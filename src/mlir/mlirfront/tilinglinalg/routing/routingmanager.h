@@ -72,7 +72,7 @@ public:
     ModuleOp ops_test(MLIRContext* ctx,int totalN=2) ;
     ModuleOp ops_testNew(MLIRContext* ctx,int totalN=2) ;
     mlir::func::FuncOp createroutingfunc(MLIRContext* ctx, int totalN = 16,bool purefunc=false) ;
-    mlir::func::FuncOp createroutingfuncNew(MLIRContext* ctx, int totalN = 16,bool purefunc=false) ;
+    mlir::func::FuncOp createroutingfuncByDim(MLIRContext* ctx,bool braodcastbyrow,bool purefunc=false) ;
     static void loaddialect(MLIRContext* ctx);
 };
 #endif//__ROUTING_MANAGER__
