@@ -261,8 +261,9 @@ mlir::func::FuncOp routingmanager::createroutingfuncByDim(MLIRContext* ctx, bool
         mlir::FunctionType ftype = builder.getFunctionType({itype,itype,itype,itype,itype,itype,itype,itype},{});
         func::FuncOp func = builder.create<func::FuncOp>(builder.getUnknownLoc(), "createroutebydim", ftype);
         //add parameter comments
-        llvm::ArrayRef<llvm::StringRef> argNames = {"mesh", "tensor", "splitnum", "axisidx", "partensor_dim", 
+         llvm::SmallVector<llvm::StringRef, 8> argNamesStorage = {"mesh", "tensor", "splitnum", "axisidx", "partensor_dim", 
                                                     "axisowner", "partensor_replicateon","partensor_singleowner"};
+        llvm::ArrayRef<llvm::StringRef> argNames(argNamesStorage);
         llvm::SmallVector<mlir::Attribute> argAttrs;
         for (size_t i = 0; i < argNames.size(); ++i) {
             std::string argName = "arg" + std::to_string(i) + "_name";
