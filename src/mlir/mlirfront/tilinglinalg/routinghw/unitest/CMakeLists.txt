@@ -35,9 +35,13 @@ find_package(MLIR  REQUIRED CONFIG)
 message(STATUS "Found Clang ${Clang_PACKAGE_VERSION}")
 message(STATUS "Using ClangConfig.cmake in: ${Clang_DIR}")
 
+message(STATUS "Clang_INCLUDE_DIRS is: ${Clang_INCLUDE_DIRS}")
+message(STATUS "CLANG_INCLUDE_DIRS is: ${CLANG_INCLUDE_DIRS}")
+
+include_directories(${Clang_INCLUDE_DIRS})
 include_directories(${CLANG_INCLUDE_DIRS})
 
-message(STATUS "Using ${CLANG_INCLUDE_DIRS}")
+include_directories(${LLVM_INSTALL_DIR}/include/)
 
 set(CMAKE_BUILD_TYPE Debug)
 
@@ -59,10 +63,13 @@ foreach(dir IN LISTS MLIR_INCLUDE_DIRS)
   list(APPEND MLIR_INC_ARGS --mlir-include "${dir}")
 endforeach()
 
+set(LLVM_ROOT_BIN_ARG "")
+list(APPEND LLVM_ROOT_BIN_ARG --llvm-bin "${LLVM_ROOT}/bin/")
+
 add_custom_target(
 	aiedialectteablegen ALL
   COMMAND ${CMAKE_COMMAND} -E echo "Running custom script..."
-	COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../gen.sh ${MLIR_INC_ARGS}
+	COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../gen.sh ${MLIR_INC_ARGS} ${LLVM_ROOT_BIN_ARG}
   COMMENT "Executing custom script before building AIE Dialect from tablegen"
 )
 
@@ -126,10 +133,10 @@ target_link_libraries(test PUBLIC
       MLIRTransformDialectTransforms
       #tiling logic end
     LLVMPasses
-    LLVMNVPTXCodeGen
+    #LLVMNVPTXCodeGen
     #LLVMNVPTXAsmPrinter
-    LLVMAMDGPUCodeGen
-    LLVMAMDGPUAsmParser
+    #LLVMAMDGPUCodeGen
+    #LLVMAMDGPUAsmParser
     dl
 )
 target_link_options(test PRIVATE ${LLVM_LDFLAGS})

@@ -29,13 +29,23 @@ if(LLVM_ROOT)
        "${LLVM_ROOT}/lib/cmake/clang"
        "${LLVM_ROOT}/lib/cmake/mlir")
 endif()
+
+set(LLVM_ROOT_BIN_ARG "")
+list(APPEND LLVM_ROOT_BIN_ARG --llvm-bin "${LLVM_ROOT}/bin/")
+
 find_package(Clang REQUIRED CONFIG)
 find_package(MLIR  REQUIRED CONFIG)
 
 message(STATUS "Found Clang ${Clang_PACKAGE_VERSION}")
 message(STATUS "Using ClangConfig.cmake in: ${Clang_DIR}")
 
+message(STATUS "Clang_INCLUDE_DIRS is: ${Clang_INCLUDE_DIRS}")
+message(STATUS "CLANG_INCLUDE_DIRS is: ${CLANG_INCLUDE_DIRS}")
+
+include_directories(${Clang_INCLUDE_DIRS})
 include_directories(${CLANG_INCLUDE_DIRS})
+
+include_directories(${LLVM_INSTALL_DIR}/include/)
 
 message(STATUS "Using ${CLANG_INCLUDE_DIRS}")
 
@@ -76,8 +86,8 @@ endforeach()
 add_custom_target(
 	routingdilaect ALL
   COMMAND ${CMAKE_COMMAND} -E echo "Running custom script..."
-	COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../../routing/gen.sh ${MLIR_INC_ARGS}
-  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../../routinghw/gen.sh ${MLIR_INC_ARGS}
+	COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../../routing/gen.sh ${MLIR_INC_ARGS} ${LLVM_ROOT_BIN_ARG}
+  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../../routinghw/gen.sh ${MLIR_INC_ARGS} ${LLVM_ROOT_BIN_ARG}
   COMMENT "Executing custom script before building AIE Dialect from tablegen"
 )
 

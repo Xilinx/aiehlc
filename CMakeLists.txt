@@ -18,11 +18,15 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_TYPE Debug)
 
 #set the llvm path find path into the path you installed
-set(LLVM_INSTALL_DIR /usr/local/)
-#set(LLVM_INSTALL_DIR "/path/to/thirdparty/llvm-project/build" CACHE PATH "Root of an LLVM/Clang/MLIR install")
+if(NOT DEFINED LLVM_INSTALL_DIR OR "${LLVM_INSTALL_DIR}" STREQUAL "")
+  # Assign a default value if LLVM_INSTALL_DIR is not defined or is empty
+  set(LLVM_INSTALL_DIR "/usr/local/")
+endif()
+
+message(STATUS "Found LLVM ${LLVM_INSTALL_DIR}/bin/")
 
 set(CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}/bin/" ${CMAKE_PREFIX_PATH})
-find_program(LLVM_CONFIG llvm-config REQUIRED)
+find_program(LLVM_CONFIG ${LLVM_INSTALL_DIR}/bin/llvm-config REQUIRED)
 #find_package(LLVM REQUIRED CONFIG)
 
 message(STATUS "Found LLVM ${LLVM_CONFIG}")
@@ -44,20 +48,27 @@ execute_process(
 
 
 include_directories(${LLVM_INCLUDE_DIRS})
+include_directories(${LLVM_INSTALL_DIR}/include/)
+
+message(STATUS "LLVM_INCLUDE_DIRS is: ${LLVM_INCLUDE_DIRS}")
+
 #LLVM_DEFINITIONS will cause a conflict with boost::btree, and complain undefined reference to `boost::throw_exception(
 # the reason why that happen is because in LLVM_DEFINITIONS there is a -fno-exceptions ,that will cause the said issue
 #add_definitions(${LLVM_DEFINITIONS})
 
 #set(CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}/lib/cmake/clang" ${CMAKE_PREFIX_PATH})
 #find_package(Clang REQUIRED CONFIG)
-set(LLVM_INSTALL_DIR /usr/local/)
 set(CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}/lib/cmake/clang" ${CMAKE_PREFIX_PATH})
 find_package(Clang REQUIRED CONFIG)
 
 message(STATUS "Found Clang ${Clang_PACKAGE_VERSION}")
 message(STATUS "Using ClangConfig.cmake in: ${Clang_DIR}")
 
+message(STATUS "Clang_INCLUDE_DIRS is: ${Clang_INCLUDE_DIRS}")
+message(STATUS "CLANG_INCLUDE_DIRS is: ${CLANG_INCLUDE_DIRS}")
+
 include_directories(${Clang_INCLUDE_DIRS})
+include_directories(${CLANG_INCLUDE_DIRS})
 include_directories("./src/mlir/mlirfront/")
 
 
@@ -89,6 +100,7 @@ include_directories("./src/mlir/mlirfront/")
 find_package(Boost REQUIRED CONFIG)
 #find_package(Boost 1.89.0 REQUIRED)
 # MLIR
+set(CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}/lib/cmake/mlir" ${CMAKE_PREFIX_PATH})
 find_package(MLIR REQUIRED CONFIG PATHS ${MLIR_DIR})
 
 include_directories(${MLIR_INCLUDE_DIRS})
@@ -137,10 +149,10 @@ target_link_libraries(aiehlc PRIVATE
 			#MLIRGPUToROCDLTransforms
 			#LLVM
     LLVMPasses
-    LLVMNVPTXCodeGen
+    #LLVMNVPTXCodeGen
     #LLVMNVPTXAsmPrinter
-    LLVMAMDGPUCodeGen
-    LLVMAMDGPUAsmParser
+    #LLVMAMDGPUCodeGen
+    #LLVMAMDGPUAsmParser
     dl
 		#LLVM # use this replace ${llvm_libs} to fix the register more than once issue
 )

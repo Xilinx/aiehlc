@@ -112,7 +112,7 @@ void routing::RoutingCreate::print(OpAsmPrinter &p) {
   p.printType(getResult().getType());
   
   // Use printRegion to print the region.
-  p.printRegion(getBody(), /*printEntryBlockArgs=*/false, 
+  p.printRegion(getBody(), /*printEntryBlockArgs=*/true, 
                               /*printBlockTerminators=*/false);
 }
 
@@ -254,7 +254,8 @@ ModuleOp routingmanager::ops_testNew(MLIRContext* ctx, int totalN) {
                                                                                                 partensor_singleowner,
                                                                                                 io_direction}));
     //*/
-    createroutingfuncByDim(builder, ctx, mesh, tensor, hwrowused, true);
+    createroutingfuncByDim(builder, ctx, mesh, tensor, hwrowused, "row");
+    createroutingfuncByDim(builder, ctx, mesh, tensor, hwcolused, "col");
     auto retop = builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc());
     m.push_back(main);
     llvm::errs() << m;
@@ -364,8 +365,9 @@ mlir::func::FuncOp routingmanager::createroutingfunc(MLIRContext* ctx, int total
 }
 
 void routingmanager::createroutingfuncByDim(OpBuilder& builder, MLIRContext* ctx, Value mesh, Value tensor,
-                                           uint32_t hwsplitnum, bool braodcastbyrow) {
+                                           uint32_t hwsplitnum, std::string splitAxis) {
         auto location = builder.getUnknownLoc();
+        auto tensorhwaxisowner = splitAxis;
         // no region creatation
         //
         auto exec = builder.create<scf::ExecuteRegionOp>(builder.getUnknownLoc(), /*result types*/TypeRange{});
@@ -378,13 +380,10 @@ void routingmanager::createroutingfuncByDim(OpBuilder& builder, MLIRContext* ctx
                 ///*
                 
                 
-                    auto patitionmesh = builder.create<partitionmesh>(builder.getUnknownLoc(),  mesh, hwsplitnum, "row");
+                    auto patitionmesh = builder.create<partitionmesh>(builder.getUnknownLoc(),  mesh, hwsplitnum, splitAxis);
                     IntegerAttr splitdim = builder.getI64IntegerAttr(0);//dim 0 is 
-                    mlir::StringAttr hw_axis_owner=builder.getStringAttr("row");
-                    mlir::StringAttr replicate_on=builder.getStringAttr("col");
-                    mlir::StringAttr single_tile_owner=builder.getStringAttr("");
                     auto outTy = builder.getI32Type();
-                    auto rowtensor = builder.create<partitiontensor>(builder.getUnknownLoc(), tensor, hwsplitnum, 0,"row","col","");
+                    auto rowtensor = builder.create<partitiontensor>(builder.getUnknownLoc(), tensor, hwsplitnum, 0, tensorhwaxisowner,"col","");
                     Value lb = builder.create<arith::ConstantIndexOp>(location, 0);
                     Value ub = builder.create<arith::ConstantIndexOp>(location, hwsplitnum);
                     Value step = builder.create<arith::ConstantIndexOp>(location,1);
