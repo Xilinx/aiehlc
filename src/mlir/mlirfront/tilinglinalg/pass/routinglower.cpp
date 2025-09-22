@@ -245,6 +245,22 @@ private:
     LLVMTypeConverter& typeconverter;
 };
 
+//routinggatherout
+struct routinggatheroutconvert : public ConversionPattern {
+    explicit routinggatheroutconvert(MLIRContext * ctx, LLVMTypeConverter &converter, RoutingTopology & router):
+        ConversionPattern(routing::routinggatherout::getOperationName(),1, ctx), typeconverter(converter), router_(router) {
+
+        }
+    LogicalResult matchAndRewrite(Operation* op, ArrayRef<Value> operands, ConversionPatternRewriter& rewriter ) const override {    
+        //TODO create gather/pktmerge logic
+        rewriter.eraseOp(op);
+        return success();
+    }
+private:
+    LLVMTypeConverter& typeconverter;
+    RoutingTopology & router_;
+};
+
 //extract_tiles
 struct extract_tilesconvert : public ConversionPattern {
     explicit extract_tilesconvert(MLIRContext * ctx, LLVMTypeConverter &converter):
@@ -522,10 +538,17 @@ struct RoutingmovedatabyioConvert : public ConversionPattern {
         routing::partitiontensor partitiontensor;
         routing::partitionmesh partitionmesh;
         routing::extract_data extract_data;
+        routing::routinggatherout gatherout_pktmerge;
         routing::extract_tiles extract_tiles;
         routing::createhwiowithtarget createhwiowithtarget = operands[1].getDefiningOp<routing::createhwiowithtarget>();
-        if (extract_data = operands[0].getDefiningOp<routing::extract_data>()) {
-            auto edata_operands = extract_data->getOperands();
+        if (!(extract_data = operands[0].getDefiningOp<routing::extract_data>())) {
+            if (gatherout_pktmerge = operands[0].getDefiningOp<routing::routinggatherout>()){
+                extract_data = gatherout_pktmerge->getOperands()[1].getDefiningOp<routing::extract_data>();
+            }
+        }
+
+        if (extract_data) {
+             auto edata_operands = extract_data->getOperands();
             round_idx = getRoutingCreateConsArgu(edata_operands[1]);
             llvm::outs() << "slice data round_idx=" << round_idx << "\n";
             if (!(partitiontensor = extract_data->getOperands()[0].getDefiningOp<routing::partitiontensor>())) {
@@ -533,11 +556,9 @@ struct RoutingmovedatabyioConvert : public ConversionPattern {
                 return failure();
             }
         } else {
-            llvm::outs() << "pkt merge" << "\n";
-        }
-        if (!extract_data) {
             return failure();
         }
+
         if (!(createhwiowithtarget = operands[1].getDefiningOp<routing::createhwiowithtarget>())) {
             llvm::outs() << " createhwiowithtarget not found return" << "\n";
             return failure();
@@ -665,9 +686,12 @@ void RoutingLowerPass::runOnOperation() {
 
     patterns.add<extract_dataconvert>(&ctx, typeconverter);
     patterns.add<extract_tilesconvert>(&ctx, typeconverter);
+    patterns.add<routinggatheroutconvert>(&ctx, typeconverter,rtopology_);
 
     patterns.add<RoutingcreatehwiowithtargetConvert>(&ctx, typeconverter);
     patterns.add<RoutingmovedatabyioConvert>(&ctx, typeconverter,rtopology_);
+    
+    
     //patterns.add<arithconstantconvert>(&ctx, typeconverter);
 
     //erase hwmesh and dummytensor

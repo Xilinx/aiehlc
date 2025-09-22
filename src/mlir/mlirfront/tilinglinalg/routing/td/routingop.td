@@ -63,18 +63,32 @@ def routing_creatbroadcast : routingop<"routingcreatebroadcast"> {
 	let assemblyFormat = "$io `,` $tilearray `:` type($io) `,` type($tilearray)  attr-dict`->` type($output)";
 }
 
-def routing_movedatabyio : routingop<"routingmovedatabyio "> {
+def routing_movedatabyio : routingop<"routingmovedatabyio"> {
 	let summary = "movedatabyio";
 	let cppNamespace = "routing";
 	let description = "move data through io to aie or from";
 
 	let arguments = (ins
-		I32:$pktmerge_or_slicetestor,
+		I32:$gatherout_tensorin,
 		I32:$hwiowithtarget);
 
 	let results = (outs
 		I32:$output);
-	let assemblyFormat = " `pktmerge_or_slicetestor` `=` $pktmerge_or_slicetestor `,` `hwiowithtarget` `=` $hwiowithtarget `:` type($pktmerge_or_slicetestor) `,` type($hwiowithtarget)  attr-dict`->` type($output)";
+	let assemblyFormat = " `gatherout_tensorin` `=` $gatherout_tensorin `,` `hwiowithtarget` `=` $hwiowithtarget `:` type($gatherout_tensorin) `,` type($hwiowithtarget)  attr-dict`->` type($output)";
+}
+
+def routing_routinggatherout : routingop<"routingroutinggatherout"> {
+	let summary = "routinggatherout";
+	let cppNamespace = "routing";
+	let description = "gather data from a tile list";
+
+	let arguments = (ins
+		I32:$tilelist,
+		I32:$tensordata);
+
+	let results = (outs
+		I32:$output);
+	let assemblyFormat = " `tilelist` `=` $tilelist `,` `tensordata` `=` $tensordata `:` type($tilelist) `,` type($tensordata)  attr-dict`->` type($output)";
 }
 
 def routing_createhwmesh :routingop<"routingcreatehwmesh"> {
@@ -193,7 +207,7 @@ def Routing_YieldOp : routingop<"yield", [Terminator]> {
     a region within a `routing` operation.
   }];
 
-  //let arguments = (ins AnyType:$value);
+  //let arguments = (ins I32:$value);
   //let arguments = (ins);
   //let results = (outs); // No results
 }
@@ -210,7 +224,7 @@ def Routing_RoutingCreate : routingop<"RoutingCreate", []> {
   				   I32:$scf_idx,
 				   StrAttr:$Memo
 				   );
-  //let results = (outs I32:$output);
+  let results = (outs I32:$output);
 
   let regions = (region SizedRegion<1>:$body);
  

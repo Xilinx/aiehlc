@@ -74,7 +74,7 @@ public:
     ModuleOp ops_test(MLIRContext* ctx,int totalN=2) ;
     ModuleOp ops_testNew(MLIRContext* ctx,int totalN=2) ;
     mlir::func::FuncOp createroutingfunc(MLIRContext* ctx, int totalN = 16,bool purefunc=false) ;
-    void createroutingfuncByDim(OpBuilder& builder, MLIRContext* ctx, Value mesh, Value tensor, uint32_t hwsplitnum, std::string splitAxis);
+    void createroutingfuncByDim(OpBuilder& builder, MLIRContext* ctx,  bool binput,Value mesh, Value tensor, uint32_t hwsplitnum, std::string splitAxis);
     static void loaddialect(MLIRContext* ctx);
 };
 #endif//__ROUTING_MANAGER__
