@@ -427,7 +427,7 @@ int main(int argc, char* argv[]) {
 
     XAie_PmRequestTiles(&DevInst, NULL, 0); 
 #endif
-    //return 0;
+ 
 
     for(int i = 0; i < num_cols; i++) {
         //start_col(&DevInst, cols_to_test[i], num_rows);
@@ -463,7 +463,7 @@ int main(int argc, char* argv[]) {
         printf("Mem Module Event Status 4 0x2001C31420C : 0x%x\n\n", Xil_In32(0x2001C31420C));      
         //break;
     }
-    sleep(10);
+    sleep(2);
 
     for(int i = 0; i < num_cols; i++) {
         //stop_col(&DevInst, cols_to_test[i], num_rows);
@@ -531,21 +531,21 @@ int main(int argc, char* argv[]) {
             return -1;
         }
     #else
-    XAie_SetIOBackend(&DbistDevInst, XAIE_IO_BACKEND_BAREMETAL);
+        XAie_SetIOBackend(&DbistDevInst, XAIE_IO_BACKEND_BAREMETAL);
         XAie_PmRequestTiles(&DbistDevInst, NULL, 0);
  
     #endif
 
 
-            printf("After partition init\n");
-            if(RC != XAIE_OK) {
-            printf("Failed to initialize partition\n");
-            return -1;
-            }
+        printf("After partition init\n");
+        if(RC != XAIE_OK) {
+        printf("Failed to initialize partition\n");
+        return -1;
+        }
 
-            printf("After XAie_PartitionInitialize\n");
+        printf("After XAie_PartitionInitialize\n");
     #endif
-            sleep(5);
+        sleep(5);
 
         for(int j = 0; j < dbist_num_cols; j++) {
             //start_col(&DevInst, dbist_columns[j], num_rows);
@@ -554,9 +554,9 @@ int main(int argc, char* argv[]) {
             //start_col_no_elf(&DbistDevInst, j, num_rows);
         }
 
-          printf("a-2 after start and before sleep\n");
-    sleep(1);
-    printf("after 2 sleep\n");
+        printf("a-2 after start and before sleep\n");
+        sleep(1);
+        printf("after 2 sleep\n");
 
         for(int i = 0; i < dbist_num_cols; i++) {
             if(check_col_output(&DbistDevInst, i, num_rows)) {
@@ -579,12 +579,12 @@ int main(int argc, char* argv[]) {
         }
     #endif
         XAie_Finish(&DbistDevInst);
-            printf("After Teardown partition 2 \n");
-            //read_ip_op_mem(&DbistDevInst, 0, num_rows);
-            sleep(1);
+        printf("After Teardown partition 2 \n");
+        //read_ip_op_mem(&DbistDevInst, 0, num_rows);
+        sleep(1);
 
-            printf("After loop\n");
-            printf("\n");
-            break;
+        printf("After loop\n");
+        printf("\n");
+
     }    
 }
