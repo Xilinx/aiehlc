@@ -275,7 +275,7 @@ int main(int argc, char* argv[]) {
 
 		XAie_InstDeclare(DevInst, &ConfigPtr);
 
-		int partitonnum = 34;
+		int partitonnum = 1;//34;
 		int startcol = 2;
 		int colnum = (startcol + partitonnum <= XAIE_NUM_COLS) ? partitonnum : (XAIE_NUM_COLS- startcol);
 
