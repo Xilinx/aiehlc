@@ -43,7 +43,7 @@ aierepo_download_check() {
     fi
 
     bash -c "pushd  $AIE_DRIVER_PARENT_DIR;git clone $AIE_REPO; popd"
-    bash -c "cd $AIE_DRIVER_PARENT_DIR/aie-rt/driver/src; git checkout main-aie; make -f Makefile.Linux; make clean"
+    bash -c "cd $AIE_DRIVER_PARENT_DIR/aie-rt/driver/src; make -f Makefile.Linux; make clean"
     ##temporary disable PLM support privledge register, as compile have issue
     find $AIE_DRIVER_PARENT_DIR/aie-rt/driver/src -name "Makefile" -exec sed -i 's/-DXAIE_PROD//g' {} \;
 }
