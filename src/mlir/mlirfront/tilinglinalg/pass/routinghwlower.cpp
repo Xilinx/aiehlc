@@ -23,11 +23,20 @@ struct EnableExtToAieShimPortpattern: public ConversionPattern {
         // get the tilecreate parameter
         // Access attributes by name
         int32_t rowValue=-1, colValue=-1;
-        if (auto colAttr = shimtileop->getAttrOfType<IntegerAttr>("col")) {
-            colValue = colAttr.getInt();
-        } 
-        if (auto rowAttr = shimtileop->getAttrOfType<IntegerAttr>("row")) {
-            rowValue = rowAttr.getInt();
+        if (auto shimop = dyn_cast<routinghw::TileCreate>(shimtileop)) {
+            if (auto colAttr = shimop->getAttrOfType<IntegerAttr>("col")) {
+                colValue = colAttr.getInt();
+            } 
+            if (auto rowAttr = shimop->getAttrOfType<IntegerAttr>("row")) {
+                rowValue = rowAttr.getInt();
+            }
+        } else if (auto shimop = dyn_cast<IOShimTileCreate>(shimtileop)){
+            if (auto colAttr = shimop->getAttrOfType<IntegerAttr>("col")) {
+                colValue = colAttr.getInt();
+            } 
+            if (auto rowAttr = shimop->getAttrOfType<IntegerAttr>("row")) {
+                rowValue = rowAttr.getInt();
+            }
         }
         auto colConstOp = rewriter.create<emitc::ConstantOp>(op->getLoc(), rewriter.getI32Type(),rewriter.getI32IntegerAttr(colValue));
         auto rowConstOp = rewriter.create<emitc::ConstantOp>(op->getLoc(),rewriter.getI32Type(), rewriter.getI32IntegerAttr(rowValue));
@@ -297,12 +306,29 @@ struct ConnectStreamSingleSwitchPortpattern: public ConversionPattern {
         auto tileop = tileoprand.getDefiningOp();
         
         int32_t rowValue=-1, colValue=-1;
-        if (auto colAttr = tileop->getAttrOfType<IntegerAttr>("col")) {
-            colValue = colAttr.getInt();
-        } 
-        if (auto rowAttr = tileop->getAttrOfType<IntegerAttr>("row")) {
-            rowValue = rowAttr.getInt();
+        //if (auto colAttr = tileop->getAttrOfType<IntegerAttr>("col")) {
+        //    colValue = colAttr.getInt();
+        //} 
+        //if (auto rowAttr = tileop->getAttrOfType<IntegerAttr>("row")) {
+        //    rowValue = rowAttr.getInt();
+        //}
+        ///*
+        if (auto shimop = dyn_cast<routinghw::TileCreate>(tileop)) {
+            if (auto colAttr = shimop->getAttrOfType<IntegerAttr>("col")) {
+                colValue = colAttr.getInt();
+            } 
+            if (auto rowAttr = shimop->getAttrOfType<IntegerAttr>("row")) {
+                rowValue = rowAttr.getInt();
+            }
+        } else if (auto shimop = dyn_cast<IOShimTileCreate>(tileop)){
+            if (auto colAttr = shimop->getAttrOfType<IntegerAttr>("col")) {
+                colValue = colAttr.getInt();
+            } 
+            if (auto rowAttr = shimop->getAttrOfType<IntegerAttr>("row")) {
+                rowValue = rowAttr.getInt();
+            }
         }
+        //*/
 
         int32_t masterportdirection=-1, masterportidx = -1,slaveportdirection=-1, slaveportidx = -1;
         std::string masterportdirectionstr="fixme",slaveportdirectionstr="fixme";
@@ -350,7 +376,7 @@ struct ConnectStreamSingleSwitchPortpattern: public ConversionPattern {
                                         mlir::emitc::OpaqueAttr::get(rewriter.getContext(), slaveportdirectionstr));
         Value slaveidx = rewriter.create<mlir::emitc::ConstantOp>(op->getLoc(), rewriter.getI32Type(),rewriter.getI32IntegerAttr(slaveportidx));
         auto callOp = rewriter.create<mlir::emitc::CallOp>(op->getLoc(), TypeRange{rewriter.getI32Type()}, callee, 
-            ValueRange{deviceInst, tileLocOp.getResult(0), masterport,masteridx,slaveport,slaveidx});
+            ValueRange{deviceInst, tileLocOp.getResult(0),slaveport,slaveidx, masterport,masteridx});
 
         rewriter.eraseOp(op);
         return success();

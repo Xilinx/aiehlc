@@ -116,15 +116,23 @@ def ConnectStreamSingleSwitchPort:RoutingHWOp<"connectsinglestreamswitchport"> {
     let arguments = (
         ins
         I32:$curtile,
-        StrAttr:$masterportdirection,
-        I32Attr:$masterportidx,
         StrAttr:$slaveportdirection,
-        I32Attr:$slaveportidx
+        I32Attr:$slaveportidx,
+        StrAttr:$masterportdirection,
+        I32Attr:$masterportidx
     );
     let results = (outs
         I32:$output
     );
-    let assemblyFormat = "$curtile `:` type($curtile) attr-dict `->` type($output)";
+    //let assemblyFormat = "$curtile `:` type($curtile) attr-dict `->` type($output)";
+    //let assemblyFormat = "$curtile `:` type($curtile) $slaveportdirection `,` $slaveportidx `,` $masterportdirection `,` $masterportidx attr-dict `:` type($output)";
+    let assemblyFormat =
+        "$curtile `:` `{` "
+        "`slaveportdirection` `=` $slaveportdirection `,` "
+        "`slaveportidx` `=` $slaveportidx `,` "
+        "`masterportdirection` `=` $masterportdirection `,` "
+        "`masterportidx` `=` $masterportidx "
+        "`}` attr-dict `:` type($output)";
 }
 
 def ConnectStreamPktSwitchPort:RoutingHWOp<"connectpktstreamswitchport"> {
