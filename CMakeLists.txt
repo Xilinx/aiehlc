@@ -15,7 +15,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_BUILD_TYPE Debug)
+# set(CMAKE_BUILD_TYPE Debug)
+set(CMAKE_BUILD_TYPE Release)
 
 #set the llvm path find path into the path you installed
 if(NOT DEFINED LLVM_INSTALL_DIR OR "${LLVM_INSTALL_DIR}" STREQUAL "")
@@ -109,6 +110,11 @@ set(SOURCE_FILES ./src/llvm/aiehlc.cc)
 set(mlirfrontend src/mlir/mlirfront/)
 
 add_executable(aiehlc ${SOURCE_FILES})
+
+add_custom_command(TARGET aiehlc POST_BUILD
+    COMMAND ${CMAKE_STRIP} $<TARGET_FILE:aiehlc>
+    COMMENT "Stripping binary..."
+)
 
 llvm_map_components_to_libnames(llvm_libs support core irreader)
 # this will cause "LLVM Option 'help-list' registered more than once“ issue
