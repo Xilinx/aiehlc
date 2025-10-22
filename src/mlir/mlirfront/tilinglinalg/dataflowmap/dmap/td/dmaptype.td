@@ -3,12 +3,12 @@
 include "dmapattr.td"
 
 def dmapcoreenginegrouptype:dmaptype<"dmacoreenginegroup"> {
-    let mnemonic = "core engine group";
+    let mnemonic = "dmacoreenginegroupType";
     let summary = "this is dmap process engine group";
 }
 
 def dmapioenginetype:dmaptype<"dmapioenginetype"> {
-    let mnemonic = " io engine";
+    let mnemonic = "dmapioenginetype";
     let summary = "this is dmap IO engine";
 }
 
@@ -22,18 +22,34 @@ def dmapportgrouptype : dmaptype<"dmapportgroup"> {
     let summary = "this is a dmap port";
 }
 
-def dmapportstreamtype : dmaptype<"dmapportstreamtype"> {
-    let mnemonic = "dmapportstreamtype";
+def dmapportstreamtype : dmaptype<"dmapportstream"> {
+    let mnemonic = "dmapportstream";
     let summary = "this is a dmap stream port";
 }
 
 def dmapdatatype : dmaptype<"dmapdata"> {
     let mnemonic = "dmapdata";
     let summary = "this is a dmap data";
+    
 }
 
-def dmapportorgroup : TypeConstraint<
-  CPred<"$_self.isa<dflow::PortType>() || $_self.isa<dflow::PortGroupType>()">,
-  "port or port group">;
+def dmapioconfigtype : dmaptype<"dmapioconfig"> {
+    let mnemonic = "dmapioconfig";
+    let summary = "this is a dmap port config"; 
+}
+
+def dmapportconfigtype : dmaptype<"dmapportconfig"> {
+    let mnemonic = "dmapportconfig";
+    let summary = "this is a dmap port config"; 
+}
+
+def dmacoregroupconfigtype : dmaptype<"dmacoregroupconfig"> {
+    let mnemonic = "dmacoregroupconfig";
+    let summary = "this is a dmap port config map";
+}
+
+//def dmapportorgroup : TypeConstraint<
+// CPred<"$_self.isa<dflow::PortType>() || $_self.isa<dflow::PortGroupType>()">,
+ // "port or port group">;
 
 #endif //_TYPE_DMAMAP_

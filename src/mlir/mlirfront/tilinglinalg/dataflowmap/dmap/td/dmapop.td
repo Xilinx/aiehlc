@@ -10,9 +10,9 @@ include "dmaptype.td"
       %pegroup = dataflowmap.dmap_create_pe_group {group_idx = 1, pe_count=4, "row"}
       %coreenginegroup = dataflowmap.dmap_create_core_engine_group {1, 4, "row"}
       %ioengine = dataflowmap.dmap_create_io_engine {0, "shim"}
-      %portsend = dataflowmap.configure_port %ioengine {peorioidx=0, dataacces=}  
-      %portreceive1 = dataflowmap.configure_port on %{peorioidx = 0, dataacces=}  
-      %portreceive2 = dataflowmap.configure_port on %{peorioidx = 1, dataacces=}   
+      %portsend = dataflowmap.configure_io %ioengine {peorioidx=0, dataacces=}  
+      %portreceive1 = dataflowmap.configure_io on %{peorioidx = 0, dataacces=}  
+      %portreceive2 = dataflowmap.configure_io on %{peorioidx = 1, dataacces=}   
       %receive_group = dataflowmap.create_port_group(%portreceive1, %portreceive2)    
       %broadcast_stream = dataflowmap.create_stream %send_port, %receive_group         
       dataflowmap.push %data, %broadcast_stream {cache_policy = "force_memtile" }
@@ -52,7 +52,7 @@ def dmap_create_core_engine_group : dmapop<"create_core_engine_group"> {
   }];
 }
 
-def dmap_create_io_engine : dmapop<"create_io_group"> {
+def dmap_create_io_engine : dmapop<"create_io_engine"> {
   let summary = "create io group";
   let description = [{
 
@@ -69,7 +69,46 @@ def dmap_create_io_engine : dmapop<"create_io_group"> {
   }];
 }
 
-def dmap_configure_port : dmapop<"configure_port"> {
+def dmap_port_configure_create : dmapop<"port_configure_create", [Symbol]> {
+  let summary = "this is port config.";
+  let description = [{
+    Binds a physical hardware handle (e.g., a tile from the routinghw dialect)
+    to a logical data port, specifying its direction and a logical channel ID.
+    This creates a node in the logical dataflow graph.
+  }];
+
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    dataaccesspattern:$accesspattern
+  );
+  let results = (outs dmapioconfigtype:$portconfig);
+  //let assemblyFormat = [{
+  let assemblyFormat =   "$sym_name `:` $accesspattern attr-dict-with-keyword  `->` type($portconfig)";
+  //}];
+}
+def UseSymbolOp : Op<dmapdialect, "use_symbol", []> {
+  let arguments = (ins SymbolRefAttr:$target);
+  let assemblyFormat = "$target attr-dict";
+}
+
+def dmap_configure_coregroup : dmapop<"configure_coregroup"> {
+  let summary = "this is port config.";
+  let description = [{
+    the map between core index and configure.
+  }];
+
+  let arguments = (ins
+    dmapcoreenginegrouptype:$coregroup,
+    StrAttr:$comments, // row or col
+    dataconfigmap:$map
+  );
+  let results = (outs dmacoregroupconfigtype:$portconfig);
+  let assemblyFormat = [{
+      $coregroup `{` $map `,` $comments `}` attr-dict `:` type($coregroup) `->` type($portconfig) 
+  }];
+}
+
+def dmap_configure_io : dmapop<"configure_io"> {
   let summary = "Configures a logical data port on a physical hardware entity.";
   let description = [{
     Binds a physical hardware handle (e.g., a tile from the routinghw dialect)
@@ -78,15 +117,15 @@ def dmap_configure_port : dmapop<"configure_port"> {
   }];
 
   let arguments = (ins
-    AnyTypeOf<[dmapioenginetype, dmapcoreenginegrouptype]>:$pegrouporioengine,
-    I32Attr:$peorioidx,
+    //AnyTypeOf<[dmapioenginetype, dmapcoreenginegrouptype]>:$pegrouporioengine,
+    dmapioenginetype :$peioengine,
     dataaccesspattern:$accesspattern
   );
 
-  let results = (outs dmapporttype:$port);
+  let results = (outs dmapioconfigtype:$ioconfig);
 
   let assemblyFormat = [{
-     $pegrouporioengine `:` type($pegrouporioengine) attr-dict `->` type($port) 
+     $peioengine `:` type($peioengine) attr-dict `->` type($ioconfig) 
   }];
 }
 
@@ -109,7 +148,7 @@ def dmap_createport_group : dmapop<"create_port_group"> {
   }];
 }
 
-def dmap_createSstream : dmapop<"create_stream"> {
+def dmap_createstream : dmapop<"create_stream"> {
   let summary = "Defines a logical data stream from a source to a destination.";
   let description = [{
     Creates an edge in the dataflow graph, explicitly connecting a source port
@@ -119,14 +158,14 @@ def dmap_createSstream : dmapop<"create_stream"> {
 
   let arguments = (ins
     //dmapportorgroup:$source,
-    AnyTypeOf<[dmapporttype, dmapportgrouptype]>:$source,
-    AnyTypeOf<[dmapporttype, dmapportgrouptype]>:$destination
+    AnyTypeOf<[dmapioconfigtype, dmacoregroupconfigtype]>:$source,
+    AnyTypeOf<[dmapioconfigtype, dmacoregroupconfigtype]>:$destination
   );
 
   let results = (outs dmapportstreamtype:$stream);
 
   let assemblyFormat = [{
-    $source `,` $destination `:` type($source) type($destination) attr-dict `->` type($stream)
+   `src` `=` $source `,` `dst` `=` $destination `,` type($source) type($destination) attr-dict `->` type($stream)
   }];
 }
 

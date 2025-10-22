@@ -69,7 +69,7 @@ class dmapmanager{
 public:
     dmapmanager(){};
     ModuleOp ops_test(MLIRContext* ctx,int totalN=2) ;
-    void createdmapfuncByDim(OpBuilder& builder, MLIRContext* ctx,  bool binput,Value mesh, Value tensor, uint32_t hwsplitnum, std::string splitAxis);
+    void createdmapfuncByDim(OpBuilder& builder, MLIRContext* ctx);
     static void loaddialect(MLIRContext* ctx);
 };
 #endif//__DMAP_MANAGER__

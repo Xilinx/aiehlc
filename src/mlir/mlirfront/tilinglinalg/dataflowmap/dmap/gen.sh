@@ -8,9 +8,6 @@ GEN_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INC=$GEN_SCRIPT_DIR/inc
 TD=$GEN_SCRIPT_DIR/td
 
-MLIR_INCLUDES=-I/usr/local/include/mlir/
-LLVM_BIN=/usr/local/bin/
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mlir-include)
@@ -21,8 +18,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [ ${#MLIR_INCLUDES[@]} -eq 0 ]; then
+  echo "No --mlir-include provided, using default."
+  #MLIR_INCLUDES=("-I/usr/local/include/mlir/")
+  MLIR_INCLUDES=("-I/Users/llvm/llvm-project/mlir/include/")
+fi
+if [ ${#LLVM_BIN[@]} -eq 0 ]; then
+  echo "No LLVM_BIN provided, using default."
+  #LLVM_BIN=("/usr/local/bin/")
+  LLVM_BIN=("/Users/llvm/llvm-project/build/bin/")
+fi
+
+echo $MLIR_INCLUDES
 echo "Script is located in: $GEN_SCRIPT_DIR"
 pushd ${GEN_SCRIPT_DIR}
+echo ${LLVM_BIN}
 ${LLVM_BIN}/mlir-tblgen -gen-dialect-defs $TD/dmaptype.td -dialect=dmap -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} > $INC/dmapdialect.cc.inc
 ${LLVM_BIN}/mlir-tblgen -gen-dialect-decls $TD/dmaptype.td -dialect=dmap -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dmapdialect.h.inc
 ${LLVM_BIN}/mlir-tblgen -gen-typedef-defs $TD/dmaptype.td -typedefs-dialect=dmap -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dmaptype.cc.inc

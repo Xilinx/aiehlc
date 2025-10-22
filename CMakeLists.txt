@@ -17,12 +17,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_BUILD_TYPE Release)
-
+message(STATUS "aFound LLVM ${LLVM_INSTALL_DIR}/bin/")
 #set the llvm path find path into the path you installed
 if(NOT DEFINED LLVM_INSTALL_DIR OR "${LLVM_INSTALL_DIR}" STREQUAL "")
   # Assign a default value if LLVM_INSTALL_DIR is not defined or is empty
   set(LLVM_INSTALL_DIR "/usr/local/")
 endif()
+message(STATUS "use set LLVM_ROOT to change LLVM into your local llvm if the compile failed!!!")
+set(LLVM_INSTALL_DIR "/Users/username/src/project/thirdparty/llvm-project/build/" CACHE PATH "Root of an LLVM/Clang/MLIR install")
 
 message(STATUS "Found LLVM ${LLVM_INSTALL_DIR}/bin/")
 

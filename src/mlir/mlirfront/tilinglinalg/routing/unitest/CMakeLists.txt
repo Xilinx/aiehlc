@@ -15,10 +15,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 #set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 #set(LLVM_INSTALL_DIR /usr/local/)
 set(LLVM_ROOT /usr/local/)
+#message(STATUS "use set LLVM_ROOT to change LLVM into your local llvm if the compile failed!!!")
+#set(LLVM_ROOT "/Users/llvm/llvm-project/build" CACHE PATH "Root of an LLVM/Clang/MLIR install")
+
 if(DEFINED LLVM_INSTALL_DIR AND NOT "${LLVM_INSTALL_DIR}" STREQUAL "")
   set(LLVM_ROOT "${LLVM_INSTALL_DIR}" CACHE PATH "Root of LLVM/Clang/MLIR install" FORCE)
 endif()
-#set(LLVM_ROOT "/path/to/thirdparty/llvm-project/build" CACHE PATH "Root of an LLVM/Clang/MLIR install")
 
 if(LLVM_ROOT)
   list(APPEND CMAKE_PREFIX_PATH
@@ -72,7 +74,7 @@ add_custom_target(
 	aiedialectteablegen ALL
   COMMAND ${CMAKE_COMMAND} -E echo "Running custom script..."
 	COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../gen.sh ${MLIR_INC_ARGS} ${LLVM_ROOT_BIN_ARG}
-  COMMENT "Executing custom script before building AIE Dialect from tablegen"
+  COMMENT "Executing custom script before building AIE Dialect from tablegen ${MLIR_INC_ARGS} ${LLVM_ROOT_BIN_ARG}"
 )
 
 add_dependencies(test aiedialectteablegen)

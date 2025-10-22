@@ -135,6 +135,7 @@ export LIB_PATH="${XILINX_VITIS}/gnu/aarch64/lin/aarch64-none/x86_64-oesdk-linux
 export LIB_BASE_PATH="${XILINX_VITIS}/gnu/aarch64/lin/aarch64-none/x86_64-oesdk-linux/lib"
 export LD_SO="${LIB_BASE_PATH}/ld-linux-x86-64.so.2"
 export CLANG_INCLUDE_PATH="${XILINX_VITIS}/gnu/aarch64/lin/aarch64-none/x86_64-oesdk-linux/usr/lib/aarch64-xilinx-elf/gcc/aarch64-xilinx-elf/13.3.0/include/"
+export LLVM_INSTALL_DIR=/Users/hua/src/dsamlir/thirdparty/llvm-project/build/
 
 if [ "$SKIP_BSP" -eq 0 ]; then
     if [ ! -d "${AIEHLC_DIR}/thirdparty/arch/cortexa78_0/workspace" ] || \

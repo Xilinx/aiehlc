@@ -20,6 +20,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [ ${#MLIR_INCLUDES[@]} -eq 0 ]; then
+  echo "No --mlir-include provided, using default."
+  MLIR_INCLUDES=("-I/usr/local/include/mlir/")
+
+fi
+if [ ${#LLVM_BIN[@]} -eq 0 ]; then
+  echo "No LLVM_BIN provided, using default."
+  LLVM_BIN=("/usr/local/bin/")
+fi
+
 echo "Script is located in: $GEN_SCRIPT_DIR"
 pushd ${GEN_SCRIPT_DIR}
 ${LLVM_BIN}/mlir-tblgen -gen-dialect-defs $TD/routingtype.td -dialect=routing -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} > $INC/routingdialect.cc.inc

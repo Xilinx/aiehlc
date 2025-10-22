@@ -11,10 +11,11 @@ include "mlir/IR/EnumAttr.td"
 def dmapdialect : Dialect {
     let name = "dmap";
     let cppNamespace = "dmap";
-    let useDefaultAttributePrinterParser = 1;
+    //let useDefaultAttributePrinterParser = 1;
     let hasOperationAttrVerify = 0;
     let useDefaultAttributePrinterParser = 1;
-	let usePropertiesForAttributes = 0;
+	  let usePropertiesForAttributes = 0;
+    let useDefaultTypePrinterParser = 1;  
     dag discardableAttrs = (ins);
 }
 
@@ -56,7 +57,7 @@ def dmapioAttr : EnumAttr<dmapdialect, dmapio_enum, "io"> {
 */
 
 def dataaccesspattern : dmapattr<"dataaccesspattern"> {
-    let mnemonic = "datadirectionattr";
+    let mnemonic = "dataaccesspattern";
     let cppNamespace = "dmap";
     let parameters = ( ins
         "StringAttr":$direction,
@@ -67,5 +68,26 @@ def dataaccesspattern : dmapattr<"dataaccesspattern"> {
     let assemblyFormat = "`{` $direction  `,` $sizepertran  `,` $pingpongbuffer `,` $slidingaccess `}`";
 
 }
+
+def dataconfigmapitem :dmapattr<"dataconfmapitem"> {
+    let mnemonic = "dataconfmapitem";
+    let cppNamespace = "dmap";
+    let parameters = ( ins
+        "int64_t":$index,
+        "SymbolRefAttr":$configsymbol
+    );
+    let assemblyFormat = "`{` $index  `,` $configsymbol `}`";
+}
+
+def dataconfigmap : dmapattr<"dataconfigmap"> {
+  let mnemonic = "dataconfigmap";
+  let summary  = "configure map";
+  let parameters = (ins
+    ArrayRefParameter<"dataconfmapitemAttr">:$items
+  );
+  let assemblyFormat = "`[` $items `]`";
+}
+
+
 
 #endif//_ATTR_DMAMAP_
