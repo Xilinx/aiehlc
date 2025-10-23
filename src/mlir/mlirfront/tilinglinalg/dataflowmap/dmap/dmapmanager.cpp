@@ -77,12 +77,14 @@ ModuleOp dmapmanager::ops_test(MLIRContext* ctx, int totalN) {
   // ------------------------------------------------------------------
   // 4. Look up the symbol anywhere inside the module
   // ------------------------------------------------------------------
-   Operation *def = symTable.lookup("receive1");
-   if (!def) {
+   Operation *found = symTable.lookup("receive1");
+   if (!found) {
      llvm::errs() << "Symbol @receive1 not found!\n";
+     
  
    } else {
      llvm::outs() << "receive1 found \n";
+     llvm::outs() << "Found: " << found->getName() <<"\n";
    }
     llvm::errs() << m;
     return m;
@@ -119,10 +121,13 @@ void dmapmanager::createdmapfuncByDim(OpBuilder& builder, MLIRContext* ctx,Symbo
         mlir::Type pgeout = dmap::dmacoreenginegroupType::get(ctx);
         auto peg = builder.create<create_core_engine_group>(builder.getUnknownLoc(),  pgeout, 0, 4,"row"); 
         mlir::Type ioout = dmap::dmapioenginetypeType::get(ctx);
-        auto io = builder.create<create_io_engine>(builder.getUnknownLoc(),  ioout, 0,"shim"); 
+        auto io = builder.create<create_io_engine>(builder.getUnknownLoc(),  ioout, 0,"SHIM"); 
+        auto memio = builder.create<create_io_engine>(builder.getUnknownLoc(),  ioout, 0,"MEM"); 
         //config port
         auto ioconfigret = dmap::dmapioconfigType::get(ctx);
         auto dataaccesspattern = dmap::dataaccesspatternAttr::get(ctx, builder.getStringAttr("SEND"), 16, 1, 1);
+        auto memsndpattern = dmap::dataaccesspatternAttr::get(ctx, builder.getStringAttr("SEND"), 16, 1, 1);
+        auto memreceivepattern = dmap::dataaccesspatternAttr::get(ctx, builder.getStringAttr("RECEIVE"), 16, 1, 1);
         auto receivepattern = dmap::dataaccesspatternAttr::get(ctx, builder.getStringAttr("RECEIVE"), 16, 1, 1);
         // create a port configuration
         //port_configure_create
@@ -132,9 +137,9 @@ void dmapmanager::createdmapfuncByDim(OpBuilder& builder, MLIRContext* ctx,Symbo
         auto pf = builder.create<dmap::port_configure_create>(builder.getUnknownLoc(), portconfig, symbolName, receivepattern);
         symTable.insert(pf);
         mlir::SymbolRefAttr symbolRef = mlir::SymbolRefAttr::get(ctx,"receive1");
-        auto useOp = builder.create<dmap::UseSymbolOp>(builder.getUnknownLoc(), symbolRef);
+        //auto useOp = builder.create<dmap::UseSymbolOp>(builder.getUnknownLoc(), symbolRef);
         //config io port 
-        auto ioconfig = builder.create<configure_io>(builder.getUnknownLoc(),  ioconfigret, io.getResult(),dataaccesspattern);
+        auto shimioconfig = builder.create<configure_io_engine>(builder.getUnknownLoc(),  ioconfigret,  io.getResult(),dataaccesspattern);
         //config port group
         dmap::dataconfmapitemAttr item1 = dmap::dataconfmapitemAttr::get(ctx,0, mlir::SymbolRefAttr::get(ctx, "receive1"));
         dmap::dataconfmapitemAttr item2 = dmap::dataconfmapitemAttr::get(ctx,1, mlir::SymbolRefAttr::get(ctx, "receive1"));
@@ -150,9 +155,22 @@ void dmapmanager::createdmapfuncByDim(OpBuilder& builder, MLIRContext* ctx,Symbo
         auto gcmap = builder.create<configure_coregroup>(builder.getUnknownLoc(),  gcret, peg.getResult(), "row", configMapAttr);
         //create strem
         auto streamret = dmap::dmapportstreamType::get(ctx);
-        auto streamhandle = builder.create<createstream>(builder.getUnknownLoc(),  streamret, ioconfig.getResult(),gcmap.getResult());
+        bool opbymemio = true;
+        if (opbymemio) {
+            auto memiorecvconfig = builder.create<configure_io_engine>(builder.getUnknownLoc(),  ioconfigret,  memio.getResult(),memreceivepattern);
+            auto memiosendconfig = builder.create<configure_io_engine>(builder.getUnknownLoc(),  ioconfigret,  memio.getResult(),memsndpattern);
+            auto streamhandle1 = builder.create<createstream>(builder.getUnknownLoc(),  streamret, shimioconfig.getResult(),memiorecvconfig.getResult(),"SH2ME",0, 1);
+            auto streamhandle2 = builder.create<createstream>(builder.getUnknownLoc(),  streamret, memiosendconfig.getResult(),gcmap.getResult(), "ME2CO", 0, 1);
+
+            auto pret1 = builder.create<push>(builder.getUnknownLoc(), data.getResult(),streamhandle1.getResult());
+            auto pret2 = builder.create<push>(builder.getUnknownLoc(), data.getResult(),streamhandle2.getResult());
+
+        } else {
+            auto streamhandle = builder.create<createstream>(builder.getUnknownLoc(),  streamret, shimioconfig.getResult(),gcmap.getResult(),"SH2CO", 0, 1);
+            auto pret = builder.create<push>(builder.getUnknownLoc(), data.getResult(),streamhandle.getResult());
+        }
         //push stream
-        auto pret = builder.create<push>(builder.getUnknownLoc(), data.getResult(),streamhandle.getResult());
+        
 
         //config core port
         //auto dataaccesspattern1 = dmap::dataaccesspatternAttr::get(ctx, builder.getStringAttr("RECEIVE"), 16, 1, 1);

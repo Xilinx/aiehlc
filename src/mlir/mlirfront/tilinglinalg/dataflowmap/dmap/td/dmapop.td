@@ -75,8 +75,8 @@ def dmap_create_io_engine : dmapop<"create_io_engine"> {
   }];
 
   let arguments = (ins
-    I32Attr:$io_idx,
-    StrAttr:$comments // row or col
+    I32Attr:$io_id,
+    StrAttr:$ioattr //SHIM MEM
   );
   let results = (outs dmapioenginetype:$ioengine );
 
@@ -124,7 +124,7 @@ def dmap_configure_coregroup : dmapop<"configure_coregroup"> {
   }];
 }
 
-def dmap_configure_io : dmapop<"configure_io"> {
+def dmap_configure_io_engine : dmapop<"configure_io_engine"> {
   let summary = "Configures a logical data port on a physical hardware entity.";
   let description = [{
     Binds a physical hardware handle (e.g., a tile from the routinghw dialect)
@@ -133,7 +133,6 @@ def dmap_configure_io : dmapop<"configure_io"> {
   }];
 
   let arguments = (ins
-    //AnyTypeOf<[dmapioenginetype, dmapcoreenginegrouptype]>:$pegrouporioengine,
     dmapioenginetype :$peioengine,
     dataaccesspattern:$accesspattern
   );
@@ -175,7 +174,10 @@ def dmap_createstream : dmapop<"create_stream"> {
   let arguments = (ins
     //dmapportorgroup:$source,
     AnyTypeOf<[dmapioconfigtype, dmacoregroupconfigtype]>:$source,
-    AnyTypeOf<[dmapioconfigtype, dmacoregroupconfigtype]>:$destination
+    AnyTypeOf<[dmapioconfigtype, dmacoregroupconfigtype]>:$destination,
+    StrAttr:$streamType,
+    I32Attr:$stream_group_index,
+    I32Attr:$stream_id
   );
 
   let results = (outs dmapportstreamtype:$stream);
