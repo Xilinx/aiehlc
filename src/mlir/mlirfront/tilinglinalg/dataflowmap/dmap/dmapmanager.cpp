@@ -60,20 +60,24 @@ ModuleOp dmapmanager::ops_test(MLIRContext* ctx, int totalN) {
     //m.push_back(func);
     auto functype = builder.getFunctionType({},{});
     
-    mlir::func::FuncOp main = builder.create<func::FuncOp>(builder.getUnknownLoc(), "main", functype);
-    
-    auto block = main.addEntryBlock();
-    builder.setInsertionPointToEnd(block);
-    createdmapfuncByDim(builder, ctx);
-    auto retop = builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc());
+    dmap::FuncOp main = builder.create<dmap::FuncOp>(builder.getUnknownLoc(), "main", functype);
     m.push_back(main);
+    //auto block = main.addEntryBlock();
+    auto &block = main.getBody().emplaceBlock();
+    builder.setInsertionPointToEnd(&block);
 
-    SymbolTable symTab(m);
+    SymbolTable symTable(main);
+
+    createdmapfuncByDim(builder, ctx, symTable);
+    auto retop = builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc());
+    
+
+    
 
   // ------------------------------------------------------------------
   // 4. Look up the symbol anywhere inside the module
   // ------------------------------------------------------------------
-   Operation *def = symTab.lookup("receive1");
+   Operation *def = symTable.lookup("receive1");
    if (!def) {
      llvm::errs() << "Symbol @receive1 not found!\n";
  
@@ -101,7 +105,7 @@ void dmapmanager::loaddialect(MLIRContext* ctx) {
       %broadcast_stream = dataflowmap.create_stream %send_port, %receive_group         
       dataflowmap.push %data, %broadcast_stream {cache_policy = "force_memtile" }
 */
-void dmapmanager::createdmapfuncByDim(OpBuilder& builder, MLIRContext* ctx) {
+void dmapmanager::createdmapfuncByDim(OpBuilder& builder, MLIRContext* ctx,SymbolTable& symTable) {
         auto location = builder.getUnknownLoc();
         // no region creatation
     ///*   
@@ -126,6 +130,7 @@ void dmapmanager::createdmapfuncByDim(OpBuilder& builder, MLIRContext* ctx) {
         mlir::Type portconfig = dmap::dmapportconfigType::get(ctx);
         std::string symbolName = "receive1";
         auto pf = builder.create<dmap::port_configure_create>(builder.getUnknownLoc(), portconfig, symbolName, receivepattern);
+        symTable.insert(pf);
         mlir::SymbolRefAttr symbolRef = mlir::SymbolRefAttr::get(ctx,"receive1");
         auto useOp = builder.create<dmap::UseSymbolOp>(builder.getUnknownLoc(), symbolRef);
         //config io port 

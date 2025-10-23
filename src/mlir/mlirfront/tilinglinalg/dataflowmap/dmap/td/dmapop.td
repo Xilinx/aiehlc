@@ -17,6 +17,22 @@ include "dmaptype.td"
       %broadcast_stream = dataflowmap.create_stream %send_port, %receive_group         
       dataflowmap.push %data, %broadcast_stream {cache_policy = "force_memtile" }
 */
+def dmap_FuncOp : dmapop<"func",[IsolatedFromAbove, SymbolTable, Symbol]>
+{
+    let summary = "Defines a function in the Starplat Dialect";
+    let description = [{This operation represents a function definiton in the Starplat dialect.
+                        It contains a name, other related arguments and an optional return type.
+                        It has a single region for the function body.
+                        }];
+
+  let arguments = (ins 
+                    SymbolNameAttr:$sym_name,
+                    TypeAttrOf<FunctionType>:$funcType
+                  );
+
+  let regions = (region AnyRegion:$body);
+}
+
 def dmap_create_data : dmapop<"create_data"> {
   let summary = "create data";
   let description = [{
