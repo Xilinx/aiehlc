@@ -13,9 +13,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 #set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(LLVM_ROOT /usr/local/)
+#set(LLVM_ROOT /usr/local/)
 #message(STATUS "use set LLVM_ROOT to change LLVM into your local llvm if the compile failed!!!")
-#set(LLVM_ROOT "/Users/llvm/llvm-project/build" CACHE PATH "Root of an LLVM/Clang/MLIR install")
+set(LLVM_ROOT "/Users/llvm/llvm-project/build" CACHE PATH "Root of an LLVM/Clang/MLIR install")
 
 if(DEFINED LLVM_INSTALL_DIR AND NOT "${LLVM_INSTALL_DIR}" STREQUAL "")
   set(LLVM_ROOT "${LLVM_INSTALL_DIR}" CACHE PATH "Root of LLVM/Clang/MLIR install" FORCE)
