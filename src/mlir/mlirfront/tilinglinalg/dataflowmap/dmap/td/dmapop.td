@@ -5,6 +5,7 @@
 #ifndef dmap_OPS
 #define dmap_OPS
 include "dmaptype.td"
+include "dmapattr.td"
 /*
       %data = dataflowmap.create_data {type="i32", dim1=10, dim2 20}
       %pegroup = dataflowmap.dmap_create_pe_group {group_idx = 1, pe_count=4, "row"}
@@ -175,7 +176,7 @@ def dmap_createstream : dmapop<"create_stream"> {
     //dmapportorgroup:$source,
     AnyTypeOf<[dmapioconfigtype, dmacoregroupconfigtype]>:$source,
     AnyTypeOf<[dmapioconfigtype, dmacoregroupconfigtype]>:$destination,
-    StrAttr:$streamType,
+    dmapioAttr:$streamType,
     I32Attr:$stream_group_index,
     I32Attr:$stream_id
   );

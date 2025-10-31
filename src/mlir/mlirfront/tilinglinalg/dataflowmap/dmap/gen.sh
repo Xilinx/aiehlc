@@ -39,6 +39,8 @@ ${LLVM_BIN}/mlir-tblgen -gen-typedef-defs $TD/dmaptype.td -typedefs-dialect=dmap
 ${LLVM_BIN}/mlir-tblgen -gen-typedef-decls $TD/dmaptype.td -typedefs-dialect=dmap -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dmaptype.h.inc
 ${LLVM_BIN}/mlir-tblgen --gen-attrdef-defs $TD/dmapattr.td -attrdefs-dialect=dmap -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dmapattr.cc.inc
 ${LLVM_BIN}/mlir-tblgen --gen-attrdef-decls $TD/dmapattr.td -attrdefs-dialect=dmap -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dmapattr.h.inc
+${LLVM_BIN}/mlir-tblgen --gen-enum-decls $TD/dmapattr.td -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dmapenums.h.inc
+${LLVM_BIN}/mlir-tblgen --gen-enum-defs $TD/dmapattr.td -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dmapenums.cc.inc
 
 #${LLVM_BIN}/mlir-tblgen --gen-type-interface-defs $TD/dmamapterface.td -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} -o  $INC/dmamapterface.cc.inc
 #${LLVM_BIN}/mlir-tblgen --gen-type-interface-decls $TD/dmamapterface.td -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} -o  $INC/dmamapterface.h.inc

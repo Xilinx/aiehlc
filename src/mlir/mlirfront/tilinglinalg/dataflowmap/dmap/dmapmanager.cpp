@@ -13,6 +13,7 @@
 #include "dmapdialect.cc.inc"
 #include "dmapattr.cc.inc"
 #include "dmaptype.cc.inc"
+#include "dmapenums.cc.inc"
 
 #include "dmapop.cc.inc"
 //#undef GET_OP_LIST
@@ -119,10 +120,10 @@ void dmapmanager::createdmapfuncByDim(OpBuilder& builder, MLIRContext* ctx,Symbo
         mlir::Type myDataHandleType = dmap::dmapdataType::get(ctx);
         auto data = builder.create<create_data>(builder.getUnknownLoc(),  myDataHandleType, shapettr, elementType); 
         mlir::Type pgeout = dmap::dmacoreenginegroupType::get(ctx);
-        auto peg = builder.create<create_core_engine_group>(builder.getUnknownLoc(),  pgeout, 0, 4,"row"); 
+        auto peg = builder.create<create_core_engine_group>(builder.getUnknownLoc(),  pgeout, builder.getI32IntegerAttr(0), builder.getI32IntegerAttr(4), builder.getStringAttr("row")); 
         mlir::Type ioout = dmap::dmapioenginetypeType::get(ctx);
-        auto io = builder.create<create_io_engine>(builder.getUnknownLoc(),  ioout, 0,"SHIM"); 
-        auto memio = builder.create<create_io_engine>(builder.getUnknownLoc(),  ioout, 0,"MEM"); 
+        auto io = builder.create<create_io_engine>(builder.getUnknownLoc(),  ioout, builder.getI32IntegerAttr(0), builder.getStringAttr("SHIM")); 
+        auto memio = builder.create<create_io_engine>(builder.getUnknownLoc(),  ioout, builder.getI32IntegerAttr(0), builder.getStringAttr("MEM")); 
         //config port
         auto ioconfigret = dmap::dmapioconfigType::get(ctx);
         auto dataaccesspattern = dmap::dataaccesspatternAttr::get(ctx, builder.getStringAttr("SEND"), 16, 1, 1);
@@ -152,21 +153,33 @@ void dmapmanager::createdmapfuncByDim(OpBuilder& builder, MLIRContext* ctx,Symbo
         itemsVector.push_back(item4);
         dmap::dataconfigmapAttr configMapAttr = dmap::dataconfigmapAttr::get(ctx,itemsVector);
         auto gcret = dmap::dmacoregroupconfigType::get(ctx);
-        auto gcmap = builder.create<configure_coregroup>(builder.getUnknownLoc(),  gcret, peg.getResult(), "row", configMapAttr);
+        auto gcmap = builder.create<configure_coregroup>(builder.getUnknownLoc(),  gcret, peg.getResult(), builder.getStringAttr("row"), configMapAttr);
         //create strem
         auto streamret = dmap::dmapportstreamType::get(ctx);
         bool opbymemio = true;
         if (opbymemio) {
             auto memiorecvconfig = builder.create<configure_io_engine>(builder.getUnknownLoc(),  ioconfigret,  memio.getResult(),memreceivepattern);
             auto memiosendconfig = builder.create<configure_io_engine>(builder.getUnknownLoc(),  ioconfigret,  memio.getResult(),memsndpattern);
-            auto streamhandle1 = builder.create<createstream>(builder.getUnknownLoc(),  streamret, shimioconfig.getResult(),memiorecvconfig.getResult(),"SH2ME",0, 1);
-            auto streamhandle2 = builder.create<createstream>(builder.getUnknownLoc(),  streamret, memiosendconfig.getResult(),gcmap.getResult(), "ME2CO", 0, 1);
+            
+            auto shimToMemAttr = dmapioAttr::get(ctx, dmapio::DMAP_SHIMIO);
+            auto memToCoreAttr = dmapioAttr::get(ctx, dmapio::DMAP_MEMTILEIO);
+            
+            auto groupIndexAttr = builder.getI32IntegerAttr(0);
+            auto streamIdAttr1 = builder.getI32IntegerAttr(1);
+            
+            auto streamhandle1 = builder.create<createstream>(builder.getUnknownLoc(),  streamret, shimioconfig.getResult(),memiorecvconfig.getResult(), shimToMemAttr, groupIndexAttr, streamIdAttr1);
+            auto streamhandle2 = builder.create<createstream>(builder.getUnknownLoc(),  streamret, memiosendconfig.getResult(),gcmap.getResult(), memToCoreAttr, groupIndexAttr, streamIdAttr1);
 
             auto pret1 = builder.create<push>(builder.getUnknownLoc(), data.getResult(),streamhandle1.getResult());
             auto pret2 = builder.create<push>(builder.getUnknownLoc(), data.getResult(),streamhandle2.getResult());
 
         } else {
-            auto streamhandle = builder.create<createstream>(builder.getUnknownLoc(),  streamret, shimioconfig.getResult(),gcmap.getResult(),"SH2CO", 0, 1);
+            auto shimToCoreAttr = dmapioAttr::get(ctx, dmapio::DMAP_SHIMIO);
+            
+            auto groupIndexAttr = builder.getI32IntegerAttr(0);
+            auto streamIdAttr = builder.getI32IntegerAttr(1);
+            
+            auto streamhandle = builder.create<createstream>(builder.getUnknownLoc(),  streamret, shimioconfig.getResult(),gcmap.getResult(), shimToCoreAttr, groupIndexAttr, streamIdAttr);
             auto pret = builder.create<push>(builder.getUnknownLoc(), data.getResult(),streamhandle.getResult());
         }
         //push stream
