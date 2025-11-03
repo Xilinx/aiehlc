@@ -14,7 +14,7 @@ def Direction_OUT : I32EnumAttrCase<"Out", 1, "out">;
 
 def DirectionAttr : I32EnumAttr<"Direction", "Port direction attribute",
                                [Direction_IN, Direction_OUT]> {
-  let genSpecializedAttr = 0;
+  //let genSpecializedAttr = 0;
   let cppNamespace = "dmaphop";
 }
 

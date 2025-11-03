@@ -231,6 +231,22 @@ include "mlir/IR/BuiltinTypes.td"  // Add this line for MemRefType
 include "dmaphoptype.td"
 include "dmaphopattr.td"
 
+def dmaphop_FuncOp : dmaphopop<"func",[IsolatedFromAbove, SymbolTable, Symbol]>
+{
+    let summary = "Defines a function in the Starplat Dialect";
+    let description = [{This operation represents a function definiton in the Starplat dialect.
+                        It contains a name, other related arguments and an optional return type.
+                        It has a single region for the function body.
+                        }];
+
+  let arguments = (ins 
+                    SymbolNameAttr:$sym_name,
+                    TypeAttrOf<FunctionType>:$funcType
+                  );
+
+  let regions = (region AnyRegion:$body);
+}
+
 // --- 1. Tile Definition Operation ---
 
 def dmaphop_tile : dmaphopop<"tile"> {
@@ -247,11 +263,12 @@ def dmaphop_tile : dmaphopop<"tile"> {
  
 // --- 2. Port Definition Operation ---
 
-def dmaphop_port : dmaphopop<"port"> {
+def dmaphop_port : dmaphopop<"port",[Symbol]> {
   let summary = "Defines a logical port on a tile";
   let arguments = (ins
     dmaphoptiletype:$tile,
-    DirectionAttr:$direction,
+    StrAttr:$direction,
+    SymbolNameAttr:$sym_name,
     OptionalAttr<I64Attr>:$direction_channel
   );
   let results = (outs dmaphopporttype:$port);
