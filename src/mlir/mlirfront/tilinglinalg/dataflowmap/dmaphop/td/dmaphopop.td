@@ -105,104 +105,70 @@ builtin.module {
 /*
 builtin.module {
 
-  // 定义一个函数来设置 "缓存并转发" 的顺序广播
   dma_hop.func @cache_and_forward_broadcast() {
 
-    // --- 1. 定义物理 Tile 实例 (The "Where") ---
     
-    // 源: "mem tile" 接口, 比如 SHIM Tile (连接到 DDR)
     %shim_tile = dma_hop.tile { col = 0, row = 0 } -> !dma_hop.tile
     
-    // 目的地 1: 中间 "缓存" Tile
     %tile_A    = dma_hop.tile { col = 1, row = 2 } -> !dma_hop.tile
     
-    // 目的地 2: 最终 "目的地" Tile
     %tile_B    = dma_hop.tile { col = 2, row = 2 } -> !dma_hop.tile
 
     
-    // --- 2. 定义物理端口 (The "Doors") ---
-    
-    // SHIM 的 *输出* 端口 (发送数据)
     %port_shim_out = dma_hop.port on %shim_tile { 
         direction = #dma_hop<direction SEND>, 
         channel = 0 
     } -> !dma_hop.port
 
-    // Tile A 的 *输入* 端口 (接收数据)
     %port_A_in = dma_hop.port on %tile_A { 
         direction = #dma_hop<direction RECEIVE>, 
         channel = 0 
     } -> !dma_hop.port
     
-    // Tile A 的 *输出* 端口 (转发数据)
     %port_A_out = dma_hop.port on %tile_A { 
         direction = #dma_hop<direction SEND>, 
         channel = 0 
     } -> !dma_hop.port
 
-    // Tile B 的 *输入* 端口 (接收数据)
     %port_B_in = dma_hop.port on %tile_B { 
         direction = #dma_hop<direction RECEIVE>, 
         channel = 0 
     } -> !dma_hop.port
 
     
-    // --- 3. 定义 Hops (The Physical Links) ---
     
     // Hop 1: SHIM -> Tile A
     %hop_1 = dma_hop.create_hop %port_shim_out -> %port_A_in -> !dma_hop.hop
     
-    // Hop 2: Tile A -> Tile B (顺序广播的下一跳)
     %hop_2 = dma_hop.create_hop %port_A_out -> %port_B_in -> !dma_hop.hop
 
     
-    // --- 4. 定义 Path (The Full Route) ---
-    
-    // 这个 path 定义了数据流的 *物理序列*
-    // 路径是线性的: SHIM -> A -> B
     %serial_path = dma_hop.create_path [%hop_1, %hop_2] -> !dma_hop.path
+    
 
-    
-    // --- 5. 准备数据和 `memref` 缓冲区 (The "What") ---
-    
-    // %data 是源数据, 位于 "mem tile" (DDR) 中
     %data = memref.alloc() : memref<1024xf32, memory_space = "DDR"> 
 
-    // %buffer_A 是在 Tile A 的 L1 内存中的 "缓存" 
+
     %buffer_A = dma_hop.alloc_buffer on %tile_A { 
         memory_space = "L1" 
     } -> memref<1024xf32, memory_space = "L1">
 
-    // %buffer_B 是在 Tile B 的 L1 内存中的 "目的地"
+   
     %buffer_B = dma_hop.alloc_buffer on %tile_B { 
         memory_space = "L1" 
     } -> memref<1024xf32, memory_space = "L1">
 
-    
-    // --- 6. 执行传输 (The "How" & "When") ---
-    
-    // 这是核心操作：
-    // 1. 将 *原始* 数据 (%data) 推送到 *整个* 路径 (%serial_path)。
-    // 2. 'outputs' 映射表告诉硬件:
-    //    - 当数据到达 %port_A_in 时, 存一份到 %buffer_A。
-    //    - 当数据到达 %port_B_in 时, 存一份到 %buffer_B。
-    //
-    // 硬件（或 `dataschedule` 层）将负责配置 Tile A 上的 "Tee" (分流)
-    // 以便数据流 *同时* 写入 L1 并 *转发* 到 %port_A_out。
     dma_hop.push %data onto %serial_path
       outputs(
-        %port_A_in -> %buffer_A,  // 消费者 1: "缓存" 在 A
-        %port_B_in -> %buffer_B   // 消费者 2: "存储" 在 B
+        %port_A_in -> %buffer_A, 
+        %port_B_in -> %buffer_B   
       )
 
       
-    // --- 7. 同步 ---
-    
-    // 阻塞, 直到 *所有* 消费者 (%buffer_A 和 %buffer_B) 都已接收完毕
+
     dma_hop.sync %serial_path
 
-    
-    // --- 8. 释放资源 ---
+
     dma_hop.dealloc_buffer %buffer_A
     dma_hop.dealloc_buffer %buffer_B
     memref.dealloc %data
