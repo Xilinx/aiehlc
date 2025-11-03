@@ -27,6 +27,11 @@ def dmapportstreamtype : dmaptype<"dmapportstream"> {
     let summary = "this is a dmap stream port";
 }
 
+def dmapportchainstreamtype : dmaptype<"dmapportchainstream"> {
+    let mnemonic = "dmapportchainstream";
+    let summary = "this is a dmap chain/concatenated stream composed of multiple port streams";
+}
+
 def dmapdatatype : dmaptype<"dmapdata"> {
     let mnemonic = "dmapdata";
     let summary = "this is a dmap data";

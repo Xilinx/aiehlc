@@ -188,6 +188,24 @@ def dmap_createstream : dmapop<"create_stream"> {
   }];
 }
 
+// New: create a chain stream from an array of existing port streams.
+def dmap_createchainstream : dmapop<"create_chain_stream"> {
+  let summary = "Creates a chain/concatenated stream from multiple existing port streams.";
+  let description = [{
+    Takes a list of existing dmap port streams and returns a single chained stream handle.
+  }];
+
+  let arguments = (ins
+    Variadic<dmapportstreamtype>:$streams
+  );
+
+  let results = (outs dmapportchainstreamtype:$chain);
+
+  let assemblyFormat = [{
+    `(` $streams `)` attr-dict `:` type($streams) `->` type($chain)
+  }];
+}
+
 //===----------------------------------------------------------------------===//
 // Execution Operators
 //===----------------------------------------------------------------------===//
@@ -195,18 +213,18 @@ def dmap_createstream : dmapop<"create_stream"> {
 def dmap_push : dmapop<"push"> {
   let summary = "Pushes a block of data into a pre-defined stream.";
   let description = [{
-    The primary execution-phase operation. It takes a memref of data and
-    a stream handle, initiating the data transfer along the path defined
-    by the stream. This operation can be implemented asynchronously.
+    The primary execution-phase operation. It takes a data handle and
+    a stream handle (either a single port stream or a chained stream),
+    initiating the data transfer along the path defined by the stream.
   }];
 
   let arguments = (ins
     dmapdatatype:$data,
-    dmapportstreamtype:$stream
+    AnyTypeOf<[dmapportstreamtype, dmapportchainstreamtype]>:$stream
   );
 
   let assemblyFormat = [{
-    $data `to` $stream attr-dict
+    $data `to` $stream `:` type($stream) attr-dict
   }];
 
 }

@@ -62,7 +62,7 @@ include_directories(./)
 #file(GLOB PARSER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/../Parser/*.cpp)
 message("Parser src Directory: ${PARSER_FILES}")
 
-set(SOURCE_FILES ./test.cpp ../dmapmanager.cpp)
+set(SOURCE_FILES ./test.cpp ../dmaphopmanager.cpp)
 
 add_executable(test ${SOURCE_FILES})
 

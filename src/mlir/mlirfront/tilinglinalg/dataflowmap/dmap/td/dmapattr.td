@@ -33,9 +33,9 @@ def dmapdirection : I32EnumAttr<"dmapdirection", "dmap direction", [
   let cppNamespace = "dmap";
 }
 
-def dmapdirectionAttr : EnumAttr<dmapdialect, dmapdirection, "direction"> {
-  let assemblyFormat = "`<` $value `>`";
-}
+//def dmapdirectionAttr : EnumAttr<dmapdialect, dmapdirection, "direction"> {
+//  let assemblyFormat = "`<` $value `>`";
+//}
 
 
 def DMAP_SHIMIO : I32EnumAttrCase<"DMAP_SHIMIO", 0, "DMAP_SHIMIO">;
