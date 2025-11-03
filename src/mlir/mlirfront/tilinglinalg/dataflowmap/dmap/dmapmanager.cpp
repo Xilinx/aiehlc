@@ -120,10 +120,10 @@ void dmapmanager::createdmapfuncByDim(OpBuilder& builder, MLIRContext* ctx,Symbo
         mlir::Type myDataHandleType = dmap::dmapdataType::get(ctx);
         auto data = builder.create<create_data>(builder.getUnknownLoc(),  myDataHandleType, shapettr, elementType); 
         mlir::Type pgeout = dmap::dmacoreenginegroupType::get(ctx);
-        auto peg = builder.create<create_core_engine_group>(builder.getUnknownLoc(),  pgeout, builder.getI32IntegerAttr(0), builder.getI32IntegerAttr(4), builder.getStringAttr("row")); 
+        auto peg = builder.create<create_core_engine_group>(builder.getUnknownLoc(),  pgeout, 0, 4, "row"); 
         mlir::Type ioout = dmap::dmapioenginetypeType::get(ctx);
-        auto io = builder.create<create_io_engine>(builder.getUnknownLoc(),  ioout, builder.getI32IntegerAttr(0), builder.getStringAttr("SHIM")); 
-        auto memio = builder.create<create_io_engine>(builder.getUnknownLoc(),  ioout, builder.getI32IntegerAttr(0), builder.getStringAttr("MEM")); 
+        auto io = builder.create<create_io_engine>(builder.getUnknownLoc(),  ioout, 0, "SHIM"); 
+        auto memio = builder.create<create_io_engine>(builder.getUnknownLoc(),  ioout, 0, "MEM"); 
         //config port
         auto ioconfigret = dmap::dmapioconfigType::get(ctx);
         auto dataaccesspattern = dmap::dataaccesspatternAttr::get(ctx, builder.getStringAttr("SEND"), 16, 1, 1);
@@ -153,7 +153,7 @@ void dmapmanager::createdmapfuncByDim(OpBuilder& builder, MLIRContext* ctx,Symbo
         itemsVector.push_back(item4);
         dmap::dataconfigmapAttr configMapAttr = dmap::dataconfigmapAttr::get(ctx,itemsVector);
         auto gcret = dmap::dmacoregroupconfigType::get(ctx);
-        auto gcmap = builder.create<configure_coregroup>(builder.getUnknownLoc(),  gcret, peg.getResult(), builder.getStringAttr("row"), configMapAttr);
+        auto gcmap = builder.create<configure_coregroup>(builder.getUnknownLoc(),  gcret, peg.getResult(), "row", configMapAttr);
         //create strem
         auto streamret = dmap::dmapportstreamType::get(ctx);
         bool opbymemio = true;
