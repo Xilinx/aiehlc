@@ -214,6 +214,35 @@ ModuleOp routingmanager::ops_test(MLIRContext* ctx, int totalN) {
     return m;
 }
 
+ModuleOp routingmanager::ops_testNew_dmap(MLIRContext* ctx, int totalN) {
+    const int hwrowused= 4, hwcolused=4;
+    OpBuilder builder(ctx);
+    mlir::ModuleOp m = ModuleOp::create(builder.getUnknownLoc());
+    //auto func = createroutingfuncByDim(ctx, true);
+    //m.push_back(func);
+    auto functype = builder.getFunctionType({},{});
+    
+    mlir::func::FuncOp main = builder.create<func::FuncOp>(builder.getUnknownLoc(), "main", functype);
+    
+    auto block = main.addEntryBlock();
+    builder.setInsertionPointToEnd(block);
+    auto mesh = builder.create<createhwmesh>(builder.getUnknownLoc(),  hwrowused, hwcolused);
+    //dummy tensor
+    SmallVector<Attribute> shape;
+    for (int64_t v : {10, 20})
+    shape.push_back(builder.getI64IntegerAttr(v));
+    ArrayAttr vals = builder.getArrayAttr(shape);  // satisfies I64ArrayAttr
+    IntegerAttr dimnum = builder.getI64IntegerAttr(2);
+    auto tensor = builder.create<createdummytensor>(builder.getUnknownLoc(), vals, dimnum);
+    createroutingfuncByDimDmap(builder, ctx, false, mesh, tensor, hwrowused, "row");
+    //createroutingfuncByDim(builder, ctx, true, mesh, tensor, hwrowused, "row");
+    //createroutingfuncByDim(builder, ctx, true, mesh, tensor, hwcolused, "col");
+    auto retop = builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc());
+    m.push_back(main);
+    llvm::errs() << m;
+    return m;
+}
+
 ModuleOp routingmanager::ops_testNew(MLIRContext* ctx, int totalN) {
     const int hwrowused= 4, hwcolused=4;
     OpBuilder builder(ctx);
@@ -235,8 +264,8 @@ ModuleOp routingmanager::ops_testNew(MLIRContext* ctx, int totalN) {
     IntegerAttr dimnum = builder.getI64IntegerAttr(2);
     auto tensor = builder.create<createdummytensor>(builder.getUnknownLoc(), vals, dimnum);
     createroutingfuncByDim(builder, ctx, false, mesh, tensor, hwrowused, "row");
-    //createroutingfuncByDim(builder, ctx, true, mesh, tensor, hwrowused, "row");
-    //createroutingfuncByDim(builder, ctx, true, mesh, tensor, hwcolused, "col");
+    createroutingfuncByDim(builder, ctx, true, mesh, tensor, hwrowused, "row");
+    createroutingfuncByDim(builder, ctx, true, mesh, tensor, hwcolused, "col");
     auto retop = builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc());
     m.push_back(main);
     llvm::errs() << m;
@@ -384,6 +413,69 @@ void routingmanager::createroutingfuncByDim(OpBuilder& builder, MLIRContext* ctx
                             auto slicetensor = builder1.create<extract_data>(builder1.getUnknownLoc(), rowtensor, sidx);
                             auto tilelist = builder1.create<extract_tiles>(builder1.getUnknownLoc(), patitionmesh, sidx);
                             
+                            if (binput) {
+                                auto hwio = builder1.create<createhwiowithtarget>(builder1.getUnknownLoc(), tilelist, "input", "mem2");
+                                auto datamov = builder1.create<movedatabyio>(builder1.getUnknownLoc(), slicetensor, hwio);
+                            } else {
+                                auto gatherdata = builder1.create<routinggatherout>(builder1.getUnknownLoc(), tilelist, slicetensor);
+                                auto hwio = builder1.create<createhwiowithtarget>(builder1.getUnknownLoc(), tilelist, "output", "mem2");
+                                auto datamov = builder1.create<movedatabyio>(builder1.getUnknownLoc(), gatherdata, hwio);
+                            }
+                            //*/
+                            builder1.create<routing::YieldOp>(builder1.getUnknownLoc());
+                            
+                        });
+                        
+                        //extract tile
+                    }
+                    //*/
+
+                    // use routing.yield to return value finish the yield
+                 builder.create<scf::YieldOp>(builder.getUnknownLoc());
+        };
+       
+        return ;//func;
+}
+
+void routingmanager::createroutingfuncByDimDmap(OpBuilder& builder, MLIRContext* ctx, bool binput, Value mesh, Value tensor,
+                                           uint32_t hwsplitnum, std::string splitAxis) {
+        auto location = builder.getUnknownLoc();
+        auto tensorhwaxisowner = splitAxis;
+        // no region creatation
+        //
+        auto exec = builder.create<scf::ExecuteRegionOp>(builder.getUnknownLoc(), /*result types*/TypeRange{});
+        exec->setAttr("routing_memo", builder.getStringAttr(splitAxis));
+        //Block *body = builder.createBlock(&exec.getRegion());
+        {
+                    OpBuilder::InsertionGuard guard(builder);
+                    //fix the upper scope return go inside this region issue
+                    builder.setInsertionPointToStart(&exec.getRegion().emplaceBlock());
+                ///*                
+                    auto patitionmesh = builder.create<partitionmesh>(builder.getUnknownLoc(),  mesh, hwsplitnum, splitAxis);
+                    IntegerAttr splitdim = builder.getI64IntegerAttr(0);//dim 0 is 
+                    auto outTy = builder.getI32Type();
+                    auto rowtensor = builder.create<partitiontensor>(builder.getUnknownLoc(), tensor, hwsplitnum, 0, tensorhwaxisowner,"col","");
+                    Value lb = builder.create<arith::ConstantIndexOp>(location, 0);
+                    Value ub = builder.create<arith::ConstantIndexOp>(location, hwsplitnum);
+                    Value step = builder.create<arith::ConstantIndexOp>(location,1);
+                    // create RoutingCreate region op
+                    // inside region
+                    ///*
+                    auto scf = builder.create<mlir::scf::ForOp>(location, lb, ub, step);
+                    { 
+                        OpBuilder::InsertionGuard guard(builder);
+                        builder.setInsertionPointToStart(scf.getBody());
+                        auto memo = builder.getStringAttr(splitAxis);
+                        mlir::Value scf_idx = scf.getInductionVar();
+                        
+                        Value idx = builder.create<arith::IndexCastOp>(builder.getUnknownLoc(),builder.getI32Type(), scf_idx);
+                        
+                        auto routingcreateOp = builder.create<routing::RoutingCreate>(builder.getUnknownLoc(), idx, memo, [&](OpBuilder &builder1, Location bodyLoc,Value sidx) { 
+                            //use such format to fix the generic format print issue 
+                            
+                            auto slicetensor = builder1.create<extract_data>(builder1.getUnknownLoc(), rowtensor, sidx);
+                            auto tilelist = builder1.create<extract_tiles>(builder1.getUnknownLoc(), patitionmesh, sidx);
+                            ///*
                             if (binput) {
                                 auto hwio = builder1.create<createhwiowithtarget>(builder1.getUnknownLoc(), tilelist, "input", "mem2");
                                 auto datamov = builder1.create<movedatabyio>(builder1.getUnknownLoc(), slicetensor, hwio);
