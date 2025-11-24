@@ -66,10 +66,13 @@ include_directories(../../routinghw/)
 include_directories(../)
 include_directories(../routingimplement/include/)
 include_directories(../passroutingtodmap/)
+include_directories(../passdmaphoptodfschedule/)
 include_directories(../../dataflowmap/dmap/inc/)
 include_directories(../../dataflowmap/dmap/)
 include_directories(../../dataflowmap/dmaphop/inc/)
 include_directories(../../dataflowmap/dmaphop/)
+include_directories(../../dataflowmap/dfschedule/inc/)
+include_directories(../../dataflowmap/dfschedule/)
 
 #file(GLOB PARSER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/../Parser/*.cpp)
 message("Parser src Directory: ${PARSER_FILES}")
@@ -78,7 +81,8 @@ set(SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../../routinghw/routinghwmanager.cpp 
                 ${CMAKE_CURRENT_SOURCE_DIR}/../../routing/routingmanager.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../../dataflowmap/dmap/dmapmanager.cpp
-                ${CMAKE_CURRENT_SOURCE_DIR}/../../dataflowmap/dmaphop/dmaphopmanager.cpp    
+                ${CMAKE_CURRENT_SOURCE_DIR}/../../dataflowmap/dmaphop/dmaphopmanager.cpp
+                ${CMAKE_CURRENT_SOURCE_DIR}/../../dataflowmap/dfschedule/dfschedulemanager.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../routinghwlower.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../routinglower.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../routingunrolling.cpp
@@ -87,6 +91,7 @@ set(SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passroutingtodmap/routingtodmap.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passdmaptodmaphop/dmaptodmaphop.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passdmaphoptoroutinghw/passdmaphoptoroutinghw.cpp
+                ${CMAKE_CURRENT_SOURCE_DIR}/../passdmaphoptodfschedule/passdmaphoptodfschedule.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../routingimplement/routing/routingpath.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../routingimplement/hw/hwresource.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../routingimplement/hw/ResourceManager.cpp

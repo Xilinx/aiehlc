@@ -70,7 +70,7 @@ private:
     // find the nearest point from the tree
     Point nearestTreePoint(const Point& dst) const;
 
-    // limited BFS
+    // limited BFS with priority
     bool bfsSingle(const Point& start, const Point& goal,
                    std::vector<Point>& outSeg);
 
@@ -86,6 +86,12 @@ private:
     std::shared_ptr<DataIO> dio_;
 
     MultiPath mutipaths_;
+    
+    // Priority zone boundaries
+    int M_start_;      // Memory tile start row
+    int M_end_;        // Memory tile end row
+    int SHIM_start_;   // SHIM tile start row
+    int SHIM_end_;     // SHIM tile end row
 };
 
 #endif // ROUTING_PATH_H

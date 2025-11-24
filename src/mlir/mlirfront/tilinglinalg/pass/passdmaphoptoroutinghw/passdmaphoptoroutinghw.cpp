@@ -93,6 +93,17 @@ std::optional<TileListPktRoutingNode> GatherPktRoutingPathCreate(Operation* op,
     for(auto x: dsttiles) {
         pktmergetile.push_back(x.first);
     }
+    //sort the pktmergetile in asending order
+    std::sort(pktmergetile.begin(), pktmergetile.end(), [](const Point& a, const Point& b) {
+        if (a.r != b.r) return a.r < b.r;
+        return a.c < b.c;
+    });
+
+    //sort tilist in asending order
+    std::sort(tilist.begin(), tilist.end(), [](const Point& a, const Point& b) {
+        if (a.r != b.r) return a.r < b.r;
+        return a.c < b.c;
+    });
     
     // For core-to-shim (S2MM) packet gather routing:
     // We need to reuse the existing shim DataIO based on shimpoint and channel
@@ -286,6 +297,17 @@ std::optional<TileListRoutingMap> GetSeqPath(
                 connectionData[shimpoint].MasterSendToNextTileDirectionPortIdx = shimPortInfo->portnum_;
             }
         }
+    } else if (dio->type() == IOType::Input) {// 1c. Handle the special case for the starting SHIM tile's input
+        // 1c. Handle the special case for the starting SHIM tile's input
+        PortDirection shimDir = PortDirection::South;
+        int shimPortNum = 3; // A reasonable default
+        if (auto shimPortInfo = dio->getshimport()) {
+            shimDir = shimPortInfo->dir_;
+            shimPortNum = shimPortInfo->portnum_;
+        }
+        Point dioshimpoint = Point{dio->rowpos(), dio->colpos()};
+        connectionData[dioshimpoint].SlaveReceiveForwardDirection = shimDir;
+        connectionData[dioshimpoint].SlaveReceiveForwardDirectionPortIdx = shimPortNum;
     }
 
     // 1b. Populate DMA connection information
@@ -301,18 +323,6 @@ std::optional<TileListRoutingMap> GetSeqPath(
             }
         }
     }
-
-    // 1c. Handle the special case for the starting SHIM tile's input
-    
-    PortDirection shimDir = PortDirection::South;
-    int shimPortNum = 3; // A reasonable default
-    if (auto shimPortInfo = dio->getshimport()) {
-        shimDir = shimPortInfo->dir_;
-        shimPortNum = shimPortInfo->portnum_;
-    }
-    Point dioshimpoint = Point{dio->rowpos(), dio->colpos()};
-    connectionData[dioshimpoint].SlaveReceiveForwardDirection = shimDir;
-    connectionData[dioshimpoint].SlaveReceiveForwardDirectionPortIdx = shimPortNum;
 
     return std::make_optional<TileListRoutingMap>(troutingmap);
 }
@@ -697,7 +707,13 @@ struct DmaphopPathConversionPattern : public OpConversionPattern<dmaphop::create
                 }
             }
         }
-        
+        //sort coreTileList in ascending order, to make sure the stream flow is from left to right, top to bottom
+        std::sort(coreTileList.begin(), coreTileList.end(), [](const Point& a, const Point& b) {
+            if (a.r == b.r) {
+                return a.c < b.c;
+            }
+            return a.r < b.r;
+        });
         if (allTilesInPath.empty()) {
             rewriter.eraseOp(op);
             return success();
@@ -828,6 +844,7 @@ struct DmaphopPathConversionPattern : public OpConversionPattern<dmaphop::create
                 router_,
                 rewriter
             );
+            
         }
         
         // Call ParseTheCCTRoutingPath to generate the routing connections

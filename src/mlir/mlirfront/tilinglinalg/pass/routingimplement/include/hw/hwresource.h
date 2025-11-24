@@ -22,6 +22,10 @@ struct Point {
     int c;  // column
     bool operator==(const Point& o) const { return r == o.r && c == o.c; }
     bool operator!=(const Point& o) const { return !(*this == o); }
+    bool operator<(const Point& o) const {
+        if (r != o.r) return r < o.r;
+        return c < o.c;
+    }
     struct Hash {
         std::size_t operator()(const Point& p) const {
             // Combine the hash of row and column

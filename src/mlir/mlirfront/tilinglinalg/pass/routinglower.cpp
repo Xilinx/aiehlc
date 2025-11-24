@@ -239,6 +239,16 @@ std::optional<TileListRoutingMap> GetSeqPath(
                 connectionData[shimpoint].MasterSendToNextTileDirectionPortIdx = shimPortInfo->portnum_;
             }
         }
+    } else if (dio->type() == IOType::Input) {// 1c. Handle the special case for the starting SHIM tile's input
+        PortDirection shimDir = PortDirection::South;
+        int shimPortNum = 3; // A reasonable default
+        if (auto shimPortInfo = dio->getshimport()) {
+            shimDir = shimPortInfo->dir_;
+            shimPortNum = shimPortInfo->portnum_;
+        }
+        Point dioshimpoint = Point{dio->rowpos(), dio->colpos()};
+        connectionData[dioshimpoint].SlaveReceiveForwardDirection = shimDir;
+        connectionData[dioshimpoint].SlaveReceiveForwardDirectionPortIdx = shimPortNum;
     }
 
     // 1b. Populate DMA connection information
@@ -254,18 +264,6 @@ std::optional<TileListRoutingMap> GetSeqPath(
             }
         }
     }
-
-    // 1c. Handle the special case for the starting SHIM tile's input
-    
-    PortDirection shimDir = PortDirection::South;
-    int shimPortNum = 3; // A reasonable default
-    if (auto shimPortInfo = dio->getshimport()) {
-        shimDir = shimPortInfo->dir_;
-        shimPortNum = shimPortInfo->portnum_;
-    }
-    Point dioshimpoint = Point{dio->rowpos(), dio->colpos()};
-    connectionData[dioshimpoint].SlaveReceiveForwardDirection = shimDir;
-    connectionData[dioshimpoint].SlaveReceiveForwardDirectionPortIdx = shimPortNum;
 
     return std::make_optional<TileListRoutingMap>(troutingmap);
 }

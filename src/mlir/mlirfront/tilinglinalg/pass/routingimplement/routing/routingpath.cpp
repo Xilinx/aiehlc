@@ -26,11 +26,30 @@ RoutingPath::RoutingPath(std::shared_ptr<ResourceMgr> resmgr,std::shared_ptr<Dat
     : R_(resmgr->rows()), C_(resmgr->cols()),
       wall_(R_,std::vector<bool>(C_,false)),
       tree_(R_,std::vector<bool>(C_,false)),
-      parent_(R_,std::vector<Point>(C_,{-1,-1}))
+      parent_(R_,std::vector<Point>(C_,{-1,-1})),
+      M_start_(1),       // Memory tiles typically start at row 1
+      M_end_(1),         // Memory tiles typically end at row 1 (single row)
+      SHIM_start_(0),    // SHIM tiles at row 0
+      SHIM_end_(0)       // SHIM tiles at row 0
 {
     addObstacles(initObs);
     resmgr_= resmgr;
     dio_ = dio;
+    
+    // Initialize priority zones based on resource manager if available
+    if (resmgr_) {
+        // You can customize these based on your hardware topology
+        // For AIE architectures:
+        // - SHIM tiles: row 0
+        // - Memory tiles: row 1 (for AIEML/AIE2)
+        // - Core tiles: row 2 and above
+        
+        // These can be set based on device type from resmgr
+        SHIM_start_ = 0;
+        SHIM_end_ = 0;
+        M_start_ = 1;
+        M_end_ = 1;
+    }
 }
 
 //--------------------------------------------------------------------
@@ -69,37 +88,65 @@ bool RoutingPath::connectAvailable(Point start, Point goal) {
 }
 
 //--------------------------------------------------------------------
-// BFS (allows traversing existing tree_, but not walls)
+// BFS with priority (prefers Memory tiles, then SHIM tiles)
+// Priority order: M tiles > SHIM tiles > Core tiles
 //--------------------------------------------------------------------
 bool RoutingPath::bfsSingle(const Point& start,const Point& goal,
                             std::vector<Point>& out){
     const int INF=std::numeric_limits<int>::max();
     std::vector<std::vector<int>> dist(R_,std::vector<int>(C_,INF));
-    std::queue<Point> q;
+    
+    // Priority queue: (priority, distance, Point)
+    // Lower priority value = explored first
+    // Priority: 0 = M tiles, 1 = SHIM tiles, 2 = Core tiles
+    auto getPriority = [this](const Point& p) -> int {
+        if (p.r >= M_start_ && p.r <= M_end_) return 0;      // Memory tiles highest priority
+        if (p.r >= SHIM_start_ && p.r <= SHIM_end_) return 1; // SHIM tiles second priority
+        return 2;                                              // Core tiles lowest priority
+    };
+    
+    // Priority queue: (priority, distance, Point)
+    using PQEntry = std::tuple<int, int, Point>;
+    std::priority_queue<PQEntry, std::vector<PQEntry>, std::greater<PQEntry>> pq;
 
     if(!inGrid(start)||!inGrid(goal)||isWall(start.r,start.c)||isWall(goal.r,goal.c))
         return false;
+    
     dist[start.r][start.c]=0;
     parent_[start.r][start.c]={-1,-1};
-    q.push(start);
+    pq.push({getPriority(start), 0, start});
 
-    while(!q.empty()){
-        Point cur=q.front();q.pop();
+    while(!pq.empty()){
+        auto [curPriority, curDist, cur] = pq.top();
+        pq.pop();
+        
+        // Skip if we've already found a better path
+        if(curDist > dist[cur.r][cur.c]) continue;
+        
         if(cur==goal) break;
+        
         for(auto d:kDirs){
-            if(cur.r==0 && d.c!=0) continue; // row‑0 rule
+            if(cur.r==0 && d.c!=0) continue; // row-0 rule: no left/right movement
             Point nxt{cur.r+d.r,cur.c+d.c};
-            //check whether the connection have enough resource.
+            
+            //check whether the connection has enough resources
             if(!inGrid(nxt)||!connectAvailable(Point{cur.r, cur.c}, Point{nxt.r,nxt.c})) continue;
-            if(dist[nxt.r][nxt.c]!=INF) continue;
-            // allow stepping on tree_ tiles too
-            dist[nxt.r][nxt.c]=dist[cur.r][cur.c]+1;
-            parent_[nxt.r][nxt.c]=cur;
-            q.push(nxt);
+            
+            int newDist = dist[cur.r][cur.c] + 1;
+            
+            // Only update if we found a shorter path
+            if(newDist < dist[nxt.r][nxt.c]) {
+                dist[nxt.r][nxt.c] = newDist;
+                parent_[nxt.r][nxt.c] = cur;
+                int nxtPriority = getPriority(nxt);
+                pq.push({nxtPriority, newDist, nxt});
+            }
         }
     }
+    
     if(dist[goal.r][goal.c]==INF) return false;
-    // rebuild
+    
+    // rebuild path
     for(Point p=goal;p!=start;p=parent_[p.r][p.c]) out.push_back(p);
     out.push_back(start);
     std::reverse(out.begin(),out.end());

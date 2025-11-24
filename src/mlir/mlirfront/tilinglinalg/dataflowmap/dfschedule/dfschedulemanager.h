@@ -2,8 +2,8 @@
 * Copyright (C) 2025 Advanced Micro Devices, Inc. All Rights Reserved.
 * SPDX-License-Identifier: MIT
 ******************************************************************************/
-#ifndef __DMAP_MANAGER__
-#define __DMAP_MANAGER__
+#ifndef __DFSCHEDULE_MANAGER__
+#define __DFSCHEDULE_MANAGER__
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/SymbolTable.h"
@@ -76,4 +76,4 @@ public:
     mlir::func::FuncOp createDSKernelFunc(OpBuilder &builder, MLIRContext *ctx);
     static void loaddialect(MLIRContext* ctx);
 };
-#endif//__DMAP_MANAGER__
+#endif//__DFSCHEDULE_MANAGER__
