@@ -49,7 +49,9 @@ aierepo_download_check() {
 }
 
 if [ "$PATH_SET_ONLY" -eq 0 ]; then
-    bash "$SCRIPT_DIR/precommitsetup.sh"
+    if [ -f "$SCRIPT_DIR/precommitsetup.sh" ]; then
+        bash "$SCRIPT_DIR/precommitsetup.sh"
+    fi
 fi
 
 USE_LLVMAIE=0
