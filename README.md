@@ -86,4 +86,12 @@ Building aiehlc is only necessary if you intend to develop or compile aiehlc its
 
 Build Tutorial: [build.md](doc/build.md)
 
+## Contributing
+
+If you plan to contibute code then make sure you set up the clang-format pre-commit hook.
+
+```bash
+source script/precommitsetup.sh
+```
+
 <p align="center">Copyright&copy; 2025 Advanced Micro Devices, Inc</p>
