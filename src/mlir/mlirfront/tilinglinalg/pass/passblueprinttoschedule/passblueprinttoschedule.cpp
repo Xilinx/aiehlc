@@ -10,12 +10,14 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "dfscheblueprintmanager.h"
+#include "dfschedulemanager.h"
 #include <sstream>
 #include <vector>
 #include <unordered_map>
@@ -27,248 +29,136 @@ using namespace dfschedule;
 
 namespace {
 
-// Pattern to convert dfscheblueprint::ConfigOp to dfschedule module structure
-struct ConfigOpConversion : public OpConversionPattern<dfscheblueprint::ConfigOp> {
-    using OpConversionPattern<dfscheblueprint::ConfigOp>::OpConversionPattern;
+// Helper function to look up TileGroupOp by symbol reference
+static dfscheblueprint::TileGroupOp lookupTileGroup(Operation *rootOp, SymbolRefAttr target) {
+    // Walk up to find the ConfigOp that contains the TileGroupOp definitions
+    Operation *configOp = rootOp->getParentOfType<dfscheblueprint::ConfigOp>();
+    if (!configOp) {
+        // Try to find ConfigOp among siblings
+        if (auto parentOp = rootOp->getParentOp()) {
+            for (Operation &op : parentOp->getRegion(0).front()) {
+                if (auto config = dyn_cast<dfscheblueprint::ConfigOp>(&op)) {
+                    configOp = config;
+                    break;
+                }
+            }
+        }
+    }
+    
+    if (!configOp) return nullptr;
+    
+    // Search within the ConfigOp's body for matching TileGroupOp
+    StringRef targetName = target.getRootReference().getValue();
+    for (Operation &op : cast<dfscheblueprint::ConfigOp>(configOp).getBody().front()) {
+        if (auto tileGroup = dyn_cast<dfscheblueprint::TileGroupOp>(&op)) {
+            if (tileGroup.getSymName() == targetName) {
+                return tileGroup;
+            }
+        }
+    }
+    return nullptr;
+}
+
+// Pattern to convert dfscheblueprint::FlowConfigOp to dfschedule operations
+// Only handles FlowConfigOp with type="shim" - creates declaretile and config.dma_bd
+struct FlowConfigConversion : public OpConversionPattern<dfscheblueprint::FlowConfigOp> {
+    using OpConversionPattern<dfscheblueprint::FlowConfigOp>::OpConversionPattern;
 
     LogicalResult
-    matchAndRewrite(dfscheblueprint::ConfigOp op, OpAdaptor adaptor,
+    matchAndRewrite(dfscheblueprint::FlowConfigOp op, OpAdaptor adaptor,
                     ConversionPatternRewriter &rewriter) const override {
         auto loc = op.getLoc();
         
-        // Create a module to contain the schedule
-        rewriter.setInsertionPoint(op);
-        auto moduleOp = rewriter.create<ModuleOp>(loc);
-        Block *moduleBlock = &moduleOp.getBodyRegion().front();
-        
-        rewriter.setInsertionPointToEnd(moduleBlock);
-        
-        // Collect information from the blueprint
-        SmallVector<dfscheblueprint::TileGroupOp> resourceGroups;
-        SmallVector<dfscheblueprint::DeclareDataOp> declareDataOps;
-        SmallVector<dfscheblueprint::DataSliceOp> dataSliceOps;
-        SmallVector<dfscheblueprint::FlowConfigOp> bindOps;
-        SmallVector<dfscheblueprint::FlowTransferOp> transferOps;
-        SmallVector<dfscheblueprint::TransferManifestOp> manifestOps;
-        
-        // Walk the config body to collect operations
-        for (Operation &innerOp : op.getBody().front().getOperations()) {
-            if (auto resGroup = dyn_cast<dfscheblueprint::TileGroupOp>(&innerOp)) {
-                resourceGroups.push_back(resGroup);
-            } else if (auto declData = dyn_cast<dfscheblueprint::DeclareDataOp>(&innerOp)) {
-                declareDataOps.push_back(declData);
-            } else if (auto dataSlice = dyn_cast<dfscheblueprint::DataSliceOp>(&innerOp)) {
-                dataSliceOps.push_back(dataSlice);
-            } else if (auto bind = dyn_cast<dfscheblueprint::FlowConfigOp>(&innerOp)) {
-                bindOps.push_back(bind);
-            } else if (auto transfer = dyn_cast<dfscheblueprint::FlowTransferOp>(&innerOp)) {
-                transferOps.push_back(transfer);
-            } else if (auto manifest = dyn_cast<dfscheblueprint::TransferManifestOp>(&innerOp)) {
-                manifestOps.push_back(manifest);
-            }
+        // Only handle FlowConfigOp with type="shim"
+        auto typeAttr = op.getType();
+        if (!typeAttr || *typeAttr != "shim") {
+            // Skip non-shim config operations - they will be handled by other patterns
+            return failure();
         }
         
-        // Create host function for data movement orchestration
-        auto hostFuncType = rewriter.getFunctionType({}, {});
-        auto hostFunc = rewriter.create<func::FuncOp>(loc, "schedule_host", hostFuncType);
-        hostFunc.setPublic();
-        
-        Block *hostBody = hostFunc.addEntryBlock();
-        rewriter.setInsertionPointToStart(hostBody);
-        
-        // Process each resource group - get tile handles
-        llvm::DenseMap<StringRef, SmallVector<Value>> tileHandles;
-        for (auto resGroup : resourceGroups) {
-            StringRef groupName = resGroup.getSymName();
-            ArrayAttr tilesAttr = resGroup.getTiles();
-            
-            SmallVector<Value> handles;
-            for (auto tileAttr : tilesAttr) {
-                if (auto tileArray = dyn_cast<ArrayAttr>(tileAttr)) {
-                    if (tileArray.size() >= 2) {
-                        int64_t col = cast<IntegerAttr>(tileArray[0]).getInt();
-                        int64_t row = cast<IntegerAttr>(tileArray[1]).getInt();
-                        
-                        auto tileHandle = rewriter.create<dfschedule::GetTileHandleOp>(
-                            loc,
-                            dfschedule::TileType::get(rewriter.getContext()),
-                            rewriter.getI32IntegerAttr(col),
-                            rewriter.getI32IntegerAttr(row));
-                        handles.push_back(tileHandle.getResult());
-                    }
-                }
-            }
-            tileHandles[groupName] = handles;
+        // Get the target TileGroupOp by looking up the symbol reference
+        SymbolRefAttr targetRef = op.getTarget();
+        auto tileGroupOp = lookupTileGroup(op.getOperation(), targetRef);
+        if (!tileGroupOp) {
+            return op.emitError("failed to resolve target tile group: ") << targetRef;
         }
         
-        // Allocate device memory for data declarations
-        llvm::DenseMap<Operation*, Value> dataMemRefs;
-        for (auto declData : declareDataOps) {
-            Type dataType = declData.getDataType();
-            if (auto tensorType = dyn_cast<RankedTensorType>(dataType)) {
-                // Convert tensor type to memref type for device allocation
-                auto memrefType = MemRefType::get(tensorType.getShape(), tensorType.getElementType());
-                auto allocOp = rewriter.create<dfschedule::AllocDeviceMemOp>(loc, memrefType);
-                dataMemRefs[declData.getOperation()] = allocOp.getResult();
-            }
+        // Extract tile coordinates from the TileGroupOp
+        ArrayAttr tilesAttr = tileGroupOp.getTiles();
+        if (tilesAttr.empty()) {
+            return op.emitError("target tile group has no tiles");
         }
         
-        // Process collective transfers
-        SmallVector<Value> events;
-        for (auto transfer : transferOps) {
-            StringRef transferType = transfer.getType();
-            int32_t packetId = transfer.getBasePacketId();
-            
-            // Get stream handle for this transfer
-            auto streamHandle = rewriter.create<dfschedule::GetStreamHandleOp>(
-                loc,
-                dfschedule::StreamType::get(rewriter.getContext()),
-                transfer.getFromAttr());
-            
-            // Create appropriate copy operations based on transfer type
-            if (transferType == "one_to_many" || transferType == "broadcast") {
-                // Host to Device scatter/broadcast
-                // This would need actual host and device buffers
-                // For now, create placeholder structure
-            } else if (transferType == "many_to_one" || transferType == "gather") {
-                // Device to Host gather
-            }
+        // Get DMA configuration
+        auto dmaAttr = op.getDma();
+        auto dmaChannels = dmaAttr.getChannels();
+        auto dmaDirection = dmaAttr.getDirection();
+        
+        // Get the view operand (tensor/memref containing the data)
+        Value viewValue = adaptor.getView();
+        Type viewType = viewValue.getType();
+        
+        // Convert tensor type to memref type if needed
+        MemRefType memrefType;
+        if (auto tensorType = dyn_cast<RankedTensorType>(viewType)) {
+            memrefType = MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+            // Create a buffer cast from tensor to memref
+            viewValue = rewriter.create<mlir::bufferization::ToMemrefOp>(loc, memrefType, viewValue);
+        } else if (auto mrType = dyn_cast<MemRefType>(viewType)) {
+            memrefType = mrType;
+        } else {
+            return op.emitError("view must be tensor or memref type");
         }
         
-        // Add return
-        rewriter.create<func::ReturnOp>(loc);
+        // Create declaretile and config.dma_bd for each tile in the target group
+        SmallVector<Value> bdHandles;
+        int channelIdx = 0;
         
-        // Create kernel functions for each compute tile
-        for (auto &[groupName, handles] : tileHandles) {
-            // Skip shim tiles (typically at row 0)
-            if (groupName.contains("shim") || groupName.contains("gateway")) {
+        for (auto tileAttr : tilesAttr) {
+            auto tileArray = dyn_cast<ArrayAttr>(tileAttr);
+            if (!tileArray || tileArray.size() < 2) {
                 continue;
             }
             
-            rewriter.setInsertionPointToEnd(moduleBlock);
+            // Extract tile coordinates
+            int64_t col = cast<IntegerAttr>(tileArray[0]).getInt();
+            int64_t row = cast<IntegerAttr>(tileArray[1]).getInt();
             
-            // Create kernel function
-            auto kernelFuncType = rewriter.getFunctionType(
-                {rewriter.getI32Type()}, {});
-            std::string kernelName = "kernel_" + groupName.str();
-            auto kernelFunc = rewriter.create<func::FuncOp>(loc, kernelName, kernelFuncType);
-            kernelFunc.setPrivate();
+            // Create dfschedule.declaretile to declare the physical tile
+            auto declareTileOp = rewriter.create<dfschedule::DeclareTileOp>(
+                loc,
+                dfschedule::TileType::get(rewriter.getContext()),
+                rewriter.getI32IntegerAttr(col),
+                rewriter.getI32IntegerAttr(row));
             
-            Block *kernelBody = kernelFunc.addEntryBlock();
-            rewriter.setInsertionPointToStart(kernelBody);
+            // Get DMA channel for this tile (cycle through available channels)
+            int64_t dmaChannel = dmaChannels.empty() ? 0 : dmaChannels[channelIdx % dmaChannels.size()];
+            channelIdx++;
             
-            Value tileIdx = kernelBody->getArgument(0);
+            // Calculate buffer size from memref shape
+            int64_t bufferLen = 1;
+            for (int64_t dim : memrefType.getShape()) {
+                bufferLen *= dim;
+            }
             
-            // Create ping-pong buffers
-            auto memrefType = MemRefType::get({256}, rewriter.getF32Type());
-            auto allocaPing = rewriter.create<memref::AllocaOp>(loc, memrefType);
-            allocaPing->setAttr("buffer_type", rewriter.getStringAttr("ping"));
+            // Create dfschedule.config.dma_bd to configure DMA buffer descriptor
+            // Parameters: buffer, tile, bd_id, offset, len, enable_packet, packet_id, next_bd
+            auto configDmaBdOp = rewriter.create<dfschedule::ConfigDmaBdOp>(
+                loc,
+                dfschedule::BdHandleType::get(rewriter.getContext()),
+                viewValue,                                      // buffer
+                declareTileOp.getTile(),                        // tile handle
+                rewriter.getI32IntegerAttr(dmaChannel),         // bd_id (use channel as bd_id)
+                rewriter.getI32IntegerAttr(0),                  // offset
+                rewriter.getI32IntegerAttr(bufferLen),          // len
+                rewriter.getBoolAttr(false),                    // enable_packet
+                rewriter.getI32IntegerAttr(0),                  // packet_id
+                rewriter.getI32IntegerAttr(0));                 // next_bd
             
-            auto allocaPong = rewriter.create<memref::AllocaOp>(loc, memrefType);
-            allocaPong->setAttr("buffer_type", rewriter.getStringAttr("pong"));
-            
-            // Initialize locks
-            auto lockType = dfschedule::LockType::get(rewriter.getContext());
-            
-            auto pingAcquireLock = rewriter.create<dfschedule::LockInitOp>(
-                loc, lockType, rewriter.getI64IntegerAttr(0));
-            auto pongAcquireLock = rewriter.create<dfschedule::LockInitOp>(
-                loc, lockType, rewriter.getI64IntegerAttr(0));
-            auto pingReleaseLock = rewriter.create<dfschedule::LockInitOp>(
-                loc, lockType, rewriter.getI64IntegerAttr(1));
-            auto pongReleaseLock = rewriter.create<dfschedule::LockInitOp>(
-                loc, lockType, rewriter.getI64IntegerAttr(0));
-            
-            // Create DMA loop for receiving data
-            auto dmaLoop = rewriter.create<dfschedule::LaunchDmaS2MLoopOp>(
-                loc, 
-                allocaPing.getResult(), 
-                allocaPong.getResult(), 
-                tileIdx,
-                pingAcquireLock.getResult(), 
-                pongAcquireLock.getResult(),
-                pingReleaseLock.getResult(), 
-                pongReleaseLock.getResult());
-            
-            Block *dmaBlock = rewriter.createBlock(&dmaLoop.getBody());
-            rewriter.setInsertionPointToEnd(dmaBlock);
-            
-            // Set insertion point after DMA loop for compute logic
-            rewriter.setInsertionPointAfter(dmaLoop);
-            
-            // Create compute loop with ping-pong logic
-            auto c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-            auto c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-            auto c2 = rewriter.create<arith::ConstantIndexOp>(loc, 2);
-            auto c4 = rewriter.create<arith::ConstantIndexOp>(loc, 4);
-            
-            auto forOp = rewriter.create<scf::ForOp>(loc, c0, c4, c1);
-            Block *forBody = forOp.getBody();
-            rewriter.setInsertionPointToStart(forBody);
-            
-            Value loopIter = forOp.getInductionVar();
-            
-            // Check if iteration is even or odd
-            auto remOp = rewriter.create<arith::RemUIOp>(loc, loopIter, c2.getResult());
-            auto isEven = rewriter.create<arith::CmpIOp>(
-                loc, arith::CmpIPredicate::eq, remOp.getResult(), c0.getResult());
-            
-            // Select buffer based on even/odd
-            auto ifEvenBuf = rewriter.create<scf::IfOp>(loc, memrefType, isEven, true);
-            
-            rewriter.setInsertionPointToStart(&ifEvenBuf.getThenRegion().front());
-            rewriter.create<scf::YieldOp>(loc, allocaPing.getResult());
-            
-            rewriter.setInsertionPointToStart(&ifEvenBuf.getElseRegion().front());
-            rewriter.create<scf::YieldOp>(loc, allocaPong.getResult());
-            
-            rewriter.setInsertionPointAfter(ifEvenBuf);
-            Value selectedBuffer = ifEvenBuf.getResult(0);
-            
-            // Select acquire lock
-            auto ifEvenAcq = rewriter.create<scf::IfOp>(loc, lockType, isEven, true);
-            
-            rewriter.setInsertionPointToStart(&ifEvenAcq.getThenRegion().front());
-            rewriter.create<scf::YieldOp>(loc, pingAcquireLock.getResult());
-            
-            rewriter.setInsertionPointToStart(&ifEvenAcq.getElseRegion().front());
-            rewriter.create<scf::YieldOp>(loc, pongAcquireLock.getResult());
-            
-            rewriter.setInsertionPointAfter(ifEvenAcq);
-            Value selectedAcquireLock = ifEvenAcq.getResult(0);
-            
-            // Select release lock
-            auto ifEvenRel = rewriter.create<scf::IfOp>(loc, lockType, isEven, true);
-            
-            rewriter.setInsertionPointToStart(&ifEvenRel.getThenRegion().front());
-            rewriter.create<scf::YieldOp>(loc, pingReleaseLock.getResult());
-            
-            rewriter.setInsertionPointToStart(&ifEvenRel.getElseRegion().front());
-            rewriter.create<scf::YieldOp>(loc, pongReleaseLock.getResult());
-            
-            rewriter.setInsertionPointAfter(ifEvenRel);
-            Value selectedReleaseLock = ifEvenRel.getResult(0);
-            
-            // Calculate lock value (iteration + 1)
-            auto c1_i32 = rewriter.create<arith::ConstantOp>(loc, rewriter.getI32IntegerAttr(1));
-            auto idxCast = rewriter.create<arith::IndexCastOp>(loc, rewriter.getI32Type(), loopIter);
-            auto lockVal = rewriter.create<arith::AddIOp>(loc, idxCast.getResult(), c1_i32.getResult());
-            
-            // Acquire lock
-            rewriter.create<dfschedule::AcquireLockOp>(loc, selectedAcquireLock, lockVal.getResult());
-            
-            // Compute on the selected buffer
-            rewriter.create<dfschedule::ComputeOp>(loc, selectedBuffer);
-            
-            // Release lock
-            rewriter.create<dfschedule::ReleaseLockOp>(loc, selectedReleaseLock, lockVal.getResult());
-            
-            // Add return to kernel
-            rewriter.setInsertionPointToEnd(kernelBody);
-            rewriter.create<func::ReturnOp>(loc);
+            bdHandles.push_back(configDmaBdOp.getBdHandle());
         }
         
-        // Erase the original config op
+        // Erase the original FlowConfigOp
         rewriter.eraseOp(op);
         
         return success();
@@ -316,10 +206,15 @@ void BlueprintToSchedulePass::runOnOperation() {
                           arith::ArithDialect,
                           scf::SCFDialect,
                           tensor::TensorDialect,
+                          bufferization::BufferizationDialect,
                           BuiltinDialect>();
     
-    // Mark dfscheblueprint operations as illegal to trigger conversion
-    //target.addIllegalDialect<dfscheblueprint::dfscheblueprintdialect>();
+    // Mark shim-type FlowConfigOp as illegal to trigger conversion
+    target.addDynamicallyLegalOp<dfscheblueprint::FlowConfigOp>([](dfscheblueprint::FlowConfigOp op) {
+        // Only shim type should be converted, others remain legal
+        auto typeAttr = op.getType();
+        return !typeAttr || *typeAttr != "shim";
+    });
     
     // Type converter
     TypeConverter typeConverter;
@@ -331,7 +226,7 @@ void BlueprintToSchedulePass::runOnOperation() {
     });
     
     RewritePatternSet patterns(context);
-    patterns.add<ConfigOpConversion>(context);
+    patterns.add<FlowConfigConversion>(context);
     patterns.add<DataSliceOpConversion>(context);
     // Use unified erase pattern for ops that just need to be removed
     /*
