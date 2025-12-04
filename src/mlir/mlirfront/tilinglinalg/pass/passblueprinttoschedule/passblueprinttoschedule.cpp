@@ -44,27 +44,24 @@ struct ConfigOpConversion : public OpConversionPattern<dfscheblueprint::ConfigOp
         rewriter.setInsertionPointToEnd(moduleBlock);
         
         // Collect information from the blueprint
-        SmallVector<dfscheblueprint::ResourceGroupOp> resourceGroups;
+        SmallVector<dfscheblueprint::TileGroupOp> resourceGroups;
         SmallVector<dfscheblueprint::DeclareDataOp> declareDataOps;
         SmallVector<dfscheblueprint::DataSliceOp> dataSliceOps;
-        SmallVector<dfscheblueprint::BindOp> bindOps;
-        SmallVector<dfscheblueprint::BindGroupOp> bindGroupOps;
-        SmallVector<dfscheblueprint::CollectiveTransferOp> transferOps;
+        SmallVector<dfscheblueprint::FlowConfigOp> bindOps;
+        SmallVector<dfscheblueprint::FlowTransferOp> transferOps;
         SmallVector<dfscheblueprint::TransferManifestOp> manifestOps;
         
         // Walk the config body to collect operations
         for (Operation &innerOp : op.getBody().front().getOperations()) {
-            if (auto resGroup = dyn_cast<dfscheblueprint::ResourceGroupOp>(&innerOp)) {
+            if (auto resGroup = dyn_cast<dfscheblueprint::TileGroupOp>(&innerOp)) {
                 resourceGroups.push_back(resGroup);
             } else if (auto declData = dyn_cast<dfscheblueprint::DeclareDataOp>(&innerOp)) {
                 declareDataOps.push_back(declData);
             } else if (auto dataSlice = dyn_cast<dfscheblueprint::DataSliceOp>(&innerOp)) {
                 dataSliceOps.push_back(dataSlice);
-            } else if (auto bind = dyn_cast<dfscheblueprint::BindOp>(&innerOp)) {
+            } else if (auto bind = dyn_cast<dfscheblueprint::FlowConfigOp>(&innerOp)) {
                 bindOps.push_back(bind);
-            } else if (auto bindGroup = dyn_cast<dfscheblueprint::BindGroupOp>(&innerOp)) {
-                bindGroupOps.push_back(bindGroup);
-            } else if (auto transfer = dyn_cast<dfscheblueprint::CollectiveTransferOp>(&innerOp)) {
+            } else if (auto transfer = dyn_cast<dfscheblueprint::FlowTransferOp>(&innerOp)) {
                 transferOps.push_back(transfer);
             } else if (auto manifest = dyn_cast<dfscheblueprint::TransferManifestOp>(&innerOp)) {
                 manifestOps.push_back(manifest);
@@ -338,11 +335,10 @@ void BlueprintToSchedulePass::runOnOperation() {
     patterns.add<DataSliceOpConversion>(context);
     // Use unified erase pattern for ops that just need to be removed
     /*
-    patterns.add<EraseOpPattern<dfscheblueprint::ResourceGroupOp>>(context);
+    patterns.add<EraseOpPattern<dfscheblueprint::TileGroupOp>>(context);
     patterns.add<EraseOpPattern<dfscheblueprint::DeclareDataOp>>(context);
-    patterns.add<EraseOpPattern<dfscheblueprint::BindOp>>(context);
-    patterns.add<EraseOpPattern<dfscheblueprint::BindGroupOp>>(context);
-    patterns.add<EraseOpPattern<dfscheblueprint::CollectiveTransferOp>>(context);
+    patterns.add<EraseOpPattern<dfscheblueprint::FlowConfigOp>>(context);
+    patterns.add<EraseOpPattern<dfscheblueprint::FlowTransferOp>>(context);
     patterns.add<EraseOpPattern<dfscheblueprint::TransferManifestOp>>(context);
     */
     

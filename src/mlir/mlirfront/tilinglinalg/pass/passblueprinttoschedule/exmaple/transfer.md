@@ -4,51 +4,51 @@
 ******************************************************************************/
 Blueprint
 module {
-  schedule.config @broadcast_blueprint {
+  dfscheblueprint.config @broadcast_blueprint {
 
     // ==========================================
     // 1. Physical Resource Definition
     // ==========================================
-    schedule.resource_group @shim_tx { tiles = [(0, 2)] }
-    schedule.resource_group @core_rx { tiles = [(2, 0), (2, 1)] }
+    dfscheblueprint.tile_group @shim_tx { tiles = [(0, 2)] }
+    dfscheblueprint.tile_group @core_rx { tiles = [(2, 0), (2, 1)] }
 
     // ==========================================
     // 2. Logical Data Definition (Using Tensor)
     // ==========================================
     // Declare total data (1024 float)
-    %data = schedule.declare_data <1024xf32>
+    %data = dfscheblueprint.declare_data <1024xf32>
 
     // Define partition view (Tile Size = 512)
     // Slice 0: [0, 512], Slice 1: [512, 512]
-    %view = schedule.partition %data { tile_shape = [512] }
+    %view = dfscheblueprint.partition %data { tile_shape = [512] }
 
     // ==========================================
     // 3. Binding
     // ==========================================
     
     // [Bind A]: Shim Sender (Holds Root Data)
-    schedule.bind @bind_shim {
+    dfscheblueprint.flowconfig @bind_shim {
       target = @shim_tx,
       view   = %view,
-      slice  = "root",
-      dma    = #schedule.DMA<channel=0, direction=MM2S>
+      distribution = "root",
+      dma    = #dfscheblueprint.DMA<channel=0, direction=MM2S>
     }
 
     // [Bind B]: Core Receiver (Holds Sliced Data)
     // Semantics: Core 0 and Core 1 both receive *complete* Root Data (Broadcast)
     //      (If Scatter, distribution="linear" would be used here)
-    schedule.bind_group @bind_cores {
+    dfscheblueprint.flowconfig @bind_cores {
       target_group = @core_rx,
       view         = %view,
       distribution = "replicate", // Broadcast mode
-      dma          = #schedule.DMA<channel=0, direction=S2MM>
+      dma          = #dfscheblueprint.DMA<channel=0, direction=S2MM>
     }
 
     // ==========================================
     // 4. Transfer
     // ==========================================
     // Circuit-switched broadcast (No Packet ID)
-    schedule.collective_transfer @op_broadcast {
+    dfscheblueprint.flow_transfer @op_broadcast {
       type = "one_to_many",
       from = @bind_shim,
       to   = @bind_cores,
@@ -97,26 +97,26 @@ module {
     // ============================================================
     // Pass handles generated in Config phase
     scf.for %i = 0 to 100 {
-      df.host.schedule.section(%ctx_shim, %ctx_c0, %ctx_c1) {
+      df.host.dfscheblueprint.section(%ctx_shim, %ctx_c0, %ctx_c1) {
         ^bb0(%shim: !df.tile, %c0: !df.tile, %c1: !df.tile):
 
         // A. Start Shim Send (Kick-off)
-        df.host.schedule.dma_push %shim {
+        df.host.dfscheblueprint.dma_push %shim {
            channel=0, direction="MM2S", bd_id=0
         }
 
         // B. Start Core 0 Receive
-        %e0 = df.host.schedule.kernel_launch %c0 { 
+        %e0 = df.host.dfscheblueprint.kernel_launch %c0 { 
            callee=@dskernel_recv 
         } : (!df.tile) -> !df.event
 
         // C. Start Core 1 Receive
-        %e1 = df.host.schedule.kernel_launch %c1 { 
+        %e1 = df.host.dfscheblueprint.kernel_launch %c1 { 
            callee=@dskernel_recv 
         } : (!df.tile) -> !df.event
 
         // D. Wait
-        df.host.schedule.wait(%e0, %e1)
+        df.host.dfscheblueprint.wait(%e0, %e1)
         
         df.yield
       }
@@ -165,14 +165,14 @@ module {
     // ============================================================
     // 2. KERNEL SCHEDULE SECTION (Runtime)
     // ============================================================
-    df.kernel.schedule.section(%ping, %pong, %acq, %rel) {
+    df.kernel.dfscheblueprint.section(%ping, %pong, %acq, %rel) {
       ^bb0(%b_ping: memref<512xf32, "SHARED">, 
            %b_pong: memref<512xf32, "SHARED">, 
            %l_acq: !df.lock, 
            %l_rel: !df.lock):
 
       // A. Start local DMA Engine (S2MM Channel 0)
-      df.kernel.schedule.dma_push {
+      df.kernel.dfscheblueprint.dma_push {
          channel=0, direction="S2MM", start_bd_id=0
       }
 
@@ -189,13 +189,13 @@ module {
          }
 
          // 2. [Sync] Wait for DMA to fill data (Wait for Lock == 1)
-         df.kernel.schedule.lock_acquire %l_rel, 1
+         df.kernel.dfscheblueprint.lock_acquire %l_rel, 1
 
          // 3. [Compute] Compute
          "core.compute"(%curr_buf) : (memref<512xf32, "SHARED">) -> ()
 
          // 4. [Sync] Return Buffer to DMA (Set Lock = 0)
-         df.kernel.schedule.lock_release %l_acq, 0
+         df.kernel.dfscheblueprint.lock_release %l_acq, 0
       }
       
       df.yield

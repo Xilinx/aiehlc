@@ -119,7 +119,7 @@ ParseResult dfscheblueprint::TransferManifestOp::parse(OpAsmParser &parser, Oper
 }
 
 // DataSliceOp printer
-// Format: %result = schedule.data_slice @sym_name wrap %tensor_slice : tensor_type
+// Format: %result = dfscheblueprint.data_slice @sym_name wrap %tensor_slice : tensor_type
 void dfscheblueprint::DataSliceOp::print(OpAsmPrinter &printer) {
     printer << " @" << getSymName() << " wrap ";
     printer << getTensorSlice() << " : " << getTensorSlice().getType();
@@ -127,7 +127,7 @@ void dfscheblueprint::DataSliceOp::print(OpAsmPrinter &printer) {
 }
 
 // DataSliceOp parser
-// Format: %result = schedule.data_slice @sym_name wrap %tensor_slice : tensor_type
+// Format: %result = dfscheblueprint.data_slice @sym_name wrap %tensor_slice : tensor_type
 ParseResult dfscheblueprint::DataSliceOp::parse(OpAsmParser &parser, OperationState &result) {
     StringAttr nameAttr;
     if (parser.parseSymbolName(nameAttr, mlir::SymbolTable::getSymbolAttrName(), result.attributes))
@@ -151,21 +151,13 @@ ParseResult dfscheblueprint::DataSliceOp::parse(OpAsmParser &parser, OperationSt
     
     return success();
 }
-/*
-   printer.increaseIndent();
-    printer.printNewline();
-    printer << "view = " << getView() << " : " << getView().getType() << ",";
-    printer.printNewline();
-    printer << "slice = " << getSliceParams();
-    printer.decreaseIndent(); // <--- Reduce the indentation level state FIRST
-    printer.printNewline();  
-*/
-// BindGroupOp printer
-void dfscheblueprint::BindGroupOp::print(OpAsmPrinter &printer) {
+
+// FlowConfigOp printer
+void dfscheblueprint::FlowConfigOp::print(OpAsmPrinter &printer) {
     printer << " @" << getSymName() << " {";
     printer.increaseIndent();
     printer.printNewline();
-    printer << "target_group = " << getTargetGroup() << ",";
+    printer << "target = " << getTarget() << ",";
     printer.printNewline();
     printer << "view = " << getView() << " : " << getView().getType() << ",";
     printer.printNewline();
@@ -180,15 +172,15 @@ void dfscheblueprint::BindGroupOp::print(OpAsmPrinter &printer) {
         printer.printNewline();
         printer << ",type = \"" << getType() << "\"";
     }
-    printer.decreaseIndent(); // <--- Reduce the indentation level state FIRST
-    printer.printNewline();  
+    printer.decreaseIndent();
+    printer.printNewline();
     printer << "}";
     printer.printOptionalAttrDict(getOperation()->getAttrs(), 
-        /*elidedAttrs=*/{"sym_name", "target_group", "view", "distribution", "dma", "slice_symbols", "type"});
+        /*elidedAttrs=*/{"sym_name", "target", "view", "distribution", "dma", "slice_symbols", "type"});
 }
 
-// BindGroupOp parser
-ParseResult dfscheblueprint::BindGroupOp::parse(OpAsmParser &parser, OperationState &result) {
+// FlowConfigOp parser
+ParseResult dfscheblueprint::FlowConfigOp::parse(OpAsmParser &parser, OperationState &result) {
     StringAttr nameAttr;
     if (parser.parseSymbolName(nameAttr, mlir::SymbolTable::getSymbolAttrName(), result.attributes))
         return failure();
@@ -196,7 +188,7 @@ ParseResult dfscheblueprint::BindGroupOp::parse(OpAsmParser &parser, OperationSt
     if (parser.parseLBrace())
         return failure();
     
-    SymbolRefAttr targetGroup;
+    SymbolRefAttr target;
     OpAsmParser::UnresolvedOperand viewOperand;
     Type viewType;
     StringAttr distribution;
@@ -215,8 +207,8 @@ ParseResult dfscheblueprint::BindGroupOp::parse(OpAsmParser &parser, OperationSt
         if (parser.parseKeyword(&attrName) || parser.parseEqual())
             return failure();
         
-        if (attrName == "target_group") {
-            if (parser.parseAttribute(targetGroup, "target_group", result.attributes)) return failure();
+        if (attrName == "target") {
+            if (parser.parseAttribute(target, "target", result.attributes)) return failure();
         } else if (attrName == "view") {
             if (parser.parseOperand(viewOperand) || parser.parseColonType(viewType))
                 return failure();
@@ -243,91 +235,8 @@ ParseResult dfscheblueprint::BindGroupOp::parse(OpAsmParser &parser, OperationSt
     return success();
 }
 
-// BindOp printer
-void dfscheblueprint::BindOp::print(OpAsmPrinter &printer) {
-    printer << " @" << getSymName() << " {";
-    printer.increaseIndent();
-    printer.printNewline();
-    printer << "target = " << getTarget() << ",";
-    printer.printNewline();
-    printer << "view = " << getView() << " : " << getView().getType() << ",";
-    printer.printNewline();
-    printer << "slice = \"" << getSlice() << "\",";
-    printer.printNewline();
-    printer << "dma = " << getDma();
-    if (getSliceSymbol()) {
-        printer.printNewline();
-        printer << ",slice_symbol = " << getSliceSymbol();
-    }
-    if (getType()) {
-        printer.printNewline();
-        printer << ",type = \"" << getType() << "\"";
-    }
-    printer.decreaseIndent();
-    printer.printNewline();
-    printer << "}";
-    printer.printOptionalAttrDict(getOperation()->getAttrs(), 
-        /*elidedAttrs=*/{"sym_name", "target", "view", "slice", "dma", "slice_symbol", "type"});
-}
-
-// BindOp parser
-ParseResult dfscheblueprint::BindOp::parse(OpAsmParser &parser, OperationState &result) {
-    StringAttr nameAttr;
-    if (parser.parseSymbolName(nameAttr, mlir::SymbolTable::getSymbolAttrName(), result.attributes))
-        return failure();
-    
-    if (parser.parseLBrace())
-        return failure();
-    
-    SymbolRefAttr target;
-    OpAsmParser::UnresolvedOperand viewOperand;
-    Type viewType;
-    StringAttr slice;
-    dfscheblueprint::DMAAttr dma;
-    SymbolRefAttr sliceSymbol;
-    StringAttr type;
-    
-    while (true) {
-        OptionalParseResult res = parser.parseOptionalRBrace();
-        if (res.has_value()) {
-            if (failed(res.value())) return failure();
-            break;
-        }
-
-        StringRef attrName;
-        if (parser.parseKeyword(&attrName) || parser.parseEqual())
-            return failure();
-        
-        if (attrName == "target") {
-            if (parser.parseAttribute(target, "target", result.attributes)) return failure();
-        } else if (attrName == "view") {
-            if (parser.parseOperand(viewOperand) || parser.parseColonType(viewType))
-                return failure();
-        } else if (attrName == "slice") {
-            if (parser.parseAttribute(slice, "slice", result.attributes)) return failure();
-        } else if (attrName == "dma") {
-            if (parser.parseAttribute(dma, "dma", result.attributes)) return failure();
-        } else if (attrName == "slice_symbol") {
-            if (parser.parseAttribute(sliceSymbol, "slice_symbol", result.attributes)) return failure();
-        } else if (attrName == "type") {
-            if (parser.parseAttribute(type, "type", result.attributes)) return failure();
-        } else {
-             return parser.emitError(parser.getCurrentLocation(), "unknown attribute: ") << attrName;
-        }
-        
-        parser.parseOptionalComma();
-    }
-    
-    if (parser.resolveOperand(viewOperand, viewType, result.operands))
-        return failure();
-        
-    parser.parseOptionalAttrDict(result.attributes);
-    
-    return success();
-}
-
-// CollectiveTransferOp printer
-void dfscheblueprint::CollectiveTransferOp::print(OpAsmPrinter &printer) {
+// FlowTransferOp printer
+void dfscheblueprint::FlowTransferOp::print(OpAsmPrinter &printer) {
     printer << " @" << getSymName() << " {";
     printer.increaseIndent();
     printer.printNewline();
@@ -349,8 +258,8 @@ void dfscheblueprint::CollectiveTransferOp::print(OpAsmPrinter &printer) {
         /*elidedAttrs=*/{"sym_name", "type", "from", "to", "ordering", "base_packet_id"});
 }
 
-// CollectiveTransferOp parser
-ParseResult dfscheblueprint::CollectiveTransferOp::parse(OpAsmParser &parser, OperationState &result) {
+// FlowTransferOp parser
+ParseResult dfscheblueprint::FlowTransferOp::parse(OpAsmParser &parser, OperationState &result) {
     StringAttr nameAttr;
     if (parser.parseSymbolName(nameAttr, mlir::SymbolTable::getSymbolAttrName(), result.attributes))
         return failure();
@@ -451,23 +360,23 @@ void dfscheblueprintmanager::loaddialect(MLIRContext* ctx) {
 /**
  * Creates an example schedule blueprint as shown in the user's specification:
  * 
- * schedule.config @tiling_and_broadcast_blueprint {
- *   schedule.transfer_manifest @broadcast_upper_half {
- *     payload_slice = #schedule.slice<...>,
+ * dfscheblueprint.config @tiling_and_broadcast_blueprint {
+ *   dfscheblueprint.transfer_manifest @broadcast_upper_half {
+ *     payload_slice = #dfscheblueprint.slice<...>,
  *     packet_id = 10 : i32,
- *     source = #schedule.endpoint<tile=(2,0), direction="MM2S", channel=0>,
+ *     source = #dfscheblueprint.endpoint<tile=(2,0), direction="MM2S", channel=0>,
  *     destinations = [
- *       #schedule.endpoint<tile=(2,2), direction="S2MM", channel=0>,
- *       #schedule.endpoint<tile=(2,3), direction="S2MM", channel=0>
+ *       #dfscheblueprint.endpoint<tile=(2,2), direction="S2MM", channel=0>,
+ *       #dfscheblueprint.endpoint<tile=(2,3), direction="S2MM", channel=0>
  *     ]
  *   }
- *   schedule.transfer_manifest @broadcast_lower_half { ... }
+ *   dfscheblueprint.transfer_manifest @broadcast_lower_half { ... }
  * }
  */
 void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRContext* ctx) {
     auto location = builder.getUnknownLoc();
     
-    // Create the top-level schedule.config operation
+    // Create the top-level dfscheblueprint.config operation
     auto configOp = builder.create<dfscheblueprint::ConfigOp>(
         location,
         builder.getStringAttr("broadcast_gather_blueprint")
@@ -486,7 +395,7 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
     auto shimTiles = builder.getArrayAttr({
         builder.getArrayAttr({builder.getI64IntegerAttr(0), builder.getI64IntegerAttr(2)})
     });
-    builder.create<dfscheblueprint::ResourceGroupOp>(
+    builder.create<dfscheblueprint::TileGroupOp>(
         location,
         builder.getStringAttr("shim_gateway"),
         shimTiles
@@ -499,7 +408,7 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
         builder.getArrayAttr({builder.getI64IntegerAttr(2), builder.getI64IntegerAttr(2)}),
         builder.getArrayAttr({builder.getI64IntegerAttr(2), builder.getI64IntegerAttr(3)})
     });
-    builder.create<dfscheblueprint::ResourceGroupOp>(
+    builder.create<dfscheblueprint::TileGroupOp>(
         location,
         builder.getStringAttr("compute_row"),
         computeTiles
@@ -532,14 +441,6 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
     // 3. Binding & Channel Config
     // ============================================================
 
-    // Extract partition 0
-    //auto extractOp = builder.create<dfscheblueprint::ExtractOp>(
-    //    location,
-    //    viewSplit,
-    //    builder.getI32IntegerAttr(0)
-    //);
-    //auto extractedView = extractOp.getResult();
-
     // First: Create all 4 tensor.extract_slice ops as a group
     // Each slice is 64x1024 from the 256x1024 view (viewSplit)
     llvm::SmallVector<mlir::Value, 4> tensorSlices;
@@ -568,7 +469,7 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
         tensorSlices.push_back(tensorSlice.getResult());
     }
     
-    // Second: Create all 4 schedule.data_slice ops as a group to wrap the tensor slices
+    // Second: Create all 4 dfscheblueprint.data_slice ops as a group to wrap the tensor slices
     llvm::SmallVector<mlir::Attribute, 4> outSliceSymbols;
     llvm::SmallVector<mlir::Value, 4> dataSliceResults;
     for (int i = 0; i < 4; ++i) {
@@ -587,23 +488,23 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
     // Bind Shim TX
     llvm::SmallVector<int64_t, 1> shimTxCh = {0};
     auto shimTxDMA = dfscheblueprint::DMAAttr::get(ctx, shimTxCh, dfscheblueprint::bp_direction::MM2S);
-    builder.create<dfscheblueprint::BindOp>(
+    builder.create<dfscheblueprint::FlowConfigOp>(
         location,
-        builder.getStringAttr("bind_shim_tx"),
+        builder.getStringAttr("flow_shim_tx"),
         mlir::SymbolRefAttr::get(ctx, "shim_gateway"),
         viewSplit,
         builder.getStringAttr("root"),
         shimTxDMA,
-        nullptr, // slice_symbol
+        nullptr, // slice_symbols
         builder.getStringAttr("shim") // type
     );
 
     // Bind Cores Input (S2MM - Receive)
     llvm::SmallVector<int64_t, 1> coresInCh = {0};
     auto coresInDMA = dfscheblueprint::DMAAttr::get(ctx, coresInCh, dfscheblueprint::bp_direction::S2MM);
-    builder.create<dfscheblueprint::BindGroupOp>(
+    builder.create<dfscheblueprint::FlowConfigOp>(
         location,
-        builder.getStringAttr("bind_cores_in"),
+        builder.getStringAttr("flow_cores_in"),
         mlir::SymbolRefAttr::get(ctx, "compute_row"),
         viewSplit,
         builder.getStringAttr("linear"),
@@ -615,9 +516,9 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
     // Bind Cores Output (MM2S - Send)
     llvm::SmallVector<int64_t, 1> coresOutCh = {1};
     auto coresOutDMA = dfscheblueprint::DMAAttr::get(ctx, coresOutCh, dfscheblueprint::bp_direction::MM2S);
-    builder.create<dfscheblueprint::BindGroupOp>(
+    builder.create<dfscheblueprint::FlowConfigOp>(
         location,
-        builder.getStringAttr("bind_cores_out"),
+        builder.getStringAttr("flow_cores_out"),
         mlir::SymbolRefAttr::get(ctx, "compute_row"),
         viewSplit,
         builder.getStringAttr("linear"),
@@ -629,14 +530,14 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
     // Bind Shim RX
     llvm::SmallVector<int64_t, 1> shimRxCh = {0};
     auto shimRxDMA = dfscheblueprint::DMAAttr::get(ctx, shimRxCh, dfscheblueprint::bp_direction::S2MM);
-    builder.create<dfscheblueprint::BindOp>(
+    builder.create<dfscheblueprint::FlowConfigOp>(
         location,
-        builder.getStringAttr("bind_shim_rx"),
+        builder.getStringAttr("flow_shim_rx"),
         mlir::SymbolRefAttr::get(ctx, "shim_gateway"),
         viewSplit,
         builder.getStringAttr("root"),
         shimRxDMA,
-        nullptr, // slice_symbol
+        nullptr, // slice_symbols
         builder.getStringAttr("shim") // type
     );
 
@@ -645,27 +546,24 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
     // ============================================================
 
     // Input Scatter
-    builder.create<dfscheblueprint::CollectiveTransferOp>(
+    builder.create<dfscheblueprint::FlowTransferOp>(
         location,
         builder.getStringAttr("input_scatter"),
         builder.getStringAttr("one_to_many"),
-        mlir::SymbolRefAttr::get(ctx, "bind_shim_tx"),
-        mlir::SymbolRefAttr::get(ctx, "bind_cores_in"),
+        mlir::SymbolRefAttr::get(ctx, "flow_shim_tx"),
+        mlir::SymbolRefAttr::get(ctx, "flow_cores_in"),
         nullptr, // ordering
         builder.getI32IntegerAttr(10)
     );
 
     // Output Gather
-    builder.create<dfscheblueprint::CollectiveTransferOp>(
+    builder.create<dfscheblueprint::FlowTransferOp>(
         location,
         builder.getStringAttr("output_gather"),
         builder.getStringAttr("many_to_one"),
-        mlir::SymbolRefAttr::get(ctx, "bind_cores_out"),
-        mlir::SymbolRefAttr::get(ctx, "bind_shim_rx"),
+        mlir::SymbolRefAttr::get(ctx, "flow_cores_out"),
+        mlir::SymbolRefAttr::get(ctx, "flow_shim_rx"),
         builder.getStringAttr("sequential"),
         builder.getI32IntegerAttr(20)
     );
-
-    // Note: Tensors are value types, no deallocation needed (removed memref::DeallocOp)
 }
-

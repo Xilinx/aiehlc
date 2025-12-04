@@ -23,7 +23,7 @@ include "dfscheblueprinttype.td"
 //-- let hasCustomAssemblyFormat = 1; will fix the generic print issue after the said fix in
 //-- the synbol op can not be put inside a func.func, if we do that the symbol func will cause generic print
 //--- the reason is the func.func do isolatedfrom above but @symbol will be module visible that will cause confuse
-// schedule.config - Top-level container for schedule blueprint
+// dfscheblueprint.config - Top-level container for schedule blueprint
 def dfscheblueprint_ConfigOp : dfscheblueprintop<"config", [
     IsolatedFromAbove,  
     SymbolTable,
@@ -38,9 +38,9 @@ def dfscheblueprint_ConfigOp : dfscheblueprintop<"config", [
     
     Example:
     ```mlir
-    schedule.config @my_blueprint {
-      schedule.transfer_manifest @transfer1 { ... }
-      schedule.transfer_manifest @transfer2 { ... }
+    dfscheblueprint.config @my_blueprint {
+      dfscheblueprint.transfer_manifest @transfer1 { ... }
+      dfscheblueprint.transfer_manifest @transfer2 { ... }
     }
     ```
   }];
@@ -54,7 +54,7 @@ def dfscheblueprint_ConfigOp : dfscheblueprintop<"config", [
   let hasCustomAssemblyFormat = 1;
 }
 // Symbol will cause generic print once the partent have no Symboltalbe
-// schedule.transfer_manifest - Individual data transfer specification
+// dfscheblueprint.transfer_manifest - Individual data transfer specification
 def dfscheblueprint_TransferManifestOp : dfscheblueprintop<"transfer_manifest", [
     Symbol,
     HasParent<"ConfigOp">
@@ -69,18 +69,18 @@ def dfscheblueprint_TransferManifestOp : dfscheblueprintop<"transfer_manifest", 
     
     Example:
     ```mlir
-    schedule.transfer_manifest @broadcast_upper {
-      payload_slice = #schedule.slice<
+    dfscheblueprint.transfer_manifest @broadcast_upper {
+      payload_slice = #dfscheblueprint.slice<
         data_type = memref<1024x1024xf32>,
         offset = [0, 0],
         size = [512, 1024],
         stride = [1024, 1]
       >,
       packet_id = 10 : i32,
-      source = #schedule.endpoint<tile=[0,2], direction="MM2S", channel=0>,
+      source = #dfscheblueprint.endpoint<tile=[0,2], direction="MM2S", channel=0>,
       destinations = [
-        #schedule.endpoint<tile=[2,2], direction="S2MM", channel=0>,
-        #schedule.endpoint<tile=[3,2], direction="S2MM", channel=0>
+        #dfscheblueprint.endpoint<tile=[2,2], direction="S2MM", channel=0>,
+        #dfscheblueprint.endpoint<tile=[3,2], direction="S2MM", channel=0>
       ]
     }
     ```
@@ -88,10 +88,10 @@ def dfscheblueprint_TransferManifestOp : dfscheblueprintop<"transfer_manifest", 
   
   let arguments = (ins
     SymbolNameAttr:$sym_name,
-    dfscheblueprint_SliceAttr:$payload_slice,
+    SliceAttr:$payload_slice,
     I32Attr:$packet_id,
-    dfscheblueprint_EndpointAttr:$source,
-    ArrayAttr:$destinations  // Array of dfscheblueprint_EndpointAttr
+    EndpointAttr:$source,
+    ArrayAttr:$destinations  // Array of EndpointAttr
   );
   
   let hasCustomAssemblyFormat = 1;
@@ -102,8 +102,8 @@ def dfscheblueprint_TransferManifestOp : dfscheblueprintop<"transfer_manifest", 
   }];
 }
 
-// schedule.resource_group
-def dfscheblueprint_ResourceGroupOp : dfscheblueprintop<"resource_group", [
+// dfscheblueprint.tile_group
+def dfscheblueprint_TileGroupOp : dfscheblueprintop<"tile_group", [
     Symbol
   ]> {
   let summary = "Defines a group of physical tiles";
@@ -114,7 +114,7 @@ def dfscheblueprint_ResourceGroupOp : dfscheblueprintop<"resource_group", [
   let assemblyFormat = "$sym_name `{` `tiles` `=` $tiles `}` attr-dict";
 }
 
-// schedule.declare_data - Creates a logical tensor without memory allocation
+// dfscheblueprint.declare_data - Creates a logical tensor without memory allocation
 def dfscheblueprint_DeclareDataOp : dfscheblueprintop<"declare_data", [
     
   ]> {
@@ -125,7 +125,7 @@ def dfscheblueprint_DeclareDataOp : dfscheblueprintop<"declare_data", [
     
     Example:
     ```mlir
-    %root_data = schedule.declare_data tensor<1024x1024xf32>
+    %root_data = dfscheblueprint.declare_data tensor<1024x1024xf32>
     ```
   }];
   let arguments = (ins
@@ -135,20 +135,20 @@ def dfscheblueprint_DeclareDataOp : dfscheblueprintop<"declare_data", [
   let assemblyFormat = "$data_type attr-dict `->` type($result)";
 }
 
-// schedule.partition
+// dfscheblueprint.partition
 def dfscheblueprint_PartitionOp : dfscheblueprintop<"partition", [
     
   ]> {
   let summary = "Partitions data into views";
   let arguments = (ins
-    dfscheblueprint_DataHandleType:$data,
+    DataHandleType:$data,
     ArrayAttr:$tile_shape
   );
-  let results = (outs dfscheblueprint_ViewHandleType:$result);
+  let results = (outs ViewHandleType:$result);
   let assemblyFormat = "$data `{` `tile_shape` `=` $tile_shape `}` attr-dict";
 }
 
-// schedule.extract
+// dfscheblueprint.extract
 def dfscheblueprint_ExtractOp : dfscheblueprintop<"extract", [
     
   ]> {
@@ -157,11 +157,11 @@ def dfscheblueprint_ExtractOp : dfscheblueprintop<"extract", [
     AnyType:$view,
     I32Attr:$index
   );
-  let results = (outs dfscheblueprint_ViewHandleType:$result);
+  let results = (outs ViewHandleType:$result);
   let assemblyFormat = "$view `:` type($view) `{` `index` `=` $index `}` attr-dict";
 }
 
-// schedule.data_slice - wraps a tensor slice with a symbol name
+// dfscheblueprint.data_slice - wraps a tensor slice with a symbol name
 def dfscheblueprint_DataSliceOp : dfscheblueprintop<"data_slice", [
     Symbol
   ]> {
@@ -173,7 +173,7 @@ def dfscheblueprint_DataSliceOp : dfscheblueprintop<"data_slice", [
     Example:
     ```mlir
     %slice = tensor.extract_slice %tensor[0, 0] [4, 256] [1, 1] : tensor<16x256xf32> to tensor<4x256xf32>
-    %wrapped = schedule.data_slice @out_slice_0 wrap %slice : tensor<4x256xf32>
+    %wrapped = dfscheblueprint.data_slice @out_slice_0 wrap %slice : tensor<4x256xf32>
     ```
   }];
   let arguments = (ins
@@ -184,42 +184,25 @@ def dfscheblueprint_DataSliceOp : dfscheblueprintop<"data_slice", [
   let hasCustomAssemblyFormat = 1;
 }
 
-// schedule.bind
-def dfscheblueprint_BindOp : dfscheblueprintop<"bind", [
+// dfscheblueprint.flowconfig
+def dfscheblueprint_FlowConfigOp : dfscheblueprintop<"flowconfig", [
     Symbol
   ]> {
-  let summary = "Binds a resource to a data view";
+  let summary = "Binds a resource or resource group to a data view";
   let arguments = (ins
     SymbolNameAttr:$sym_name,
     SymbolRefAttr:$target,
     AnyType:$view,
-    StrAttr:$slice,
-    dfscheblueprint_DMAAttr:$dma,
-    OptionalAttr<SymbolRefAttr>:$slice_symbol,
-    OptionalAttr<StrAttr>:$type
-  );
-  let hasCustomAssemblyFormat = 1;
-}
-
-// schedule.bind_group
-def dfscheblueprint_BindGroupOp : dfscheblueprintop<"bind_group", [
-    Symbol
-  ]> {
-  let summary = "Binds a resource group to a data view";
-  let arguments = (ins
-    SymbolNameAttr:$sym_name,
-    SymbolRefAttr:$target_group,
-    AnyType:$view,
     StrAttr:$distribution,
-    dfscheblueprint_DMAAttr:$dma,
+    DMAAttr:$dma,
     OptionalAttr<ArrayAttr>:$slice_symbols,
     OptionalAttr<StrAttr>:$type
   );
   let hasCustomAssemblyFormat = 1;
 }
 
-// schedule.collective_transfer
-def dfscheblueprint_CollectiveTransferOp : dfscheblueprintop<"collective_transfer", [
+// dfscheblueprint.flow_transfer
+def dfscheblueprint_FlowTransferOp : dfscheblueprintop<"flow_transfer", [
     Symbol
   ]> {
   let summary = "Defines a collective transfer between bindings";
@@ -235,4 +218,3 @@ def dfscheblueprint_CollectiveTransferOp : dfscheblueprintop<"collective_transfe
 }
 
 #endif // dfscheblueprint_OPS
-

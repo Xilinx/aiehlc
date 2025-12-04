@@ -33,12 +33,12 @@ echo $MLIR_INCLUDES
 echo "Script is located in: $GEN_SCRIPT_DIR"
 pushd ${GEN_SCRIPT_DIR}
 echo ${LLVM_BIN}
-${LLVM_BIN}/mlir-tblgen -gen-dialect-defs $TD/dfscheblueprinttype.td -dialect=schedule -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} > $INC/dfscheblueprintdialect.cc.inc
-${LLVM_BIN}/mlir-tblgen -gen-dialect-decls $TD/dfscheblueprinttype.td -dialect=schedule -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheblueprintdialect.h.inc
-${LLVM_BIN}/mlir-tblgen -gen-typedef-defs $TD/dfscheblueprinttype.td -typedefs-dialect=schedule -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheblueprinttype.cc.inc
-${LLVM_BIN}/mlir-tblgen -gen-typedef-decls $TD/dfscheblueprinttype.td -typedefs-dialect=schedule -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheblueprinttype.h.inc
-${LLVM_BIN}/mlir-tblgen --gen-attrdef-defs $TD/dfscheblueprintattr.td -attrdefs-dialect=schedule -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheblueprintattr.cc.inc
-${LLVM_BIN}/mlir-tblgen --gen-attrdef-decls $TD/dfscheblueprintattr.td -attrdefs-dialect=schedule -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheblueprintattr.h.inc
+${LLVM_BIN}/mlir-tblgen -gen-dialect-defs $TD/dfscheblueprinttype.td -dialect=dfscheblueprint -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} > $INC/dfscheblueprintdialect.cc.inc
+${LLVM_BIN}/mlir-tblgen -gen-dialect-decls $TD/dfscheblueprinttype.td -dialect=dfscheblueprint -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheblueprintdialect.h.inc
+${LLVM_BIN}/mlir-tblgen -gen-typedef-defs $TD/dfscheblueprinttype.td -typedefs-dialect=dfscheblueprint -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheblueprinttype.cc.inc
+${LLVM_BIN}/mlir-tblgen -gen-typedef-decls $TD/dfscheblueprinttype.td -typedefs-dialect=dfscheblueprint -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheblueprinttype.h.inc
+${LLVM_BIN}/mlir-tblgen --gen-attrdef-defs $TD/dfscheblueprintattr.td -attrdefs-dialect=dfscheblueprint -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheblueprintattr.cc.inc
+${LLVM_BIN}/mlir-tblgen --gen-attrdef-decls $TD/dfscheblueprintattr.td -attrdefs-dialect=dfscheblueprint -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheblueprintattr.h.inc
 
 ${LLVM_BIN}/mlir-tblgen --gen-enum-decls $TD/dfscheblueprintattr.td -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheblueprintenums.h.inc
 ${LLVM_BIN}/mlir-tblgen --gen-enum-defs $TD/dfscheblueprintattr.td -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheblueprintenums.cc.inc

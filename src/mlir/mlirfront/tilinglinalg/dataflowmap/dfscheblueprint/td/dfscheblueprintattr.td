@@ -18,7 +18,7 @@ include "mlir/IR/EnumAttr.td"
 
 // Dialect: dfscheblueprint
 def dfscheblueprintdialect : Dialect {
-    let name = "schedule";
+    let name = "dfscheblueprint";
     let cppNamespace = "dfscheblueprint";
     let hasOperationAttrVerify = 0;
     let useDefaultAttributePrinterParser = 1;
@@ -48,7 +48,7 @@ def bp_directionAttr : EnumAttr<dfscheblueprintdialect, bp_direction_enum, "dire
 }
 
 // DMA Attribute
-def dfscheblueprint_DMAAttr : dfscheblueprintattr<"DMA"> {
+def DMAAttr : dfscheblueprintattr<"DMA"> {
   let summary = "DMA configuration attribute";
   let parameters = (ins
     ArrayRefParameter<"int64_t">:$channels,
@@ -58,7 +58,7 @@ def dfscheblueprint_DMAAttr : dfscheblueprintattr<"DMA"> {
 }
 
 // Slice attribute - defines data tiling/slicing
-def dfscheblueprint_SliceAttr : dfscheblueprintattr<"Slice"> {
+def SliceAttr : dfscheblueprintattr<"Slice"> {
   let summary = "Data slice definition for tiling";
   let parameters = (ins
     "TypeAttr":$data_type,           // memref<1024x1024xf32>
@@ -70,7 +70,7 @@ def dfscheblueprint_SliceAttr : dfscheblueprintattr<"Slice"> {
 }
 
 // Endpoint attribute - defines tile location and DMA configuration
-def dfscheblueprint_EndpointAttr : dfscheblueprintattr<"Endpoint"> {
+def EndpointAttr : dfscheblueprintattr<"Endpoint"> {
   let summary = "Physical tile endpoint with DMA configuration";
   let parameters = (ins
     "int64_t":$row,                   // tile row

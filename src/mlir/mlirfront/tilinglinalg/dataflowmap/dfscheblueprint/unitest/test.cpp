@@ -19,7 +19,7 @@ int main(int argc, char* argv[]) {
     blueprinttest.ops_test(&ctx);
     
     std::cout << "\n=== Test Completed Successfully ===" << std::endl;
-    std::cout << "Generated schedule.config with transfer manifests" << std::endl;
+    std::cout << "Generated dfscheblueprint.config with transfer manifests" << std::endl;
     std::cout << "- broadcast_upper_half (packet_id=10)" << std::endl;
     std::cout << "- broadcast_lower_half (packet_id=11)" << std::endl;
     

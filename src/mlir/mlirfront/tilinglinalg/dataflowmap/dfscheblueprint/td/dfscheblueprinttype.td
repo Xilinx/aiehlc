@@ -10,31 +10,31 @@ include "dfscheblueprintattr.td"
 //=== dfscheblueprint Types ===//
 
 // Blueprint type - represents a schedule blueprint handle
-def dfscheblueprint_BlueprintType : dfscheblueprinttype<"Blueprint"> {
+def BlueprintType : dfscheblueprinttype<"Blueprint"> {
   let mnemonic = "blueprint";
   let summary = "Schedule blueprint handle";
 }
 
 // Config type - represents a schedule configuration
-def dfscheblueprint_ConfigType : dfscheblueprinttype<"Config"> {
+def ConfigType : dfscheblueprinttype<"Config"> {
   let mnemonic = "config";
   let summary = "Schedule configuration handle";
 }
 
 // Manifest type - represents a transfer manifest
-def dfscheblueprint_ManifestType : dfscheblueprinttype<"Manifest"> {
+def ManifestType : dfscheblueprinttype<"Manifest"> {
   let mnemonic = "manifest";
   let summary = "Transfer manifest handle";
 }
 
 // Data handle type
-def dfscheblueprint_DataHandleType : dfscheblueprinttype<"DataHandle"> {
+def DataHandleType : dfscheblueprinttype<"DataHandle"> {
   let mnemonic = "data_handle";
   let summary = "Handle to declared data";
 }
 
 // View handle type
-def dfscheblueprint_ViewHandleType : dfscheblueprinttype<"ViewHandle"> {
+def ViewHandleType : dfscheblueprinttype<"ViewHandle"> {
   let mnemonic = "view_handle";
   let summary = "Handle to a data view/partition";
 }
