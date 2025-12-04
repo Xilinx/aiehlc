@@ -107,9 +107,7 @@ def dfschedule_ConfigDmaBdOp : dfscheduleop<"config.dma_bd"> {
     I32Attr:$next_bd
   );
   let results = (outs dfschedule_BdHandleType:$bd_handle);
-  let assemblyFormat = [{
-    `(` $buffer `,` $tile `)` attr-dict `:` `(` type($buffer) `,` type($tile) `)` `->` type($bd_handle)
-  }];
+  let hasCustomAssemblyFormat = 1;
 }
 
 // Create IO handle
@@ -123,9 +121,7 @@ def dfschedule_ConfigCreateIoOp : dfscheduleop<"config.create_io"> {
     StrAttr:$io_operation  // Renamed from 'operation' to avoid conflict with getOperation()
   );
   let results = (outs dfschedule_IoHandleType:$io_handle);
-  let assemblyFormat = [{
-    `(` $bd_config `,` $tile `)` attr-dict `:` `(` type($bd_config) `,` type($tile) `)` `->` type($io_handle)
-  }];
+  let hasCustomAssemblyFormat = 1;
 }
 
 // Load kernel group configuration
@@ -138,9 +134,7 @@ def dfschedule_LoadKernelGroupOp : dfscheduleop<"config.load_kernel_group"> {
     SymbolRefArrayAttr:$distributed_args
   );
   let results = (outs dfschedule_KernelGroupType:$kernel_group);
-  let assemblyFormat = [{
-    `(` $tiles `)` attr-dict `:` `(` type($tiles) `)` `->` type($kernel_group)
-  }];
+  let hasCustomAssemblyFormat = 1;
 }
 
 // ============================================================================
@@ -302,13 +296,7 @@ def dfschedule_DSKernelLaunchDmaLoopOp : dfscheduleop<"dskernel.launch_dma_s2m_l
     dfschedule_DmaChannelType:$channel
   );
   let results = (outs);
-  let assemblyFormat = [{
-    `(` $ping `,` $pong `)` `{`
-      `locks_ping` `=` `{` `acq` `=` $ping_acq_lock `,` `rel` `=` $ping_rel_lock `}` `,`
-      `locks_pong` `=` `{` `acq` `=` $pong_acq_lock `,` `rel` `=` $pong_rel_lock `}` `,`
-      `channelid` `=` $channel
-    `}` attr-dict `:` `(` type($ping) `,` type($pong) `)`
-  }];
+  let hasCustomAssemblyFormat = 1;
 }
 
 // DSKernel Acquire Lock

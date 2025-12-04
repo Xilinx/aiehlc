@@ -43,6 +43,8 @@ void processPull(dmaphop::pull op, OpBuilder &builder, dfscheblueprint::ConfigOp
     SmallVector<Attribute> destTiles;
     int64_t sourceChannel = -1;
     int64_t destChannel = -1;
+    std::string srcTileType;
+    std::string dstTileType;
     
     // Get producers (sources) from create_path attribute via symbol table lookup
     auto producersAttr = pathOp.getProducers();
@@ -61,21 +63,22 @@ void processPull(dmaphop::pull op, OpBuilder &builder, dfscheblueprint::ConfigOp
                                     << symbolRef.getValue() << "' in symbol table\n";
                         continue;
                     }
-                    sourceChannel = static_cast<int64_t>(port.getDirectionChannel().value());
-                    auto tileValue = port.getTile();
+            sourceChannel = static_cast<int64_t>(port.getDirectionChannel().value());
+            auto tileValue = port.getTile();
                     auto tileOp = dyn_cast_or_null<dmaphop::tile>(tileValue.getDefiningOp());
                     if (!tileOp) {
                         llvm::errs() << "ERROR: processPull - failed to get tile from producer port '" 
                                     << symbolRef.getValue() << "'\n";
                         continue;
                     }
-                    sourceTiles.push_back(builder.getArrayAttr({
-                        builder.getI64IntegerAttr(tileOp.getCol()),
-                        builder.getI64IntegerAttr(tileOp.getRow())
-                    }));
-                }
+                    srcTileType = tileOp.getTiletype().str();
+                sourceTiles.push_back(builder.getArrayAttr({
+                    builder.getI64IntegerAttr(tileOp.getCol()),
+                    builder.getI64IntegerAttr(tileOp.getRow())
+                }));
             }
         }
+    }
     }
     
     if (sourceTiles.empty()) {
@@ -93,8 +96,8 @@ void processPull(dmaphop::pull op, OpBuilder &builder, dfscheblueprint::ConfigOp
     );
     
     // Get consumers (destinations) from create_path attribute via symbol table lookup
-    auto consumersAttr = pathOp.getConsumers();
-    if (auto arrayAttr = dyn_cast<ArrayAttr>(consumersAttr)) {
+        auto consumersAttr = pathOp.getConsumers();
+        if (auto arrayAttr = dyn_cast<ArrayAttr>(consumersAttr)) {
         for (auto innerAttr : arrayAttr) {
             if (auto innerArray = dyn_cast<ArrayAttr>(innerAttr)) {
                 for (auto symbolAttr : innerArray) {
@@ -103,13 +106,13 @@ void processPull(dmaphop::pull op, OpBuilder &builder, dfscheblueprint::ConfigOp
                         llvm::errs() << "ERROR: processPull - consumer is not a FlatSymbolRefAttr\n";
                         continue;
                     }
-                    auto port = SymbolTable::lookupNearestSymbolFrom<dmaphop::port>(op, symbolRef);
+                            auto port = SymbolTable::lookupNearestSymbolFrom<dmaphop::port>(op, symbolRef);
                     if (!port) {
                         llvm::errs() << "ERROR: processPull - failed to find consumer port symbol '" 
                                     << symbolRef.getValue() << "' in symbol table\n";
                         continue;
                     }
-                    destChannel = static_cast<int64_t>(port.getDirectionChannel().value());
+                                destChannel = static_cast<int64_t>(port.getDirectionChannel().value());
                     auto tileValue = port.getTile();
                     auto tileOp = dyn_cast_or_null<dmaphop::tile>(tileValue.getDefiningOp());
                     if (!tileOp) {
@@ -117,14 +120,15 @@ void processPull(dmaphop::pull op, OpBuilder &builder, dfscheblueprint::ConfigOp
                                     << symbolRef.getValue() << "'\n";
                         continue;
                     }
-                    destTiles.push_back(builder.getArrayAttr({
-                        builder.getI64IntegerAttr(tileOp.getCol()),
-                        builder.getI64IntegerAttr(tileOp.getRow())
-                    }));
+                    dstTileType = tileOp.getTiletype().str();
+                                destTiles.push_back(builder.getArrayAttr({
+                                    builder.getI64IntegerAttr(tileOp.getCol()),
+                                    builder.getI64IntegerAttr(tileOp.getRow())
+                                }));
+                            }
+                        }
+                    }
                 }
-            }
-        }
-    }
     
     if (destTiles.empty()) {
         llvm::errs() << "WARNING: processPull - no destination tiles found from consumers attribute\n";
@@ -146,7 +150,8 @@ void processPull(dmaphop::pull op, OpBuilder &builder, dfscheblueprint::ConfigOp
         viewHandle,
         builder.getStringAttr("linear"),
         dfscheblueprint::DMAAttr::get(builder.getContext(), ArrayRef<int64_t>({sourceChannel}), dfscheblueprint::bp_direction::MM2S),
-        builder.getArrayAttr({}) 
+        builder.getArrayAttr({}),
+        builder.getStringAttr(srcTileType) 
     );
     
     std::string dstBindName = "bind_dst_" + std::to_string(opId);
@@ -157,7 +162,8 @@ void processPull(dmaphop::pull op, OpBuilder &builder, dfscheblueprint::ConfigOp
         viewHandle,
         builder.getStringAttr("root"),
         dfscheblueprint::DMAAttr::get(builder.getContext(), ArrayRef<int64_t>({destChannel}), dfscheblueprint::bp_direction::S2MM),
-        nullptr // slice_symbol
+        nullptr, // slice_symbol
+        builder.getStringAttr(dstTileType)
     );
     
     // 4. Collective Transfer
@@ -185,6 +191,8 @@ void processPush(dmaphop::push op, OpBuilder &builder, dfscheblueprint::ConfigOp
     SmallVector<Attribute> srcTiles;
     SmallVector<Attribute> dstTiles;
     int64_t dstChannel = -1;
+    std::string srcTileType;
+    std::string dstTileType;
     
     auto pathOp = dyn_cast_or_null<dmaphop::create_path>(pathValue.getDefiningOp());
     if (!pathOp) {
@@ -193,8 +201,8 @@ void processPush(dmaphop::push op, OpBuilder &builder, dfscheblueprint::ConfigOp
     }
     
     // Producers (sources) via symbol table lookup
-    auto producersAttr = pathOp.getProducers();
-    if (auto arrayAttr = dyn_cast<ArrayAttr>(producersAttr)) {
+        auto producersAttr = pathOp.getProducers();
+        if (auto arrayAttr = dyn_cast<ArrayAttr>(producersAttr)) {
         for (auto innerAttr : arrayAttr) {
             if (auto innerArray = dyn_cast<ArrayAttr>(innerAttr)) {
                 for (auto symbolAttr : innerArray) {
@@ -203,13 +211,13 @@ void processPush(dmaphop::push op, OpBuilder &builder, dfscheblueprint::ConfigOp
                         llvm::errs() << "ERROR: processPush - producer is not a FlatSymbolRefAttr\n";
                         continue;
                     }
-                    auto port = SymbolTable::lookupNearestSymbolFrom<dmaphop::port>(op, symbolRef);
+                            auto port = SymbolTable::lookupNearestSymbolFrom<dmaphop::port>(op, symbolRef);
                     if (!port) {
                         llvm::errs() << "ERROR: processPush - failed to find producer port symbol '" 
                                     << symbolRef.getValue() << "' in symbol table\n";
                         continue;
                     }
-                    srcChannel = static_cast<int64_t>(port.getDirectionChannel().value());
+                                srcChannel = static_cast<int64_t>(port.getDirectionChannel().value());
                     auto tileValue = port.getTile();
                     auto tileOp = dyn_cast_or_null<dmaphop::tile>(tileValue.getDefiningOp());
                     if (!tileOp) {
@@ -217,22 +225,23 @@ void processPush(dmaphop::push op, OpBuilder &builder, dfscheblueprint::ConfigOp
                                     << symbolRef.getValue() << "'\n";
                         continue;
                     }
-                    srcTiles.push_back(builder.getArrayAttr({
-                        builder.getI64IntegerAttr(tileOp.getCol()),
-                        builder.getI64IntegerAttr(tileOp.getRow())
-                    }));
+                    srcTileType = tileOp.getTiletype().str();
+                                srcTiles.push_back(builder.getArrayAttr({
+                                    builder.getI64IntegerAttr(tileOp.getCol()),
+                                    builder.getI64IntegerAttr(tileOp.getRow())
+                                }));
+                            }
+                        }
+                    }
                 }
-            }
-        }
-    }
     
     if (srcTiles.empty()) {
         llvm::errs() << "WARNING: processPush - no source tiles found from producers attribute\n";
     }
     
     // Consumers (destinations) via symbol table lookup
-    auto consumersAttr = pathOp.getConsumers();
-    if (auto arrayAttr = dyn_cast<ArrayAttr>(consumersAttr)) {
+        auto consumersAttr = pathOp.getConsumers();
+        if (auto arrayAttr = dyn_cast<ArrayAttr>(consumersAttr)) {
         for (auto innerAttr : arrayAttr) {
             if (auto innerArray = dyn_cast<ArrayAttr>(innerAttr)) {
                 for (auto symbolAttr : innerArray) {
@@ -241,7 +250,7 @@ void processPush(dmaphop::push op, OpBuilder &builder, dfscheblueprint::ConfigOp
                         llvm::errs() << "ERROR: processPush - consumer is not a FlatSymbolRefAttr\n";
                         continue;
                     }
-                    auto port = SymbolTable::lookupNearestSymbolFrom<dmaphop::port>(op, symbolRef);
+                            auto port = SymbolTable::lookupNearestSymbolFrom<dmaphop::port>(op, symbolRef);
                     if (!port) {
                         llvm::errs() << "ERROR: processPush - failed to find consumer port symbol '" 
                                     << symbolRef.getValue() << "' in symbol table\n";
@@ -255,14 +264,15 @@ void processPush(dmaphop::push op, OpBuilder &builder, dfscheblueprint::ConfigOp
                                     << symbolRef.getValue() << "'\n";
                         continue;
                     }
-                    dstTiles.push_back(builder.getArrayAttr({
-                        builder.getI64IntegerAttr(tileOp.getCol()),
-                        builder.getI64IntegerAttr(tileOp.getRow())
-                    }));
+                    dstTileType = tileOp.getTiletype().str();
+                                dstTiles.push_back(builder.getArrayAttr({
+                                    builder.getI64IntegerAttr(tileOp.getCol()),
+                                    builder.getI64IntegerAttr(tileOp.getRow())
+                                }));
+                            }
+                        }
+                    }
                 }
-            }
-        }
-    }
     
     if (dstTiles.empty()) {
         llvm::errs() << "WARNING: processPush - no destination tiles found from consumers attribute\n";
@@ -294,7 +304,8 @@ void processPush(dmaphop::push op, OpBuilder &builder, dfscheblueprint::ConfigOp
         viewHandle,
         builder.getStringAttr("root"),
         dfscheblueprint::DMAAttr::get(builder.getContext(), ArrayRef<int64_t>({srcChannel}), dfscheblueprint::bp_direction::MM2S),
-        nullptr // slice_symbol
+        nullptr, // slice_symbol
+        builder.getStringAttr(srcTileType)
     );
     
     std::string dstBindName = "bind_dst_" + std::to_string(opId);
@@ -305,7 +316,8 @@ void processPush(dmaphop::push op, OpBuilder &builder, dfscheblueprint::ConfigOp
         viewHandle,
         builder.getStringAttr("linear"),
         dfscheblueprint::DMAAttr::get(builder.getContext(), ArrayRef<int64_t>({dstChannel}), dfscheblueprint:: bp_direction::S2MM),
-        builder.getArrayAttr({})
+        builder.getArrayAttr({}),
+        builder.getStringAttr(dstTileType)
     );
     
     builder.create<dfscheblueprint::CollectiveTransferOp>(
@@ -391,7 +403,7 @@ struct ExtractDataConversion : public OpConversionPattern<routing::extract_data>
         // 1. Try to get partition info
         if (auto partitionOp = dyn_cast_or_null<routing::partitiontensor>(op.getTensor().getDefiningOp())) {
             splitDim = partitionOp.getSplitdim();
-            int64_t splitNum = partitionOp.getSplitnum();
+        int64_t splitNum = partitionOp.getSplitnum();
             if (splitNum > 0) {
                  if (splitDim == 0) sliceSize = inputShape[0] / splitNum;
                  else sliceSize = inputShape[1] / splitNum;
@@ -464,18 +476,18 @@ struct ExtractDataConversion : public OpConversionPattern<routing::extract_data>
              }
         } else {
              // Dynamic calculation using arith ops
-             Value indexVal = adaptor.getIdx(); 
-             if (!indexVal.getType().isIndex()) {
-                 indexVal = rewriter.create<arith::IndexCastOp>(op.getLoc(), rewriter.getIndexType(), indexVal);
-             }
-             
+        Value indexVal = adaptor.getIdx();
+        if (!indexVal.getType().isIndex()) {
+            indexVal = rewriter.create<arith::IndexCastOp>(op.getLoc(), rewriter.getIndexType(), indexVal);
+        }
+
              Value sliceSizeVal = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), sliceSize);
              Value offsetVal = rewriter.create<arith::MulIOp>(op.getLoc(), indexVal, sliceSizeVal);
              
              if (splitDim == 0) {
                  offsets[0] = offsetVal;
                  offsets[1] = rewriter.getIndexAttr(0);
-             } else {
+            } else {
                  offsets[0] = rewriter.getIndexAttr(0);
                  offsets[1] = offsetVal;
              }
@@ -561,6 +573,8 @@ struct PushOpConversion : public OpConversionPattern<dmaphop::push> {
         SmallVector<Attribute> destTiles;
         int64_t sourceChannel = -1;
         int64_t destChannel = -1;
+        std::string srcTileType;
+        std::string dstTileType;
         
         // Get producers (source - one tile for push/scatter) from create_path attribute via symbol table lookup
         auto producersAttr = pathOp.getProducers();
@@ -585,6 +599,7 @@ struct PushOpConversion : public OpConversionPattern<dmaphop::push> {
                                 << symbolRef.getValue() << "'\n";
                     continue;
                 }
+                srcTileType = tileOp.getTiletype().str();
                 sourceTiles.push_back(rewriter.getArrayAttr({
                     rewriter.getI64IntegerAttr(tileOp.getCol()),
                     rewriter.getI64IntegerAttr(tileOp.getRow())
@@ -619,6 +634,7 @@ struct PushOpConversion : public OpConversionPattern<dmaphop::push> {
                                 << symbolRef.getValue() << "'\n";
                     continue;
                 }
+                dstTileType = tileOp.getTiletype().str();
                 destTiles.push_back(rewriter.getArrayAttr({
                     rewriter.getI64IntegerAttr(tileOp.getCol()),
                     rewriter.getI64IntegerAttr(tileOp.getRow())
@@ -677,7 +693,8 @@ struct PushOpConversion : public OpConversionPattern<dmaphop::push> {
             viewSplit,
             rewriter.getStringAttr("root"),
             dfscheblueprint::DMAAttr::get(getContext(), ArrayRef<int64_t>({sourceChannel}), dfscheblueprint::bp_direction::MM2S),
-            nullptr // slice_symbol - source is root, no slice
+            nullptr, // slice_symbol - source is root, no slice
+            rewriter.getStringAttr(srcTileType)
         );
         
         std::string dstBindName = "bind_dst_" + std::to_string(opId);
@@ -688,7 +705,8 @@ struct PushOpConversion : public OpConversionPattern<dmaphop::push> {
             viewSplit,
             rewriter.getStringAttr("linear"),
             dfscheblueprint::DMAAttr::get(getContext(), ArrayRef<int64_t>({destChannel}), dfscheblueprint::bp_direction::S2MM),
-            rewriter.getArrayAttr(sliceSymbols)  // Associate with @consumer_slice_0 to @consumer_slice_N
+            rewriter.getArrayAttr(sliceSymbols),  // Associate with @consumer_slice_0 to @consumer_slice_N
+            rewriter.getStringAttr(dstTileType)
         );
         
         // 5. Create Collective Transfer - one_to_many for push/scatter
@@ -743,7 +761,7 @@ struct PullOpConversion : public OpConversionPattern<dmaphop::pull> {
                 rewriter.getStringAttr(sliceName),
                 buffer // Use adapted producer buffer (DeclareDataOp result)
             );
-            
+
             // Collect slice symbol reference for bind_group
             sliceSymbols.push_back(FlatSymbolRefAttr::get(getContext(), sliceName));
         }
@@ -762,6 +780,8 @@ struct PullOpConversion : public OpConversionPattern<dmaphop::pull> {
         SmallVector<Attribute> destTiles;
         int64_t sourceChannel = -1;
         int64_t destChannel = -1;
+        std::string srcTileType;
+        std::string dstTileType;
         
         // Get producers (sources) from create_path attribute via symbol table lookup
         auto producersAttr = pathOp.getProducers();
@@ -788,6 +808,7 @@ struct PullOpConversion : public OpConversionPattern<dmaphop::pull> {
                                         << symbolRef.getValue() << "'\n";
                             continue;
                         }
+                        srcTileType = tileOp.getTiletype().str();
                         sourceTiles.push_back(rewriter.getArrayAttr({
                             rewriter.getI64IntegerAttr(tileOp.getCol()),
                             rewriter.getI64IntegerAttr(tileOp.getRow())
@@ -826,6 +847,7 @@ struct PullOpConversion : public OpConversionPattern<dmaphop::pull> {
                                         << symbolRef.getValue() << "'\n";
                             continue;
                         }
+                        dstTileType = tileOp.getTiletype().str();
                         destTiles.push_back(rewriter.getArrayAttr({
                             rewriter.getI64IntegerAttr(tileOp.getCol()),
                             rewriter.getI64IntegerAttr(tileOp.getRow())
@@ -885,7 +907,8 @@ struct PullOpConversion : public OpConversionPattern<dmaphop::pull> {
             viewSplit,
             rewriter.getStringAttr("linear"),
             dfscheblueprint::DMAAttr::get(getContext(), ArrayRef<int64_t>({sourceChannel}), dfscheblueprint::bp_direction::MM2S),
-            rewriter.getArrayAttr(sliceSymbols)  // Associate with @producer_slice_0 to @producer_slice_N
+            rewriter.getArrayAttr(sliceSymbols),  // Associate with @producer_slice_0 to @producer_slice_N
+            rewriter.getStringAttr(srcTileType)
         );
         
         std::string dstBindName = "bind_dst_" + std::to_string(opId);
@@ -896,7 +919,8 @@ struct PullOpConversion : public OpConversionPattern<dmaphop::pull> {
             viewSplit,
             rewriter.getStringAttr("root"),
             dfscheblueprint::DMAAttr::get(getContext(), ArrayRef<int64_t>({destChannel}), dfscheblueprint::bp_direction::S2MM),
-            nullptr // slice_symbol
+            nullptr, // slice_symbol
+            rewriter.getStringAttr(dstTileType)
         );
         
         // 5. Create Collective Transfer

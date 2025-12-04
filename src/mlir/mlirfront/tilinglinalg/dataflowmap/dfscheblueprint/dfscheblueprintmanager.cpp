@@ -172,15 +172,19 @@ void dfscheblueprint::BindGroupOp::print(OpAsmPrinter &printer) {
     printer << "distribution = \"" << getDistribution() << "\",";
     printer.printNewline();
     printer << "dma = " << getDma();
-    printer.printNewline();
     if (getSliceSymbols()) {
+        printer.printNewline();
         printer << ",slice_symbols = " << getSliceSymbols();
+    }
+    if (getType()) {
+        printer.printNewline();
+        printer << ",type = \"" << getType() << "\"";
     }
     printer.decreaseIndent(); // <--- Reduce the indentation level state FIRST
     printer.printNewline();  
     printer << "}";
     printer.printOptionalAttrDict(getOperation()->getAttrs(), 
-        /*elidedAttrs=*/{"sym_name", "target_group", "view", "distribution", "dma", "slice_symbols"});
+        /*elidedAttrs=*/{"sym_name", "target_group", "view", "distribution", "dma", "slice_symbols", "type"});
 }
 
 // BindGroupOp parser
@@ -198,6 +202,7 @@ ParseResult dfscheblueprint::BindGroupOp::parse(OpAsmParser &parser, OperationSt
     StringAttr distribution;
     dfscheblueprint::DMAAttr dma;
     ArrayAttr sliceSymbols;
+    StringAttr type;
     
     while (true) {
         OptionalParseResult res = parser.parseOptionalRBrace();
@@ -221,6 +226,8 @@ ParseResult dfscheblueprint::BindGroupOp::parse(OpAsmParser &parser, OperationSt
             if (parser.parseAttribute(dma, "dma", result.attributes)) return failure();
         } else if (attrName == "slice_symbols") {
             if (parser.parseAttribute(sliceSymbols, "slice_symbols", result.attributes)) return failure();
+        } else if (attrName == "type") {
+            if (parser.parseAttribute(type, "type", result.attributes)) return failure();
         } else {
              return parser.emitError(parser.getCurrentLocation(), "unknown attribute: ") << attrName;
         }
@@ -252,11 +259,15 @@ void dfscheblueprint::BindOp::print(OpAsmPrinter &printer) {
         printer.printNewline();
         printer << ",slice_symbol = " << getSliceSymbol();
     }
+    if (getType()) {
+        printer.printNewline();
+        printer << ",type = \"" << getType() << "\"";
+    }
     printer.decreaseIndent();
     printer.printNewline();
     printer << "}";
     printer.printOptionalAttrDict(getOperation()->getAttrs(), 
-        /*elidedAttrs=*/{"sym_name", "target", "view", "slice", "dma", "slice_symbol"});
+        /*elidedAttrs=*/{"sym_name", "target", "view", "slice", "dma", "slice_symbol", "type"});
 }
 
 // BindOp parser
@@ -274,6 +285,7 @@ ParseResult dfscheblueprint::BindOp::parse(OpAsmParser &parser, OperationState &
     StringAttr slice;
     dfscheblueprint::DMAAttr dma;
     SymbolRefAttr sliceSymbol;
+    StringAttr type;
     
     while (true) {
         OptionalParseResult res = parser.parseOptionalRBrace();
@@ -297,6 +309,8 @@ ParseResult dfscheblueprint::BindOp::parse(OpAsmParser &parser, OperationState &
             if (parser.parseAttribute(dma, "dma", result.attributes)) return failure();
         } else if (attrName == "slice_symbol") {
             if (parser.parseAttribute(sliceSymbol, "slice_symbol", result.attributes)) return failure();
+        } else if (attrName == "type") {
+            if (parser.parseAttribute(type, "type", result.attributes)) return failure();
         } else {
              return parser.emitError(parser.getCurrentLocation(), "unknown attribute: ") << attrName;
         }
@@ -580,7 +594,8 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
         viewSplit,
         builder.getStringAttr("root"),
         shimTxDMA,
-        nullptr // slice_symbol
+        nullptr, // slice_symbol
+        builder.getStringAttr("shim") // type
     );
 
     // Bind Cores Input (S2MM - Receive)
@@ -593,7 +608,8 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
         viewSplit,
         builder.getStringAttr("linear"),
         coresInDMA,
-        nullptr // slice_symbols
+        nullptr, // slice_symbols
+        builder.getStringAttr("core") // type
     );
 
     // Bind Cores Output (MM2S - Send)
@@ -606,7 +622,8 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
         viewSplit,
         builder.getStringAttr("linear"),
         coresOutDMA,
-        builder.getArrayAttr(outSliceSymbols) // slice_symbols
+        builder.getArrayAttr(outSliceSymbols), // slice_symbols
+        builder.getStringAttr("core") // type
     );
 
     // Bind Shim RX
@@ -619,7 +636,8 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
         viewSplit,
         builder.getStringAttr("root"),
         shimRxDMA,
-        nullptr // slice_symbol
+        nullptr, // slice_symbol
+        builder.getStringAttr("shim") // type
     );
 
     // ============================================================

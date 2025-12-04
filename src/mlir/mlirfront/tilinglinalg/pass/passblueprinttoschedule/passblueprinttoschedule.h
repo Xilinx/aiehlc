@@ -21,9 +21,9 @@ public:
 
     StringRef getArgument() const final { return "lower-blueprint-to-schedule"; }
     StringRef getDescription() const final { return "Lower dfscheblueprint dialect to dfschedule dialect"; }
-
+    
     void runOnOperation() override;
-
+    
     void getDependentDialects(DialectRegistry &registry) const override {
         registry.insert<dfscheblueprint::dfscheblueprintdialect,
                         dfschedule::dfscheduledialect, 

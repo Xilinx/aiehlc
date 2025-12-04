@@ -195,7 +195,8 @@ def dfscheblueprint_BindOp : dfscheblueprintop<"bind", [
     AnyType:$view,
     StrAttr:$slice,
     dfscheblueprint_DMAAttr:$dma,
-    OptionalAttr<SymbolRefAttr>:$slice_symbol
+    OptionalAttr<SymbolRefAttr>:$slice_symbol,
+    OptionalAttr<StrAttr>:$type
   );
   let hasCustomAssemblyFormat = 1;
 }
@@ -211,7 +212,8 @@ def dfscheblueprint_BindGroupOp : dfscheblueprintop<"bind_group", [
     AnyType:$view,
     StrAttr:$distribution,
     dfscheblueprint_DMAAttr:$dma,
-    OptionalAttr<ArrayAttr>:$slice_symbols
+    OptionalAttr<ArrayAttr>:$slice_symbols,
+    OptionalAttr<StrAttr>:$type
   );
   let hasCustomAssemblyFormat = 1;
 }
