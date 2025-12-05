@@ -157,6 +157,12 @@ struct FlowConfigConversion : public OpConversionPattern<dfscheblueprint::FlowCo
                 bufferLen *= dim;
             }
             
+            // Get bd_id for this tile using schedule.getbdid
+            auto bdIdOp = rewriter.create<dfschedule::GetBdIdOp>(
+                loc,
+                rewriter.getI32Type(),
+                declareTileOp.getTile());
+            
             // Create dfschedule.config.dma_bd to configure DMA buffer descriptor
             // Parameters: buffer, tile, bd_id, offset, len, enable_packet, packet_id, next_bd
             auto configDmaBdOp = rewriter.create<dfschedule::ConfigDmaBdOp>(
@@ -164,7 +170,7 @@ struct FlowConfigConversion : public OpConversionPattern<dfscheblueprint::FlowCo
                 dfschedule::BdHandleType::get(rewriter.getContext()),
                 viewValue,                                      // buffer
                 declareTileOp.getTile(),                        // tile handle
-                rewriter.getI32IntegerAttr(dmaChannel),         // bd_id (use channel as bd_id)
+                bdIdOp.getBdId(),                               // bd_id from GetBdIdOp
                 rewriter.getI32IntegerAttr(0),                  // offset
                 rewriter.getI32IntegerAttr(bufferLen),          // len
                 rewriter.getBoolAttr(false),                    // enable_packet

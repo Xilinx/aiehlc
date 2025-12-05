@@ -99,7 +99,7 @@ def dfschedule_ConfigDmaBdOp : dfscheduleop<"config.dma_bd"> {
   let arguments = (ins
     AnyMemRef:$buffer,
     dfschedule_TileHandleType:$tile,
-    I32Attr:$bd_id,
+    I32:$bd_id,
     I32Attr:$offset,
     I32Attr:$len,
     BoolAttr:$enable_packet,
@@ -151,10 +151,12 @@ def dfschedule_LaunchKernelGroupOp : dfscheduleop<"schedule.launch_kernel_group"
 
 // Get BD ID for scheduling
 def dfschedule_GetBdIdOp : dfscheduleop<"schedule.getbdid"> {
-  let summary = "Get a buffer descriptor ID for runtime scheduling";
-  let arguments = (ins);
+  let summary = "Get a buffer descriptor ID for a given tile";
+  let arguments = (ins
+    dfschedule_TileHandleType:$tile
+  );
   let results = (outs I32:$bd_id);
-  let assemblyFormat = "attr-dict `:` type($bd_id)";
+  let assemblyFormat = "`(` $tile `)` attr-dict `:` `(` type($tile) `)` `->` type($bd_id)";
 }
 
 // Start IO operation

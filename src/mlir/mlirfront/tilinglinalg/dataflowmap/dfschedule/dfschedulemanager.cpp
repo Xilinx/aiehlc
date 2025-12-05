@@ -242,27 +242,31 @@ void dfschedule::KernelScheduleOp::print(::mlir::OpAsmPrinter &printer) {
 
 // ConfigDmaBdOp - DMA Buffer Descriptor Configuration
 ::mlir::ParseResult dfschedule::ConfigDmaBdOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result) {
-    mlir::OpAsmParser::UnresolvedOperand bufferOperand, tileOperand;
-    mlir::Type bufferType, tileType;
+    mlir::OpAsmParser::UnresolvedOperand bufferOperand, tileOperand, bdIdOperand;
+    mlir::Type bufferType, tileType, bdIdType;
     
-    // Parse: (%buffer, %tile)
+    // Parse: (%buffer, %tile, %bd_id)
     if (parser.parseLParen() ||
         parser.parseOperand(bufferOperand) ||
         parser.parseComma() ||
         parser.parseOperand(tileOperand) ||
+        parser.parseComma() ||
+        parser.parseOperand(bdIdOperand) ||
         parser.parseRParen())
         return mlir::failure();
     
-    // Parse attributes: { bd_id = ..., offset = ..., len = ..., enable_packet = ..., packet_id = ..., next_bd = ... }
+    // Parse attributes: { offset = ..., len = ..., enable_packet = ..., packet_id = ..., next_bd = ... }
     if (parser.parseOptionalAttrDict(result.attributes))
         return mlir::failure();
     
-    // Parse: : (type($buffer), type($tile)) -> type($bd_handle)
+    // Parse: : (type($buffer), type($tile), type($bd_id)) -> type($bd_handle)
     if (parser.parseColon() ||
         parser.parseLParen() ||
         parser.parseType(bufferType) ||
         parser.parseComma() ||
         parser.parseType(tileType) ||
+        parser.parseComma() ||
+        parser.parseType(bdIdType) ||
         parser.parseRParen() ||
         parser.parseArrow())
         return mlir::failure();
@@ -273,7 +277,8 @@ void dfschedule::KernelScheduleOp::print(::mlir::OpAsmPrinter &printer) {
     
     // Resolve operands
     if (parser.resolveOperand(bufferOperand, bufferType, result.operands) ||
-        parser.resolveOperand(tileOperand, tileType, result.operands))
+        parser.resolveOperand(tileOperand, tileType, result.operands) ||
+        parser.resolveOperand(bdIdOperand, bdIdType, result.operands))
         return mlir::failure();
     
     // Add result type
@@ -284,13 +289,11 @@ void dfschedule::KernelScheduleOp::print(::mlir::OpAsmPrinter &printer) {
 
 void dfschedule::ConfigDmaBdOp::print(::mlir::OpAsmPrinter &printer) {
     printer << "(";
-    printer << getBuffer() << ", " << getTile();
+    printer << getBuffer() << ", " << getTile() << ", " << getBdId();
     printer << ") {";
     
     // Print attributes with proper indentation
     printer.increaseIndent();
-    printer.printNewline();
-    printer << "bd_id = " << getBdId() << ",";
     printer.printNewline();
     printer << "offset = " << getOffset() << ",";
     printer.printNewline();
@@ -307,7 +310,7 @@ void dfschedule::ConfigDmaBdOp::print(::mlir::OpAsmPrinter &printer) {
     
     // Print types
     printer << ": (";
-    printer << getBuffer().getType() << ", " << getTile().getType();
+    printer << getBuffer().getType() << ", " << getTile().getType() << ", " << getBdId().getType();
     printer << ") -> ";
     printer << getBdHandle().getType();
 }
@@ -643,13 +646,16 @@ void dfschedulemanager::createHostBlock(OpBuilder& builder, MLIRContext* ctx, Sy
         builder.getI32IntegerAttr(0)   // row
     );
     
-    // %bd_config = dfschedule.config.dma_bd(%gmem, %shim0) {...}
+    // Get bd_id for this tile
+    auto bdIdForConfig = builder.create<dfschedule::GetBdIdOp>(location, builder.getI32Type(), shim0.getResult());
+    
+    // %bd_config = dfschedule.config.dma_bd(%gmem, %shim0, %bd_id) {...}
     auto bdHandleType = dfschedule::BdHandleType::get(ctx);
     auto bdConfig = builder.create<dfschedule::ConfigDmaBdOp>(
         location, bdHandleType,
         gmem.getResult(),
         shim0.getResult(),
-        builder.getI32IntegerAttr(0),     // bd_id
+        bdIdForConfig.getBdId(),          // bd_id from GetBdIdOp
         builder.getI32IntegerAttr(0),     // offset
         builder.getI32IntegerAttr(1024),  // len
         builder.getBoolAttr(true),        // enable_packet
@@ -733,8 +739,8 @@ void dfschedulemanager::createHostBlock(OpBuilder& builder, MLIRContext* ctx, Sy
     );
     
     // Schedule section
-    // %bd_id = dfschedule.schedule.getbdid() : i32
-    auto bdId = builder.create<dfschedule::GetBdIdOp>(location, builder.getI32Type());
+    // %bd_id = dfschedule.schedule.getbdid(%shim0) : (!dfschedule.tile) -> i32
+    auto bdId = builder.create<dfschedule::GetBdIdOp>(location, builder.getI32Type(), shim0.getResult());
     
     // %evnt_io = dfschedule.schedule.start_io(%io_0, %bd_id) {...}
     auto evntIo = builder.create<dfschedule::StartIoOp>(
@@ -868,34 +874,36 @@ void dfschedulemanager::createDSKernelReceiver(OpBuilder& builder, MLIRContext* 
     
     // DMA configuration parameters (derived from buffer shape and local constants)
     int64_t bufferLen = 16 * 256;  // Total elements in buffer
-    int64_t pingBdId = 0;          // BD ID for ping buffer
-    int64_t pongBdId = 1;          // BD ID for pong buffer
     int64_t packetIdBase = 10;     // Base packet ID
     
-    // %bd_ping = dfschedule.config.dma_bd(%ping, %tile) { ... }
+    // Get bd_ids for ping and pong buffers
+    auto pingBdIdOp = builder.create<dfschedule::GetBdIdOp>(location, builder.getI32Type(), tileArg);
+    auto pongBdIdOp = builder.create<dfschedule::GetBdIdOp>(location, builder.getI32Type(), tileArg);
+    
+    // %bd_ping = dfschedule.config.dma_bd(%ping, %tile, %bd_id_ping) { ... }
     auto bdPing = builder.create<dfschedule::ConfigDmaBdOp>(
         location, bdHandleType,
         ping.getResult(),
         tileArg,
-        builder.getI32IntegerAttr(pingBdId),      // bd_id
+        pingBdIdOp.getBdId(),                      // bd_id from GetBdIdOp
         builder.getI32IntegerAttr(0),              // offset
         builder.getI32IntegerAttr(bufferLen),      // len
         builder.getBoolAttr(true),                 // enable_packet
         builder.getI32IntegerAttr(packetIdBase),   // packet_id
-        builder.getI32IntegerAttr(pongBdId)        // next_bd (chain to pong)
+        builder.getI32IntegerAttr(1)               // next_bd (chain to pong)
     );
     
-    // %bd_pong = dfschedule.config.dma_bd(%pong, %tile) { ... }
+    // %bd_pong = dfschedule.config.dma_bd(%pong, %tile, %bd_id_pong) { ... }
     auto bdPong = builder.create<dfschedule::ConfigDmaBdOp>(
         location, bdHandleType,
         pong.getResult(),
         tileArg,
-        builder.getI32IntegerAttr(pongBdId),       // bd_id
+        pongBdIdOp.getBdId(),                      // bd_id from GetBdIdOp
         builder.getI32IntegerAttr(0),              // offset
         builder.getI32IntegerAttr(bufferLen),      // len
         builder.getBoolAttr(true),                 // enable_packet
         builder.getI32IntegerAttr(packetIdBase + 1), // packet_id
-        builder.getI32IntegerAttr(pingBdId)        // next_bd (chain back to ping)
+        builder.getI32IntegerAttr(0)               // next_bd (chain back to ping)
     );
     //*/
     // Initialize locks
