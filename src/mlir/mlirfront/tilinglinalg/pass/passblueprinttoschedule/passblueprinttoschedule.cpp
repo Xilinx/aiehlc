@@ -68,6 +68,7 @@ static dfscheblueprint::TileGroupOp lookupTileGroup(Operation *rootOp, SymbolRef
 
 // Pattern to convert dfscheblueprint::FlowConfigOp to dfschedule operations
 // Only handles FlowConfigOp with type="shim" - creates declaretile and config.dma_bd
+// For non-shim types, just erases the operation
 struct FlowConfigConversion : public OpConversionPattern<dfscheblueprint::FlowConfigOp> {
     using OpConversionPattern<dfscheblueprint::FlowConfigOp>::OpConversionPattern;
 
@@ -76,24 +77,30 @@ struct FlowConfigConversion : public OpConversionPattern<dfscheblueprint::FlowCo
                     ConversionPatternRewriter &rewriter) const override {
         auto loc = op.getLoc();
         
-        // Only handle FlowConfigOp with type="shim"
+        // Check if this is a shim-type FlowConfigOp
         auto typeAttr = op.getType();
         if (!typeAttr || *typeAttr != "shim") {
-            // Skip non-shim config operations - they will be handled by other patterns
-            return failure();
+            // Non-shim type: just erase and return success
+            rewriter.eraseOp(op);
+            return success();
         }
+        
+        // Shim type: convert to dfschedule operations
         
         // Get the target TileGroupOp by looking up the symbol reference
         SymbolRefAttr targetRef = op.getTarget();
         auto tileGroupOp = lookupTileGroup(op.getOperation(), targetRef);
         if (!tileGroupOp) {
-            return op.emitError("failed to resolve target tile group: ") << targetRef;
+            // If target not found, just erase
+            rewriter.eraseOp(op);
+            return success();
         }
         
         // Extract tile coordinates from the TileGroupOp
         ArrayAttr tilesAttr = tileGroupOp.getTiles();
         if (tilesAttr.empty()) {
-            return op.emitError("target tile group has no tiles");
+            rewriter.eraseOp(op);
+            return success();
         }
         
         // Get DMA configuration
@@ -114,7 +121,9 @@ struct FlowConfigConversion : public OpConversionPattern<dfscheblueprint::FlowCo
         } else if (auto mrType = dyn_cast<MemRefType>(viewType)) {
             memrefType = mrType;
         } else {
-            return op.emitError("view must be tensor or memref type");
+            // Unsupported type, just erase
+            rewriter.eraseOp(op);
+            return success();
         }
         
         // Create declaretile and config.dma_bd for each tile in the target group
@@ -216,12 +225,13 @@ void BlueprintToSchedulePass::runOnOperation() {
                           bufferization::BufferizationDialect,
                           BuiltinDialect>();
     
-    // Mark shim-type FlowConfigOp as illegal to trigger conversion
-    target.addDynamicallyLegalOp<dfscheblueprint::FlowConfigOp>([](dfscheblueprint::FlowConfigOp op) {
-        // Only shim type should be converted, others remain legal
-        auto typeAttr = op.getType();
-        return !typeAttr || *typeAttr != "shim";
-    });
+    // Mark all dfscheblueprint operations as illegal to trigger conversion/erasure
+    target.addIllegalOp<dfscheblueprint::FlowConfigOp>();
+    target.addIllegalOp<dfscheblueprint::TileGroupOp>();
+    //target.addIllegalOp<dfscheblueprint::DeclareDataOp>();
+    //target.addIllegalOp<dfscheblueprint::DataSliceOp>();
+    target.addIllegalOp<dfscheblueprint::FlowTransferOp>();
+    target.addIllegalOp<dfscheblueprint::TransferManifestOp>();
     
     // Type converter
     TypeConverter typeConverter;
@@ -233,16 +243,15 @@ void BlueprintToSchedulePass::runOnOperation() {
     });
     
     RewritePatternSet patterns(context);
+    // FlowConfigConversion handles shim type conversion and erases non-shim types
     patterns.add<FlowConfigConversion>(context);
+    // DataSliceOp replaces with input tensor
     patterns.add<DataSliceOpConversion>(context);
     // Use unified erase pattern for ops that just need to be removed
-    /*
     patterns.add<EraseOpPattern<dfscheblueprint::TileGroupOp>>(context);
-    patterns.add<EraseOpPattern<dfscheblueprint::DeclareDataOp>>(context);
-    patterns.add<EraseOpPattern<dfscheblueprint::FlowConfigOp>>(context);
+    //patterns.add<EraseOpPattern<dfscheblueprint::DeclareDataOp>>(context);
     patterns.add<EraseOpPattern<dfscheblueprint::FlowTransferOp>>(context);
     patterns.add<EraseOpPattern<dfscheblueprint::TransferManifestOp>>(context);
-    */
     
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns)))) {
         signalPassFailure();
