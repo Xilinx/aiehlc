@@ -4,8 +4,6 @@
 # SPDX-License-Identifier: MIT
 ###############################################################################
 
-# Script to set up git pre-commit hooks for the aiehlc project
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIEHLC_DIR="${SCRIPT_DIR}/../"
 
@@ -48,9 +46,8 @@ fi
 
 echo "Auto-formatting staged C/C++ files with clang-format..."
 
-git clang-format
-
 for file in $staged_files; do
+    git clang-format --staged "$file"
     git add "$file"
 done
 
