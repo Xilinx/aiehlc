@@ -30,32 +30,39 @@ using namespace dfschedule;
 namespace {
 
 // Helper function to look up TileGroupOp by symbol reference
+// The TileGroupOp is typically a sibling operation in the same block as the FlowConfigOp
 static dfscheblueprint::TileGroupOp lookupTileGroup(Operation *rootOp, SymbolRefAttr target) {
-    // Walk up to find the ConfigOp that contains the TileGroupOp definitions
-    Operation *configOp = rootOp->getParentOfType<dfscheblueprint::ConfigOp>();
-    if (!configOp) {
-        // Try to find ConfigOp among siblings
-        if (auto parentOp = rootOp->getParentOp()) {
-            for (Operation &op : parentOp->getRegion(0).front()) {
-                if (auto config = dyn_cast<dfscheblueprint::ConfigOp>(&op)) {
-                    configOp = config;
-                    break;
+    StringRef targetName = target.getRootReference().getValue();
+    
+    // First, search in the same block as the FlowConfigOp
+    Block *parentBlock = rootOp->getBlock();
+    if (parentBlock) {
+        for (Operation &op : *parentBlock) {
+            if (auto tileGroup = dyn_cast<dfscheblueprint::TileGroupOp>(&op)) {
+                if (tileGroup.getSymName() == targetName) {
+                    return tileGroup;
                 }
             }
         }
     }
     
-    if (!configOp) return nullptr;
-    
-    // Search within the ConfigOp's body for matching TileGroupOp
-    StringRef targetName = target.getRootReference().getValue();
-    for (Operation &op : cast<dfscheblueprint::ConfigOp>(configOp).getBody().front()) {
-        if (auto tileGroup = dyn_cast<dfscheblueprint::TileGroupOp>(&op)) {
-            if (tileGroup.getSymName() == targetName) {
-                return tileGroup;
+    // If not found, try searching in parent regions (for nested structures)
+    Operation *parentOp = rootOp->getParentOp();
+    while (parentOp) {
+        for (Region &region : parentOp->getRegions()) {
+            for (Block &block : region) {
+                for (Operation &op : block) {
+                    if (auto tileGroup = dyn_cast<dfscheblueprint::TileGroupOp>(&op)) {
+                        if (tileGroup.getSymName() == targetName) {
+                            return tileGroup;
+                        }
+                    }
+                }
             }
         }
+        parentOp = parentOp->getParentOp();
     }
+    
     return nullptr;
 }
 

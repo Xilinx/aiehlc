@@ -25,6 +25,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
 
@@ -814,6 +815,7 @@ void routingtodfschedule() {
     ctx.getOrLoadDialect<mlir::memref::MemRefDialect>();
     ctx.getOrLoadDialect<mlir::scf::SCFDialect>();
     ctx.getOrLoadDialect<mlir::tensor::TensorDialect>();
+    ctx.getOrLoadDialect<mlir::bufferization::BufferizationDialect>();
     
     // Create test routing module
     auto module1 = mtest.ops_testNew(&ctx, 1);
