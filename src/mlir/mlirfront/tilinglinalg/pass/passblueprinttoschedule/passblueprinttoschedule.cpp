@@ -66,128 +66,9 @@ static dfscheblueprint::TileGroupOp lookupTileGroup(Operation *rootOp, SymbolRef
     return nullptr;
 }
 
-// Pattern to convert dfscheblueprint::FlowConfigOp to dfschedule operations
-// Only handles FlowConfigOp with type="shim" - creates declaretile and config.dma_bd
-// For non-shim types, just erases the operation
-struct FlowConfigConversion : public OpConversionPattern<dfscheblueprint::FlowConfigOp> {
-    using OpConversionPattern<dfscheblueprint::FlowConfigOp>::OpConversionPattern;
-
-    LogicalResult
-    matchAndRewrite(dfscheblueprint::FlowConfigOp op, OpAdaptor adaptor,
-                    ConversionPatternRewriter &rewriter) const override {
-        auto loc = op.getLoc();
-        
-        // Check if this is a shim-type FlowConfigOp
-        auto typeAttr = op.getType();
-        if (!typeAttr || *typeAttr != "shim") {
-            // Non-shim type: just erase and return success
-            rewriter.eraseOp(op);
-            return success();
-        }
-        
-        // Shim type: convert to dfschedule operations
-        
-        // Get the target TileGroupOp by looking up the symbol reference
-        SymbolRefAttr targetRef = op.getTarget();
-        auto tileGroupOp = lookupTileGroup(op.getOperation(), targetRef);
-        if (!tileGroupOp) {
-            // If target not found, just erase
-            rewriter.eraseOp(op);
-            return success();
-        }
-        
-        // Extract tile coordinates from the TileGroupOp
-        ArrayAttr tilesAttr = tileGroupOp.getTiles();
-        if (tilesAttr.empty()) {
-            rewriter.eraseOp(op);
-            return success();
-        }
-        
-        // Get DMA configuration
-        auto dmaAttr = op.getDma();
-        auto dmaChannels = dmaAttr.getChannels();
-        auto dmaDirection = dmaAttr.getDirection();
-        
-        // Get the view operand (tensor/memref containing the data)
-        Value viewValue = adaptor.getView();
-        Type viewType = viewValue.getType();
-        
-        // Convert tensor type to memref type if needed
-        MemRefType memrefType;
-        if (auto tensorType = dyn_cast<RankedTensorType>(viewType)) {
-            memrefType = MemRefType::get(tensorType.getShape(), tensorType.getElementType());
-            // Create a buffer cast from tensor to memref
-            viewValue = rewriter.create<mlir::bufferization::ToMemrefOp>(loc, memrefType, viewValue);
-        } else if (auto mrType = dyn_cast<MemRefType>(viewType)) {
-            memrefType = mrType;
-        } else {
-            // Unsupported type, just erase
-            rewriter.eraseOp(op);
-            return success();
-        }
-        
-        // Create declaretile and config.dma_bd for each tile in the target group
-        SmallVector<Value> bdHandles;
-        int channelIdx = 0;
-        
-        for (auto tileAttr : tilesAttr) {
-            auto tileArray = dyn_cast<ArrayAttr>(tileAttr);
-            if (!tileArray || tileArray.size() < 2) {
-                continue;
-            }
-            
-            // Extract tile coordinates
-            int64_t col = cast<IntegerAttr>(tileArray[0]).getInt();
-            int64_t row = cast<IntegerAttr>(tileArray[1]).getInt();
-            
-            // Create dfschedule.declaretile to declare the physical tile
-            auto declareTileOp = rewriter.create<dfschedule::DeclareTileOp>(
-                loc,
-                dfschedule::TileType::get(rewriter.getContext()),
-                rewriter.getI32IntegerAttr(col),
-                rewriter.getI32IntegerAttr(row));
-            
-            // Get DMA channel for this tile (cycle through available channels)
-            int64_t dmaChannel = dmaChannels.empty() ? 0 : dmaChannels[channelIdx % dmaChannels.size()];
-            channelIdx++;
-            
-            // Calculate buffer size from memref shape
-            int64_t bufferLen = 1;
-            for (int64_t dim : memrefType.getShape()) {
-                bufferLen *= dim;
-            }
-            
-            // Get bd_id for this tile using schedule.getbdid
-            auto bdIdOp = rewriter.create<dfschedule::GetBdIdOp>(
-                loc,
-                rewriter.getI32Type(),
-                declareTileOp.getTile());
-            
-            // Create dfschedule.config.dma_bd to configure DMA buffer descriptor
-            // Parameters: buffer, tile, bd_id, offset, len, enable_packet, packet_id, next_bd
-            auto configDmaBdOp = rewriter.create<dfschedule::ConfigDmaBdOp>(
-                loc,
-                dfschedule::BdHandleType::get(rewriter.getContext()),
-                viewValue,                                      // buffer
-                declareTileOp.getTile(),                        // tile handle
-                bdIdOp.getBdId(),                               // bd_id from GetBdIdOp
-                rewriter.getI32IntegerAttr(0),                  // offset
-                rewriter.getI32IntegerAttr(bufferLen),          // len
-                rewriter.getBoolAttr(false),                    // enable_packet
-                rewriter.getI32IntegerAttr(0),                  // packet_id
-                rewriter.getI32IntegerAttr(0));                 // next_bd
-            
-            bdHandles.push_back(configDmaBdOp.getBdHandle());
-        }
-        
-        // Erase the original FlowConfigOp
-        rewriter.eraseOp(op);
-        
-        return success();
-    }
-};
-
 // Unified template pattern to erase dfscheblueprint operations
+// FlowConfigOp is just erased since FlowTransferConversion reads its attributes
+// and generates all the DMA BD configuration logic
 template <typename OpTy>
 struct EraseOpPattern : public OpConversionPattern<OpTy> {
     using OpConversionPattern<OpTy>::OpConversionPattern;
@@ -196,6 +77,275 @@ struct EraseOpPattern : public OpConversionPattern<OpTy> {
     matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
                     ConversionPatternRewriter &rewriter) const override {
         rewriter.eraseOp(op);
+        return success();
+    }
+};
+
+// Helper function to look up FlowConfigOp by symbol reference
+static dfscheblueprint::FlowConfigOp lookupFlowConfig(Operation *rootOp, SymbolRefAttr target) {
+    StringRef targetName = target.getRootReference().getValue();
+    
+    // Search in the same block as the FlowTransferOp
+    Block *parentBlock = rootOp->getBlock();
+    if (parentBlock) {
+        for (Operation &op : *parentBlock) {
+            if (auto flowConfig = dyn_cast<dfscheblueprint::FlowConfigOp>(&op)) {
+                if (flowConfig.getSymName() == targetName) {
+                    return flowConfig;
+                }
+            }
+        }
+    }
+    
+    // Search in parent regions
+    Operation *parentOp = rootOp->getParentOp();
+    while (parentOp) {
+        for (Region &region : parentOp->getRegions()) {
+            for (Block &block : region) {
+                for (Operation &op : block) {
+                    if (auto flowConfig = dyn_cast<dfscheblueprint::FlowConfigOp>(&op)) {
+                        if (flowConfig.getSymName() == targetName) {
+                            return flowConfig;
+                        }
+                    }
+                }
+            }
+        }
+        parentOp = parentOp->getParentOp();
+    }
+    
+    return nullptr;
+}
+
+// Pattern to convert dfscheblueprint::FlowTransferOp to dfschedule operations
+// Generates: declaretensor, declaretile, config.dma_bd, config.create_io, packet, 
+//            load_kernel_group, schedule.launch_kernel_group, schedule.getbdid, 
+//            schedule.start_io, schedule.wait
+struct FlowTransferConversion : public OpConversionPattern<dfscheblueprint::FlowTransferOp> {
+    using OpConversionPattern<dfscheblueprint::FlowTransferOp>::OpConversionPattern;
+
+    LogicalResult
+    matchAndRewrite(dfscheblueprint::FlowTransferOp op, OpAdaptor adaptor,
+                    ConversionPatternRewriter &rewriter) const override {
+        auto loc = op.getLoc();
+        
+        // Look up "from" FlowConfigOp (source/sender)
+        SymbolRefAttr fromRef = op.getFrom();
+        auto fromFlowConfig = lookupFlowConfig(op.getOperation(), fromRef);
+        if (!fromFlowConfig) {
+            rewriter.eraseOp(op);
+            return success();
+        }
+        
+        // Look up "to" FlowConfigOp (destination/receiver)
+        SymbolRefAttr toRef = op.getTo();
+        auto toFlowConfig = lookupFlowConfig(op.getOperation(), toRef);
+        if (!toFlowConfig) {
+            rewriter.eraseOp(op);
+            return success();
+        }
+        
+        // Get sender's tile group
+        auto fromTileGroup = lookupTileGroup(fromFlowConfig.getOperation(), fromFlowConfig.getTarget());
+        if (!fromTileGroup) {
+            rewriter.eraseOp(op);
+            return success();
+        }
+        
+        // Get receiver's tile group
+        auto toTileGroup = lookupTileGroup(toFlowConfig.getOperation(), toFlowConfig.getTarget());
+        if (!toTileGroup) {
+            rewriter.eraseOp(op);
+            return success();
+        }
+        
+        // Get base packet id for packet operations
+        uint32_t basePacketId = op.getBasePacketId();
+        
+        // Get the view operand from the source FlowConfig
+        Value viewValue = fromFlowConfig.getView();
+        Type viewType = viewValue.getType();
+        
+        // Convert tensor type to memref type if needed
+        MemRefType memrefType;
+        Value memrefValue;
+        if (auto tensorType = dyn_cast<RankedTensorType>(viewType)) {
+            // Create 1D memref type with total size
+            int64_t totalSize = 1;
+            for (int64_t dim : tensorType.getShape()) {
+                totalSize *= dim;
+            }
+            memrefType = MemRefType::get({totalSize}, tensorType.getElementType());
+            
+            // Create dfschedule.declaretensor
+            memrefValue = rewriter.create<dfschedule::DeclareTensorOp>(
+                loc, memrefType, viewValue);
+        } else if (auto mrType = dyn_cast<MemRefType>(viewType)) {
+            memrefType = mrType;
+            memrefValue = viewValue;
+        } else {
+            rewriter.eraseOp(op);
+            return success();
+        }
+        
+        // --- SENDER SIDE (from FlowConfig) ---
+        ArrayAttr fromTilesAttr = fromTileGroup.getTiles();
+        if (fromTilesAttr.empty()) {
+            rewriter.eraseOp(op);
+            return success();
+        }
+        
+        // Get first sender tile coordinates
+        auto firstFromTile = dyn_cast<ArrayAttr>(fromTilesAttr[0]);
+        if (!firstFromTile || firstFromTile.size() < 2) {
+            rewriter.eraseOp(op);
+            return success();
+        }
+        int64_t fromCol = cast<IntegerAttr>(firstFromTile[0]).getInt();
+        int64_t fromRow = cast<IntegerAttr>(firstFromTile[1]).getInt();
+        
+        // Create dfschedule.declaretile for sender
+        auto senderTileOp = rewriter.create<dfschedule::DeclareTileOp>(
+            loc,
+            dfschedule::TileType::get(rewriter.getContext()),
+            rewriter.getI32IntegerAttr(fromCol),
+            rewriter.getI32IntegerAttr(fromRow));
+        
+        // Get DMA configuration from sender
+        auto fromDmaAttr = fromFlowConfig.getDma();
+        auto fromDmaChannels = fromDmaAttr.getChannels();
+        int64_t senderChannel = fromDmaChannels.empty() ? 0 : fromDmaChannels[0];
+        
+        // Calculate buffer size
+        int64_t bufferLen = 1;
+        for (int64_t dim : memrefType.getShape()) {
+            bufferLen *= dim;
+        }
+        
+        // Create bd_id constant for config
+        auto bdIdConst = rewriter.create<arith::ConstantOp>(
+            loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
+        
+        // Create dfschedule.config.dma_bd for sender
+        auto configDmaBdOp = rewriter.create<dfschedule::ConfigDmaBdOp>(
+            loc,
+            dfschedule::BdHandleType::get(rewriter.getContext()),
+            memrefValue,                                      // buffer
+            senderTileOp.getTile(),                           // tile
+            bdIdConst.getResult(),                            // bd_id
+            rewriter.getI32IntegerAttr(0),                    // offset
+            rewriter.getI32IntegerAttr(bufferLen),            // len
+            rewriter.getBoolAttr(true),                       // enable_packet
+            rewriter.getI32IntegerAttr(basePacketId),         // packet_id
+            rewriter.getI32IntegerAttr(4294967295));          // next_bd (-1 as unsigned)
+        
+        // Create dfschedule.config.create_io for sender
+        auto createIoOp = rewriter.create<dfschedule::ConfigCreateIoOp>(
+            loc,
+            dfschedule::IoHandleType::get(rewriter.getContext()),
+            configDmaBdOp.getBdHandle(),                      // bd_config
+            senderTileOp.getTile(),                           // tile
+            rewriter.getI32IntegerAttr(senderChannel),        // channel
+            rewriter.getStringAttr("MM2S"),                   // direction
+            rewriter.getStringAttr("SEND"));                  // io_operation
+        
+        // --- RECEIVER SIDE (to FlowConfig) ---
+        ArrayAttr toTilesAttr = toTileGroup.getTiles();
+        SmallVector<Value> receiverTiles;
+        SmallVector<SymbolRefAttr> packetSymbols;
+        uint32_t packetIdx = 0;
+        
+        for (auto tileAttr : toTilesAttr) {
+            auto tileArray = dyn_cast<ArrayAttr>(tileAttr);
+            if (!tileArray || tileArray.size() < 2) {
+                continue;
+            }
+            
+            int64_t col = cast<IntegerAttr>(tileArray[0]).getInt();
+            int64_t row = cast<IntegerAttr>(tileArray[1]).getInt();
+            
+            // Create dfschedule.declaretile for each receiver
+            auto receiverTileOp = rewriter.create<dfschedule::DeclareTileOp>(
+                loc,
+                dfschedule::TileType::get(rewriter.getContext()),
+                rewriter.getI32IntegerAttr(col),
+                rewriter.getI32IntegerAttr(row));
+            receiverTiles.push_back(receiverTileOp.getTile());
+            
+            // Create packet symbol name (packet0, packet1, ...)
+            std::string packetName = "packet" + std::to_string(packetIdx);
+            
+            // Create dfschedule.packet for each receiver
+            auto toDmaAttr = toFlowConfig.getDma();
+            auto toDmaChannels = toDmaAttr.getChannels();
+            int64_t recvChannel = toDmaChannels.empty() ? 0 : toDmaChannels[0];
+            
+            rewriter.create<dfschedule::PacketOp>(
+                loc,
+                dfschedule::PacketType::get(rewriter.getContext()),
+                rewriter.getStringAttr(packetName),
+                memrefValue,
+                rewriter.getI32IntegerAttr(recvChannel));
+            
+            packetSymbols.push_back(SymbolRefAttr::get(rewriter.getContext(), packetName));
+            packetIdx++;
+        }
+        
+        if (receiverTiles.empty()) {
+            rewriter.eraseOp(op);
+            return success();
+        }
+        
+        // Create callee symbol refs (dskernel_receiver for all)
+        SmallVector<Attribute> calleeAttrs;
+        calleeAttrs.push_back(SymbolRefAttr::get(rewriter.getContext(), "dskernel_receiver"));
+        
+        // Create distributed_compute_kernel_args (compute0 for all)
+        SmallVector<Attribute> computeKernelAttrs;
+        for (size_t i = 0; i < receiverTiles.size(); ++i) {
+            computeKernelAttrs.push_back(SymbolRefAttr::get(rewriter.getContext(), "compute0"));
+        }
+        
+        // Create distributed_args from packet symbols
+        SmallVector<Attribute> distArgsAttrs(packetSymbols.begin(), packetSymbols.end());
+        
+        // Create dfschedule.config.load_kernel_group
+        auto loadKernelGroupOp = rewriter.create<dfschedule::LoadKernelGroupOp>(
+            loc,
+            dfschedule::KernelGroupType::get(rewriter.getContext()),
+            receiverTiles,
+            rewriter.getArrayAttr(calleeAttrs),
+            rewriter.getArrayAttr(computeKernelAttrs),
+            rewriter.getArrayAttr(distArgsAttrs));
+        
+        // Create dfschedule.schedule.launch_kernel_group
+        auto launchKernelGroupOp = rewriter.create<dfschedule::LaunchKernelGroupOp>(
+            loc,
+            dfschedule::EventType::get(rewriter.getContext()),
+            loadKernelGroupOp.getKernelGroup());
+        
+        // Create dfschedule.schedule.getbdid
+        auto getBdIdOp = rewriter.create<dfschedule::GetBdIdOp>(
+            loc,
+            rewriter.getI32Type(),
+            senderTileOp.getTile());
+        
+        // Create dfschedule.schedule.start_io
+        auto startIoOp = rewriter.create<dfschedule::StartIoOp>(
+            loc,
+            dfschedule::EventType::get(rewriter.getContext()),
+            createIoOp.getIoHandle(),
+            getBdIdOp.getBdId());
+        
+        // Create dfschedule.schedule.wait with both events
+        SmallVector<Value> events;
+        events.push_back(startIoOp.getEvent());
+        events.push_back(launchKernelGroupOp.getEvent());
+        rewriter.create<dfschedule::ScheduleWaitOp>(loc, events);
+        
+        // Erase the original FlowTransferOp
+        rewriter.eraseOp(op);
+        
         return success();
     }
 };
@@ -249,14 +399,16 @@ void BlueprintToSchedulePass::runOnOperation() {
     });
     
     RewritePatternSet patterns(context);
-    // FlowConfigConversion handles shim type conversion and erases non-shim types
-    patterns.add<FlowConfigConversion>(context);
+    // FlowTransferConversion converts flow_transfer to dfschedule operations
+    // It reads from FlowConfigOps to get DMA configuration
+    patterns.add<FlowTransferConversion>(context);
     // DataSliceOp replaces with input tensor
     patterns.add<DataSliceOpConversion>(context);
     // Use unified erase pattern for ops that just need to be removed
+    // FlowConfigOp is erased since FlowTransferConversion reads its attributes directly
+    patterns.add<EraseOpPattern<dfscheblueprint::FlowConfigOp>>(context);
     patterns.add<EraseOpPattern<dfscheblueprint::TileGroupOp>>(context);
     //patterns.add<EraseOpPattern<dfscheblueprint::DeclareDataOp>>(context);
-    patterns.add<EraseOpPattern<dfscheblueprint::FlowTransferOp>>(context);
     patterns.add<EraseOpPattern<dfscheblueprint::TransferManifestOp>>(context);
     
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns)))) {
