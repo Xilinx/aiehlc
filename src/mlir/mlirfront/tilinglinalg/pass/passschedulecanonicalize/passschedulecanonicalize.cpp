@@ -60,6 +60,16 @@ struct SliceParams {
     RankedTensorType resultType;
 };
 
+// Structure to hold partition tensor parameters
+struct PartitionParams {
+    RankedTensorType tensorType;
+    int64_t splitnum;
+    int64_t splitdim;
+    std::string hw_axis_owner;
+    std::string replicate_on;
+    std::string single_tile_owner;
+};
+
 // Collected module-level schedule info
 struct ModuleScheduleInfo {
     // Map from (col, row) to tile info
@@ -90,6 +100,9 @@ struct ModuleScheduleInfo {
     
     // Unique source tensor types (deduplicated)
     SmallVector<RankedTensorType> sourceTensorTypes;
+    
+    // Unique partition params (deduplicated)
+    SmallVector<PartitionParams> uniquePartitionParams;
     
     // Unique extract_slice params (deduplicated)
     SmallVector<SliceParams> uniqueSliceParams;
@@ -204,6 +217,42 @@ static void collectScheduleOps(ModuleOp moduleOp, ModuleScheduleInfo &info) {
         // Check by operation name for routing dialect ops
         if (op->getName().getStringRef() == "routing.partitiontensor") {
             info.partitionTensorOps.push_back(op);
+            
+            // Extract partition parameters
+            PartitionParams params;
+            if (op->getNumResults() > 0) {
+                params.tensorType = cast<RankedTensorType>(op->getResult(0).getType());
+            }
+            if (auto attr = op->getAttrOfType<IntegerAttr>("splitnum")) {
+                params.splitnum = attr.getInt();
+            }
+            if (auto attr = op->getAttrOfType<IntegerAttr>("splitdim")) {
+                params.splitdim = attr.getInt();
+            }
+            if (auto attr = op->getAttrOfType<StringAttr>("hw_axis_owner")) {
+                params.hw_axis_owner = attr.getValue().str();
+            }
+            if (auto attr = op->getAttrOfType<StringAttr>("replicate_on")) {
+                params.replicate_on = attr.getValue().str();
+            }
+            if (auto attr = op->getAttrOfType<StringAttr>("single_tile_owner")) {
+                params.single_tile_owner = attr.getValue().str();
+            }
+            
+            // Check if this partition config already exists (deduplicate)
+            bool found = false;
+            for (auto &existing : info.uniquePartitionParams) {
+                if (existing.tensorType == params.tensorType &&
+                    existing.splitnum == params.splitnum &&
+                    existing.splitdim == params.splitdim &&
+                    existing.hw_axis_owner == params.hw_axis_owner) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                info.uniquePartitionParams.push_back(params);
+            }
         } else if (op->getName().getStringRef().starts_with("routing.RoutingCreate")) {
             info.routingCreateOps.push_back(op);
         }
@@ -419,18 +468,67 @@ static void createCanonicalizedSchedule(
         return key;
     };
     
-    // 0a. Create source tensors (tensor.empty) - deduplicated by type
+    // Helper to create partition key
+    auto makePartitionKey = [&](const PartitionParams &p) -> std::string {
+        std::string key;
+        llvm::raw_string_ostream os(key);
+        os << p.tensorType << "_" << p.splitnum << "_" << p.splitdim << "_" << p.hw_axis_owner;
+        return key;
+    };
+    
+    // ==========================================================
+    // DATA FLOW: declare_data -> partitiontensor -> extract_slice
+    // ==========================================================
+    
+    // 0a. Create dfscheblueprint.declare_data for each unique source tensor type
     std::map<std::string, Value> sourceTensorMap;
     for (auto tensorType : info.sourceTensorTypes) {
         std::string key = makeTensorTypeKey(tensorType);
         if (sourceTensorMap.find(key) == sourceTensorMap.end()) {
-            auto emptyTensor = builder.create<tensor::EmptyOp>(
-                loc, tensorType.getShape(), tensorType.getElementType());
-            sourceTensorMap[key] = emptyTensor.getResult();
+            // Create declare_data operation using generic op builder
+            OperationState state(loc, "dfscheblueprint.declare_data");
+            state.addTypes({tensorType});
+            state.addAttribute("data_type", TypeAttr::get(tensorType));
+            Operation *declareDataOp = builder.create(state);
+            sourceTensorMap[key] = declareDataOp->getResult(0);
         }
     }
     
-    // 0b. Create extract_slice operations - deduplicated by (source_type, offsets, sizes)
+    // 0b. Create routing.partitiontensor for each unique partition config
+    std::map<std::string, Value> partitionedTensorMap;
+    for (const auto &params : info.uniquePartitionParams) {
+        std::string partKey = makePartitionKey(params);
+        if (partitionedTensorMap.find(partKey) == partitionedTensorMap.end()) {
+            // Find the source tensor
+            std::string srcKey = makeTensorTypeKey(params.tensorType);
+            Value sourceTensor;
+            if (sourceTensorMap.find(srcKey) != sourceTensorMap.end()) {
+                sourceTensor = sourceTensorMap[srcKey];
+            } else {
+                // Create declare_data if not found
+                OperationState state(loc, "dfscheblueprint.declare_data");
+                state.addTypes({params.tensorType});
+                state.addAttribute("data_type", TypeAttr::get(params.tensorType));
+                Operation *declareDataOp = builder.create(state);
+                sourceTensorMap[srcKey] = declareDataOp->getResult(0);
+                sourceTensor = declareDataOp->getResult(0);
+            }
+            
+            // Create routing.partitiontensor
+            OperationState partState(loc, "routing.partitiontensor");
+            partState.addOperands({sourceTensor});
+            partState.addTypes({params.tensorType});
+            partState.addAttribute("splitnum", builder.getI32IntegerAttr(params.splitnum));
+            partState.addAttribute("splitdim", builder.getI32IntegerAttr(params.splitdim));
+            partState.addAttribute("hw_axis_owner", builder.getStringAttr(params.hw_axis_owner));
+            partState.addAttribute("replicate_on", builder.getStringAttr(params.replicate_on));
+            partState.addAttribute("single_tile_owner", builder.getStringAttr(params.single_tile_owner));
+            Operation *partitionOp = builder.create(partState);
+            partitionedTensorMap[partKey] = partitionOp->getResult(0);
+        }
+    }
+    
+    // 0c. Create extract_slice operations - use partitioned tensor as source
     auto makeSliceKey = [&](const SliceParams &params) -> std::string {
         std::string key;
         llvm::raw_string_ostream os(key);
@@ -444,17 +542,31 @@ static void createCanonicalizedSchedule(
     for (const auto &params : info.uniqueSliceParams) {
         std::string sliceKey = makeSliceKey(params);
         if (sliceMap.find(sliceKey) == sliceMap.end()) {
-            // Find the source tensor
+            // Find the source tensor - try partitioned first, then direct source
             std::string srcKey = makeTensorTypeKey(params.sourceType);
             Value sourceTensor;
-            if (sourceTensorMap.find(srcKey) != sourceTensorMap.end()) {
-                sourceTensor = sourceTensorMap[srcKey];
-            } else {
-                // Create the source tensor if not found
-                auto emptyTensor = builder.create<tensor::EmptyOp>(
-                    loc, params.sourceType.getShape(), params.sourceType.getElementType());
-                sourceTensorMap[srcKey] = emptyTensor.getResult();
-                sourceTensor = emptyTensor.getResult();
+            
+            // Look for a partitioned tensor with matching source type
+            for (auto &[partKey, partValue] : partitionedTensorMap) {
+                if (partKey.find(srcKey) == 0) {
+                    sourceTensor = partValue;
+                    break;
+                }
+            }
+            
+            // If no partitioned tensor found, use direct source
+            if (!sourceTensor) {
+                if (sourceTensorMap.find(srcKey) != sourceTensorMap.end()) {
+                    sourceTensor = sourceTensorMap[srcKey];
+                } else {
+                    // Create declare_data if not found
+                    OperationState state(loc, "dfscheblueprint.declare_data");
+                    state.addTypes({params.sourceType});
+                    state.addAttribute("data_type", TypeAttr::get(params.sourceType));
+                    Operation *declareDataOp = builder.create(state);
+                    sourceTensorMap[srcKey] = declareDataOp->getResult(0);
+                    sourceTensor = declareDataOp->getResult(0);
+                }
             }
             
             // Create extract_slice with static offsets/sizes/strides
