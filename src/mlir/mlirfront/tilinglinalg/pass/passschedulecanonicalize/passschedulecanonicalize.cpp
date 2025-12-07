@@ -708,19 +708,47 @@ static void removeOldScheduleOps(ModuleScheduleInfo &info) {
         opsToRemove.push_back(op);
     }
     
-    // Erase dfschedule operations only (safe, no nested structure issues)
-    // The scf.execute_region, tensor.empty, extract_slice, routing ops
-    // will remain but are now unused - a separate cleanup pass can remove them
+    // Erase dfschedule operations (safe, no nested structure issues)
     for (auto *op : opsToRemove) {
         if (op->use_empty()) {
             op->erase();
         }
     }
+}
+
+// Remove scf.execute_region blocks and tensor.empty from func.func main
+// This is done separately to avoid memory corruption from nested op pointer invalidation
+static void removeExecuteRegionsFromMain(func::FuncOp mainFunc) {
+    if (!mainFunc) return;
     
-    // NOTE: We intentionally do NOT erase scf.execute_region, tensor.empty,
-    // tensor.extract_slice, and routing ops here to avoid memory corruption.
-    // These operations remain in the IR but are effectively dead code.
-    // A subsequent canonicalization or DCE pass can clean them up.
+    // Collect scf.execute_region ops to erase (fresh collection, not using old pointers)
+    SmallVector<Operation*> regionsToErase;
+    SmallVector<Operation*> tensorEmptyToErase;
+    
+    mainFunc.walk([&](Operation *op) {
+        if (isa<scf::ExecuteRegionOp>(op)) {
+            regionsToErase.push_back(op);
+        } else if (isa<tensor::EmptyOp>(op)) {
+            // Only collect tensor.empty that are direct children of main's block
+            if (op->getParentOp() == mainFunc.getOperation()) {
+                tensorEmptyToErase.push_back(op);
+            }
+        }
+    });
+    
+    // Erase scf.execute_region ops (this also erases all nested ops including extract_slice)
+    for (auto *op : regionsToErase) {
+        if (op->use_empty()) {
+            op->erase();
+        }
+    }
+    
+    // Erase tensor.empty ops
+    for (auto *op : tensorEmptyToErase) {
+        if (op->use_empty()) {
+            op->erase();
+        }
+    }
 }
 
 } // namespace
@@ -766,8 +794,12 @@ void ScheduleCanonicalizePass::runOnOperation() {
     
     createCanonicalizedSchedule(builder, loc, info, moduleOp, mainFunc);
     
-    // Step 6: Remove old distributed operations
+    // Step 6: Remove old distributed dfschedule operations
     removeOldScheduleOps(info);
+    
+    // Step 7: Remove scf.execute_region blocks (contains extract_slice, routing ops)
+    // and tensor.empty from func.func main
+    removeExecuteRegionsFromMain(mainFunc);
 }
 
 } // namespace mlir
