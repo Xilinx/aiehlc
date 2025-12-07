@@ -51,6 +51,15 @@ struct ShimDmaInfo {
     SmallVector<Value> ioHandles;
 };
 
+// Structure to hold tensor slice parameters
+struct SliceParams {
+    RankedTensorType sourceType;
+    SmallVector<int64_t, 4> offsets;
+    SmallVector<int64_t, 4> sizes;
+    SmallVector<int64_t, 4> strides;
+    RankedTensorType resultType;
+};
+
 // Collected module-level schedule info
 struct ModuleScheduleInfo {
     // Map from (col, row) to tile info
@@ -69,6 +78,19 @@ struct ModuleScheduleInfo {
     SmallVector<Operation*> startIoOps;
     SmallVector<Operation*> scheduleWaitOps;
     SmallVector<Operation*> dskernelReceiverOps;
+    
+    // Operations to move from func.func main
+    SmallVector<Operation*> tensorEmptyOps;
+    SmallVector<Operation*> extractSliceOps;
+    SmallVector<Operation*> partitionTensorOps;
+    SmallVector<Operation*> executeRegionOps;
+    SmallVector<Operation*> routingCreateOps;
+    
+    // Unique source tensor types (deduplicated)
+    SmallVector<RankedTensorType> sourceTensorTypes;
+    
+    // Unique extract_slice params (deduplicated)
+    SmallVector<SliceParams> uniqueSliceParams;
     
     // Events to wait for
     SmallVector<Value> allEvents;
@@ -132,6 +154,56 @@ static void collectScheduleOps(ModuleOp moduleOp, ModuleScheduleInfo &info) {
             info.scheduleWaitOps.push_back(op);
         } else if (auto receiver = dyn_cast<dfschedule::DSKernelReceiverOp>(op)) {
             info.dskernelReceiverOps.push_back(op);
+        } else if (auto emptyOp = dyn_cast<tensor::EmptyOp>(op)) {
+            // Collect tensor.empty ops
+            info.tensorEmptyOps.push_back(op);
+            auto tensorType = cast<RankedTensorType>(emptyOp.getType());
+            // Track unique tensor types
+            bool found = false;
+            for (auto &existingType : info.sourceTensorTypes) {
+                if (existingType == tensorType) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                info.sourceTensorTypes.push_back(tensorType);
+            }
+        } else if (auto extractSlice = dyn_cast<tensor::ExtractSliceOp>(op)) {
+            // Collect tensor.extract_slice ops
+            info.extractSliceOps.push_back(op);
+            
+            // Create slice params for deduplication
+            SliceParams params;
+            params.sourceType = cast<RankedTensorType>(extractSlice.getSource().getType());
+            for (auto o : extractSlice.getStaticOffsets()) params.offsets.push_back(o);
+            for (auto s : extractSlice.getStaticSizes()) params.sizes.push_back(s);
+            for (auto s : extractSlice.getStaticStrides()) params.strides.push_back(s);
+            params.resultType = cast<RankedTensorType>(extractSlice.getType());
+            
+            // Check if this slice params already exists
+            bool sliceFound = false;
+            for (auto &existing : info.uniqueSliceParams) {
+                if (existing.sourceType == params.sourceType &&
+                    existing.offsets == params.offsets &&
+                    existing.sizes == params.sizes) {
+                    sliceFound = true;
+                    break;
+                }
+            }
+            if (!sliceFound) {
+                info.uniqueSliceParams.push_back(params);
+            }
+        } else if (auto execRegion = dyn_cast<scf::ExecuteRegionOp>(op)) {
+            // Collect scf.execute_region ops
+            info.executeRegionOps.push_back(op);
+        }
+        
+        // Check by operation name for routing dialect ops
+        if (op->getName().getStringRef() == "routing.partitiontensor") {
+            info.partitionTensorOps.push_back(op);
+        } else if (op->getName().getStringRef().starts_with("routing.RoutingCreate")) {
+            info.routingCreateOps.push_back(op);
         }
     });
 }
@@ -306,6 +378,78 @@ static void createCanonicalizedSchedule(
     
     // All operations below are created INSIDE dfschedule.host
     // They only use constants and values defined within this block
+    
+    // Helper to create type key strings
+    auto makeTensorTypeKey = [](RankedTensorType t) -> std::string {
+        std::string key;
+        llvm::raw_string_ostream os(key);
+        os << t;
+        return key;
+    };
+    
+    // 0a. Create source tensors (tensor.empty) - deduplicated by type
+    std::map<std::string, Value> sourceTensorMap;
+    for (auto tensorType : info.sourceTensorTypes) {
+        std::string key = makeTensorTypeKey(tensorType);
+        if (sourceTensorMap.find(key) == sourceTensorMap.end()) {
+            auto emptyTensor = builder.create<tensor::EmptyOp>(
+                loc, tensorType.getShape(), tensorType.getElementType());
+            sourceTensorMap[key] = emptyTensor.getResult();
+        }
+    }
+    
+    // 0b. Create extract_slice operations - deduplicated by (source_type, offsets, sizes)
+    auto makeSliceKey = [&](const SliceParams &params) -> std::string {
+        std::string key;
+        llvm::raw_string_ostream os(key);
+        os << params.sourceType;
+        for (auto o : params.offsets) os << "_" << o;
+        for (auto s : params.sizes) os << "_" << s;
+        return key;
+    };
+    
+    std::map<std::string, Value> sliceMap;
+    for (const auto &params : info.uniqueSliceParams) {
+        std::string sliceKey = makeSliceKey(params);
+        if (sliceMap.find(sliceKey) == sliceMap.end()) {
+            // Find the source tensor
+            std::string srcKey = makeTensorTypeKey(params.sourceType);
+            Value sourceTensor;
+            if (sourceTensorMap.find(srcKey) != sourceTensorMap.end()) {
+                sourceTensor = sourceTensorMap[srcKey];
+            } else {
+                // Create the source tensor if not found
+                auto emptyTensor = builder.create<tensor::EmptyOp>(
+                    loc, params.sourceType.getShape(), params.sourceType.getElementType());
+                sourceTensorMap[srcKey] = emptyTensor.getResult();
+                sourceTensor = emptyTensor.getResult();
+            }
+            
+            // Create extract_slice with static offsets/sizes/strides
+            SmallVector<int64_t, 4> defaultStrides(params.offsets.size(), 1);
+            auto newSlice = builder.create<tensor::ExtractSliceOp>(
+                loc,
+                params.resultType,
+                sourceTensor,
+                ValueRange{}, ValueRange{}, ValueRange{},  // No dynamic offsets/sizes/strides
+                params.offsets,
+                params.sizes,
+                params.strides.empty() ? defaultStrides : params.strides);
+            
+            sliceMap[sliceKey] = newSlice.getResult();
+        }
+    }
+    
+    // 0c. Create dfschedule.declaretensor for each unique slice
+    std::map<std::string, Value> declaredMemrefs;
+    for (auto &[sliceKey, sliceValue] : sliceMap) {
+        auto sliceType = cast<RankedTensorType>(sliceValue.getType());
+        auto memrefType = MemRefType::get(sliceType.getShape(), sliceType.getElementType());
+        
+        auto declareTensor = builder.create<dfschedule::DeclareTensorOp>(
+            loc, memrefType, sliceValue);
+        declaredMemrefs[sliceKey] = declareTensor.getMemref();
+    }
     
     // 1. Create NEW deduplicated shim tile declarations
     std::map<TileKey, Value> shimTileMap;
@@ -564,12 +708,19 @@ static void removeOldScheduleOps(ModuleScheduleInfo &info) {
         opsToRemove.push_back(op);
     }
     
-    // Erase operations
+    // Erase dfschedule operations only (safe, no nested structure issues)
+    // The scf.execute_region, tensor.empty, extract_slice, routing ops
+    // will remain but are now unused - a separate cleanup pass can remove them
     for (auto *op : opsToRemove) {
         if (op->use_empty()) {
             op->erase();
         }
     }
+    
+    // NOTE: We intentionally do NOT erase scf.execute_region, tensor.empty,
+    // tensor.extract_slice, and routing ops here to avoid memory corruption.
+    // These operations remain in the IR but are effectively dead code.
+    // A subsequent canonicalization or DCE pass can clean them up.
 }
 
 } // namespace
