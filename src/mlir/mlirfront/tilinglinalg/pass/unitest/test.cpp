@@ -12,6 +12,7 @@
 #include "../passdmaphoptoroutinghw/passdmaphoptoroutinghw.h"
 #include "../passblueprinttoschedule/passblueprinttoschedule.h"
 #include "../passdmaphoptodfscheblueprint/passdmaphoptodfscheblueprint.h"
+#include "../passschedulecanonicalize/passschedulecanonicalize.h"
 #include "dmapmanager.h"
 #include "dmaphopmanager.h"
 #include "dfschedulemanager.h"
@@ -850,6 +851,11 @@ void routingtodfschedule() {
     // Stage 5: Convert dfscheblueprint to dfschedule (final schedule IR)
     pm.addPass(std::make_unique<mlir::BlueprintToSchedulePass>());
     options.label = "After BlueprintToSchedulePass:";
+    pm.addPass(mlir::createPrintIRPass(options));
+    
+    // Stage 6: Canonicalize schedule - merge kernel loads, deduplicate tiles, consolidate IOs
+    pm.addPass(std::make_unique<mlir::ScheduleCanonicalizePass>());
+    options.label = "After ScheduleCanonicalizePass:";
     pm.addPass(mlir::createPrintIRPass(options));
     
     // Run the pass pipeline
