@@ -58,6 +58,32 @@ def dfschedule_HostBlockOp : dfscheduleop<"host", [
   let hasCustomAssemblyFormat = 1;
 }
 
+// Launch/invoke a host block by symbol reference
+def dfschedule_LaunchHostOp : dfscheduleop<"launchhost", [
+    MemoryEffects<[MemRead, MemWrite]>
+  ]> {
+  let summary = "Launch/invoke a host schedule block by symbol reference";
+  let description = [{
+    This operation invokes a dfschedule.host block by its symbol name.
+    It has memory side effects as it triggers DMA and kernel execution.
+    
+    Example:
+    ```mlir
+    func.func @main() {
+      dfschedule.launchhost @host_canonicalized
+      return
+    }
+    
+    dfschedule.host @host_canonicalized {
+      // schedule operations
+    }
+    ```
+  }];
+  let arguments = (ins SymbolRefAttr:$host);
+  let results = (outs);
+  let assemblyFormat = "$host attr-dict";
+}
+
 // ============================================================================
 // CONFIG PHASE OPERATIONS
 // ============================================================================

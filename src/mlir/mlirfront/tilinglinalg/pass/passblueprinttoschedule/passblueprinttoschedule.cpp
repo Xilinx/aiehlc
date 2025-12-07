@@ -625,20 +625,20 @@ struct FlowTransferConversion : public OpConversionPattern<dfscheblueprint::Flow
         SmallVector<Attribute> computeKernelAttrs;
         for (size_t i = 0; i < coreTiles.size(); ++i) {
             computeKernelAttrs.push_back(SymbolRefAttr::get(rewriter.getContext(), "compute0"));
-        }
-        
+            }
+            
         // Create distributed_args from packet symbols
         SmallVector<Attribute> distArgsAttrs(packetSymbols.begin(), packetSymbols.end());
         
         // Create dfschedule.config.load_kernel_group
         auto loadKernelGroupOp = rewriter.create<dfschedule::LoadKernelGroupOp>(
-            loc,
+                loc,
             dfschedule::KernelGroupType::get(rewriter.getContext()),
             coreTiles,
             rewriter.getArrayAttr(calleeAttrs),
             rewriter.getArrayAttr(computeKernelAttrs),
             rewriter.getArrayAttr(distArgsAttrs));
-        
+            
         // Create dfschedule.schedule.launch_kernel_group
         auto launchKernelGroupOp = rewriter.create<dfschedule::LaunchKernelGroupOp>(
             loc,
@@ -653,7 +653,7 @@ struct FlowTransferConversion : public OpConversionPattern<dfscheblueprint::Flow
         
         // Create dfschedule.schedule.start_io for shim
         auto startIoOp = rewriter.create<dfschedule::StartIoOp>(
-            loc,
+                loc,
             dfschedule::EventType::get(rewriter.getContext()),
             createIoOp.getIoHandle(),
             getBdIdOp.getBdId());
