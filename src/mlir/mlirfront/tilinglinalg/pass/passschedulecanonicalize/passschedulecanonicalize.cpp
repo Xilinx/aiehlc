@@ -85,6 +85,8 @@ struct ModuleScheduleInfo {
     SmallVector<Operation*> partitionTensorOps;
     SmallVector<Operation*> executeRegionOps;
     SmallVector<Operation*> routingCreateOps;
+    SmallVector<Operation*> declareDataOps;        // dfscheblueprint.declare_data
+    SmallVector<Operation*> topLevelConstantOps;   // arith.constant at top level of main
     
     // Unique source tensor types (deduplicated)
     SmallVector<RankedTensorType> sourceTensorTypes;
@@ -204,6 +206,36 @@ static void collectScheduleOps(ModuleOp moduleOp, ModuleScheduleInfo &info) {
             info.partitionTensorOps.push_back(op);
         } else if (op->getName().getStringRef().starts_with("routing.RoutingCreate")) {
             info.routingCreateOps.push_back(op);
+        }
+        
+        // Collect dfscheblueprint.declare_data
+        if (op->getName().getStringRef() == "dfscheblueprint.declare_data") {
+            info.declareDataOps.push_back(op);
+            // Extract tensor type for source tensor creation
+            if (op->getNumResults() > 0) {
+                if (auto tensorType = dyn_cast<RankedTensorType>(op->getResult(0).getType())) {
+                    bool found = false;
+                    for (auto &existingType : info.sourceTensorTypes) {
+                        if (existingType == tensorType) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        info.sourceTensorTypes.push_back(tensorType);
+                    }
+                }
+            }
+        }
+        
+        // Collect top-level arith.constant in main function
+        if (auto constOp = dyn_cast<arith::ConstantOp>(op)) {
+            // Only collect if direct child of func.func (not nested in regions)
+            if (auto funcOp = dyn_cast<func::FuncOp>(op->getParentOp())) {
+                if (funcOp.getName() == "main") {
+                    info.topLevelConstantOps.push_back(op);
+                }
+            }
         }
     });
 }
@@ -716,35 +748,39 @@ static void removeOldScheduleOps(ModuleScheduleInfo &info) {
     }
 }
 
-// Remove scf.execute_region blocks and tensor.empty from func.func main
+// Remove scf.execute_region blocks, tensor.empty, declare_data, and constants from func.func main
 // This is done separately to avoid memory corruption from nested op pointer invalidation
 static void removeExecuteRegionsFromMain(func::FuncOp mainFunc) {
     if (!mainFunc) return;
     
-    // Collect scf.execute_region ops to erase (fresh collection, not using old pointers)
+    // Collect ops to erase (fresh collection, not using old pointers)
     SmallVector<Operation*> regionsToErase;
-    SmallVector<Operation*> tensorEmptyToErase;
+    SmallVector<Operation*> otherOpsToErase;
     
     mainFunc.walk([&](Operation *op) {
         if (isa<scf::ExecuteRegionOp>(op)) {
             regionsToErase.push_back(op);
-        } else if (isa<tensor::EmptyOp>(op)) {
-            // Only collect tensor.empty that are direct children of main's block
-            if (op->getParentOp() == mainFunc.getOperation()) {
-                tensorEmptyToErase.push_back(op);
+        } else if (op->getParentOp() == mainFunc.getOperation()) {
+            // Only collect ops that are direct children of main's block
+            if (isa<tensor::EmptyOp>(op)) {
+                otherOpsToErase.push_back(op);
+            } else if (isa<arith::ConstantOp>(op)) {
+                otherOpsToErase.push_back(op);
+            } else if (op->getName().getStringRef() == "dfscheblueprint.declare_data") {
+                otherOpsToErase.push_back(op);
             }
         }
     });
     
-    // Erase scf.execute_region ops (this also erases all nested ops including extract_slice)
+    // Erase scf.execute_region ops first (this also erases all nested ops)
     for (auto *op : regionsToErase) {
         if (op->use_empty()) {
             op->erase();
         }
     }
     
-    // Erase tensor.empty ops
-    for (auto *op : tensorEmptyToErase) {
+    // Erase other top-level ops (tensor.empty, arith.constant, declare_data)
+    for (auto *op : otherOpsToErase) {
         if (op->use_empty()) {
             op->erase();
         }
