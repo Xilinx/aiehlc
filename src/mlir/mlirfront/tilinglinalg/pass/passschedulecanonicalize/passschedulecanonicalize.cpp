@@ -53,12 +53,15 @@ struct ShimDmaInfo {
 
 // Structure to hold tensor slice parameters
 struct SliceParams {
+    size_t index;  // Unique index for this slice
     RankedTensorType sourceType;
     SmallVector<int64_t, 4> offsets;
     SmallVector<int64_t, 4> sizes;
     SmallVector<int64_t, 4> strides;
     RankedTensorType resultType;
-    size_t partitionIndex;  // Index of the partitiontensor this slice comes from
+    size_t partitionIndex;  // Index of the partitiontensor this slice ultimately comes from
+    int64_t parentSliceIndex;  // Index of parent slice if nested, -1 if directly from partition
+    bool isFromPartition;  // true if immediate source is partitiontensor, false if from another slice
 };
 
 // Structure to hold partition tensor parameters
@@ -187,57 +190,66 @@ static void collectScheduleOps(ModuleOp moduleOp, ModuleScheduleInfo &info) {
                 info.sourceTensorTypes.push_back(tensorType);
             }
         } else if (auto extractSlice = dyn_cast<tensor::ExtractSliceOp>(op)) {
-            // Collect tensor.extract_slice ops
+            // Collect tensor.extract_slice ops - NO deduplication!
+            // Each slice is unique even if it has same offsets/sizes
             info.extractSliceOps.push_back(op);
             
-            // Create slice params for deduplication
+            // Create slice params
             SliceParams params;
+            params.index = info.uniqueSliceParams.size();  // Unique index
             params.sourceType = cast<RankedTensorType>(extractSlice.getSource().getType());
             for (auto o : extractSlice.getStaticOffsets()) params.offsets.push_back(o);
             for (auto s : extractSlice.getStaticSizes()) params.sizes.push_back(s);
             for (auto s : extractSlice.getStaticStrides()) params.strides.push_back(s);
             params.resultType = cast<RankedTensorType>(extractSlice.getType());
+            params.partitionIndex = 0;
+            params.parentSliceIndex = -1;  // Default: no parent slice
+            params.isFromPartition = false;
             
-            // Find which partitiontensor this slice comes from
-            // Walk up the def-use chain to find the ultimate partitiontensor source
-            // (slices can be nested: partitiontensor -> slice1 -> slice2)
-            params.partitionIndex = 0;  // Default
+            // Check immediate source
             Value source = extractSlice.getSource();
-            
-            // Walk up the chain until we find a partitiontensor or reach the top
-            while (Operation *defOp = source.getDefiningOp()) {
+            if (Operation *defOp = source.getDefiningOp()) {
                 if (defOp->getName().getStringRef() == "routing.partitiontensor") {
-                    // Find the index of this partitiontensor in our collected list
+                    // Direct source is partitiontensor
+                    params.isFromPartition = true;
                     for (size_t i = 0; i < info.partitionTensorOps.size(); ++i) {
                         if (info.partitionTensorOps[i] == defOp) {
                             params.partitionIndex = i;
                             break;
                         }
                     }
-                    break;  // Found the partitiontensor, stop walking
                 } else if (auto parentSlice = dyn_cast<tensor::ExtractSliceOp>(defOp)) {
-                    // Source is another slice, walk up to its source
-                    source = parentSlice.getSource();
-                } else {
-                    // Not a partitiontensor or slice, stop walking
-                    break;
+                    // Direct source is another slice - find its index
+                    params.isFromPartition = false;
+                    for (size_t i = 0; i < info.extractSliceOps.size(); ++i) {
+                        if (info.extractSliceOps[i] == defOp) {
+                            params.parentSliceIndex = static_cast<int64_t>(i);
+                            break;
+                        }
+                    }
+                    
+                    // Walk up to find the ultimate partitiontensor
+                    Value walkSource = parentSlice.getSource();
+                    while (Operation *walkDefOp = walkSource.getDefiningOp()) {
+                        if (walkDefOp->getName().getStringRef() == "routing.partitiontensor") {
+                            for (size_t i = 0; i < info.partitionTensorOps.size(); ++i) {
+                                if (info.partitionTensorOps[i] == walkDefOp) {
+                                    params.partitionIndex = i;
+                                    break;
+                                }
+                            }
+                            break;
+                        } else if (auto grandParentSlice = dyn_cast<tensor::ExtractSliceOp>(walkDefOp)) {
+                            walkSource = grandParentSlice.getSource();
+                        } else {
+                            break;
+                        }
+                    }
                 }
             }
             
-            // Check if this slice params already exists (including partition index)
-            bool sliceFound = false;
-            for (auto &existing : info.uniqueSliceParams) {
-                if (existing.sourceType == params.sourceType &&
-                    existing.offsets == params.offsets &&
-                    existing.sizes == params.sizes &&
-                    existing.partitionIndex == params.partitionIndex) {
-                    sliceFound = true;
-                    break;
-                }
-            }
-            if (!sliceFound) {
-                info.uniqueSliceParams.push_back(params);
-            }
+            // Always add - no deduplication for slices
+            info.uniqueSliceParams.push_back(params);
         } else if (auto execRegion = dyn_cast<scf::ExecuteRegionOp>(op)) {
             // Collect scf.execute_region ops
             info.executeRegionOps.push_back(op);
@@ -548,27 +560,19 @@ static void createCanonicalizedSchedule(
         }
     }
     
-    // 0c. Create extract_slice operations - use partitioned tensor as source
-    // Key includes partitionIndex to differentiate slices from different partitions
-    auto makeSliceKey = [&](const SliceParams &params) -> std::string {
-        std::string key;
-        llvm::raw_string_ostream os(key);
-        os << "p" << params.partitionIndex << "_" << params.sourceType;
-        for (auto o : params.offsets) os << "_" << o;
-        for (auto s : params.sizes) os << "_" << s;
-        return key;
-    };
+    // 0c. Create extract_slice operations - maintain proper chain
+    // Each slice gets a unique entry, keyed by its index
+    // We process in order: first slices from partitions, then nested slices
     
-    std::map<std::string, Value> sliceMap;
+    std::map<size_t, Value> sliceMap;  // Map from slice index to created Value
+    
+    // First pass: create slices that come directly from partitiontensors
     for (const auto &params : info.uniqueSliceParams) {
-        std::string sliceKey = makeSliceKey(params);
-        if (sliceMap.find(sliceKey) == sliceMap.end()) {
+        if (params.isFromPartition) {
             Value sourceTensor;
             
             // Find the partitioned tensor by index
-            // The partitionedTensorMap key format is: index_tensorType_splitnum_splitdim_hw_axis_owner
             for (auto &[partKey, partValue] : partitionedTensorMap) {
-                // Check if this partition key starts with the correct index
                 std::string indexPrefix = std::to_string(params.partitionIndex) + "_";
                 if (partKey.find(indexPrefix) == 0) {
                     sourceTensor = partValue;
@@ -576,46 +580,68 @@ static void createCanonicalizedSchedule(
                 }
             }
             
-            // If no partitioned tensor found, use direct source
-            if (!sourceTensor) {
-                std::string srcKey = makeTensorTypeKey(params.sourceType);
-                if (sourceTensorMap.find(srcKey) != sourceTensorMap.end()) {
-                    sourceTensor = sourceTensorMap[srcKey];
-                } else {
-                    // Create declare_data if not found
-                    OperationState state(loc, "dfscheblueprint.declare_data");
-                    state.addTypes({params.sourceType});
-                    state.addAttribute("data_type", TypeAttr::get(params.sourceType));
-                    Operation *declareDataOp = builder.create(state);
-                    sourceTensorMap[srcKey] = declareDataOp->getResult(0);
-                    sourceTensor = declareDataOp->getResult(0);
-                }
+            if (sourceTensor) {
+                SmallVector<int64_t, 4> defaultStrides(params.offsets.size(), 1);
+                auto newSlice = builder.create<tensor::ExtractSliceOp>(
+                    loc,
+                    params.resultType,
+                    sourceTensor,
+                    ValueRange{}, ValueRange{}, ValueRange{},
+                    params.offsets,
+                    params.sizes,
+                    params.strides.empty() ? defaultStrides : params.strides);
+                sliceMap[params.index] = newSlice.getResult();
             }
-            
-            // Create extract_slice with static offsets/sizes/strides
-            SmallVector<int64_t, 4> defaultStrides(params.offsets.size(), 1);
-            auto newSlice = builder.create<tensor::ExtractSliceOp>(
-                loc,
-                params.resultType,
-                sourceTensor,
-                ValueRange{}, ValueRange{}, ValueRange{},  // No dynamic offsets/sizes/strides
-                params.offsets,
-                params.sizes,
-                params.strides.empty() ? defaultStrides : params.strides);
-            
-            sliceMap[sliceKey] = newSlice.getResult();
         }
     }
     
-    // 0c. Create dfschedule.declaretensor for each unique slice
-    std::map<std::string, Value> declaredMemrefs;
-    for (auto &[sliceKey, sliceValue] : sliceMap) {
-        auto sliceType = cast<RankedTensorType>(sliceValue.getType());
-        auto memrefType = MemRefType::get(sliceType.getShape(), sliceType.getElementType());
-        
-        auto declareTensor = builder.create<dfschedule::DeclareTensorOp>(
-            loc, memrefType, sliceValue);
-        declaredMemrefs[sliceKey] = declareTensor.getMemref();
+    // Second pass: create nested slices (from other slices)
+    // May need multiple passes if there are deeply nested slices
+    bool progress = true;
+    while (progress) {
+        progress = false;
+        for (const auto &params : info.uniqueSliceParams) {
+            // Skip if already created or if it's directly from partition
+            if (sliceMap.find(params.index) != sliceMap.end() || params.isFromPartition) {
+                continue;
+            }
+            
+            // Check if parent slice is ready
+            if (params.parentSliceIndex >= 0) {
+                auto parentIt = sliceMap.find(static_cast<size_t>(params.parentSliceIndex));
+                if (parentIt != sliceMap.end()) {
+                    // Parent is ready, create this slice
+                    Value sourceTensor = parentIt->second;
+                    SmallVector<int64_t, 4> defaultStrides(params.offsets.size(), 1);
+                    auto newSlice = builder.create<tensor::ExtractSliceOp>(
+                        loc,
+                        params.resultType,
+                        sourceTensor,
+                        ValueRange{}, ValueRange{}, ValueRange{},
+                        params.offsets,
+                        params.sizes,
+                        params.strides.empty() ? defaultStrides : params.strides);
+                    sliceMap[params.index] = newSlice.getResult();
+                    progress = true;
+                }
+            }
+        }
+    }
+    
+    
+    // 0d. Create dfschedule.declaretensor for each slice
+    std::map<size_t, Value> declaredMemrefs;  // Map from slice index to memref
+    for (const auto &params : info.uniqueSliceParams) {
+        auto it = sliceMap.find(params.index);
+        if (it != sliceMap.end()) {
+            Value sliceValue = it->second;
+            auto sliceType = cast<RankedTensorType>(sliceValue.getType());
+            auto memrefType = MemRefType::get(sliceType.getShape(), sliceType.getElementType());
+            
+            auto declareTensor = builder.create<dfschedule::DeclareTensorOp>(
+                loc, memrefType, sliceValue);
+            declaredMemrefs[params.index] = declareTensor.getMemref();
+        }
     }
     
     // 1. Create NEW deduplicated shim tile declarations
