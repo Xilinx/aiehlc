@@ -74,7 +74,7 @@ def routing_movedatabyio : routingop<"routingmovedatabyio"> {
 
 	let results = (outs
 		I32:$output);
-	let assemblyFormat = " `gatherout_tensorin` `=` $gatherout_tensorin `,` `hwiowithtarget` `=` $hwiowithtarget `:` type($gatherout_tensorin) `,` type($hwiowithtarget)  attr-dict`->` type($output)";
+	let assemblyFormat = " `tensordata` `=` $gatherout_tensorin `,` `hwiowithtarget` `=` $hwiowithtarget `:` type($gatherout_tensorin) `,` type($hwiowithtarget)  attr-dict`->` type($output)";
 }
 
 def routing_routinggatherout : routingop<"routingroutinggatherout"> {

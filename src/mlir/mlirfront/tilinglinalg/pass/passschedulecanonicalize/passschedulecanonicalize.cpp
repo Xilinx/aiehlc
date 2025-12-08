@@ -58,10 +58,12 @@ struct SliceParams {
     SmallVector<int64_t, 4> sizes;
     SmallVector<int64_t, 4> strides;
     RankedTensorType resultType;
+    size_t partitionIndex;  // Index of the partitiontensor this slice comes from
 };
 
 // Structure to hold partition tensor parameters
 struct PartitionParams {
+    size_t index;  // Unique index to distinguish partitions with same params but different flows
     RankedTensorType tensorType;
     int64_t splitnum;
     int64_t splitdim;
@@ -196,12 +198,39 @@ static void collectScheduleOps(ModuleOp moduleOp, ModuleScheduleInfo &info) {
             for (auto s : extractSlice.getStaticStrides()) params.strides.push_back(s);
             params.resultType = cast<RankedTensorType>(extractSlice.getType());
             
-            // Check if this slice params already exists
+            // Find which partitiontensor this slice comes from
+            // Walk up the def-use chain to find the ultimate partitiontensor source
+            // (slices can be nested: partitiontensor -> slice1 -> slice2)
+            params.partitionIndex = 0;  // Default
+            Value source = extractSlice.getSource();
+            
+            // Walk up the chain until we find a partitiontensor or reach the top
+            while (Operation *defOp = source.getDefiningOp()) {
+                if (defOp->getName().getStringRef() == "routing.partitiontensor") {
+                    // Find the index of this partitiontensor in our collected list
+                    for (size_t i = 0; i < info.partitionTensorOps.size(); ++i) {
+                        if (info.partitionTensorOps[i] == defOp) {
+                            params.partitionIndex = i;
+                            break;
+                        }
+                    }
+                    break;  // Found the partitiontensor, stop walking
+                } else if (auto parentSlice = dyn_cast<tensor::ExtractSliceOp>(defOp)) {
+                    // Source is another slice, walk up to its source
+                    source = parentSlice.getSource();
+                } else {
+                    // Not a partitiontensor or slice, stop walking
+                    break;
+                }
+            }
+            
+            // Check if this slice params already exists (including partition index)
             bool sliceFound = false;
             for (auto &existing : info.uniqueSliceParams) {
                 if (existing.sourceType == params.sourceType &&
                     existing.offsets == params.offsets &&
-                    existing.sizes == params.sizes) {
+                    existing.sizes == params.sizes &&
+                    existing.partitionIndex == params.partitionIndex) {
                     sliceFound = true;
                     break;
                 }
@@ -218,8 +247,11 @@ static void collectScheduleOps(ModuleOp moduleOp, ModuleScheduleInfo &info) {
         if (op->getName().getStringRef() == "routing.partitiontensor") {
             info.partitionTensorOps.push_back(op);
             
-            // Extract partition parameters
+            // Extract partition parameters - NO deduplication here!
+            // Each execute_region has its own partitiontensor representing different data flows
+            // (e.g., producer flow vs consumer flow may have same partition params but different purposes)
             PartitionParams params;
+            params.index = info.uniquePartitionParams.size();  // Unique index for each partition
             if (op->getNumResults() > 0) {
                 params.tensorType = cast<RankedTensorType>(op->getResult(0).getType());
             }
@@ -239,20 +271,8 @@ static void collectScheduleOps(ModuleOp moduleOp, ModuleScheduleInfo &info) {
                 params.single_tile_owner = attr.getValue().str();
             }
             
-            // Check if this partition config already exists (deduplicate)
-            bool found = false;
-            for (auto &existing : info.uniquePartitionParams) {
-                if (existing.tensorType == params.tensorType &&
-                    existing.splitnum == params.splitnum &&
-                    existing.splitdim == params.splitdim &&
-                    existing.hw_axis_owner == params.hw_axis_owner) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                info.uniquePartitionParams.push_back(params);
-            }
+            // Always add - each partitiontensor represents a unique data flow
+            info.uniquePartitionParams.push_back(params);
         } else if (op->getName().getStringRef().starts_with("routing.RoutingCreate")) {
             info.routingCreateOps.push_back(op);
         }
@@ -468,11 +488,11 @@ static void createCanonicalizedSchedule(
         return key;
     };
     
-    // Helper to create partition key
+    // Helper to create partition key - include index for uniqueness
     auto makePartitionKey = [&](const PartitionParams &p) -> std::string {
         std::string key;
         llvm::raw_string_ostream os(key);
-        os << p.tensorType << "_" << p.splitnum << "_" << p.splitdim << "_" << p.hw_axis_owner;
+        os << p.index << "_" << p.tensorType << "_" << p.splitnum << "_" << p.splitdim << "_" << p.hw_axis_owner;
         return key;
     };
     
@@ -529,10 +549,11 @@ static void createCanonicalizedSchedule(
     }
     
     // 0c. Create extract_slice operations - use partitioned tensor as source
+    // Key includes partitionIndex to differentiate slices from different partitions
     auto makeSliceKey = [&](const SliceParams &params) -> std::string {
         std::string key;
         llvm::raw_string_ostream os(key);
-        os << params.sourceType;
+        os << "p" << params.partitionIndex << "_" << params.sourceType;
         for (auto o : params.offsets) os << "_" << o;
         for (auto s : params.sizes) os << "_" << s;
         return key;
@@ -542,13 +563,14 @@ static void createCanonicalizedSchedule(
     for (const auto &params : info.uniqueSliceParams) {
         std::string sliceKey = makeSliceKey(params);
         if (sliceMap.find(sliceKey) == sliceMap.end()) {
-            // Find the source tensor - try partitioned first, then direct source
-            std::string srcKey = makeTensorTypeKey(params.sourceType);
             Value sourceTensor;
             
-            // Look for a partitioned tensor with matching source type
+            // Find the partitioned tensor by index
+            // The partitionedTensorMap key format is: index_tensorType_splitnum_splitdim_hw_axis_owner
             for (auto &[partKey, partValue] : partitionedTensorMap) {
-                if (partKey.find(srcKey) == 0) {
+                // Check if this partition key starts with the correct index
+                std::string indexPrefix = std::to_string(params.partitionIndex) + "_";
+                if (partKey.find(indexPrefix) == 0) {
                     sourceTensor = partValue;
                     break;
                 }
@@ -556,6 +578,7 @@ static void createCanonicalizedSchedule(
             
             // If no partitioned tensor found, use direct source
             if (!sourceTensor) {
+                std::string srcKey = makeTensorTypeKey(params.sourceType);
                 if (sourceTensorMap.find(srcKey) != sourceTensorMap.end()) {
                     sourceTensor = sourceTensorMap[srcKey];
                 } else {
