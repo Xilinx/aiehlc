@@ -401,6 +401,7 @@ struct DmaBdParams {
     int64_t packetId;
     int64_t nextBd;
     int bdIndex;
+    int64_t sliceIndex;  // Index into uniqueSliceParams/declaredMemrefs for the buffer
 };
 
 // Structure to hold IO config parameters
@@ -451,6 +452,24 @@ static void createCanonicalizedSchedule(
                 params.packetId = dmaBd.getPacketId();
                 params.nextBd = dmaBd.getNextBd();
                 params.bdIndex = shimBdCounter[key]++;
+                params.sliceIndex = -1;  // Default: no slice found
+                
+                // Trace buffer back to find the slice index
+                // Buffer -> DeclareTensorOp -> ExtractSliceOp
+                Value buffer = dmaBd.getBuffer();
+                if (auto declareTensor = buffer.getDefiningOp<dfschedule::DeclareTensorOp>()) {
+                    Value tensorVal = declareTensor.getTensor();
+                    if (auto extractSlice = tensorVal.getDefiningOp<tensor::ExtractSliceOp>()) {
+                        // Find which slice index this corresponds to
+                        for (size_t i = 0; i < info.extractSliceOps.size(); ++i) {
+                            if (info.extractSliceOps[i] == extractSlice.getOperation()) {
+                                params.sliceIndex = static_cast<int64_t>(i);
+                                break;
+                            }
+                        }
+                    }
+                }
+                
                 allDmaBdParams.push_back(params);
             }
         }
@@ -629,9 +648,30 @@ static void createCanonicalizedSchedule(
     }
     
     
-    // 0d. Create dfschedule.declaretensor for each slice
+    // Identify leaf slices (slices with no children)
+    std::set<size_t> slicesWithChildren;
+    for (const auto &params : info.uniqueSliceParams) {
+        if (params.parentSliceIndex >= 0) {
+            slicesWithChildren.insert(static_cast<size_t>(params.parentSliceIndex));
+        }
+    }
+    
+    // Build mapping from parent slice to its child slices
+    std::map<size_t, SmallVector<size_t>> sliceChildren;
+    for (const auto &params : info.uniqueSliceParams) {
+        if (params.parentSliceIndex >= 0) {
+            sliceChildren[static_cast<size_t>(params.parentSliceIndex)].push_back(params.index);
+        }
+    }
+    
+    // 0d. Create dfschedule.declaretensor ONLY for leaf slices (no children)
     std::map<size_t, Value> declaredMemrefs;  // Map from slice index to memref
     for (const auto &params : info.uniqueSliceParams) {
+        // Skip if this slice has children - only create declaretensor for leaf slices
+        if (slicesWithChildren.count(params.index) > 0) {
+            continue;
+        }
+        
         auto it = sliceMap.find(params.index);
         if (it != sliceMap.end()) {
             Value sliceValue = it->second;
@@ -642,6 +682,25 @@ static void createCanonicalizedSchedule(
                 loc, memrefType, sliceValue);
             declaredMemrefs[params.index] = declareTensor.getMemref();
         }
+    }
+    
+    // Build mapping from intermediate slice to its leaf descendants
+    // This is used to map DMA BD (which references intermediate slice) to leaf slices
+    std::map<size_t, SmallVector<size_t>> sliceToLeafDescendants;
+    std::function<SmallVector<size_t>(size_t)> getLeafDescendants = [&](size_t idx) -> SmallVector<size_t> {
+        if (slicesWithChildren.count(idx) == 0) {
+            // This is a leaf slice
+            return {idx};
+        }
+        SmallVector<size_t> leaves;
+        for (size_t childIdx : sliceChildren[idx]) {
+            auto childLeaves = getLeafDescendants(childIdx);
+            leaves.append(childLeaves.begin(), childLeaves.end());
+        }
+        return leaves;
+    };
+    for (const auto &params : info.uniqueSliceParams) {
+        sliceToLeafDescendants[params.index] = getLeafDescendants(params.index);
     }
     
     // 1. Create NEW deduplicated shim tile declarations
@@ -680,40 +739,65 @@ static void createCanonicalizedSchedule(
     std::map<TileKey, SmallVector<Value>> shimBdHandles;
     
     // 4. Create DMA BD configurations for shim tiles
+    // If the traced slice is an intermediate slice, create DMA BDs for all its leaf descendants
+    int bdIndexCounter = 0;
     for (const auto &params : allDmaBdParams) {
         if (shimTileMap.find(params.shimKey) == shimTileMap.end()) continue;
         Value shimTile = shimTileMap[params.shimKey];
         
-        // Create or reuse buffer
-        std::string bufKey = makeBufferKey(params.bufferType);
-        Value buffer;
-        if (bufferMap.find(bufKey) == bufferMap.end()) {
-            // Create memref.alloc for the buffer
-            auto memrefType = cast<MemRefType>(params.bufferType);
-            buffer = builder.create<memref::AllocOp>(loc, memrefType);
-            bufferMap[bufKey] = buffer;
-        } else {
-            buffer = bufferMap[bufKey];
+        // Get the leaf descendants for this slice
+        SmallVector<size_t> leafIndices;
+        if (params.sliceIndex >= 0) {
+            auto it = sliceToLeafDescendants.find(static_cast<size_t>(params.sliceIndex));
+            if (it != sliceToLeafDescendants.end()) {
+                leafIndices = it->second;
+            }
         }
         
-        // Create BD ID constant
-        auto bdIdConst = builder.create<arith::ConstantOp>(
-            loc, builder.getI32Type(), builder.getI32IntegerAttr(params.bdIndex));
+        // If no leaf indices found, try direct lookup
+        if (leafIndices.empty() && params.sliceIndex >= 0) {
+            leafIndices.push_back(static_cast<size_t>(params.sliceIndex));
+        }
         
-        // Create DMA BD config
-        auto dmaBdOp = builder.create<dfschedule::ConfigDmaBdOp>(
-            loc,
-            dfschedule::BdHandleType::get(builder.getContext()),
-            buffer,
-            shimTile,
-            bdIdConst.getResult(),
-            builder.getI32IntegerAttr(params.offset),
-            builder.getI32IntegerAttr(params.len),
-            builder.getBoolAttr(params.enablePacket),
-            builder.getI32IntegerAttr(params.packetId),
-            builder.getI32IntegerAttr(params.nextBd));
-        
-        shimBdHandles[params.shimKey].push_back(dmaBdOp.getBdHandle());
+        // Create a DMA BD for each leaf slice
+        for (size_t leafIdx : leafIndices) {
+            Value buffer;
+            auto memIt = declaredMemrefs.find(leafIdx);
+            if (memIt != declaredMemrefs.end()) {
+                buffer = memIt->second;
+            }
+            
+            // Fallback: create or reuse buffer if not found
+            if (!buffer) {
+                std::string bufKey = makeBufferKey(params.bufferType);
+                if (bufferMap.find(bufKey) == bufferMap.end()) {
+                    auto memrefType = cast<MemRefType>(params.bufferType);
+                    buffer = builder.create<memref::AllocOp>(loc, memrefType);
+                    bufferMap[bufKey] = buffer;
+                } else {
+                    buffer = bufferMap[bufKey];
+                }
+            }
+            
+            // Create BD ID constant
+            auto bdIdConst = builder.create<arith::ConstantOp>(
+                loc, builder.getI32Type(), builder.getI32IntegerAttr(bdIndexCounter++));
+            
+            // Create DMA BD config
+            auto dmaBdOp = builder.create<dfschedule::ConfigDmaBdOp>(
+                loc,
+                dfschedule::BdHandleType::get(builder.getContext()),
+                buffer,
+                shimTile,
+                bdIdConst.getResult(),
+                builder.getI32IntegerAttr(params.offset),
+                builder.getI32IntegerAttr(params.len),
+                builder.getBoolAttr(params.enablePacket),
+                builder.getI32IntegerAttr(params.packetId),
+                builder.getI32IntegerAttr(params.nextBd));
+            
+            shimBdHandles[params.shimKey].push_back(dmaBdOp.getBdHandle());
+        }
     }
     
     // 5. Create IO configurations for shim tiles
@@ -1000,4 +1084,5 @@ void ScheduleCanonicalizePass::runOnOperation() {
 }
 
 } // namespace mlir
+
 
