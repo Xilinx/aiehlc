@@ -18,15 +18,64 @@ using namespace mlir;
 
 namespace mlir {
 
+// Helper to get EmitC opaque type string from MLIR element type
+static std::string getEmitCTypeString(Type elemType) {
+    if (elemType.isInteger(8)) return "int8_t";
+    if (elemType.isInteger(16)) return "int16_t";
+    if (elemType.isInteger(32)) return "int32_t";
+    if (elemType.isInteger(64)) return "int64_t";
+    if (elemType.isF32()) return "float";
+    if (elemType.isF64()) return "double";
+    return "uint8_t";
+}
+
+// Helper to build array type string with dimensions
+static std::string buildArrayTypeString(const std::string &baseType, ArrayRef<int64_t> shape) {
+    std::string result = baseType;
+    for (auto dim : shape) {
+        result += "[" + std::to_string(dim) + "]";
+    }
+    return result;
+}
+
+// Helper to build initializer string from dense attribute
+static std::string buildInitializerString(DenseElementsAttr denseAttr, Type elemType) {
+    std::ostringstream initStream;
+    initStream << "{";
+    bool first = true;
+    
+    if (elemType.isIntOrIndex()) {
+        for (auto val : denseAttr.getValues<llvm::APInt>()) {
+            if (!first) initStream << ", ";
+            first = false;
+            initStream << val.getSExtValue();
+        }
+    } else if (elemType.isF32()) {
+        for (auto val : denseAttr.getValues<llvm::APFloat>()) {
+            if (!first) initStream << ", ";
+            first = false;
+            initStream << val.convertToFloat();
+        }
+    } else if (elemType.isF64()) {
+        for (auto val : denseAttr.getValues<llvm::APFloat>()) {
+            if (!first) initStream << ", ";
+            first = false;
+            initStream << val.convertToDouble();
+        }
+    }
+    initStream << "}";
+    return initStream.str();
+}
+
 void DfscheduleToApiPass::runOnOperation() {
     ModuleOp moduleOp = getOperation();
     OpBuilder builder(moduleOp.getContext());
     auto loc = builder.getUnknownLoc();
     
-    // ===== PHASE 1: Generate EmitC for dense constants (just at module level) =====
+    // ===== PHASE 1: Convert dense constants to emitc.global =====
     SmallVector<arith::ConstantOp> denseConstantOps;
     
-    // Only collect top-level constants in func.func main
+    // Collect top-level constants in func.func main
     if (auto mainFunc = moduleOp.lookupSymbol<func::FuncOp>("main")) {
         for (auto &op : mainFunc.getBody().front()) {
             if (auto constOp = dyn_cast<arith::ConstantOp>(&op)) {
@@ -48,61 +97,18 @@ void DfscheduleToApiPass::runOnOperation() {
         if (!tensorType) continue;
         
         std::string arrayName = "g_data_array_" + std::to_string(arrayIndex++);
-        
-        std::string cTypeStr;
         Type elemType = tensorType.getElementType();
-        if (elemType.isInteger(8)) cTypeStr = "int8_t";
-        else if (elemType.isInteger(16)) cTypeStr = "int16_t";
-        else if (elemType.isInteger(32)) cTypeStr = "int32_t";
-        else if (elemType.isInteger(64)) cTypeStr = "int64_t";
-        else if (elemType.isF32()) cTypeStr = "float";
-        else if (elemType.isF64()) cTypeStr = "double";
-        else cTypeStr = "uint8_t";
+        std::string cTypeStr = getEmitCTypeString(elemType);
+        std::string arrayTypeStr = buildArrayTypeString(cTypeStr, tensorType.getShape());
+        std::string initStr = buildInitializerString(denseAttr, elemType);
         
-        std::string dimsStr;
-        for (auto dim : tensorType.getShape()) {
-            dimsStr += "[" + std::to_string(dim) + "]";
-        }
-        
-        std::ostringstream initStream;
-        initStream << "{";
-        bool first = true;
-        
-        if (elemType.isIntOrIndex()) {
-            for (auto val : denseAttr.getValues<llvm::APInt>()) {
-                if (!first) initStream << ", ";
-                first = false;
-                initStream << val.getSExtValue();
-            }
-        } else if (elemType.isF32()) {
-            for (auto val : denseAttr.getValues<llvm::APFloat>()) {
-                if (!first) initStream << ", ";
-                first = false;
-                initStream << val.convertToFloat();
-            }
-        } else if (elemType.isF64()) {
-            for (auto val : denseAttr.getValues<llvm::APFloat>()) {
-                if (!first) initStream << ", ";
-                first = false;
-                initStream << val.convertToDouble();
-            }
-        }
-        initStream << "}";
-        
-        std::string verbatimCode = "static const " + cTypeStr + " " + arrayName + dimsStr + " = " + initStream.str() + ";";
+        // Create emitc.verbatim for the global array declaration
+        std::string verbatimCode = "static const " + cTypeStr + " " + arrayName + 
+            buildArrayTypeString("", tensorType.getShape()) + " = " + initStr + ";";
         builder.create<emitc::VerbatimOp>(loc, builder.getStringAttr(verbatimCode));
     }
     
-    // ===== PHASE 2: Create hostruntime() function =====
-    auto hostRuntimeFuncType = builder.getFunctionType({}, {});
-    if (!moduleOp.lookupSymbol<func::FuncOp>("hostruntime")) {
-        builder.setInsertionPointToStart(moduleOp.getBody());
-        auto hostRuntimeFunc = builder.create<func::FuncOp>(loc, "hostruntime", hostRuntimeFuncType);
-        hostRuntimeFunc.setPrivate();
-    }
-    
-    // ===== PHASE 3: Replace launchhost with call to hostruntime =====
-    // Collect first, then process
+    // ===== PHASE 2: Replace launchhost with emitc.call_opaque to hostruntime =====
     SmallVector<Operation*> launchHostOps;
     moduleOp.walk([&](Operation *op) {
         if (op->getName().getStringRef() == "dfschedule.launchhost") {
@@ -112,13 +118,19 @@ void DfscheduleToApiPass::runOnOperation() {
     
     for (auto *op : launchHostOps) {
         builder.setInsertionPoint(op);
-        if (auto hostRuntimeFunc = moduleOp.lookupSymbol<func::FuncOp>("hostruntime")) {
-            builder.create<func::CallOp>(loc, hostRuntimeFunc, ValueRange{});
-        }
+        // Use emitc.call_opaque to call hostruntime()
+        builder.create<emitc::CallOpaqueOp>(
+            loc,
+            /*resultTypes=*/TypeRange{},
+            /*callee=*/builder.getStringAttr("hostruntime"),
+            /*args=*/nullptr,
+            /*templateArgs=*/nullptr,
+            /*operands=*/ValueRange{}
+        );
         op->erase();
     }
     
-    // ===== PHASE 4: Convert dfschedule.dskernel_receiver to EmitC kernel function =====
+    // ===== PHASE 3: Convert dfschedule.dskernel_receiver to emitc.func =====
     SmallVector<Operation*> dskernelOps;
     for (auto &op : moduleOp.getBody()->getOperations()) {
         if (op.getName().getStringRef() == "dfschedule.dskernel_receiver") {
@@ -133,17 +145,41 @@ void DfscheduleToApiPass::runOnOperation() {
             kernelName = symNameAttr.getValue().str();
         }
         
-        // Create __global__ void kernel function using emitc.verbatim
         builder.setInsertionPoint(op);
-        std::string kernelCode = "__global__ void " + kernelName + "() {\n    // AIE kernel implementation\n}";
-        builder.create<emitc::VerbatimOp>(loc, builder.getStringAttr(kernelCode));
+        
+        // Create emitc.func for the kernel
+        auto voidType = emitc::OpaqueType::get(builder.getContext(), "void");
+        auto funcType = builder.getFunctionType({}, {});
+        
+        auto emitcFunc = builder.create<emitc::FuncOp>(
+            loc,
+            kernelName,
+            funcType
+        );
+        
+        // Add __global__ specifier as an attribute
+        emitcFunc->setAttr("specifiers", builder.getStrArrayAttr({"__global__"}));
+        
+        // Create function body with a return
+        Block *entryBlock = emitcFunc.addEntryBlock();
+        builder.setInsertionPointToStart(entryBlock);
+        
+        // Add a comment as emitc.call_opaque placeholder
+        builder.create<emitc::CallOpaqueOp>(
+            loc,
+            TypeRange{},
+            builder.getStringAttr("/* AIE kernel implementation */"),
+            nullptr, nullptr, ValueRange{}
+        );
+        
+        // emitc::ReturnOp takes optional single Value, not ValueRange
+        builder.create<emitc::ReturnOp>(loc, Value{});
         
         // Erase the original dskernel_receiver op
         op->erase();
     }
     
-    // ===== PHASE 5: Erase dfschedule.host at module level =====
-    // Collect first to avoid iterator invalidation
+    // ===== PHASE 4: Erase dfschedule.host at module level =====
     SmallVector<Operation*> hostOps;
     for (auto &op : moduleOp.getBody()->getOperations()) {
         if (op.getName().getStringRef() == "dfschedule.host") {
@@ -154,27 +190,28 @@ void DfscheduleToApiPass::runOnOperation() {
         op->erase();
     }
     
-    // ===== PHASE 6: Clean up func.func main - keep only return and call =====
+    // ===== PHASE 5: Clean up func.func main - keep return and emitc ops =====
     func::FuncOp mainFunc = moduleOp.lookupSymbol<func::FuncOp>("main");
     if (!mainFunc || mainFunc.getBody().empty()) return;
     
     Block &mainBlock = mainFunc.getBody().front();
     
-    // Repeatedly find and erase ops until only return and call remain
-    // This handles the def-use chain by erasing users before defs
+    // Repeatedly find and erase ops until only return and emitc ops remain
     bool changed = true;
     while (changed) {
         changed = false;
         for (auto &op : llvm::make_early_inc_range(mainBlock)) {
-            // Keep return and call ops
-            if (isa<func::ReturnOp>(&op) || isa<func::CallOp>(&op))
+            // Keep return, call, and emitc ops
+            if (isa<func::ReturnOp>(&op) || 
+                isa<func::CallOp>(&op) ||
+                op.getName().getStringRef().starts_with("emitc."))
                 continue;
             
             // Check if all users are already erased (op has no uses)
             if (op.use_empty()) {
                 op.erase();
                 changed = true;
-                break;  // Restart iteration since we modified the block
+                break;
             }
         }
     }
