@@ -292,7 +292,7 @@ ModuleOp routingmanager::ops_test(MLIRContext* ctx, int totalN) {
 }
 
 ModuleOp routingmanager::ops_testNew(MLIRContext* ctx, int totalN) {
-    const int hwrowused= 4, hwcolused=4;
+    const int hwrowused= 2, hwcolused=2;
     OpBuilder builder(ctx);
     mlir::ModuleOp m = ModuleOp::create(builder.getUnknownLoc());
     //auto func = createroutingfuncByDim(ctx, true);
@@ -311,8 +311,22 @@ ModuleOp routingmanager::ops_testNew(MLIRContext* ctx, int totalN) {
         shape.push_back(builder.getI64IntegerAttr(v));
     ArrayAttr vals = builder.getArrayAttr(shape);  // satisfies I64ArrayAttr
     IntegerAttr dimnum = builder.getI64IntegerAttr(2);
-    auto tensorType = RankedTensorType::get(shapeVec, builder.getF32Type());
-    auto tensor = builder.create<createscheduletensor>(builder.getUnknownLoc(), tensorType, vals, dimnum);
+    auto tensorType = RankedTensorType::get(shapeVec, builder.getI8Type());
+    
+    // Create arith.constant dense with init data starting from 1
+    // For tensor<16x16xi8>, create values [1, 2, 3, ..., 256] (wraps around for i8)
+    SmallVector<llvm::APInt> initValues;
+    int64_t totalElements = 1;
+    for (auto dim : shapeVec) {
+        totalElements *= dim;
+    }
+    for (int64_t i = 1; i <= totalElements; ++i) {
+        initValues.push_back(llvm::APInt(8, i));
+    }
+    auto denseAttr = DenseElementsAttr::get(tensorType, initValues);
+    auto initConstant = builder.create<arith::ConstantOp>(builder.getUnknownLoc(), tensorType, denseAttr);
+    
+    auto tensor = builder.create<createscheduletensor>(builder.getUnknownLoc(), tensorType, initConstant.getResult(), vals, dimnum);
     createroutingfuncByDim(builder, ctx, false, mesh, tensor, hwrowused, "row");
     createroutingfuncByDim(builder, ctx, true, mesh, tensor, hwrowused, "row");
     createroutingfuncByDim(builder, ctx, true, mesh, tensor, hwcolused, "col");

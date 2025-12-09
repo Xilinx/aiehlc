@@ -111,9 +111,10 @@ def routing_createhwmesh :routingop<"routingcreatehwmesh"> {
 def routing_createscheduletensor :routingop<"routingcreatescheduletensor"> {
 	let summary = "createscheduletensor";
 	let cppNamespace = "routing";
-	let description = "create a schedule tensor";
+	let description = "create a schedule tensor with initial data";
 
 	let arguments = (ins
+		AnyTensor:$init_tensor,
 		I64ArrayAttr:$shape,
 		I64Attr:$dim
 		);
@@ -121,7 +122,7 @@ def routing_createscheduletensor :routingop<"routingcreatescheduletensor"> {
 	let results = (outs
 		AnyTensor:$output);
 
-	let assemblyFormat = " `shape` `=` $shape `,` `dim` `=` $dim attr-dict `->` type($output)";	
+	let assemblyFormat = " $init_tensor `:` type($init_tensor) `shape` `=` $shape `,` `dim` `=` $dim attr-dict `->` type($output)";	
 
 }
 

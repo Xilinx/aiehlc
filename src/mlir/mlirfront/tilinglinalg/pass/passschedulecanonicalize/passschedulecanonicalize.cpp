@@ -106,6 +106,9 @@ struct ModuleScheduleInfo {
     // Unique source tensor types (deduplicated)
     SmallVector<RankedTensorType> sourceTensorTypes;
     
+    // Map from tensor type string key to its init tensor Value
+    std::map<std::string, Value> initTensorMap;
+    
     // Unique partition params (deduplicated)
     SmallVector<PartitionParams> uniquePartitionParams;
     
@@ -292,9 +295,14 @@ static void collectScheduleOps(ModuleOp moduleOp, ModuleScheduleInfo &info) {
         // Collect dfscheblueprint.declare_data
         if (op->getName().getStringRef() == "dfscheblueprint.declare_data") {
             info.declareDataOps.push_back(op);
-            // Extract tensor type for source tensor creation
+            // Extract tensor type and init tensor for source tensor creation
             if (op->getNumResults() > 0) {
                 if (auto tensorType = dyn_cast<RankedTensorType>(op->getResult(0).getType())) {
+                    // Create a key for this tensor type
+                    std::string typeKey;
+                    llvm::raw_string_ostream os(typeKey);
+                    os << tensorType;
+                    
                     bool found = false;
                     for (auto &existingType : info.sourceTensorTypes) {
                         if (existingType == tensorType) {
@@ -304,6 +312,11 @@ static void collectScheduleOps(ModuleOp moduleOp, ModuleScheduleInfo &info) {
                     }
                     if (!found) {
                         info.sourceTensorTypes.push_back(tensorType);
+                    }
+                    
+                    // Capture the init tensor from the operand (new DeclareDataOp takes init_tensor as input)
+                    if (op->getNumOperands() > 0 && info.initTensorMap.find(typeKey) == info.initTensorMap.end()) {
+                        info.initTensorMap[typeKey] = op->getOperand(0);
                     }
                 }
             }
@@ -532,14 +545,36 @@ static void createCanonicalizedSchedule(
     // ==========================================================
     
     // 0a. Create dfscheblueprint.declare_data for each unique source tensor type
+    // Reuse the init tensor from the original IR instead of creating new ones
     std::map<std::string, Value> sourceTensorMap;
     for (auto tensorType : info.sourceTensorTypes) {
         std::string key = makeTensorTypeKey(tensorType);
         if (sourceTensorMap.find(key) == sourceTensorMap.end()) {
-            // Create declare_data operation using generic op builder
+            // Look up the captured init tensor from the original IR
+            auto initTensorIt = info.initTensorMap.find(key);
+            if (initTensorIt == info.initTensorMap.end()) {
+                llvm::errs() << "Warning: No init tensor found for type " << key << "\n";
+                continue;
+            }
+            
+            Value originalInitTensor = initTensorIt->second;
+            
+            // Clone the init tensor (arith.constant) into the new block
+            Operation *initDefOp = originalInitTensor.getDefiningOp();
+            Value initTensor;
+            if (initDefOp) {
+                Operation *clonedOp = builder.clone(*initDefOp);
+                initTensor = clonedOp->getResult(0);
+            } else {
+                // If it's a block argument or other, we can't clone - skip
+                llvm::errs() << "Warning: Init tensor is not defined by an operation\n";
+                continue;
+            }
+            
+            // Create declare_data operation using generic op builder with init_tensor
             OperationState state(loc, "dfscheblueprint.declare_data");
+            state.addOperands({initTensor});
             state.addTypes({tensorType});
-            state.addAttribute("data_type", TypeAttr::get(tensorType));
             Operation *declareDataOp = builder.create(state);
             sourceTensorMap[key] = declareDataOp->getResult(0);
         }
@@ -556,13 +591,28 @@ static void createCanonicalizedSchedule(
             if (sourceTensorMap.find(srcKey) != sourceTensorMap.end()) {
                 sourceTensor = sourceTensorMap[srcKey];
             } else {
-                // Create declare_data if not found
-                OperationState state(loc, "dfscheblueprint.declare_data");
-                state.addTypes({params.tensorType});
-                state.addAttribute("data_type", TypeAttr::get(params.tensorType));
-                Operation *declareDataOp = builder.create(state);
-                sourceTensorMap[srcKey] = declareDataOp->getResult(0);
-                sourceTensor = declareDataOp->getResult(0);
+                // Create declare_data if not found - reuse init tensor from original IR
+                auto initTensorIt = info.initTensorMap.find(srcKey);
+                if (initTensorIt != info.initTensorMap.end()) {
+                    Value originalInitTensor = initTensorIt->second;
+                    
+                    // Clone the init tensor (arith.constant) into the new block
+                    Operation *initDefOp = originalInitTensor.getDefiningOp();
+                    Value initTensor;
+                    if (initDefOp) {
+                        Operation *clonedOp = builder.clone(*initDefOp);
+                        initTensor = clonedOp->getResult(0);
+                    } else {
+                        continue;
+                    }
+                    
+                    OperationState state(loc, "dfscheblueprint.declare_data");
+                    state.addOperands({initTensor});
+                    state.addTypes({params.tensorType});
+                    Operation *declareDataOp = builder.create(state);
+                    sourceTensorMap[srcKey] = declareDataOp->getResult(0);
+                    sourceTensor = declareDataOp->getResult(0);
+                }
             }
             
             // Create routing.partitiontensor

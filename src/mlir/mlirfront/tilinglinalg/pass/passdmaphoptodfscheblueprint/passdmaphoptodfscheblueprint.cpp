@@ -356,11 +356,14 @@ struct CreateScheduleTensorConversion : public OpConversionPattern<routing::crea
         Type elementType = origResultType ? origResultType.getElementType() : rewriter.getF32Type();
         auto tensorType = RankedTensorType::get(shape, elementType);
         
-        // Convert to dfscheblueprint::DeclareDataOp
+        // Get the init_tensor from adaptor (converted value)
+        Value initTensor = adaptor.getInitTensor();
+        
+        // Convert to dfscheblueprint::DeclareDataOp with init_tensor
         auto declareDataOp = rewriter.create<dfscheblueprint::DeclareDataOp>(
             op.getLoc(),
-            tensorType,                     // result type (AnyTensor)
-            TypeAttr::get(tensorType)       // data_type attribute
+            tensorType,     // result type (AnyTensor)
+            initTensor      // init_tensor input
         );
         rewriter.replaceOp(op, declareDataOp.getResult());
         return success();

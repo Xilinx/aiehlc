@@ -7,6 +7,7 @@
 #include <iostream>
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 
 #define GET_TYPEDEF_CLASSES
 #define GET_ATTRDEF_CLASSES
@@ -418,9 +419,26 @@ void dfscheblueprintmanager::createBlueprintExample(OpBuilder& builder, MLIRCont
     // 2. Logical Data View (using Tensor types)
     // ============================================================
     
-    // Create Root Tensor (tensor<1024x1024xf32>) - logical declaration, no memory allocation
-    auto emptyTensorOp = builder.create<tensor::EmptyOp>(location, ArrayRef<int64_t>{1024, 1024}, builder.getF32Type());
-    auto rootTensor = emptyTensorOp.getResult();
+    // Create Root Tensor (tensor<1024x1024xf32>) - logical declaration with init data
+    SmallVector<int64_t> tensorShape = {1024, 1024};
+    auto tensorType = RankedTensorType::get(tensorShape, builder.getF32Type());
+    
+    // Create arith.constant dense with init data starting from 1
+    int64_t totalElements = 1024 * 1024;
+    SmallVector<float> initValues;
+    for (int64_t i = 1; i <= totalElements; ++i) {
+        initValues.push_back(static_cast<float>(i));
+    }
+    auto denseAttr = DenseElementsAttr::get(tensorType, ArrayRef<float>(initValues));
+    auto initConstant = builder.create<arith::ConstantOp>(location, tensorType, denseAttr);
+    
+    // Create DeclareDataOp with the init tensor
+    auto declareDataOp = builder.create<dfscheblueprint::DeclareDataOp>(
+        location,
+        tensorType,  // result type
+        initConstant.getResult()  // init_tensor
+    );
+    auto rootTensor = declareDataOp.getResult();
 
     // Create tensor.extract_slice (Partition 0: 256x1024)
     // Offset=[0, 0], Size=[256, 1024], Stride=[1, 1] relative to source

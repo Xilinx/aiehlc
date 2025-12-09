@@ -118,21 +118,23 @@ def dfscheblueprint_TileGroupOp : dfscheblueprintop<"tile_group", [
 def dfscheblueprint_DeclareDataOp : dfscheblueprintop<"declare_data", [
     
   ]> {
-  let summary = "Declares a logical data tensor";
+  let summary = "Declares a logical data tensor with initial data";
   let description = [{
-    Declares a logical tensor for scheduling purposes. This creates an SSA value
-    representing the data shape and type without actual memory allocation.
+    Declares a logical tensor for scheduling purposes with initial data.
+    This creates an SSA value representing the data shape and type with
+    the provided initial tensor data.
     
     Example:
     ```mlir
-    %root_data = dfscheblueprint.declare_data tensor<1024x1024xf32>
+    %init_data = arith.constant dense<[[1.0, 2.0], [3.0, 4.0]]> : tensor<2x2xf32>
+    %root_data = dfscheblueprint.declare_data %init_data : tensor<2x2xf32> -> tensor<2x2xf32>
     ```
   }];
   let arguments = (ins
-    TypeAttr:$data_type
+    AnyTensor:$init_tensor
   );
   let results = (outs AnyTensor:$result);
-  let assemblyFormat = "$data_type attr-dict `->` type($result)";
+  let assemblyFormat = "$init_tensor `:` type($init_tensor) attr-dict `->` type($result)";
 }
 
 // dfscheblueprint.partition
