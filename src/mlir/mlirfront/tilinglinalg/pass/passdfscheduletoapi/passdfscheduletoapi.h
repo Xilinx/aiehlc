@@ -11,13 +11,15 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 
 namespace mlir {
 
 /// Pass to convert dfschedule operations to API calls:
 /// 1. Convert dfschedule.host @host_canonicalized to void hostruntime() function call
 /// 2. Convert arith.constant dense to C array definitions using EmitC
-/// 3. Erase all other dfschedule operations
+/// 3. Convert dfscheblueprint.declare_data to XAie_MemAllocate with emitc.for data copy
+/// 4. Erase all other dfschedule operations
 class DfscheduleToApiPass : public PassWrapper<DfscheduleToApiPass, OperationPass<ModuleOp>> {
 public:
     DfscheduleToApiPass() = default;
@@ -32,7 +34,8 @@ public:
     void getDependentDialects(DialectRegistry &registry) const override {
         registry.insert<func::FuncDialect, 
                         arith::ArithDialect,
-                        emitc::EmitCDialect>();
+                        emitc::EmitCDialect,
+                        scf::SCFDialect>();
     }
 };
 
