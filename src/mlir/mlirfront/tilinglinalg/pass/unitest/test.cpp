@@ -13,6 +13,7 @@
 #include "../passblueprinttoschedule/passblueprinttoschedule.h"
 #include "../passdmaphoptodfscheblueprint/passdmaphoptodfscheblueprint.h"
 #include "../passschedulecanonicalize/passschedulecanonicalize.h"
+#include "../passdfscheduletoapi/passdfscheduletoapi.h"
 #include "dmapmanager.h"
 #include "dmaphopmanager.h"
 #include "dfschedulemanager.h"
@@ -27,6 +28,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/EmitC/IR/EmitC.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
 
@@ -817,6 +819,7 @@ void routingtodfschedule() {
     ctx.getOrLoadDialect<mlir::scf::SCFDialect>();
     ctx.getOrLoadDialect<mlir::tensor::TensorDialect>();
     ctx.getOrLoadDialect<mlir::bufferization::BufferizationDialect>();
+    ctx.getOrLoadDialect<mlir::emitc::EmitCDialect>();
     
     // Create test routing module
     auto module1 = mtest.ops_testNew(&ctx, 1);
@@ -858,14 +861,26 @@ void routingtodfschedule() {
     options.label = "After ScheduleCanonicalizePass:";
     pm.addPass(mlir::createPrintIRPass(options));
     
+    // Stage 7: Convert dfschedule to API calls and EmitC
+    pm.addPass(std::make_unique<mlir::DfscheduleToApiPass>());
+    options.label = "After DfscheduleToApiPass:";
+    pm.addPass(mlir::createPrintIRPass(options));
+    
     // Run the pass pipeline
     if (failed(pm.run(module1))) {
         llvm::errs() << "ERROR: Pass pipeline failed!\n";
         return;
     }
     
-    std::cout << "\n=== Final Module with dfschedule ===" << std::endl;
+    std::cout << "\n=== Final Module with API calls ===" << std::endl;
     module1.dump();
+    
+    // Convert to C++ code
+    std::cout << "\n=== Generated C++ Code ===" << std::endl;
+    mlir::LogicalResult result = mlir::emitc::translateToCpp(module1, llvm::outs());
+    if (failed(result)) {
+        llvm::errs() << "Failed to translate MLIR to C++.\n";
+    }
     
     return;
 }
