@@ -169,21 +169,60 @@ public:
         
         std::string arrayName;
         
+        // Find the module for inserting global arrays
+        auto moduleOp = op->getParentOfType<ModuleOp>();
+        if (!moduleOp)
+            return failure();
+        
+        // Get unique index for this declare_data
+        int idx = state.nextArrayIndex();
+        
         // Check if operand is emitc.constant (already converted)
         if (auto emitcConstOp = dyn_cast_or_null<emitc::ConstantOp>(initOp)) {
             if (auto opaqueAttr = dyn_cast<emitc::OpaqueAttr>(emitcConstOp.getValue())) {
                 arrayName = opaqueAttr.getValue().str();
             }
         }
-        // Or if it's still arith.constant (not yet converted)
+        // Or if it's still arith.constant - handle it directly by creating global array
         else if (auto constOp = dyn_cast_or_null<arith::ConstantOp>(initOp)) {
-            // This shouldn't happen if DenseConstantToEmitCPattern runs first,
-            // but handle it just in case
-            return failure();
+            auto denseAttr = dyn_cast<DenseElementsAttr>(constOp.getValue());
+            if (denseAttr) {
+                arrayName = "g_data_array_" + std::to_string(idx);
+                
+                auto tensorType = dyn_cast<RankedTensorType>(denseAttr.getType());
+                if (tensorType) {
+                    Type constElemType = tensorType.getElementType();
+                    std::string constCTypeStr = getEmitCTypeString(constElemType);
+                    std::string initStr = buildInitializerString(denseAttr, constElemType);
+                    
+                    // Create emitc.verbatim for the global array at module scope
+                    std::string verbatimCode = "static const " + constCTypeStr + " " + arrayName +
+                        buildArrayDimString(tensorType.getShape()) + " = " + initStr + ";";
+                    
+                    {
+                        OpBuilder::InsertionGuard guard(rewriter);
+                        rewriter.setInsertionPointToStart(moduleOp.getBody());
+                        rewriter.create<emitc::VerbatimOp>(op->getLoc(), rewriter.getStringAttr(verbatimCode));
+                    }
+                }
+            }
         }
         
-        if (arrayName.empty())
-            return failure();
+        // Fallback: if we still don't have an array name, generate one
+        if (arrayName.empty()) {
+            arrayName = "g_data_array_" + std::to_string(idx);
+            
+            // Create a zero-initialized array based on result type
+            std::string cTypeStrFallback = getEmitCTypeString(resultType.getElementType());
+            std::string verbatimCode = "static const " + cTypeStrFallback + " " + arrayName +
+                buildArrayDimString(resultType.getShape()) + " = {0};";
+            
+            {
+                OpBuilder::InsertionGuard guard(rewriter);
+                rewriter.setInsertionPointToStart(moduleOp.getBody());
+                rewriter.create<emitc::VerbatimOp>(op->getLoc(), rewriter.getStringAttr(verbatimCode));
+            }
+        }
 
         // Calculate total size
         int64_t totalSize = 1;
