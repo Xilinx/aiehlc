@@ -81,12 +81,17 @@ void DfscheduleToApiPass::runOnOperation() {
     OpBuilder builder(moduleOp.getContext());
     
     int arrayIndex = 0;
+    int partitionIndex = 0;
+    
+    // Map to track memory allocations: tensor Value -> (memInstName, dstPtrName, byteSize)
+    DenseMap<Value, std::tuple<std::string, std::string, int64_t>> memAllocMap;
     
     // Collect all operations to process
     SmallVector<Operation*> hostOps;
     SmallVector<Operation*> launchHostOps;
     SmallVector<Operation*> dsKernelReceiverOps;
     SmallVector<Operation*> declareDataOps;
+    SmallVector<Operation*> partitionTensorOps;
     SmallVector<Operation*> allDfscheduleOps;
     SmallVector<Operation*> arithConstantDenseOps;
     
@@ -101,6 +106,8 @@ void DfscheduleToApiPass::runOnOperation() {
             dsKernelReceiverOps.push_back(op);
         } else if (opName == "dfscheblueprint.declare_data") {
             declareDataOps.push_back(op);
+        } else if (opName == "routing.partitiontensor") {
+            partitionTensorOps.push_back(op);
         }
         
         // Collect all dfschedule and dfscheblueprint ops for later erasure
@@ -119,11 +126,25 @@ void DfscheduleToApiPass::runOnOperation() {
     
     llvm::errs() << "[Pass] Found " << hostOps.size() << " host ops\n";
     llvm::errs() << "[Pass] Found " << declareDataOps.size() << " declare_data ops\n";
+    llvm::errs() << "[Pass] Found " << partitionTensorOps.size() << " partitiontensor ops\n";
     llvm::errs() << "[Pass] Found " << allDfscheduleOps.size() << " total dfschedule/dfscheblueprint/routing ops\n";
     
     //==========================================================================
     // Phase 1: Generate EmitC code
     //==========================================================================
+    
+    // 1a-0. Generate PartitionTensor struct definition at module scope
+    builder.setInsertionPointToStart(moduleOp.getBody());
+    builder.create<emitc::VerbatimOp>(moduleOp.getLoc(), builder.getStringAttr(
+        "/* PartitionTensor structure for memory management */\n"
+        "typedef struct {\n"
+        "    void* data;           /* Memory pointer from XAie_MemGetVAddr */\n"
+        "    size_t size;          /* Size in bytes */\n"
+        "    size_t num_elements;  /* Total number of elements */\n"
+        "    int splitnum;         /* Split number */\n"
+        "    int splitdim;         /* Split dimension */\n"
+        "} PartitionTensor;"
+    ));
     
     // 1a. Convert arith.constant dense to emitc.verbatim global arrays
     for (Operation *op : arithConstantDenseOps) {
@@ -227,7 +248,83 @@ void DfscheduleToApiPass::runOnOperation() {
                         dstPtrName + "[i] = ((" + cTypeStr + "*)" + arrayName + ")[i]; }"
                     ));
                     
+                    // Store memory allocation info for later use by partitiontensor
+                    memAllocMap[nestedOp.getResult(0)] = std::make_tuple(memInstName, dstPtrName, byteSize);
+                    
                     llvm::errs() << "[Pass] Generated XAie_MemAllocate for " << arrayName << "\n";
+                }
+                
+                // Handle routing.partitiontensor - create PartitionTensor struct instance
+                if (nestedOpName == "routing.partitiontensor") {
+                    if (nestedOp.getNumResults() == 0 || nestedOp.getNumOperands() == 0) continue;
+                    
+                    auto resultType = dyn_cast<RankedTensorType>(nestedOp.getResult(0).getType());
+                    if (!resultType) continue;
+                    
+                    Value inputTensor = nestedOp.getOperand(0);
+                    auto loc = nestedOp.getLoc();
+                    
+                    // Get splitnum and splitdim attributes
+                    int splitnum = 1;
+                    int splitdim = 0;
+                    if (auto attr = nestedOp.getAttrOfType<IntegerAttr>("splitnum")) {
+                        splitnum = attr.getInt();
+                    }
+                    if (auto attr = nestedOp.getAttrOfType<IntegerAttr>("splitdim")) {
+                        splitdim = attr.getInt();
+                    }
+                    
+                    // Calculate sizes for this partition
+                    int64_t totalElements = 1;
+                    for (auto dim : resultType.getShape()) {
+                        totalElements *= dim;
+                    }
+                    
+                    Type elemType = resultType.getElementType();
+                    int64_t elemSize = 1;
+                    if (elemType.isInteger(8)) elemSize = 1;
+                    else if (elemType.isInteger(16)) elemSize = 2;
+                    else if (elemType.isInteger(32) || elemType.isF32()) elemSize = 4;
+                    else if (elemType.isInteger(64) || elemType.isF64()) elemSize = 8;
+                    
+                    int64_t partitionByteSize = totalElements * elemSize;
+                    std::string cTypeStr = getEmitCTypeString(elemType);
+                    
+                    // Generate struct instance name
+                    std::string partitionName = "partition_" + std::to_string(partitionIndex++);
+                    
+                    // Try to find the source memory from memAllocMap
+                    std::string srcPtrName = "NULL";
+                    if (memAllocMap.count(inputTensor)) {
+                        srcPtrName = std::get<1>(memAllocMap[inputTensor]);
+                    } else {
+                        // Check if input is from another partitiontensor or declare_data
+                        Operation *srcOp = inputTensor.getDefiningOp();
+                        if (srcOp) {
+                            // Walk up to find the original memory
+                            for (auto &entry : memAllocMap) {
+                                srcPtrName = std::get<1>(entry.second);
+                                break; // Use first available for now
+                            }
+                        }
+                    }
+                    
+                    // Generate: PartitionTensor partition_X = { .data = ptr, .size = ..., ... };
+                    std::ostringstream structInit;
+                    structInit << "PartitionTensor " << partitionName << " = {\n"
+                               << "    .data = (void*)" << srcPtrName << ",\n"
+                               << "    .size = " << partitionByteSize << ",\n"
+                               << "    .num_elements = " << totalElements << ",\n"
+                               << "    .splitnum = " << splitnum << ",\n"
+                               << "    .splitdim = " << splitdim << "\n"
+                               << "};";
+                    
+                    builder.create<emitc::VerbatimOp>(loc, builder.getStringAttr(structInit.str()));
+                    
+                    // Store for potential chained partitions
+                    memAllocMap[nestedOp.getResult(0)] = std::make_tuple(partitionName, partitionName + ".data", partitionByteSize);
+                    
+                    llvm::errs() << "[Pass] Created PartitionTensor struct: " << partitionName << "\n";
                 }
             }
         }
