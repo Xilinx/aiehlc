@@ -1,0 +1,9 @@
+###############################################################################
+# Copyright (C) 2025 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: MIT
+###############################################################################
+
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 120
+TabWidth: 4

@@ -48,6 +48,12 @@ aierepo_download_check() {
     find $AIE_DRIVER_PARENT_DIR/aie-rt/driver/src -name "Makefile" -exec sed -i 's/-DXAIE_PROD//g' {} \;
 }
 
+if [ "$PATH_SET_ONLY" -eq 0 ]; then
+    if [ -f "$SCRIPT_DIR/precommitsetup.sh" ]; then
+        bash "$SCRIPT_DIR/precommitsetup.sh"
+    fi
+fi
+
 USE_LLVMAIE=0
 SKIP_BSP=0
 LOCAL_AIE_RT_REPO=0
@@ -183,3 +189,4 @@ else
     fi
     
 fi
+
