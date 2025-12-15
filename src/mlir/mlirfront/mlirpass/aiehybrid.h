@@ -26,7 +26,7 @@ private:
 		int result = system(command.c_str());           // Run the command
 
     if (result == 0) {
-        std::cout << "Directory created." << std::endl;
+        // std::cout << "Directory created." << std::endl;
     } else {
         std::cerr << "Failed to create directory." << std::endl;
     }
@@ -47,9 +47,9 @@ public:
 	void exportfile() {
 		std::string dir = base_dir + kernel_name + "/";
 		auto fname = dir + name;
-		std::cout << "Exporting file to: " << fname << std::endl;
-		std::cout << "Directory: " << dir << std::endl;
-		try_create_folder(dir);
+        llvm::outs() << "Exporting File: " << fname << "\n";
+        // std::cout << "Directory: " << dir << std::endl;
+        try_create_folder(dir);
 		std::ofstream ofs(fname);
 		if (ofs.is_open()) {
 			ofs << generate();
@@ -285,8 +285,8 @@ public:
 			std::size_t pos = str.find('\n');
 			str = str.substr(pos + 1);
 		}
-		std::cout << str << std::endl;
-		return str;
+        // std::cout << str << std::endl;
+        return str;
 	}
 
 };
