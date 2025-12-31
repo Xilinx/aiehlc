@@ -172,12 +172,12 @@ public:
 							// do other rewrite logic only after the RemoveText work done
 							Aiefrontend->createKernelDefinitionOp(f, Rewrite, lineStart);
 							if (anno->getAnnotation() == "__global__") {
-								std::string globalVars =
-									"\n// Global variables for kernel: " + kernelName + "\n" +
-									"extern unsigned char _binary_kernel_" + kernelName + "_start[];\n" +
-									"extern unsigned char _binary_kernel_" + kernelName + "_end[];\n" +
-									"extern unsigned int _binary_kernel_" + kernelName + "_size;\n\n";
-								Rewrite->InsertText(lineStart, globalVars, true, true);
+                                std::string globalVars =
+                                    "\n// Global variables for kernel: " + kernelName + "\n" +
+                                    // "extern unsigned char _binary_kernel_" + kernelName + "_start[];\n" +
+                                    "extern unsigned char _binary_kernel_" + kernelName + "_end[];\n" +
+                                    "extern unsigned int _binary_kernel_" + kernelName + "_size;\n\n";
+                                Rewrite->InsertText(lineStart, globalVars, true, true);
 							} else if(anno->getAnnotation() == "__kernel__") {
 							/*
 							std::string templatedef = 
@@ -583,11 +583,23 @@ public:
 				// }
 				///*
 				for (auto x:kernel_name_list) {
-					ret += "template <int Col, int Row, int colstart, int rowstart,int M, int N, int K, typename... Args> \
- 									    inline void "+ x +"(Args&&... args) { \
- 										return; \
- 										};\n";
-				}
+                    // ret += "template <int Col, int Row, int colstart, int rowstart,int M, int N, int K, typename...
+                    // Args>
+                    ret += "#include \"xaiengine.h\"\nextern unsigned char _binary_kernel_" + x +
+                           "_start[];\ntemplate <int Col, int Row, typename T, typename... Args>\n"
+                           "inline void " +
+                           x +
+                           "(T DevInst, Args&&... args) {\n"
+                           "    XAie_CoreReset(DevInst, XAie_TileLoc(Col,Row));\n"
+                           "    XAie_CoreUnreset(DevInst, XAie_TileLoc(Col,Row));\n"
+                           "    XAie_LoadElfMem(DevInst, XAie_TileLoc(Col,Row), (unsigned char *)_binary_kernel_" +
+                           x +
+                           "_start);\n"
+                           "    XAie_CoreEnable(DevInst, XAie_TileLoc(Col,Row));\n"
+                           "    while(XAie_CoreWaitForDone(DevInst, XAie_TileLoc(Col,Row), 0) != XAIE_OK) {}\n"
+                           "    return;\n"
+                           "};\n";
+                }
 										//*/
 				ret += SourceCodeString;
 				// std::cout << ret << std::endl;
