@@ -29,11 +29,11 @@ __kernel__ void k(int *in, int *out) {
 }
 
 int test_kernel(XAie_DevInst *DevInst) {
-    printf("\nLoading kernel 1...\n");
+    // printf("\nLoading kernel 1...\n");
     // XAie_CoreReset(DevInst, XAie_TileLoc(4,4));
     // XAie_CoreUnreset(DevInst, XAie_TileLoc(4,4));
     // XAie_LoadElfMem(DevInst, XAie_TileLoc(4,4), (unsigned char *)k);
-    printf("Finished. Continuing...\n");
+    // printf("Finished. Continuing...\n");
 
     printf("\nRouting...\n");
     XAie_RoutingInstance *routingInstance = XAie_InitRoutingHandler(DevInst);
@@ -65,7 +65,7 @@ int test_kernel(XAie_DevInst *DevInst) {
                               /*dest=*/XAie_TileLoc(4, 4));
     printf("Finished. Continuing...\n");
 
-    printf("\nRunning kernel 1...\n");
+    printf("\nRunning kernel 1... (with new syntax)\n");
 
     // UseDeviceInstance(DevInst);
 
@@ -77,7 +77,6 @@ int test_kernel(XAie_DevInst *DevInst) {
 
     // }
 
-    // routing needs to be handled for args to work
     // kernel<4, 4>(in);
 
     // running all kernels in parallel(if not adjacent in source) is confusing for users

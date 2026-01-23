@@ -174,19 +174,25 @@ public:
 							if (anno->getAnnotation() == "__global__") {
                                 std::string globalVars =
                                     "\n// Global variables for kernel: " + kernelName + "\n" +
-                                    // "extern unsigned char _binary_kernel_" + kernelName + "_start[];\n" +
+                                    "extern unsigned char _binary_kernel_" + kernelName + "_start[];\n" +
                                     "extern unsigned char _binary_kernel_" + kernelName + "_end[];\n" +
                                     "extern unsigned int _binary_kernel_" + kernelName + "_size;\n\n";
                                 Rewrite->InsertText(lineStart, globalVars, true, true);
 							} else if(anno->getAnnotation() == "__kernel__") {
-							/*
-							std::string templatedef = 
-								"template <int Col, int Row, int colstart, int rowstart,typename... Args> \n \
-								inline void " + kernelName + "(Args&&... args) {\n \
-								return;\n \
-								};";
-							Rewrite->InsertText(lineStart, templatedef, true, true);
-							*/
+                                std::string globalVars =
+                                    "\n// Global variables for kernel: " + kernelName + "\n" +
+                                    // "extern unsigned char _binary_kernel_" + kernelName + "_start[];\n" +
+                                    "extern unsigned char _binary_kernel_" + kernelName + "_end[];\n" +
+                                    "extern unsigned int _binary_kernel_" + kernelName + "_size;\n\n";
+                                Rewrite->InsertText(lineStart, globalVars, true, true);
+                                /*
+                                std::string templatedef =
+                                    "template <int Col, int Row, int colstart, int rowstart,typename... Args> \n \
+                                    inline void " + kernelName + "(Args&&... args) {\n \
+                                    return;\n \
+                                    };";
+                                Rewrite->InsertText(lineStart, templatedef, true, true);
+                                */
 							
 							}
 						} else {
@@ -327,9 +333,10 @@ public:
 						for (auto x:kernel_name_list) {
 							// std::cout << "kernel name is (" << x << ")" <<std::endl;
 							if (Callee->getNameAsString() == x) {
-								llvm::outs()<< "**************Function name is " << Callee->getNameInfo().getName().getAsString() <<"*********8\n";
-							
-								if (auto FD = CE->getDirectCallee()) {
+                                // llvm::outs()<< "**************Function name is " <<
+                                // Callee->getNameInfo().getName().getAsString() <<"*********8\n";
+
+                                if (auto FD = CE->getDirectCallee()) {
 
 									// 2) Check if it’s actually a specialization of a function template:
 									if (auto  TSI = FD->getTemplateSpecializationInfo()) {
