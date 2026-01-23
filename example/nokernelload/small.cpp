@@ -66,6 +66,11 @@ int test_kernel(XAie_DevInst *DevInst) {
     printf("Finished. Continuing...\n");
 
     printf("\nRunning kernel 1...\n");
+
+    // UseDeviceInstance(DevInst);
+
+    k<4, 4>(DevInst);
+
     // XAie_Run(routingInstance, 1);
     // // wait until core is done
     // while(XAie_CoreWaitForDone(DevInst, XAie_TileLoc(4,4), 0) != XAIE_OK) {
@@ -75,9 +80,12 @@ int test_kernel(XAie_DevInst *DevInst) {
     // routing needs to be handled for args to work
     // kernel<4, 4>(in);
 
-    k<4, 4>(DevInst);
-
-    // go through adjacent kernel calls
+    // running all kernels in parallel(if not adjacent in source) is confusing for users
+    //
+    // Instead, can iterate through adjacent kernel calls, for ex.
+    // k1<>();
+    // k2<>();
+    // ...
     // add to kernel list (name, tile loc)
     // start all of them: reset, unreset, load elf, core enable
     // wait for all of them to finish
