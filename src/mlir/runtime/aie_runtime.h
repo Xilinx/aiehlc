@@ -54,6 +54,12 @@ XAie_DevInst *getOrCreateDeviceInstance(void);
 // __Runtime_perfcnt_setup_mm2s_bd_finished_partition(); teardown reads them
 // back. These are the same counters aiegdb.py "dma counter" reads (0x11020/24).
 #define AIE_DEBUG_FLAG_MM2SBDFINISH_COUNTER (1 << 6)
+// bit 7 reserved (AIE_DMA_ISSUE_COUNT in aiehlc flag map)
+/* When set (and the runtime is built with -DAIEHLC_PROFILING=1), arm core-module
+ * perf counters (active/vec/stream-stall/lock-stall) on every compute tile at
+ * kernel launch so a profiling host can read the per-tile cycle budget after the
+ * run via __Runtime_core_perf_read_probe(). */
+#define AIE_DEBUG_FLAG_CORE_PERF_COUNTER (1 << 8)
 // bit 7 reserved
 // bit 8 reserved
 /* When set, enable informational runtime log output (AIEHLC_LOG).
