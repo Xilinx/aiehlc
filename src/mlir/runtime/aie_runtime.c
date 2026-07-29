@@ -1560,25 +1560,31 @@ void __Runtime_wait_event(XAie_DevInst *dev, struct_event event) {
             printf("[aie_runtime] wait_event TIMEOUT after %u iters - continuing to debug snapshot\n", iter);
     }
 #else
-    uint32_t timeout_iters = 100;
-    uint32_t iter = 0;
-    do {
-        allDone = 1;
+    /* Completion is gated by the downstream output-DMA drain (__Runtime_wait_io),
+     * NOT by Core_Done. These GEMM cores are delivery-bound: their status latches
+     * LOCK_STALL with DONE=0 and only latches Done AFTER the output S2MM fully
+     * drains, which the host's subsequent wait_io enforces. Spinning on
+     * XAie_CoreWaitForDone here just burns a spurious wait (the driver default
+     * timeout per tile, across N tiles) that never gates the launch. So skip the
+     * poll entirely; an optional per-tile core-status snapshot is emitted only at
+     * debug level >=1 for observability. */
+    (void)allDone;
+    AIEHLC_LOG(printf("[aie_runtime] wait_event: not polling Core_Done (completion gated on"
+                      " output-DMA drain in wait_io)\n"));
+    if (AIEHLC_LOG_ENABLED()) {
         for (uint32_t i = 0; i < event.num_tiles; i++) {
-            if (!__Runtime_is_aie_core_tile(event.tiles[i])) {
+            if (!__Runtime_is_aie_core_tile(event.tiles[i]))
                 continue;
-            }
-            AieRC RC = XAie_CoreWaitForDone(dev, event.tiles[i], 0);
-            if (RC != XAIE_OK) {
-                allDone = 0;
-            }
+            u32 cs = 0;
+            u8 doneb = 0;
+            u32 pc = 0;
+            AieRC rcs = XAie_CoreGetStatus(dev, event.tiles[i], &cs);
+            XAie_CoreReadDoneBit(dev, event.tiles[i], &doneb);
+            XAie_CoreGetPCValue(dev, event.tiles[i], &pc);
+            printf("[corestat] tile(%u,%u) rc=%d status=0x%08x done=%u pc=0x%08x\n", (unsigned)event.tiles[i].Col,
+                   (unsigned)event.tiles[i].Row, (int)rcs, (unsigned)cs, (unsigned)doneb, (unsigned)pc);
         }
-        iter++;
-    } while (!allDone && iter < timeout_iters);
-    if (allDone)
-        AIEHLC_LOG(printf("[aie_runtime] wait_event done\n"););
-    else
-        printf("[aie_runtime] wait_event TIMEOUT after %u iters - continuing to debug snapshot\n", iter);
+    }
 #endif
 }
 
@@ -1618,8 +1624,14 @@ void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
         }
     }
 #else
-    const uint32_t poll_interval_us = 1000 * 1000;
-    const uint32_t max_iters = 5;
+    /* Busy-poll DmaGetPendingBdCount instead of sleeping between checks. The output
+     * S2MM DMA drains in microseconds, but a usleep-based poll blocked a full
+     * interval before re-checking, dominating the launch wall. A tight poll returns
+     * the instant the channel drains; a large iteration cap bounds a genuine stall.
+     * DmaGetPendingBdCount returns 0 only when the start queue is empty AND no BD is
+     * running (the driver adds 1 for any active BD), so pending==0 means the last BD
+     * has finished executing, not merely started. */
+    const uint32_t max_iters = 50000000U; /* ~seconds of busy-poll worst case */
     u8 numPendingBDs = 1;
     uint32_t iter = 0;
     while (numPendingBDs > 0) {
@@ -1630,20 +1642,12 @@ void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
                    (int)rc, (unsigned)tile.Col, (unsigned)tile.Row, (unsigned)channel, (int)dir);
             return;
         }
-        if (numPendingBDs > 0) {
-            if (++iter >= max_iters) {
-                printf("[aie_runtime] wait_io TIMEOUT after %u ms "
-                       "tile(%u,%u) ch=%u dir=%d pending=%u\n",
-                       (unsigned)(max_iters * poll_interval_us / 1000), (unsigned)tile.Col, (unsigned)tile.Row,
-                       (unsigned)channel, (int)dir, (unsigned)numPendingBDs);
-                return;
-            } else if (AIEHLC_LOG_ENABLED()) {
-                printf("[aie_runtime] wait_io pending tile(%u,%u) ch=%u dir=%d pending=%u iter=%u\n",
-                       (unsigned)tile.Col, (unsigned)tile.Row, (unsigned)channel, (int)dir, (unsigned)numPendingBDs,
-                       (unsigned)iter);
-            }
-            usleep(poll_interval_us);
+        if (numPendingBDs > 0 && ++iter >= max_iters) {
+            printf("[aie_runtime] wait_io TIMEOUT tile(%u,%u) ch=%u dir=%d pending=%u\n", (unsigned)tile.Col,
+                   (unsigned)tile.Row, (unsigned)channel, (int)dir, (unsigned)numPendingBDs);
+            return;
         }
+        /* busy-poll: no usleep — output S2MM drain is sub-millisecond */
     }
 #endif
 
