@@ -50,10 +50,10 @@
 #  define XAIE_RES_TILE_NUM_ROWS   0
 #elif AIE_GEN == 5
 #define HW_GEN XAIE_DEV_GEN_AIE2PS
-#  define XAIE_NUM_ROWS           11
-#  define XAIE_NUM_COLS           38
+#define XAIE_NUM_ROWS 7
+#define XAIE_NUM_COLS 36
 #  define XAIE_AIE_TILE_ROW_START  3
-#  define XAIE_AIE_TILE_NUM_ROWS   8
+#define XAIE_AIE_TILE_NUM_ROWS 4
 #else
 #define HW_GEN XAIE_DEV_GEN_AIEML
 #define XAIE_NUM_ROWS 11
