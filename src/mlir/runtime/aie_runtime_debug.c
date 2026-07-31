@@ -1043,17 +1043,32 @@ void AieRt_PrintAllBds(XAie_DevInst *dev, XAie_LocType tile) {
  * -------------------------------------------------------------------------- */
 
 void AieRt_PrintShimBdRawAll(XAie_DevInst *dev, uint8_t col) {
-    printf("[AieRt_Debug] ===== Shim tile(%u,0) Raw BD Dump (16 BDs) =====\n", (unsigned)col);
+    /* Select BD layout based on AIE generation */
+    uint32_t bd_base, bd_stride, bd_words;
+    const char *gen_tag;
+    if (g_aiert_gen == AIERT_GEN_AIE2PS) {
+        bd_base = AIERT_SHIM_BD_BASE_2PS;
+        bd_stride = AIERT_SHIM_BD_STRIDE_2PS;
+        bd_words = AIERT_SHIM_BD_WORDS_2PS;
+        gen_tag = "AIE2PS";
+    } else {
+        bd_base = AIERT_SHIM_BD_BASE_ML;
+        bd_stride = AIERT_SHIM_BD_STRIDE_ML;
+        bd_words = AIERT_SHIM_BD_WORDS_ML;
+        gen_tag = "AIEML";
+    }
+    printf("[AieRt_Debug] ===== Shim tile(%u,0) Raw BD Dump [%s] (16 BDs, base=0x%x stride=0x%x words=%u) =====\n",
+           (unsigned)col, gen_tag, (unsigned)bd_base, (unsigned)bd_stride, (unsigned)bd_words);
 
     int printed = 0;
+    u32 w[9]; /* max 9 words (AIE2PS) */
     for (uint32_t bd = 0; bd < AIERT_SHIM_BD_COUNT; bd++) {
-        uint32_t base = AIERT_SHIM_BD_BASE + bd * AIERT_SHIM_BD_STRIDE;
-        u32 w[AIERT_SHIM_BD_WORDS];
+        uint32_t base = bd_base + bd * bd_stride;
 
-        /* Read all 8 words of this BD.
+        /* Read all words of this BD.
          * Shim tile address: (col << 25) | (row << 20) | reg_offset, row=0. */
         u64 tile_base = (u64)col << 25; /* shim row=0 */
-        for (uint32_t wi = 0; wi < AIERT_SHIM_BD_WORDS; wi++) {
+        for (uint32_t wi = 0; wi < bd_words; wi++) {
             AieRC rc = XAie_Read32(dev, tile_base | (u64)(base + wi * 4), &w[wi]);
             if (rc != XAIE_OK)
                 w[wi] = 0;
@@ -1096,23 +1111,37 @@ void AieRt_PrintShimBdRawAll(XAie_DevInst *dev, uint8_t col) {
         uint32_t iter_wrap = (w[6] >> 20) & 0x3Fu;
         uint32_t iter_curr = (w[6] >> 26) & 0x3Fu;
 
-        /* Decode word 7: Valid[0], Next_BD[4:1], Use_Next[5],
-         * Lock_Acq_Val[13:6], Lock_Acq_ID[17:14],
-         * Lock_Rel_Val[25:18], Lock_Rel_ID[29:26],
-         * Lock_Acq_En[30], Lock_Rel_En[31] */
-        uint32_t valid = w[7] & 0x1u;
-        uint32_t next_bd = (w[7] >> 1) & 0xFu;
-        uint32_t use_next = (w[7] >> 5) & 0x1u;
-        int32_t acq_val = (int32_t)((int8_t)((w[7] >> 6) & 0xFFu));
-        uint32_t acq_id = (w[7] >> 14) & 0xFu;
-        int32_t rel_val = (int32_t)((int8_t)((w[7] >> 18) & 0xFFu));
-        uint32_t rel_id = (w[7] >> 26) & 0xFu;
-        uint32_t acq_en = (w[7] >> 30) & 0x1u;
-        uint32_t rel_en = (w[7] >> 31) & 0x1u;
+        /* Word 7 is the lock/valid word for BOTH AIEML and AIE2PS shim NOC BDs.
+         * (AIE2PS word 8 at offset +0x20 holds BASE_ADDRESS_56_48 extra address bits.)
+         * Bit layout (both gens — from xaie2psgbl_params.h / xaiemlgbl_params.h):
+         *   [3:0]   LOCK_ACQ_ID
+         *   [11:5]  LOCK_ACQ_VALUE (7-bit signed)
+         *   [12]    LOCK_ACQ_ENABLE
+         *   [16:13] LOCK_REL_ID
+         *   [24:18] LOCK_REL_VALUE (7-bit signed)
+         *   [25]    VALID_BD
+         *   [26]    USE_NEXT_BD
+         *   [30:27] NEXT_BD
+         *   [31]    TLAST_SUPPRESS  */
+        uint32_t lock_word = w[7];
+        uint32_t acq_id = lock_word & 0xFu;
+        int32_t acq_val = (int32_t)((int8_t)(((lock_word >> 5) & 0x7Fu) << 1) >> 1);
+        uint32_t acq_en = (lock_word >> 12) & 0x1u;
+        uint32_t rel_id = (lock_word >> 13) & 0xFu;
+        int32_t rel_val = (int32_t)((int8_t)(((lock_word >> 18) & 0x7Fu) << 1) >> 1);
+        uint32_t valid = (lock_word >> 25) & 0x1u;
+        uint32_t use_next = (lock_word >> 26) & 0x1u;
+        uint32_t next_bd = (lock_word >> 27) & 0xFu;
+        uint32_t rel_en = 0; /* LOCK_REL_ENABLE is not in shim BD word7 — infer from rel_id!=0 */
+        (void)rel_en;
 
         /* Print header with raw words */
-        printf("[AieRt_Debug]   BD%-2u raw: [%08x %08x %08x %08x %08x %08x %08x %08x]\n", (unsigned)bd, w[0], w[1],
-               w[2], w[3], w[4], w[5], w[6], w[7]);
+        if (bd_words == 9)
+            printf("[AieRt_Debug]   BD%-2u raw: [%08x %08x %08x %08x %08x %08x %08x %08x %08x]\n", (unsigned)bd, w[0],
+                   w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8]);
+        else
+            printf("[AieRt_Debug]   BD%-2u raw: [%08x %08x %08x %08x %08x %08x %08x %08x]\n", (unsigned)bd, w[0], w[1],
+                   w[2], w[3], w[4], w[5], w[6], w[7]);
 
         /* Print decoded fields */
         uint64_t full_addr = ((uint64_t)addr_hi << 32) | (uint64_t)addr_lo;
@@ -1558,6 +1587,15 @@ void AieRt_DebugSnapshot(XAie_DevInst *dev, const struct_io *ios, uint32_t num_i
 
     /* 12. IO verification */
     AieRt_VerifyIoDescriptors(dev, ios, num_ios);
+
+    /* 13. Kernel klog readback — reads last 2KB of each core tile's DM (offset 0xF800).
+     * Shows Aptr/A[0..3] values written by the kernel before acquiring the input window.
+     * This reveals whether A data arrived correctly at buf_in_ping_0. */
+    printf("[AieRt_Debug] ===== Kernel Log (DM offset 0xF800) =====\n");
+    for (uint32_t i = 0; i < num_tiles; i++) {
+        if (s_is_core(tiles[i]))
+            __Runtime_read_kernel_log(dev, tiles[i]);
+    }
 
     printf("[AieRt_Debug] ============================================================\n\n");
 }

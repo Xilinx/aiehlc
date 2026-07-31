@@ -396,11 +396,15 @@ void AieRt_PrintAllBds(XAie_DevInst *dev, XAie_LocType tile);
  *
  * Reads all 16 BD slots by directly accessing DMA BD registers via
  * XAie_Read32.  For each BD where word0 (Buffer_Length) is non-zero,
- * prints all 8 words decoded:
+ * prints all words decoded.  Offsets are generation-specific.
  *
- * AIE2PS/AIEML Shim NOC tile BD register layout (xregdb):
- *   Base offset: 0x1D000  (BD0), each BD is 8 words = 0x20 bytes apart
- *   16 BDs total: BD0 @ 0x1D000 .. BD15 @ 0x1D1E0
+ * AIEML Shim NOC tile BD layout (xaiemlgbl_params.h):
+ *   Base offset: 0x1D000, each BD is 8 words = 0x20 bytes apart
+ *   16 BDs: BD0 @ 0x1D000 .. BD15 @ 0x1D1E0
+ *
+ * AIE2PS Shim NOC tile BD layout (xaie2psgbl_params.h):
+ *   Base offset: 0x9000, each BD is 9 words = 0x30 bytes apart
+ *   16 BDs: BD0 @ 0x9000 .. BD15 @ 0x92D0
  *
  *   Word 0 (BD_0): Buffer_Length [31:0]
  *   Word 1 (BD_1): Base_Address_Low [31:0]
@@ -412,16 +416,34 @@ void AieRt_PrintAllBds(XAie_DevInst *dev, XAie_LocType tile);
  *   Word 5 (BD_5): D2_Stepsize [19:0], D2_Wrap [29:20]
  *   Word 6 (BD_6): Iteration_Stepsize [19:0], Iteration_Wrap [25:20],
  *                   Iteration_Current [31:26]
- *   Word 7 (BD_7): Valid_BD [0], Next_BD [4:1], Use_Next_BD [5],
- *                   Lock_Acq_Value [13:6], Lock_Acq_ID [17:14],
- *                   Lock_Rel_Value [25:18], Lock_Rel_ID [29:26],
- *                   Lock_Acq_Enable [30], Lock_Rel_Enable [31]
+ *   Word 7 (BD_7 / AIE2PS BD_7):
+ *     AIE2PS: D3_Stepsize [19:0], D3_Wrap [29:20]
+ *     AIEML:  Valid_BD [0], Next_BD [4:1], Use_Next_BD [5],
+ *             Lock_Acq_Value [13:6], Lock_Acq_ID [17:14],
+ *             Lock_Rel_Value [25:18], Lock_Rel_ID [29:26],
+ *             Lock_Acq_Enable [30], Lock_Rel_Enable [31]
+ *   Word 8 (BD_8, AIE2PS only):
+ *     Valid_BD [0], Next_BD [4:1], Use_Next_BD [5],
+ *     Lock_Acq_Value [13:6], Lock_Acq_ID [17:14],
+ *     Lock_Rel_Value [25:18], Lock_Rel_ID [29:26],
+ *     Lock_Acq_Enable [30], Lock_Rel_Enable [31]
  * -------------------------------------------------------------------------- */
 
-#define AIERT_SHIM_BD_BASE 0x0001D000u /* BD0 word0 offset in shim tile */
-#define AIERT_SHIM_BD_STRIDE 0x20u     /* 8 words * 4 bytes per BD */
-#define AIERT_SHIM_BD_COUNT 16u        /* 16 BDs per shim tile */
-#define AIERT_SHIM_BD_WORDS 8u         /* 8 x 32-bit words per BD */
+/* AIEML shim BD layout */
+#define AIERT_SHIM_BD_BASE_ML 0x0001D000u /* BD0 word0 offset (AIEML) */
+#define AIERT_SHIM_BD_STRIDE_ML 0x20u     /* 8 words * 4 bytes per BD (AIEML) */
+#define AIERT_SHIM_BD_WORDS_ML 8u         /* 8 x 32-bit words per BD (AIEML) */
+
+/* AIE2PS shim BD layout */
+#define AIERT_SHIM_BD_BASE_2PS 0x00009000u /* BD0 word0 offset (AIE2PS) */
+#define AIERT_SHIM_BD_STRIDE_2PS 0x30u     /* 9 words * 4 bytes per BD (AIE2PS) */
+#define AIERT_SHIM_BD_WORDS_2PS 9u         /* 9 x 32-bit words per BD (AIE2PS) */
+
+/* Legacy names — default to AIEML for backward compat with existing callers */
+#define AIERT_SHIM_BD_BASE AIERT_SHIM_BD_BASE_ML
+#define AIERT_SHIM_BD_STRIDE AIERT_SHIM_BD_STRIDE_ML
+#define AIERT_SHIM_BD_COUNT 16u
+#define AIERT_SHIM_BD_WORDS AIERT_SHIM_BD_WORDS_ML
 
 /**
  * Dump all 16 raw BD registers for a shim tile.
