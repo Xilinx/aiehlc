@@ -15,6 +15,7 @@
 #include "passdmaphopprovenancemap.h"
 #include "passdmaphoptodfscheblueprint.h"
 #include "passdmaphoptoroutinghw.h"
+#include "passroutingprovenancemap.h"
 #include "passschedulecanonicalize.h"
 #include "passschedulesequentialop.h"
 #include "passwaitmerge.h"
@@ -1531,6 +1532,15 @@ after_host_emit:
         if (!runPipelineSinglePass(ctx, routingDmaphopModule, std::make_unique<RoutingHWVerifyPass>(), routingIrDir,
                                    rstage, "RoutingHWVerifyPass"))
             return false;
+
+        // Generate physical routing provenance map JSON while routinghw ops are
+        // still present (RoutingHWLowerPass below lowers them into emitc.call).
+        {
+            auto routingProvenancePass = std::make_unique<RoutingProvenanceMapPass>(outputDir, partStartCol, aieGen);
+            runPipelineSinglePass(ctx, routingDmaphopModule, std::move(routingProvenancePass), routingIrDir, rstage,
+                                  "RoutingProvenanceMapPass");
+        }
+
         if (!runPipelineSinglePass(ctx, routingDmaphopModule, std::make_unique<RoutingHWLowerPass>(routingPathTopology),
                                    routingIrDir, rstage, "RoutingHWLowerPass"))
             return false;

@@ -61,6 +61,7 @@ target_include_directories(_aietriton_core PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../tilinglinalg/pass/passdmaphoptodfscheblueprint/
     ${CMAKE_CURRENT_SOURCE_DIR}/../tilinglinalg/pass/passdmaphopprovenancemap/
     ${CMAKE_CURRENT_SOURCE_DIR}/../tilinglinalg/pass/passdfscheduleprovenancemap/
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tilinglinalg/pass/passroutingprovenancemap/
     ${CMAKE_CURRENT_SOURCE_DIR}/../tilinglinalg/pass/passdmaphoptoroutinghw/
     ${CMAKE_CURRENT_SOURCE_DIR}/../tilinglinalg/pass/passdmaptodmaphop/
     ${CMAKE_CURRENT_SOURCE_DIR}/../tilinglinalg/pass/passschedulecanonicalize/

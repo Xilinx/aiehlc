@@ -381,9 +381,14 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
 
     // --- Core tile ping-pong DMA BD configuration ---
     // Look up per-tile data slice from slice_symbols (maps 1:1 to tiles)
+    llvm::errs() << "[DeferredStartIo] emitCoreBufferDma: flowIdx=" << c.flowIndex << " tileIdx=" << c.tileIndex
+                 << " sliceSymbolsOpt=" << (c.sliceSymbolsOpt ? "yes" : "null")
+                 << " sliceSize=" << (c.sliceSymbolsOpt ? (int)c.sliceSymbolsOpt->size() : -1)
+                 << " flowRootMemref=" << (c.flowRootMemref ? "valid" : "null") << "\n";
     if (c.sliceSymbolsOpt && c.tileIndex < (int)c.sliceSymbolsOpt->size()) {
         auto sliceSymRef = cast<SymbolRefAttr>((*c.sliceSymbolsOpt)[c.tileIndex]);
         auto dataSliceOp = lookupDataSlice(op.getOperation(), sliceSymRef);
+        llvm::errs() << "[DeferredStartIo] dataSliceOp=" << (dataSliceOp ? "found" : "null") << "\n";
         if (dataSliceOp) {
             Value perTileTensor = dataSliceOp.getTensorSlice();
             Type perTileType = perTileTensor.getType();
@@ -391,6 +396,7 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
 
             // Trace back to tensor.extract_slice to get per-tile offsets/sizes
             auto tileExtractSlice = perTileTensor.getDefiningOp<tensor::ExtractSliceOp>();
+            llvm::errs() << "[DeferredStartIo] tileExtractSlice=" << (tileExtractSlice ? "yes" : "null") << "\n";
 
             int64_t perTileTotalSize = t.perTileSize / t.elementSizeBytes;
             (void)perTileTotalSize;
@@ -541,6 +547,8 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
                 // so the DMA hardware automatically re-arms via the chain.
                 // repeat=1 is sufficient; the BD chain does the work.
                 int32_t coreRepeat = 1;
+                llvm::errs() << "[DeferredStartIo] PUSH deferredCoreStartIos flowIdx=" << c.flowIndex
+                             << " tileIdx=" << c.tileIndex << " total=" << (c.deferredCoreStartIos.size() + 1) << "\n";
                 c.deferredCoreStartIos.push_back(
                     {coreCreateIoOp.getIoHandle(), coreBdIdOp.getBdId(), c.flowIndex, coreRepeat});
             } // end if (passState && ...)
@@ -652,7 +660,7 @@ void FlowTransferConversion::emitCoreSingleBufferBd(FlowLoweringCtx &c, CoreTile
         rewriter.getI32IntegerAttr(t.coreBdPacketId),  // packet_id
         rewriter.getI32IntegerAttr(-1),                // next_bd = -1 (no chaining)
         rewriter.getI32IntegerAttr(t.bdAcquireLockId), // acquire_lock_id
-        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val
+        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val (-1: acquire-always; matches exp58 baseline)
         rewriter.getI32IntegerAttr(t.bdReleaseLockId), // release_lock_id
         rewriter.getI32IntegerAttr(1),                 // release_lock_val
         rewriter.getI32IntegerAttr(-1),                // data_id
@@ -709,7 +717,7 @@ void FlowTransferConversion::emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx 
         rewriter.getI32IntegerAttr(t.coreBdPacketId),  // packet_id
         rewriter.getI32IntegerAttr(pingBdId),          // next_bd -> ping
         rewriter.getI32IntegerAttr(t.bdAcquireLockId), // acquire_lock_id
-        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val
+        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val (-1: acquire-always; matches exp58 baseline)
         rewriter.getI32IntegerAttr(t.bdReleaseLockId), // release_lock_id
         rewriter.getI32IntegerAttr(1),                 // release_lock_val
         rewriter.getI32IntegerAttr(-1),                // data_id
@@ -733,7 +741,7 @@ void FlowTransferConversion::emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx 
         rewriter.getI32IntegerAttr(t.coreBdPacketId),  // packet_id
         rewriter.getI32IntegerAttr(pongBdId),          // next_bd -> pong
         rewriter.getI32IntegerAttr(t.bdAcquireLockId), // acquire_lock_id
-        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val
+        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val (-1: acquire-always; matches exp58 baseline)
         rewriter.getI32IntegerAttr(t.bdReleaseLockId), // release_lock_id
         rewriter.getI32IntegerAttr(1),                 // release_lock_val
         rewriter.getI32IntegerAttr(-1),                // data_id

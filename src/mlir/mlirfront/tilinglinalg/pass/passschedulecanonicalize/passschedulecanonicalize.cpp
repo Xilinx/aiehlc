@@ -468,32 +468,60 @@ static void buildHostBlockByCloning(func::FuncOp mainFunc, ModuleOp moduleOp) {
                                                                         loadOp.getKernelGroup());
         launchEvent = launchOp.getEvent();
 
-        // Move only CORE-tile StartIoOp ops to AFTER the merged LaunchKernelGroupOp.
-        // ELF loading (triggered by LoadKernelGroupOp) zeroes BSS in core
-        // tile memory.  If core S2MM DMA StartIoOps fire before the ELF load,
-        // DMA-written data gets overwritten with zeros.  By placing core StartIoOps
-        // after the launch, the ELF is fully loaded before DMAs start writing.
-        // Shim StartIoOps remain in their original position (before load_kernel_group)
-        // so that shim DMA channels are armed first.
-        SmallVector<Operation *> coreStartIoOps;
+        // Ordering rule for StartIoOp: core S2MM receivers BEFORE shim MM2S senders.
+        //
+        // Background: the AIE stream switch uses a credit-based flow-control protocol.
+        // When shim MM2S (sender) fires before the downstream core S2MM (receiver) is
+        // armed, the stream switch has no credits and the shim channel stalls permanently
+        // (STALL_STREAM deadlock). The correct order is:
+        //   1. load_kernel_group  — loads ELF, zeros BSS (protects core memory)
+        //   2. launch_kernel_group
+        //   3. core S2MM startios — arm receivers (input flows) FIRST
+        //   4. shim MM2S startios — start senders only AFTER receivers are ready
+        //   5. core MM2S + shim S2MM — output flow startios (safe at any point)
+        //
+        // Collect all StartIoOp ops and classify by tile type and DMA direction.
+        // isShim: row==0 (shim tile), !isShim: row>0 (core tile).
+        // isSender (MM2S): this is a DMA source pushing data into the stream.
+        SmallVector<Operation *> coreStartIoOps;       // core tile startios (input S2MM + output MM2S)
+        SmallVector<Operation *> shimSenderStartIoOps; // shim MM2S startios (shim sends to core)
         for (Operation &op : *hostBody) {
             if (auto startIo = dyn_cast<dfschedule::StartIoOp>(&op)) {
-                // Trace: StartIoOp → io_handle (ConfigCreateIoOp) → tile (DeclareTileOp)
+                // Trace: StartIoOp → io_handle (ConfigCreateIoOp) → tile + direction
                 bool isShim = false;
+                bool isMM2S = false;
                 if (auto createIo = startIo.getIoHandle().getDefiningOp<dfschedule::ConfigCreateIoOp>()) {
                     if (auto declareTile = createIo.getTile().getDefiningOp<dfschedule::DeclareTileOp>()) {
                         isShim = (declareTile.getRow() == 0);
                     }
+                    // direction attribute: "MM2S" = sender, "S2MM" = receiver
+                    if (auto dirAttr = createIo->getAttrOfType<mlir::StringAttr>("direction"))
+                        isMM2S = (dirAttr.getValue() == "MM2S");
                 }
-                if (!isShim)
+                if (!isShim) {
                     coreStartIoOps.push_back(&op);
+                } else if (isMM2S) {
+                    // Shim MM2S = shim is sender → must come AFTER core S2MM receivers
+                    shimSenderStartIoOps.push_back(&op);
+                }
+                // Shim S2MM (receiver, output flow) stays in place — no deadlock risk.
             }
         }
+        // Step 1: Move all core startios right after launch (ELF-load protection +
+        // ensures core receivers are placed before shim senders in the block).
         Operation *insertAfter = launchOp;
         for (Operation *op : coreStartIoOps) {
             op->moveAfter(insertAfter);
             insertAfter = op;
         }
+        // Step 2: Move shim MM2S (sender) startios to AFTER all core startios.
+        // This guarantees core S2MM receivers are armed before shim pushes data.
+        for (Operation *op : shimSenderStartIoOps) {
+            op->moveAfter(insertAfter);
+            insertAfter = op;
+        }
+        llvm::errs() << "[ScheduleCanonicalize] StartIo ordering: " << coreStartIoOps.size() << " core, "
+                     << shimSenderStartIoOps.size() << " shim-MM2S moved after launch\n";
     }
 
     // Prepend launch event so wait covers it first.

@@ -587,13 +587,13 @@ void FlowTransferConversion::emitShimBdNonOoo(FlowLoweringCtx &c) const {
         rewriter.getBoolAttr(false),                  // enable_packet = false
         rewriter.getI32IntegerAttr(0),                // packet_id (unused)
         rewriter.getI32IntegerAttr(4294967295),       // next_bd = none
-        rewriter.getI32IntegerAttr(0),                // acquire_lock_id
-        rewriter.getI32IntegerAttr(0),                // acquire_lock_val
-        rewriter.getI32IntegerAttr(0),                // release_lock_id
-        rewriter.getI32IntegerAttr(0),                // release_lock_val
-        rewriter.getI32IntegerAttr(dataId),           // data_id
-        Value(),                                      // linked_bd = none
-        rewriter.getI32IntegerAttr(-1),               // out_of_order_bd_id
+        rewriter.getI32IntegerAttr(0),      // acquire_lock_id = 0 (shim lock — feature-proven; -1 starves at 4096)
+        rewriter.getI32IntegerAttr(0),      // acquire_lock_val
+        rewriter.getI32IntegerAttr(0),      // release_lock_id = 0
+        rewriter.getI32IntegerAttr(0),      // release_lock_val
+        rewriter.getI32IntegerAttr(dataId), // data_id
+        Value(),                            // linked_bd = none
+        rewriter.getI32IntegerAttr(-1),     // out_of_order_bd_id
         /*dim_strides=*/c.shimDimStrides, /*dim_wraps=*/c.shimDimWraps,
         rewriter.getI32IntegerAttr(c.shimIterStepSize), // iter_step_size
         rewriter.getI32IntegerAttr(c.shimIterWrap));    // iter_wrap
@@ -712,6 +712,10 @@ void FlowTransferConversion::computeMultipleInputOffsetParams(FlowLoweringCtx &c
                 int64_t tN = passState->tileN;
                 int64_t tC = passState->tileCols;
                 if (tN > 0 && tN < tC) {
+                    // Host repeats the startio nRounds times. NOTE: the "rely on hw iter
+                    // (shimIterWrap>1) => perIterRepeat=1" optimization was removed — it
+                    // starves the B-input stream at 4096 and deadlocks. Feature-proven:
+                    // always repeat nRounds regardless of shimIterWrap.
                     perIterRepeat = static_cast<int32_t>(tC / tN); // nRounds
                 } else {
                     perIterRepeat = static_cast<int32_t>(kRounds); // fallback
@@ -916,13 +920,13 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
             rewriter.getBoolAttr(false),                  // enable_packet
             rewriter.getI32IntegerAttr(0),                // packet_id
             rewriter.getI32IntegerAttr(4294967295),       // next_bd = none
-            rewriter.getI32IntegerAttr(0),                // acquire_lock_id
-            rewriter.getI32IntegerAttr(0),                // acquire_lock_val
-            rewriter.getI32IntegerAttr(0),                // release_lock_id
-            rewriter.getI32IntegerAttr(0),                // release_lock_val
-            rewriter.getI32IntegerAttr(dataId),           // data_id
-            Value(),                                      // linked_bd = none
-            rewriter.getI32IntegerAttr(-1),               // out_of_order_bd_id
+            rewriter.getI32IntegerAttr(0), // acquire_lock_id = 0 (shim lock — feature-proven; -1 starves at 4096)
+            rewriter.getI32IntegerAttr(0), // acquire_lock_val
+            rewriter.getI32IntegerAttr(0), // release_lock_id = 0
+            rewriter.getI32IntegerAttr(0), // release_lock_val
+            rewriter.getI32IntegerAttr(dataId), // data_id
+            Value(),                            // linked_bd = none
+            rewriter.getI32IntegerAttr(-1),     // out_of_order_bd_id
             c.shimDimStrides, c.shimDimWraps,
             rewriter.getI32IntegerAttr(c.shimIterStepSize), // iter_step_size (K-round)
             rewriter.getI32IntegerAttr(c.shimIterWrap));    // iter_wrap (kRounds)
@@ -1163,10 +1167,6 @@ void FlowTransferConversion::emitScheduleStraightLine(FlowLoweringCtx &c) const 
                          << "repeatCount " << repeatCount << " -> 1\n";
         repeatCount = 1;
     }
-    auto startIoOp = rewriter.create<dfschedule::StartIoOp>(
-        loc, dfschedule::EventType::get(rewriter.getContext()), c.createIoOp.getIoHandle(), c.getBdIdOp.getBdId(),
-        rewriter.getI32IntegerAttr(c.flowIndex), rewriter.getI32IntegerAttr(repeatCount));
-
     auto loadKernelGroupOp = rewriter.create<dfschedule::LoadKernelGroupOp>(
         loc, dfschedule::KernelGroupType::get(rewriter.getContext()), c.coreTiles, rewriter.getArrayAttr(c.calleeAttrs),
         rewriter.getArrayAttr(c.computeKernelAttrs), nullptr, rewriter.getArrayAttr(c.kernelConfigSymbols));
@@ -1174,7 +1174,12 @@ void FlowTransferConversion::emitScheduleStraightLine(FlowLoweringCtx &c) const 
     auto launchKernelGroupOp = rewriter.create<dfschedule::LaunchKernelGroupOp>(
         loc, dfschedule::EventType::get(rewriter.getContext()), loadKernelGroupOp.getKernelGroup());
 
-    // Emit deferred core StartIoOp calls AFTER kernel load/launch
+    // Emit deferred core StartIoOp calls AFTER kernel load/launch but BEFORE shim startIo.
+    // Core S2MM receivers must be armed before shim MM2S starts pushing data into the stream.
+    // Wrong order causes STALL_STREAM on shim MM2S because the downstream stream switch has
+    // no credit (consumer not yet enabled).
+    llvm::errs() << "[emitScheduleStraightLine] flowIdx=" << c.flowIndex << " shimIsSender=" << c.shimIsSender
+                 << " deferredCoreStartIos.size()=" << c.deferredCoreStartIos.size() << "\n";
     SmallVector<Value> coreStartIoEvents;
     for (auto &deferred : c.deferredCoreStartIos) {
         auto coreStartIo = rewriter.create<dfschedule::StartIoOp>(
@@ -1182,6 +1187,11 @@ void FlowTransferConversion::emitScheduleStraightLine(FlowLoweringCtx &c) const 
             rewriter.getI32IntegerAttr(deferred.flowIdx), rewriter.getI32IntegerAttr(deferred.repeatCount));
         coreStartIoEvents.push_back(coreStartIo.getEvent());
     }
+
+    // Shim MM2S startIo AFTER core S2MM receivers are armed.
+    auto startIoOp = rewriter.create<dfschedule::StartIoOp>(
+        loc, dfschedule::EventType::get(rewriter.getContext()), c.createIoOp.getIoHandle(), c.getBdIdOp.getBdId(),
+        rewriter.getI32IntegerAttr(c.flowIndex), rewriter.getI32IntegerAttr(repeatCount));
 
     // Determine whether to bypass input sending IO wait.
     bool bypassInputIoWait = false;

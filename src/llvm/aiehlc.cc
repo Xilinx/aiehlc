@@ -3183,10 +3183,9 @@ class AieDebugLevelPragmaHandler : public clang::PragmaHandler {
     void HandlePragma(clang::Preprocessor &PP, clang::PragmaIntroducer Introducer, clang::Token &FirstToken) override {
         // Known flag macros (must match aie_runtime.h definitions)
         static const std::unordered_map<std::string, int> knownFlags = {
-            {"AIE_DEBUG_FLAG_DISABLE_MULTID_DIM_DMA", 1 << 4},
-            {"AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN", 1 << 5},
-            {"AIE_DMA_ISSUE_COUNT", 1 << 7},
-            {"AIE_DEBUG_LOG", 1 << 9},
+            {"AIE_DEBUG_FLAG_DISABLE_MULTID_DIM_DMA", 1 << 4}, {"AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN", 1 << 5},
+            {"AIE_DEBUG_FLAG_MM2SBDFINISH_COUNTER", 1 << 6},   {"AIE_DMA_ISSUE_COUNT", 1 << 7},
+            {"AIE_DEBUG_FLAG_CORE_PERF_COUNTER", 1 << 8},      {"AIE_DEBUG_LOG", 1 << 9},
         };
 
         clang::Token Tok;

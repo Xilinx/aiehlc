@@ -157,6 +157,10 @@ struct ConversionState {
 
     // Track (col,row,lock_id) tuples that have already had XAie_LockSetValue emitted
     std::set<std::tuple<int32_t, int32_t, int32_t>> initializedLocks;
+    // Pending lock init verbatim strings — collected during ConfigDmaBdOp lowering and
+    // flushed by LaunchKernelGroupInnerPattern BEFORE the launch call so the host
+    // never races against a running kernel trying to acquire the same lock.
+    std::vector<std::pair<std::string, std::string>> pendingLockInits; // (comment, call)
 
     // Debug snapshot data (populated when enableDebug is true)
     SmallVector<IoDebugInfo> debugIos;
@@ -1545,15 +1549,14 @@ struct ConfigDmaBdInnerPattern : public OpConversionPattern<dfschedule::ConfigDm
                                 "/* Lock init: tile(" + std::to_string(tileCol) + "," + std::to_string(tileRow) +
                                 ") lock=" + std::to_string(kernelAcquireLock) +
                                 " init_value=" + std::to_string(lockInitValue) + " (kernel output acquire) */";
-                            rewriter.create<emitc::VerbatimOp>(loc, lockComment);
                             std::string lockSetCall = "XAie_LockSetValue(dev, XAie_TileLoc(" + std::to_string(tileCol) +
                                                       ", " + std::to_string(tileRow) + "), XAie_LockInit(" +
                                                       std::to_string(kernelAcquireLock) + ", " +
                                                       std::to_string(lockInitValue) + "));";
-                            rewriter.create<emitc::VerbatimOp>(loc, lockSetCall);
-                            llvm::errs() << "  Emitted XAie_LockSetValue for tile(" << tileCol << "," << tileRow
+                            state.pendingLockInits.emplace_back(lockComment, lockSetCall);
+                            llvm::errs() << "  Deferred XAie_LockSetValue for tile(" << tileCol << "," << tileRow
                                          << ") lock=" << kernelAcquireLock << " init=" << lockInitValue
-                                         << " (kernel output acquire)\n";
+                                         << " (kernel output acquire) — will emit before launch\n";
                         }
                         // DMA acquire lock (lock 1) init = 0 (default, no explicit init needed)
                         llvm::errs() << "  Output flow: DMA acquire lock " << acquireLockId
@@ -1564,14 +1567,14 @@ struct ConfigDmaBdInnerPattern : public OpConversionPattern<dfschedule::ConfigDm
                         std::string lockComment = "/* Lock init: tile(" + std::to_string(tileCol) + "," +
                                                   std::to_string(tileRow) + ") lock=" + std::to_string(acquireLockId) +
                                                   " init_value=" + std::to_string(initValue) + " */";
-                        rewriter.create<emitc::VerbatimOp>(loc, lockComment);
                         std::string lockSetCall = "XAie_LockSetValue(dev, XAie_TileLoc(" + std::to_string(tileCol) +
                                                   ", " + std::to_string(tileRow) + "), XAie_LockInit(" +
                                                   std::to_string(acquireLockId) + ", " + std::to_string(initValue) +
                                                   "));";
-                        rewriter.create<emitc::VerbatimOp>(loc, lockSetCall);
-                        llvm::errs() << "  ✓ Emitted XAie_LockSetValue for tile(" << tileCol << "," << tileRow
-                                     << ") lock=" << acquireLockId << " init=" << initValue << "\n";
+                        state.pendingLockInits.emplace_back(lockComment, lockSetCall);
+                        llvm::errs() << "  Deferred XAie_LockSetValue for tile(" << tileCol << "," << tileRow
+                                     << ") lock=" << acquireLockId << " init=" << initValue
+                                     << " — will emit before launch\n";
                     }
                 }
             }
@@ -2091,8 +2094,24 @@ struct LaunchKernelGroupInnerPattern : public OpConversionPattern<dfschedule::La
         Value kernelGroup = adaptor.getKernelGroup();
         
         llvm::errs() << "  Kernel Group type: " << kernelGroup.getType() << "\n";
-        //rewriter.eraseOp(op);
-        //return success();
+        // rewriter.eraseOp(op);
+        // return success();
+        //  Flush all deferred lock inits BEFORE launching the kernels.
+        //  Lock inits must precede launch_kernel_group: once cores are running they
+        //  immediately try to acquire these locks, and XAie_LockSetValue blocks until
+        //  the hardware lock is settable.  Emitting inits after launch causes lock
+        //  contention that inflates each ~35K-cycle call to ~7M cycles.
+        if (!state.pendingLockInits.empty()) {
+            rewriter.create<emitc::VerbatimOp>(loc,
+                                               "/* Lock inits — must precede kernel launch to avoid contention */");
+            for (auto &[comment, call] : state.pendingLockInits) {
+                rewriter.create<emitc::VerbatimOp>(loc, comment);
+                rewriter.create<emitc::VerbatimOp>(loc, call);
+            }
+            llvm::errs() << "  Flushed " << state.pendingLockInits.size() << " lock inits before launch_kernel_group\n";
+            state.pendingLockInits.clear();
+        }
+
         // Create comment
         rewriter.create<emitc::VerbatimOp>(loc, "/* Launch Kernel Group */");
 
@@ -3281,7 +3300,78 @@ void DfscheduleToApiPass::runOnOperation() {
         llvm::errs() << "[Pass] Found declare_data #" << declareDataCount << " at " << op->getLoc() << "\n";
     });
     llvm::errs() << "[Pass] Total declare_data ops: " << declareDataCount << "\n";
-    
+
+    // Pre-scan: collect all lock inits before conversion runs.
+    // applyPartialConversion processes patterns in an order determined by benefits and
+    // IR traversal — LaunchKernelGroupOp may be rewritten before ConfigDmaBdOps, so the
+    // deferred-emit approach (populate during ConfigDmaBd, flush in LaunchKernelGroup)
+    // races against the conversion order.  Pre-scanning resolves this: walk all
+    // ConfigDmaBdOps now (before any rewriting), compute the same lock-init logic,
+    // and populate state.pendingLockInits.  LaunchKernelGroupInnerPattern then finds a
+    // fully-populated list regardless of which pattern fires first.
+    {
+        std::set<std::tuple<int32_t, int32_t, int32_t>> preScannedLocks;
+        moduleOp->walk([&](dfschedule::ConfigDmaBdOp bdOp) {
+            // Only core tiles with lock-based DMA (acquireLockVal != 0)
+            int32_t acquireLockId = static_cast<int32_t>(bdOp.getAcquireLockId());
+            int32_t acquireLockVal = static_cast<int32_t>(bdOp.getAcquireLockVal());
+            int32_t releaseLockId = static_cast<int32_t>(bdOp.getReleaseLockId());
+            if (acquireLockId < 0 || acquireLockVal == 0)
+                return;
+            auto declareTileOp = bdOp.getTile().getDefiningOp<dfschedule::DeclareTileOp>();
+            if (!declareTileOp)
+                return;
+            int32_t tileCol = declareTileOp.getCol();
+            int32_t tileRow = declareTileOp.getRow();
+
+            // Determine direction by walking BD result -> create_io user
+            bool isOutput = false;
+            SmallVector<Operation *, 4> worklist;
+            for (auto *user : bdOp.getResult().getUsers())
+                worklist.push_back(user);
+            while (!worklist.empty()) {
+                auto *u = worklist.pop_back_val();
+                if (auto createIoOp = dyn_cast<dfschedule::ConfigCreateIoOp>(u)) {
+                    if (createIoOp.getDirection().str() == "MM2S")
+                        isOutput = true;
+                    break;
+                }
+                if (isa<dfschedule::ConfigDmaBdOp>(u))
+                    for (auto *uu : u->getResults().front().getUsers())
+                        worklist.push_back(uu);
+            }
+
+            // Single-buffer vs ping-pong
+            int32_t nextBdVal = static_cast<int32_t>(bdOp.getNextBd());
+            bool isSingleBuffer = (nextBdVal == -1) && !bdOp.getLinkedBd();
+            int32_t lockInitValue = isSingleBuffer ? 1 : 2;
+
+            auto emitLock = [&](int32_t lockId, int32_t initVal, const std::string &note) {
+                auto key = std::make_tuple(tileCol, tileRow, lockId);
+                if (preScannedLocks.insert(key).second) {
+                    std::string comment = "/* Lock init: tile(" + std::to_string(tileCol) + "," +
+                                          std::to_string(tileRow) + ") lock=" + std::to_string(lockId) +
+                                          " init_value=" + std::to_string(initVal) + " " + note + " */";
+                    std::string call = "XAie_LockSetValue(dev, XAie_TileLoc(" + std::to_string(tileCol) + ", " +
+                                       std::to_string(tileRow) + "), XAie_LockInit(" + std::to_string(lockId) + ", " +
+                                       std::to_string(initVal) + "));";
+                    state.pendingLockInits.emplace_back(comment, call);
+                }
+            };
+
+            if (isOutput) {
+                // Output (MM2S): kernel acquire lock = BD's release lock (lock 0)
+                emitLock(releaseLockId, lockInitValue, "(kernel output acquire)");
+                // BD's acquire lock (lock 1/4) stays at default 0 — no explicit init
+            } else {
+                // Input (S2MM): DMA acquire lock
+                emitLock(acquireLockId, lockInitValue, "");
+            }
+        });
+        llvm::errs() << "[Pass] Pre-scan: collected " << state.pendingLockInits.size()
+                     << " lock inits to emit before launch_kernel_group\n";
+    }
+
     if (failed(applyPartialConversion(moduleOp, innerTarget, frozenInnerPatterns))) {
         llvm::errs() << "[Pass] Warning: Some inner ops not converted\n";
     }
