@@ -811,7 +811,7 @@ XAie_DevInst *__Runtime_explicit_init(void) {
     }
 
 #if AIE_GEN == 5 && !defined(__AIESIM__)
-    // XAie_SetXprodEnable(dev, XAIE_DISABLE);
+    XAie_SetXprodEnable(dev, XAIE_DISABLE);
 #endif
     AieRC RC = XAie_CfgInitialize(dev, &g_Config);
     if (RC != XAIE_OK) {
@@ -854,11 +854,6 @@ XAie_DevInst *__Runtime_explicit_init(void) {
 
     __Runtime_routing_init(dev);
 
-    if (AIE_DEBUG_HAS_FLAG(g_runtime_debug_level, AIE_DEBUG_FLAG_MM2SBDFINISH_COUNTER)) {
-        __Runtime_perfcnt_setup_mm2s_bd_finished_partition(dev, 0, XAIE_NUM_COLS - 1, XAIE_AIE_TILE_ROW_START,
-                                                           XAIE_AIE_TILE_ROW_START + XAIE_AIE_TILE_NUM_ROWS - 1);
-    }
-
     AIEHLC_LOG(printf("[aie_runtime] explicit_init OK dev=%p\n", (void *)dev););
     g_DevInst = dev;
     return dev;
@@ -887,7 +882,7 @@ XAie_DevInst *__Runtime_explicit_init_partition(int startCol, int numCols) {
     }
 
 #if AIE_GEN == 5 && !defined(__AIESIM__)
-    // XAie_SetXprodEnable(dev, XAIE_DISABLE);
+    XAie_SetXprodEnable(dev, XAIE_DISABLE);
 #endif
     RC = XAie_CfgInitialize(dev, &g_Config);
     if (RC != XAIE_OK) {
@@ -950,11 +945,6 @@ XAie_DevInst *__Runtime_explicit_init_partition(int startCol, int numCols) {
     }
     */
     __Runtime_routing_init(dev);
-
-    if (AIE_DEBUG_HAS_FLAG(g_runtime_debug_level, AIE_DEBUG_FLAG_MM2SBDFINISH_COUNTER)) {
-        __Runtime_perfcnt_setup_mm2s_bd_finished_partition(dev, 0, XAIE_NUM_COLS - 1, XAIE_AIE_TILE_ROW_START,
-                                                           XAIE_AIE_TILE_ROW_START + XAIE_AIE_TILE_NUM_ROWS - 1);
-    }
 
     AIEHLC_LOG(printf("[aie_runtime] explicit_init_partition OK startCol=%d numCols=%d dev=%p\n", startCol, numCols,
                       (void *)dev););
