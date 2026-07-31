@@ -830,6 +830,23 @@ def read_shim_event_status(phys_col, direction, channel, target, device, dry_run
             result[name] = bool((reg1 or 0) & (1 << (eid - 32)))
     return result
 
+def decode_shim_event_status(direction, channel, reg0, reg1):
+    """Decode shim event status from already-read register values.
+    Returns dict {event_name: bool} or None if both regs are None."""
+    key = (direction.lower(), channel)
+    if key not in SHIM_DMA_EVENT_IDS:
+        return None
+    if reg0 is None and reg1 is None:
+        return None
+    event_map = SHIM_DMA_EVENT_IDS[key]
+    result = {}
+    for name, eid in event_map.items():
+        if eid < 32:
+            result[name] = bool((reg0 or 0) & (1 << eid))
+        else:
+            result[name] = bool((reg1 or 0) & (1 << (eid - 32)))
+    return result
+
 def format_shim_event_status(phys_col, direction, channel, event_bits, shim_events):
     """Format the shim event status for printing.
 

@@ -55,6 +55,145 @@ from urllib.parse import urlparse, parse_qs
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 # This file lives at src/tool/debug/ → repo root is three levels up.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_THIS_DIR)))
+
+# ── Simulator IPC debug socket helpers ───────────────────────────────────────
+# The aeg_ipc_server opens a second read-only socket at <main_socket>.dbg that
+# accepts unlimited concurrent connections and handles only READ32/NPI_READ32.
+# Wire format: 16-byte request {u8 cmd, u8[3] rsvd, u64 arg1, u32 arg2} (LE),
+#              16-byte response {u8 status, u8[7] rsvd, u64 value} (LE).
+
+import struct as _struct
+
+_IPC_READ32     = 0x11
+_IPC_NPI_READ32 = 0x13
+_IPC_STATUS_OK  = 0x00
+_IPC_REQ_FMT   = "<BxxxQI"    # 1+3+8+4 = 16 bytes (packed)
+_IPC_RESP_FMT  = "<BxxxxxxxQ" # 1+7+8 = 16 bytes (packed)
+_IPC_REQ_SIZE  = _struct.calcsize(_IPC_REQ_FMT)   # 16
+_IPC_RESP_SIZE = _struct.calcsize(_IPC_RESP_FMT)  # 16
+
+
+def _ipc_recvall(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return bytes(buf)
+
+
+def sim_ipc_ping(dbg_socket_path):
+    """Return True if the debug socket is reachable (quick connect + close)."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(dbg_socket_path)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def sim_ipc_read32(dbg_socket_path, addr):
+    """Send one READ32 over the debug socket; return the 32-bit value or None."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect(dbg_socket_path)
+        req = _struct.pack(_IPC_REQ_FMT, _IPC_READ32, addr, 0)
+        s.sendall(req)
+        raw = _ipc_recvall(s, _IPC_RESP_SIZE)
+        s.close()
+        if raw is None or len(raw) < _IPC_RESP_SIZE:
+            return None
+        status, value = _struct.unpack(_IPC_RESP_FMT, raw)
+        return int(value) if status == _IPC_STATUS_OK else None
+    except OSError:
+        return None
+
+
+def _sim_tile_addr(phys_col, row, offset, base_addr, col_shift, row_shift):
+    """Compute the absolute AIE register address from tile coordinates."""
+    return base_addr + (phys_col << col_shift) + (row << row_shift) + offset
+
+
+def _load_aie_addr_params(example_dir):
+    """Return (base_addr, col_shift, row_shift) from aie_control_config.json,
+    or None if the file is absent or malformed.
+    example_dir: the AIE example directory (parent of Work/)."""
+    cfg_path = os.path.join(example_dir, "Work", "ps", "c_rts",
+                            "aie_control_config.json")
+    if not os.path.isfile(cfg_path):
+        return None
+    try:
+        with open(cfg_path) as f:
+            d = json.load(f)
+        dc = d["aie_metadata"]["driver_config"]
+        return (int(dc["base_address"]),
+                int(dc["column_shift"]),
+                int(dc["row_shift"]))
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _load_ui_config(workdir):
+    """Load debug_ui_config.json from workdir if it exists.
+
+    This file is written by run_debug_ui.sh (or equivalent) and describes
+    extra devices (e.g. the simulator) that this server can run.  If the
+    file is absent the server still works — it just has no extra devices.
+
+    Schema:
+      {
+        "extra_devices": [
+          {
+            "value": "simulator",
+            "label": "Simulator",
+            "sim_script": "/abs/path/to/runsim_ipc.sh",
+            "sim_example_dir": "/abs/path/to/example"
+          },
+          {
+            "value": "vek385",
+            "label": "VEK385",
+            "hw_run_script": "/abs/path/to/runhw_vek385.py",
+            "hw_env": {
+              "VEK385IP": "portobello13",
+              "USERNAME": "bkirinci",
+              "VEK385PDI": "/home/bkirinci/naiebaremetal/vek385.BIN",
+              "AIEDBG_TARGET": "xsdb://portobello13:3121"
+            }
+          }
+        ]
+      }
+    """
+    path = os.path.join(workdir, "debug_ui_config.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _resolve_default_elf(workdir):
+    """Pick the project's default tiling ELF when --elf is omitted.
+
+    The tiling build emits the host ELF to <workdir>/build/host and copies it to
+    aout/main.elf (see script/aiehlc.sh). Probe those canonical locations so the
+    UI deploys the freshly-built ELF instead of falling back to apppaltest's own
+    default. Returns an absolute path, or None if nothing is found.
+    """
+    candidates = [
+        os.path.join(workdir, "build", "host"),
+        os.path.join(_REPO_ROOT, "aout", "main.elf"),
+        os.path.join(_REPO_ROOT, "aout", "worklocal", "build", "host"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return os.path.abspath(c)
+    return None
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 import aiediag  # noqa: E402
@@ -161,11 +300,48 @@ class DebugState:
         self._llm_buf = ""             # decoded transcript (browser tails this)
         self._llm_active = False       # True while a turn is being generated
         self._llm_lock = threading.Lock()
+        self._llm_log_dir = self.workdir  # dir where per-session logs are written
+        self._llm_log_fh = None          # open file handle for the current session log
+        self._llm_log_in_asst = False    # True after first text delta of a turn
+        self._llm_system_prompt_text = None  # prepended to first user turn
+        self._llm_first_turn = True      # True until first message is sent
 
         # Path to the auto-generated MCP config handed to the claude subprocess
         # via --mcp-config (written lazily by _write_mcp_config; cleaned up on
         # shutdown). None => fall back to cwd .mcp.json auto-discovery.
         self._mcp_config_path = None
+        # Tracks which backend the current MCP config was written for.
+        # When this differs from the actual backend (e.g. sim IPC just became
+        # ready), the cached config is invalidated so a fresh one is written.
+        self._mcp_config_backend = None  # None | "simulator" | "hardware"
+
+        # Extra devices (e.g. simulator) declared in debug_ui_config.json.
+        # Each entry: {"value", "label", "sim_script", "sim_example_dir"}
+        ui_cfg = _load_ui_config(self.workdir)
+        self._extra_devices = ui_cfg.get("extra_devices", [])
+        # Resolve the simulator entry (first extra_device with value=="simulator").
+        sim_dev = next((d for d in self._extra_devices
+                        if d.get("value") == "simulator"), None)
+        self.sim_script = sim_dev.get("sim_script") if sim_dev else None
+        self.sim_example_dir = sim_dev.get("sim_example_dir") if sim_dev else None
+        self.sim_log = (os.path.join(self.sim_example_dir, "ipc_sim.log")
+                        if self.sim_example_dir else None)
+        self.sim_applog = (os.path.join(self.sim_example_dir, "ipc_app.log")
+                           if self.sim_example_dir else None)
+        self._sim_lock = threading.Lock()
+        self._sim_proc = None     # subprocess.Popen or None
+        self._sim_fh = None       # open log file handle
+        self._sim_run_id = 0
+        # Path to the debug socket (<main_socket>.dbg) discovered after sim start.
+        # Once set, the debug UI uses IPC READ32 for live register reads instead
+        # of aiedbg, since the main IPC socket is held exclusively by ipc_app.
+        self._sim_dbg_socket = None   # path to *.sock.dbg once discovered
+        self._sim_ipc_ready = False   # True once debug socket is reachable
+        # AIE address parameters for converting (phys_col, row, offset) → abs addr.
+        self._sim_addr_params = (
+            _load_aie_addr_params(self.sim_example_dir)
+            if self.sim_example_dir else None
+        )
 
     # ---- static data -----------------------------------------------------
     def html_path(self):
@@ -190,13 +366,37 @@ class DebugState:
         with self._lock:
             return self._run_proc is not None and self._run_proc.poll() is None
 
+    def run_blocks_debug(self):
+        """True only while a live run still holds the JTAG link EXCLUSIVELY, i.e.
+        the setup phase (device program / dow -force / rst). Once the run is
+        `debuggable` (download done; app running / parked / hung) a second aiedbg
+        client can safely read over hw_server, so the console endpoints unblock.
+
+        Used to gate /cmd, /aiegdb, /aiegdb/reload (typed console commands) — but
+        NOT /grid or /ping, which drive a background reg-read storm that would
+        still compete with the run's own reads."""
+        if not self.run_in_progress():
+            return False
+        try:
+            with open(self.applog, "rb") as f:
+                text = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            return True  # no log yet → assume still in setup
+        last_ts = os.path.getmtime(self.applog) if os.path.isfile(self.applog) else 0
+        status = self._derive_status(text, True, last_ts)
+        return not self._is_debuggable(text, status)
+
     def start_run(self, device=None, board_host=None):
         """Spawn the board test script -y -nonreboot [elf], output → applog.
 
-        Device routing:
-          * palmyra (default): script = apppaltest.py; inherit the daemon's env.
-          * vek385: script = appvek385.py; env gets USERNAME=getpass.getuser()
-            and VEK385IP=<board_host>. A board_host is required.
+        Device routing (in priority order):
+          1. If the requested device matches an extra_device entry in
+             debug_ui_config.json that has a `hw_run_script` field, that
+             script is used.  Any `hw_env` dict in the entry is merged on
+             top of os.environ.  board_host (if provided) is set as VEK385IP.
+          2. vek385 (built-in): appvek385.py in the same dir as apppaltest;
+             requires board_host → VEK385IP.
+          3. palmyra (default): apppaltest.py; inherits the daemon's env.
 
         The elf positional is omitted unless configured (--elf); with -y, the
         script auto-picks its default elf, matching the manual
@@ -208,9 +408,28 @@ class DebugState:
                 return {"error": "a run is already in progress",
                         "run_id": self._run_id}
 
-            # Pick script + environment per device.
+            # ── 1. config-driven hw_run_script from debug_ui_config.json ───
+            cfg_dev = next(
+                (d for d in self._extra_devices
+                 if (d.get("value") or "").strip().lower() == device
+                 and d.get("hw_run_script")),
+                None)
+
             env = None
-            if device == "vek385":
+            if cfg_dev:
+                script = cfg_dev["hw_run_script"]
+                if not os.path.isfile(script):
+                    return {"error": f"hw_run_script not found: {script}"}
+                env = os.environ.copy()
+                # Merge any static env overrides declared in the config.
+                for k, v in (cfg_dev.get("hw_env") or {}).items():
+                    env[k] = str(v)
+                # board_host overrides VEK385IP so the UI host dropdown works.
+                if board_host:
+                    env["VEK385IP"] = board_host
+
+            # ── 2. built-in vek385 path ────────────────────────────────────
+            elif device == "vek385":
                 script = os.path.join(os.path.dirname(self.apppaltest),
                                       "appvek385.py")
                 if not board_host:
@@ -220,25 +439,30 @@ class DebugState:
                 env = os.environ.copy()
                 env["USERNAME"] = getpass.getuser()
                 env["VEK385IP"] = board_host
+
+            # ── 3. palmyra fallback ────────────────────────────────────────
             else:
                 device = "palmyra"
                 script = self.apppaltest
 
-            if self.elf and not os.path.isfile(self.elf):
-                return {"error": f"ELF not found: {self.elf}"}
             self._run_id += 1
             run_id = self._run_id
             # -u: unbuffered stdout for realtime tail; -y: auto-confirm ELF pick.
             cmd = [sys.executable, "-u", script, "-y", "-nonreboot"]
-            if self.elf:
-                cmd.append(self.elf)
+            # Config-driven hw_run_script gets its paths from env (VEK385_LOCAL_BIN
+            # etc.) — don't append self.elf as a positional arg for those.
+            if not cfg_dev:
+                if self.elf and not os.path.isfile(self.elf):
+                    return {"error": f"ELF not found: {self.elf}"}
+                if self.elf:
+                    cmd.append(self.elf)
             try:
                 fh = open(self.applog, "w")
             except OSError as e:
                 return {"error": f"cannot open applog {self.applog}: {e}"}
             fh.write(f"$ {' '.join(cmd)}\n")
-            if device == "vek385":
-                fh.write(f"# env: USERNAME={env['USERNAME']} "
+            if env and "VEK385IP" in env:
+                fh.write(f"# env: USERNAME={env.get('USERNAME', '')} "
                          f"VEK385IP={env['VEK385IP']}\n")
             fh.flush()
             try:
@@ -293,6 +517,206 @@ class DebugState:
         except OSError:
             pass
         return {"stopped": True, "run_id": run_id, "pid": pid}
+
+    # ---- simulator run orchestration ------------------------------------
+    def sim_in_progress(self):
+        with self._sim_lock:
+            return (self._sim_proc is not None
+                    and self._sim_proc.poll() is None)
+
+    def _sim_watch_dbg_socket(self, run_id):
+        """Background thread: poll for a *.sock.dbg file in sim_example_dir/ipc/
+        (written by aeg_ipc_server when the debug socket is ready), then mark
+        the simulator as IPC-ready.  Clears state when the sim process exits."""
+        ipc_dir = (os.path.join(self.sim_example_dir, "ipc")
+                   if self.sim_example_dir else None)
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            with self._sim_lock:
+                proc = self._sim_proc
+                current_run = self._sim_run_id
+            if current_run != run_id or proc is None or proc.poll() is not None:
+                break
+            if ipc_dir and os.path.isdir(ipc_dir):
+                try:
+                    dbg_files = [
+                        os.path.join(ipc_dir, f)
+                        for f in os.listdir(ipc_dir)
+                        if f.endswith(".sock.dbg")
+                    ]
+                    if dbg_files:
+                        dbg_path = dbg_files[0]
+                        # Quick probe: connect + disconnect.
+                        if sim_ipc_ping(dbg_path):
+                            with self._sim_lock:
+                                self._sim_dbg_socket = dbg_path
+                                self._sim_ipc_ready = True
+                            print(f"[sim] IPC debug socket ready → {dbg_path}",
+                                  flush=True)
+                            self._invalidate_mcp_config()
+                            self._write_backend_status()
+                            break
+                except OSError:
+                    pass
+            time.sleep(0.5)
+        # Wait for sim to exit, then clear IPC state.
+        with self._sim_lock:
+            proc = self._sim_proc
+        if proc is not None:
+            proc.wait()
+        with self._sim_lock:
+            if self._sim_run_id == run_id:
+                self._sim_ipc_ready = False
+                self._sim_dbg_socket = None
+        self._invalidate_mcp_config()
+        self._write_backend_status()
+
+    def start_sim(self):
+        """Spawn runsim_ipc.sh <sim_example_dir>, stream output to sim_log,
+        and start a watcher thread that retargets aiegdb once the ISS port file
+        appears."""
+        if not self.sim_script:
+            return {"error": "simulator not configured (no debug_ui_config.json)"}
+        if not os.path.isfile(self.sim_script):
+            return {"error": f"sim script not found: {self.sim_script}"}
+        if not self.sim_example_dir:
+            return {"error": "no sim_example_dir configured"}
+        with self._sim_lock:
+            if self._sim_proc and self._sim_proc.poll() is None:
+                return {"error": "simulator already running",
+                        "run_id": self._sim_run_id}
+            # Remove stale debug socket files so the watcher doesn't pick up
+            # sockets from a previous run.
+            ipc_dir = os.path.join(self.sim_example_dir, "ipc")
+            if os.path.isdir(ipc_dir):
+                for f in os.listdir(ipc_dir):
+                    if f.endswith(".sock.dbg"):
+                        try:
+                            os.unlink(os.path.join(ipc_dir, f))
+                        except OSError:
+                            pass
+            self._sim_ipc_ready = False
+            self._sim_dbg_socket = None
+            self._sim_run_id += 1
+            run_id = self._sim_run_id
+            cmd = ["/usr/bin/env", "bash", self.sim_script, self.sim_example_dir]
+            # Truncate the PS app log so the new run starts clean.
+            if self.sim_applog:
+                try:
+                    open(self.sim_applog, "w").close()
+                except OSError:
+                    pass
+            try:
+                fh = open(self.sim_log, "w")
+            except OSError as e:
+                return {"error": f"cannot open sim log {self.sim_log}: {e}"}
+            fh.write(f"$ {' '.join(cmd)}\n")
+            fh.flush()
+            try:
+                self._sim_proc = subprocess.Popen(
+                    cmd, stdout=fh, stderr=subprocess.STDOUT,
+                    start_new_session=True)
+            except FileNotFoundError as e:
+                fh.close()
+                return {"error": f"cannot launch sim script: {e}"}
+            self._sim_fh = fh
+        threading.Thread(target=self._sim_watch_dbg_socket, args=(run_id,),
+                         daemon=True).start()
+        return {"run_id": run_id, "sim_log": self.sim_log,
+                "example_dir": self.sim_example_dir}
+
+    def stop_sim(self):
+        """Kill the running simulator and its process group."""
+        with self._sim_lock:
+            proc = self._sim_proc
+            if proc is None or proc.poll() is not None:
+                return {"stopped": False, "error": "no simulator running"}
+            pid = proc.pid
+            run_id = self._sim_run_id
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+        with self._sim_lock:
+            if self._sim_fh:
+                try:
+                    self._sim_fh.close()
+                except OSError:
+                    pass
+                self._sim_fh = None
+        try:
+            with open(self.sim_log, "a") as f:
+                f.write(f"\n[force-stop: killed sim run {run_id} (pid {pid})]\n")
+        except OSError:
+            pass
+        with self._sim_lock:
+            self._sim_ipc_ready = False
+            self._sim_dbg_socket = None
+        return {"stopped": True, "run_id": run_id, "pid": pid}
+
+    def sim_status(self):
+        """Return current simulator state including IPC debug socket readiness."""
+        with self._sim_lock:
+            running = (self._sim_proc is not None
+                       and self._sim_proc.poll() is None)
+            ready = self._sim_ipc_ready
+            dbg = self._sim_dbg_socket
+        return {"running": running, "ipc_ready": ready, "dbg_socket": dbg}
+
+    def simlog_since(self, offset):
+        """Tail the sim log file from byte offset; includes IPC readiness."""
+        if not self.sim_log or not os.path.isfile(self.sim_log):
+            return {"data": "", "next": 0, "running": False,
+                    "ipc_ready": False, "dbg_socket": None}
+        with self._sim_lock:
+            running = (self._sim_proc is not None
+                       and self._sim_proc.poll() is None)
+            ipc_ready = self._sim_ipc_ready
+            dbg_socket = self._sim_dbg_socket
+        with open(self.sim_log, "rb") as f:
+            full = f.read()
+        chunk = full[offset:]
+        data = chunk.decode("utf-8", errors="replace")
+        nxt = offset + len(chunk)
+        return {"data": data, "next": nxt, "running": running,
+                "ipc_ready": ipc_ready, "dbg_socket": dbg_socket}
+
+    def sim_applog_since(self, offset):
+        """Tail ipc_app.log (PS application stdout) from byte offset."""
+        if not self.sim_applog or not os.path.isfile(self.sim_applog):
+            return {"data": "", "next": offset, "running": False}
+        with self._sim_lock:
+            running = (self._sim_proc is not None
+                       and self._sim_proc.poll() is None)
+        with open(self.sim_applog, "rb") as f:
+            f.seek(offset)
+            chunk = f.read()
+        data = chunk.decode("utf-8", errors="replace")
+        return {"data": data, "next": offset + len(chunk), "running": running}
+
+    def sim_ipc_reg_read(self, phys_col, row, offset):
+        """Read a register via the IPC debug socket.  Returns the 32-bit value
+        or None if the socket is not ready or the read fails."""
+        with self._sim_lock:
+            dbg = self._sim_dbg_socket
+            ready = self._sim_ipc_ready
+            params = self._sim_addr_params
+        if not ready or not dbg or not params:
+            return None
+        base, col_shift, row_shift = params
+        addr = _sim_tile_addr(phys_col, row, offset, base, col_shift, row_shift)
+        return sim_ipc_read32(dbg, addr)
 
     # ---- hw_server auto-launch (connect-failure recovery) ----------------
     def _hwsrv_log(self, msg):
@@ -457,9 +881,30 @@ class DebugState:
         data = chunk.decode("utf-8", errors="replace")
         nxt = offset + len(chunk)
         last_ts = os.path.getmtime(self.applog)
-        status = self._derive_status(full.decode("utf-8", errors="replace"),
-                                     running, last_ts)
-        return {"data": data, "next": nxt, "status": status, "running": running}
+        full_text = full.decode("utf-8", errors="replace")
+        status = self._derive_status(full_text, running, last_ts)
+        # `debuggable`: the run is past the JTAG-exclusive setup phase (device
+        # program / dow -force / rst), so a second aiedbg client can safely read
+        # over hw_server. The frontend uses this to auto-unlock the aiegdb console
+        # mid-run once the app is downloaded / running / parked / hung.
+        return {"data": data, "next": nxt, "status": status, "running": running,
+                "debuggable": self._is_debuggable(full_text, status)}
+
+    # Markers appvek385/apppaltest emit AFTER dow -force + rst complete. Seeing
+    # any of these means the exclusive-JTAG setup is done and reads are safe.
+    _DEBUGGABLE_MARKERS = (
+        "ELF download complete!",         # dow -force finished
+        "Execution started!",             # con issued, core running
+        "board stays powered on for debug",  # -nonreboot parked (incl. PLM-fail)
+        "wait_io TIMEOUT",                # app hung waiting on DMA
+        "Waiting for console output",     # download done, now polling UART
+    )
+
+    @classmethod
+    def _is_debuggable(cls, text, status):
+        if status in ("hang", "pass", "fail"):
+            return True
+        return any(m in text for m in cls._DEBUGGABLE_MARKERS)
 
     @staticmethod
     def _derive_status(text, running, last_ts):
@@ -583,13 +1028,11 @@ class DebugState:
                     except OSError:
                         pass
                 self._gdb_proc = None
-        old_cfg = self._mcp_config_path
-        self._mcp_config_path = None
-        if old_cfg:
-            try:
-                os.unlink(old_cfg)
-            except OSError:
-                pass
+        self._invalidate_mcp_config()
+        # Reset the LLM subprocess so the next claude -p spawn picks up the new
+        # MCP config (which embeds AIEDBG_TARGET for the just-selected board).
+        if self.llm_enabled:
+            self.llm_reset()
         return {"ok": True, "target": self.target}
 
     # ---- Claude Code (LLM) streaming subprocess --------------------------
@@ -602,36 +1045,156 @@ class DebugState:
         the browser must supply X-LLM-Auth to use the LLM endpoints."""
         return bool(self.llm_enabled and self.llm_password)
 
+    def _llm_log_write(self, text):
+        """Write text to the session log only (not the browser buffer). Caller holds lock."""
+        if self._llm_log_fh:
+            try:
+                self._llm_log_fh.write(text)
+                self._llm_log_fh.flush()
+            except OSError:
+                pass
+
     def _llm_append(self, text):
-        """Thread-safe append of decoded text to the transcript buffer."""
+        """Thread-safe append of decoded text to the transcript buffer and log."""
         with self._llm_lock:
             self._llm_buf += text
+            if self._llm_log_fh:
+                try:
+                    self._llm_log_fh.write(text)
+                    self._llm_log_fh.flush()
+                except OSError:
+                    pass
+
+    def _invalidate_mcp_config(self):
+        """Delete the cached MCP config file so the next LLM call rewrites it.
+
+        Called when the backend changes (e.g. simulator IPC becomes ready)
+        so the new config picks up the current IPC socket path and backend flag.
+        """
+        old_cfg = self._mcp_config_path
+        self._mcp_config_path = None
+        self._mcp_config_backend = None
+        if old_cfg:
+            try:
+                os.unlink(old_cfg)
+            except OSError:
+                pass
+
+    def _write_backend_status(self):
+        """Write workdir/backend_status.json with live backend state.
+
+        Called whenever backend changes (sim IPC ready/gone). The debugui MCP
+        tool reads this file instead of frozen env vars, so get_backend_status()
+        always reflects current state regardless of when the LLM was spawned.
+        """
+        with self._sim_lock:
+            sim_ready = self._sim_ipc_ready
+            dbg_socket = self._sim_dbg_socket
+        backend = "simulator" if sim_ready else "hardware"
+        addr_params = self._sim_addr_params  # (base, col_shift, row_shift) or None
+        data = {
+            "backend": backend,
+            "ipc_ready": sim_ready,
+            "dbg_socket": dbg_socket or "",
+            "target": self.target or "",
+            "device": self.device or "",
+            "startcol": self.startcol,
+            "aie_version": str(self.aie_version),
+            "sim_log": self.sim_log or "",
+            "sim_applog": self.sim_applog or "",
+            "applog": self.applog,
+            "sim_base_addr": str(addr_params[0]) if addr_params else "",
+            "sim_col_shift": str(addr_params[1]) if addr_params else "",
+            "sim_row_shift": str(addr_params[2]) if addr_params else "",
+        }
+        path = os.path.join(self.workdir, "backend_status.json")
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, path)
+        except OSError as e:
+            print(f"warning: could not write backend_status.json: {e}", file=sys.stderr)
 
     def _write_mcp_config(self):
-        """Write a temp .mcp.json registering the aiegdb MCP server with the
-        SAME hardware config the daemon already resolved, and return its path.
+        """Write a temp .mcp.json registering the MCP servers the LLM tab uses,
+        with the SAME hardware config the daemon already resolved; return path.
 
-        Handed to `claude` via --mcp-config so the LLM tab's connection to the
-        aiegdb server (src/tool/debug/aiemcp.py) does not depend on cwd / the
-        repo-root .mcp.json. Returns None on failure (caller falls back to cwd
-        discovery).
+        Two servers, both UI-scoped (this temp config is passed to `claude` via
+        --mcp-config --strict-mcp-config, so it does NOT affect general Claude
+        Code / CLI sessions that use the repo-root .mcp.json):
+          - `aiegdb`  (aiemcp.py)      : LIVE hardware debug (DMA/core/regs).
+                                         When AIEMCP_BACKEND=simulator, aiemcp.py
+                                         reads registers directly via the IPC debug
+                                         socket instead of calling aiedbg.
+          - `debugui` (debug_ui_mcp.py): STATIC schedule-view UI data (tile_info,
+                                         tile_list, get_backend_status, symbol_search).
+        Returns None on failure (caller falls back to cwd discovery).
         """
-        if self._mcp_config_path and os.path.isfile(self._mcp_config_path):
+        # Determine what backend the current call wants to serve.
+        with self._sim_lock:
+            sim_ready = self._sim_ipc_ready
+            dbg_socket = self._sim_dbg_socket
+            addr_params = self._sim_addr_params
+        want_backend = "simulator" if sim_ready else "hardware"
+
+        # Return cached config if still valid for the same backend.
+        if (self._mcp_config_path and os.path.isfile(self._mcp_config_path)
+                and self._mcp_config_backend == want_backend):
             return self._mcp_config_path
+
+        # Invalidate stale cached config first.
+        self._invalidate_mcp_config()
+
         aiemcp = os.path.join(_THIS_DIR, "aiemcp.py")
+        debugui = os.path.join(_THIS_DIR, "debug_ui_mcp.py")
+
+        # Build aiegdb env — common fields always present.
+        aiegdb_env = {
+            "AIEDBG_TARGET": self.target or "",
+            "AIEMCP_DEVICE": self.device or "pal",
+            "AIEMCP_STARTCOL": str(self.startcol),
+            "AIEMCP_AIE_VERSION": str(self.aie_version),
+            "AIEMCP_JSON_DIR": self.workdir,
+            "AIEMCP_BACKEND": want_backend,
+        }
+
+        # Simulator-specific: IPC socket path + address layout so aiemcp.py can
+        # compute tile addresses and issue READ32 directly, without aiedbg.
+        if sim_ready and dbg_socket:
+            aiegdb_env["AEG_PS_IPC_DBG_SOCKET"] = dbg_socket
+            if addr_params:
+                base, col_shift, row_shift = addr_params
+                aiegdb_env["AEG_SIM_BASE_ADDR"] = str(base)
+                aiegdb_env["AEG_SIM_COL_SHIFT"] = str(col_shift)
+                aiegdb_env["AEG_SIM_ROW_SHIFT"] = str(row_shift)
+
+        # debugui env — also expose backend status so get_backend_status works.
+        # AIEDBG_TARGET must be set explicitly; without it the subprocess inherits
+        # the shell env (e.g. hwlocal.sh) which may point at a different board.
+        debugui_env = {
+            "DEBUGUI_JSON_DIR": self.workdir,
+            "AIEMCP_JSON_DIR": self.workdir,
+            "AIEMCP_BACKEND": want_backend,
+            "AIEDBG_TARGET": self.target or "",
+            "DEBUGUI_APPLOG": self.applog,
+            "DEBUGUI_SIM_APPLOG": self.sim_applog or "",
+        }
+        if sim_ready and dbg_socket:
+            debugui_env["AEG_PS_IPC_DBG_SOCKET"] = dbg_socket
+
         cfg = {
             "mcpServers": {
                 "aiegdb": {
                     "command": sys.executable,
                     "args": [aiemcp],
-                    "env": {
-                        "AIEDBG_TARGET": self.target or "",
-                        "AIEMCP_DEVICE": self.device or "pal",
-                        "AIEMCP_STARTCOL": str(self.startcol),
-                        "AIEMCP_AIE_VERSION": str(self.aie_version),
-                        "AIEMCP_JSON_DIR": self.workdir,
-                    },
-                }
+                    "env": aiegdb_env,
+                },
+                "debugui": {
+                    "command": sys.executable,
+                    "args": [debugui],
+                    "env": debugui_env,
+                },
             }
         }
         try:
@@ -639,11 +1202,13 @@ class DebugState:
             with os.fdopen(fd, "w") as f:
                 json.dump(cfg, f, indent=2)
             self._mcp_config_path = path
+            self._mcp_config_backend = want_backend
             return path
         except OSError as e:
             print(f"warning: could not write MCP config ({e}); "
                   f"falling back to cwd .mcp.json discovery", file=sys.stderr)
             self._mcp_config_path = None
+            self._mcp_config_backend = None
             return None
 
     def probe_mcp(self, timeout=90):
@@ -656,16 +1221,19 @@ class DebugState:
         cfg = self._write_mcp_config()
         if not cfg:
             return False, "MCP config not written"
+        # Prompt via stdin: Claude CLI 2.x treats --allowedTools as variadic
+        # and would swallow a trailing positional prompt as extra tool names.
+        probe_prompt = ("Call the aiegdb aie_scope tool and reply with only "
+                        "its scope line.")
         cmd = [claude, "-p", "--output-format", "json",
                "--permission-mode", "bypassPermissions",
                "--mcp-config", cfg, "--strict-mcp-config",
-               "--allowedTools", "mcp__aiegdb__aie_scope",
-               "Call the aiegdb aie_scope tool and reply with only its "
-               "scope line."]
+               "--allowedTools=mcp__aiegdb__aie_scope"]
         if self.claude_model:
             cmd += ["--model", self.claude_model]
         try:
             proc = subprocess.run(cmd, cwd=self.claude_cwd,
+                                  input=probe_prompt,
                                   capture_output=True, text=True,
                                   timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -685,6 +1253,270 @@ class DebugState:
         return ok, ("scope tool responded" if ok else
                     "claude ran but aie_scope output not detected")
 
+    def _llm_system_prompt(self):
+        """Build the system prompt describing the debug UI context and available tools."""
+        target_str = self.target or "not connected"
+        backend_str = "hardware" if self.target else "simulator"
+        sim_avail = bool(self.sim_script)
+
+        # Summarise the schedule if loaded.
+        view = None
+        view_path = os.path.join(self.workdir, "schedule_view.json")
+        if os.path.isfile(view_path):
+            try:
+                with open(view_path) as f:
+                    view = json.load(f)
+            except (OSError, ValueError):
+                view = None
+
+        grid_summary = ""
+        if view:
+            grid = view.get("grid") or {}
+            n_flows = len(view.get("comm_paths") or [])
+            n_tiles = len(view.get("tiles") or [])
+            grid_summary = (
+                f"\nThe loaded design has {n_tiles} tiles "
+                f"({grid.get('cols')} cols × {grid.get('rows')} rows, "
+                f"startcol={grid.get('startcol')}), {n_flows} communication flows."
+            )
+
+        return f"""\
+You are an embedded AIE (AI Engine) debug assistant running inside the naiebaremetal \
+debug UI — a browser-based schedule viewer and live debug tool for AMD Versal AIE designs.
+
+## Your primary purpose: live AIE debugging
+
+Your job is to help diagnose real failures and performance problems in AIE designs \
+running on hardware or the simulator. This means actively reading live register state, \
+not just describing the static schedule.
+
+When a user reports a hang, incorrect output, DMA stall, lock contention, core fault, \
+or unexpected behaviour, your default response is to **go read the hardware**: use \
+`aie_exec` to check DMA status, BD descriptors, lock state, core PC, and event \
+registers on the relevant tiles. Cross-reference what the live registers say against \
+what the compiled schedule expects, and tell the user concisely what is wrong and why.
+
+Typical debug scenarios you should handle proactively:
+- **DMA stall / hang**: check `dma status` on producer and consumer tiles; read BDs \
+  to find the stalled descriptor; check lock state; identify whether it is a supply \
+  or demand problem.
+- **Wrong output / data corruption**: check BD address and length against the schedule; \
+  verify byte counters with `dma counter`; check for wrap/offset errors.
+- **Core fault / PC stuck**: read `pc` and `event` on the core tile; compare PC to \
+  known kernel addresses via `symbol_search`.
+- **IPC / stream deadlock**: trace the flow with `get_flow_detail`, then walk each hop \
+  checking DMA enables and BD queue depth.
+- **Performance**: use BD counters and the supply/demand verdict from `tile_info` to \
+  identify the bottleneck stage.
+
+Always prefer concrete register evidence over speculation. If you are not connected \
+to hardware or the simulator, say so and explain what you would check once connected.
+
+## Your role (overview)
+Help the user understand their compiled AIE design, interpret DMA schedule data, \
+diagnose performance issues (supply/demand imbalance, BD chain misconfiguration), \
+and control live hardware or simulator sessions. You have direct access to the compiled \
+schedule and live register state via MCP tools.
+
+## The debug UI — what the user sees
+
+The browser is divided into two halves:
+
+**Left panel — AIE tile grid (Schedule View)**
+A grid of clickable tiles representing the AIE array. Each cell shows:
+- Tile type (shim / mem tile / core)
+- DMA channel badges (click to select a specific channel)
+- Colour coding: contract balance status (green=OK, amber/red=imbalance)
+Clicking a tile or channel badge opens its detail panel (right side) and \
+pre-loads context for your next message.
+
+**Right panel — tile detail**
+Shows three sections (High / Middle / Low) for the selected tile:
+- High: role, kernel name, transfer summary, supply/demand verdict, channel↔kernel arg map
+- Middle: dfschedule IR slice
+- Low: attributed host.cc source lines
+
+**Right panel — Device Map tab**
+An SVG map showing the physical AIE array and communication paths (flows). \
+Each coloured arc or arrow is one DMA flow (f0, f1, …). Clicking a flow arc \
+highlights all tiles it touches and opens a net detail panel. \
+The "All nets / f0 / f1 …" chip buttons filter which flows are highlighted.
+
+**Bottom-right pane — three tabs**
+
+1. **aiegdb** — interactive AIE debug console. Type commands like `dma status`, \
+`bd 0`, `pc`, `event`, `target tile 4 3`, `target channel S2MM 0`. \
+Use `help` for the full command reference.
+
+2. **LLM (this chat)** — you. The user can ask questions; clicking a tile or \
+flow first automatically prepends context to the next message you receive.
+
+3. **Search** — symbol search across the compiled design. Type any kernel name, \
+window, net ID, buffer symbol, BD length, flow index, or GMIO name. \
+Matching tiles and flows are highlighted on the grid.
+
+**Top-right — Run controls**
+- Device selector: choose "Simulator" or a hardware board (e.g. VEK385 portobello13)
+- Board hostname field (hardware only)
+- "Test connect" / "Activate" — probe the JTAG or IPC connection; \
+  must succeed before Run/overlay are enabled
+- "Run test" — flash BOOT.BIN (hardware) or start the simulator binary; \
+  streams stdout to the Run console below
+- "Live status overlay" — when checked, polls DMA/core/event registers \
+  every 2 s and overlays colour on the grid tiles
+
+**Current session state**
+- Working directory: {self.workdir}{grid_summary}
+- Debug target: {target_str}
+- Backend: {backend_str}{"  (simulator available)" if sim_avail else ""}
+
+## MCP tools available to you
+
+### Static schedule tools (debugui server)
+- `get_design_overview()` — grid geometry, all flows, supply/demand summary. \
+  **Call this first** in any new session.
+- `tile_info(col, row, section)` — full tile detail (high/mid/low). \
+  section: "hi" | "mid" | "lo" | "all"
+- `tile_list()` — list all tiles with type and role
+- `get_flow_detail(flow_index)` — producer/consumer stages, hop routing, \
+  stream-switch connections for one flow
+- `symbol_search(query, kinds)` — find kernels, windows, buffers, nets, \
+  flows, GMIOs by substring. kinds: kernel,window,buffer,contract,bd_len,net,flow,gmio,port
+- `get_backend_status()` — current backend, AIEDBG_TARGET, IPC readiness
+- `get_applog(lines)` — last N lines of the hardware run log
+- `get_sim_log(lines)` — last N lines of the simulator application log (ipc_app.log)
+- `get_ipc_log(lines, side)` — recent IPC transaction CSV log; side="client"|"server"|"both"
+
+### Live register tools (aiegdb server — hardware or simulator IPC)
+- `aie_scope()` — show current scope (partition/tile/channel)
+- `aie_exec(cmd)` — run one aiegdb command. Key commands:
+    dma status         — DMA channel enable/disable, BD queue state
+    bd <id>            — BD descriptor detail (addr, len, lock, next_bd)
+    dma counter        — DMA MM2S/S2MM byte counters
+    pc                 — core program counter
+    event              — core event status
+    target tile C R    — navigate to tile (C, R)
+    target channel DIR N — navigate to DMA channel
+    up / top           — navigate to parent scope
+- `aie_commands()` — list commands valid at current scope
+- `aie_help()` — full aiegdb command reference
+
+## PS process and simulator debugging
+
+The simulator run has two processes:
+- **ipc_app** (PS client): `{self.sim_example_dir + "/ipc/ipc_app" if self.sim_example_dir else "<sim_example_dir>/ipc/ipc_app"}` \
+  Drives graph init, GMIO transfers, and result checks. \
+  stdout/stderr → `get_sim_log()` (tails `ipc_app.log`).
+- **aiesimulator** (server): Synopsys AIE functional simulator. \
+  stdout → `ipc_sim.log` (shown in the Run console). \
+  Receives `WRITE32`/`READ32`/`WRITE_GM` etc. from ipc_app over a Unix socket.
+
+### Finding what the simulator run is currently doing
+
+To check whether the simulator is still running and what it last did:
+1. Call `get_sim_log(lines=20)` — last 20 lines of `ipc_app.log` (PS app output).
+2. Call `get_ipc_log(lines=20)` — last 20 IPC transactions; the final client entry \
+   is the transaction ipc_app is currently blocked waiting for a response to.
+3. The simulator PID file is at: \
+   `{self.sim_example_dir + "/ipc_sim.pid" if self.sim_example_dir else "<sim_example_dir>/ipc_sim.pid"}`
+
+### Inspecting what the PS process is doing (hung/stalled)
+
+When ipc_app appears hung, read its kernel wait state from /proc \
+(use `aie_exec` with a bash command, or the aiegdb console Bash tab):
+
+```bash
+# Simulator PID:
+cat {self.sim_example_dir + "/ipc_sim.pid" if self.sim_example_dir else "<sim_example_dir>/ipc_sim.pid"}
+
+# ipc_app PID (find via socket or binary name):
+pgrep -f ipc_app
+
+# What syscall is the main thread blocking on?
+cat /proc/<ipc_app_pid>/wchan
+
+# All threads:
+for tid in $(ls /proc/<ipc_app_pid>/task/); do echo "=== tid $tid ==="; cat /proc/<ipc_app_pid>/task/$tid/wchan; echo; done
+
+# Stack trace (if perf_event_paranoid allows):
+cat /proc/<ipc_app_pid>/task/<tid>/stack
+```
+
+Common wchan values:
+- `unix_stream_data_wait` — blocked in `recv()` waiting for simulator ack (normal mid-transaction)
+- `futex_wait_queue_me` — waiting on a mutex/condvar (normal for idle sim threads)
+- `ep_poll` — epoll_wait (normal for sim's socket-dispatch thread)
+- `0` — thread running or runnable
+
+### IPC transaction log
+
+Every run writes timestamped CSV logs:
+- `{self.sim_example_dir + "/ipc_client.log" if self.sim_example_dir else "ipc_client.log"}` — transactions from ipc_app
+- `{self.sim_example_dir + "/ipc_server.log" if self.sim_example_dir else "ipc_server.log"}` — same transactions as dispatched by simulator
+
+CSV columns: `seq, ts_ns, side, cmd, arg1, arg2, status, value, note`
+
+`ts_ns` is CLOCK_MONOTONIC nanoseconds. Delta between client and server rows = round-trip latency.
+
+To find a hang:
+1. Call `get_ipc_log(lines=20)` — last client entry is what ipc_app is blocked on.
+2. If server log has matching seq with OK but client doesn't → response in flight or socket broken.
+3. If neither has it → simulator hasn't dispatched it yet (SystemC scheduling lag).
+
+Key IPC commands:
+- `GRAPH_INIT` — loads AIE ELFs + runs graph init (BD programming). Must finish before GMIO.
+- `WRITE_GM` / `READ_GM` — GMIO data transfer. arg1=AIE addr, arg2=byte count.
+- `WRITE32` / `READ32` — single AIE register r/w (high-frequency during graph init).
+- `START_PLIO` — starts PLIO streams after graph init.
+- `EXIT` — ipc_app teardown; sim shuts down after ack.
+
+### addr2line for ipc_app
+
+The binary `{self.sim_example_dir + "/ipc/ipc_app" if self.sim_example_dir else "<sim_example_dir>/ipc/ipc_app"}` \
+has DWARF debug symbols. Map an address to source:
+
+```bash
+addr2line -e {self.sim_example_dir + "/ipc/ipc_app" if self.sim_example_dir else "<sim_example_dir>/ipc/ipc_app"} -f -p 0x<addr>
+```
+
+PS app source: `{self.sim_example_dir + "/src/graph.cpp" if self.sim_example_dir else "example/*/src/graph.cpp"}` \
+IPC backend: `src/ipc/aeg_ps_ipc_backend.cpp` — `do_transaction()` is the central send/recv loop.
+
+## Suggested workflow
+
+1. Call `get_design_overview()` to orient yourself.
+2. When the user clicks a tile, you receive `[context] Selected: tile (C,R) …` — \
+   call `tile_info(C, R)` for the full detail.
+3. When the user clicks a flow, you receive `[context] Selected net/flow fN …` — \
+   call `get_flow_detail(N)` for the routing detail.
+4. For live AIE state, check `get_backend_status()` first; if connected, use `aie_exec` \
+   commands to read DMA/core registers.
+5. If the user has just run and wants to check results, call `get_applog()` or \
+   `get_sim_log()` depending on the backend.
+6. For a hang or stall, call `get_ipc_log()` to find the last IPC transaction, \
+   then use `/proc/<pid>/wchan` inspection via `aie_exec` Bash or the aiegdb console \
+   to confirm what each process is waiting on.
+"""
+
+    def _llm_backend_context(self):
+        """Return a [context] line describing live backend state for injection into
+        every LLM message. Reads backend_status.json so it reflects current state."""
+        path = os.path.join(self.workdir, "backend_status.json")
+        try:
+            with open(path) as f:
+                s = json.load(f)
+        except (OSError, ValueError):
+            return ""
+        backend = s.get("backend", "unknown")
+        ipc_ready = s.get("ipc_ready", False)
+        target = s.get("target", "")
+        if backend == "simulator":
+            state = "IPC ready — live register reads active" if ipc_ready else "IPC not ready — simulator not started yet"
+            return f"[context] Backend: simulator ({state})"
+        elif backend == "hardware":
+            return f"[context] Backend: hardware, target={target or 'unknown'}"
+        return f"[context] Backend: {backend}"
+
     def _llm_spawn(self):
         """Spawn the persistent claude streaming subprocess + reader thread.
         Caller holds self._llm_lock is NOT required (we lock internally)."""
@@ -701,7 +1533,17 @@ class DebugState:
             cmd += ["--mcp-config", mcp_cfg, "--strict-mcp-config",
                     "--allowedTools",
                     "mcp__aiegdb__aie_exec", "mcp__aiegdb__aie_scope",
-                    "mcp__aiegdb__aie_commands", "mcp__aiegdb__aie_help"]
+                    "mcp__aiegdb__aie_commands", "mcp__aiegdb__aie_help",
+                    "mcp__debugui__tile_info", "mcp__debugui__tile_list",
+                    "mcp__debugui__get_backend_status",
+                    "mcp__debugui__symbol_search",
+                    "mcp__debugui__get_design_overview",
+                    "mcp__debugui__get_flow_detail",
+                    "mcp__debugui__get_sim_log",
+                    "mcp__debugui__get_applog",
+                    "mcp__debugui__get_ipc_log"]
+        self._llm_system_prompt_text = self._llm_system_prompt()
+        self._llm_first_turn = True
         if self.claude_model:
             cmd += ["--model", self.claude_model]
         self._llm_proc = subprocess.Popen(
@@ -709,6 +1551,48 @@ class DebugState:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1)
         proc = self._llm_proc
+
+        # Open a new per-session transcript log with a timestamp in the filename.
+        try:
+            import datetime
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_path = os.path.join(self._llm_log_dir, f"llm_{ts}.log")
+            if self._llm_log_fh:
+                try:
+                    self._llm_log_fh.close()
+                except OSError:
+                    pass
+            self._llm_log_fh = open(log_path, "w", encoding="utf-8")
+            ts_pretty = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            fh = self._llm_log_fh
+            fh.write(f"[session start {ts_pretty}  workdir={self.workdir}]\n")
+            fh.write(f"model: {self.claude_model or '(default)'}\n")
+            fh.write(f"target: {self.target or '(none)'}\n\n")
+            # Log the MCP config: server names and allowed tools.
+            allowed_tools = [
+                "mcp__aiegdb__aie_exec", "mcp__aiegdb__aie_scope",
+                "mcp__aiegdb__aie_commands", "mcp__aiegdb__aie_help",
+                "mcp__debugui__tile_info", "mcp__debugui__tile_list",
+                "mcp__debugui__get_backend_status", "mcp__debugui__symbol_search",
+                "mcp__debugui__get_design_overview", "mcp__debugui__get_flow_detail",
+                "mcp__debugui__get_sim_log", "mcp__debugui__get_applog",
+                "mcp__debugui__get_ipc_log",
+            ]
+            fh.write("=== MCP SERVERS ===\n")
+            fh.write("  aiegdb   (aiemcp.py)      — live DMA/core/reg reads\n")
+            fh.write("  debugui  (debug_ui_mcp.py) — schedule/flow/tile/log queries\n\n")
+            fh.write("=== ALLOWED TOOLS ===\n")
+            for tool in allowed_tools:
+                fh.write(f"  {tool}\n")
+            fh.write("\n")
+            if self._llm_system_prompt_text:
+                fh.write("=== SYSTEM PROMPT ===\n")
+                fh.write(self._llm_system_prompt_text.strip())
+                fh.write("\n\n")
+            fh.flush()
+        except OSError as e:
+            print(f"warning: cannot open LLM transcript log: {e}", file=sys.stderr)
+            self._llm_log_fh = None
 
         def _reader():
             for line in proc.stdout:
@@ -719,7 +1603,10 @@ class DebugState:
                     obj = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue  # skip non-JSON banner/log lines
-                self._llm_handle_event(obj)
+                try:
+                    self._llm_handle_event(obj)
+                except Exception as e:
+                    print(f"warning: _llm_handle_event error: {e}", file=sys.stderr)
             # stdout closed → process exited; end any in-flight turn.
             with self._llm_lock:
                 self._llm_active = False
@@ -741,7 +1628,19 @@ class DebugState:
             if ev.get("type") == "content_block_delta":
                 delta = ev.get("delta", {}) or {}
                 if delta.get("type") == "text_delta":
-                    self._llm_append(delta.get("text", ""))
+                    text = delta.get("text", "")
+                    if text:
+                        with self._llm_lock:
+                            if not self._llm_log_in_asst:
+                                self._llm_log_in_asst = True
+                                self._llm_log_write("\n=== ASSISTANT ===\n")
+                            self._llm_buf += text
+                            if self._llm_log_fh:
+                                try:
+                                    self._llm_log_fh.write(text)
+                                    self._llm_log_fh.flush()
+                                except OSError:
+                                    pass
             return
         if t == "assistant":
             # Emit tool_use markers only (text already streamed via deltas).
@@ -756,6 +1655,13 @@ class DebugState:
                         compact = str(inp)
                     if len(compact) > 200:
                         compact = compact[:197] + "..."
+                    try:
+                        full_json = json.dumps(inp, indent=2)
+                    except (TypeError, ValueError):
+                        full_json = compact
+                    with self._llm_lock:
+                        self._llm_log_write(f"\n=== TOOL CALL: {name} ===\n")
+                        self._llm_log_write(full_json + "\n")
                     self._llm_append(f"\n[tool: {name} {compact}]\n")
             return
         if t == "user":
@@ -765,11 +1671,25 @@ class DebugState:
             if isinstance(content, list):
                 for blk in content:
                     if isinstance(blk, dict) and blk.get("type") == "tool_result":
+                        result_content = blk.get("content", "")
+                        if isinstance(result_content, list):
+                            # content blocks: extract text parts
+                            result_text = "\n".join(
+                                c.get("text", "") for c in result_content
+                                if isinstance(c, dict) and c.get("type") == "text"
+                            )
+                        else:
+                            result_text = str(result_content) if result_content else ""
+                        with self._llm_lock:
+                            self._llm_log_write("\n=== TOOL RESULT ===\n")
+                            if result_text:
+                                self._llm_log_write(result_text + "\n")
                         self._llm_append("\n[tool result]\n")
             return
         if t == "result":
             with self._llm_lock:
                 self._llm_active = False
+                self._llm_log_in_asst = False
             return
 
     def llm_send(self, prompt):
@@ -787,14 +1707,43 @@ class DebugState:
             dead = self._llm_proc is None or self._llm_proc.poll() is not None
         if dead:
             self._llm_spawn()
+        with self._llm_lock:
+            is_first = self._llm_first_turn
+            sys_text = self._llm_system_prompt_text if is_first else None
+            self._llm_first_turn = False
+        # Inject live backend state as a [context] line so the LLM always knows
+        # what is currently running, regardless of when it was spawned.
+        backend_ctx = self._llm_backend_context()
+        prompt_with_ctx = (backend_ctx + "\n" + prompt) if backend_ctx else prompt
+        if sys_text:
+            full_text = sys_text + "\n\n---\n\n" + prompt_with_ctx
+        else:
+            full_text = prompt_with_ctx
         line = json.dumps({
             "type": "user",
             "message": {"role": "user",
-                        "content": [{"type": "text", "text": prompt}]},
+                        "content": [{"type": "text", "text": full_text}]},
         })
         with self._llm_lock:
             offset = len(self._llm_buf)
             self._llm_active = True
+            self._llm_log_in_asst = False
+            # Split context prefix (lines starting with "[context]") from real user text.
+            lines = prompt_with_ctx.splitlines()
+            ctx_lines = []
+            user_lines = []
+            ctx_done = False
+            for ln in lines:
+                if not ctx_done and ln.startswith("[context]"):
+                    ctx_lines.append(ln)
+                else:
+                    ctx_done = True
+                    user_lines.append(ln)
+            if ctx_lines:
+                self._llm_log_write("\n=== CONTEXT (auto) ===\n")
+                self._llm_log_write("\n".join(ctx_lines) + "\n")
+            self._llm_log_write("\n=== USER ===\n")
+            self._llm_log_write("\n".join(user_lines) + "\n")
         try:
             self._llm_proc.stdin.write(line + "\n")
             self._llm_proc.stdin.flush()
@@ -831,6 +1780,16 @@ class DebugState:
             self._llm_proc = None
             self._llm_buf = ""
             self._llm_active = False
+            self._llm_log_in_asst = False
+            self._llm_first_turn = True
+            old_fh = self._llm_log_fh
+            self._llm_log_fh = None
+        if old_fh:
+            try:
+                old_fh.write("\n[session end]\n")
+                old_fh.close()
+            except OSError:
+                pass
         if self.llm_enabled:
             self._llm_spawn()
         return {"ok": True}
@@ -905,12 +1864,15 @@ def _dma_state(decoded):
 
 
 def _read_dma_channel(st, tile_type, phys_col, row, direction, channel,
-                      target=None):
+                      target=None, reg_read_fn=None):
     off = aiediag.compute_reg_offset(tile_type, direction, channel,
                                      st.aie_version)
-    raw = aiediag.run_aiedbg_reg_read(phys_col, row, off,
-                                      target=target or st.target,
-                                      device=st.device)
+    if reg_read_fn is not None:
+        raw = reg_read_fn(phys_col, row, off)
+    else:
+        raw = aiediag.run_aiedbg_reg_read(phys_col, row, off,
+                                          target=target or st.target,
+                                          device=st.device)
     if raw is None:
         return {"state": "unreachable", "offset": f"0x{off:X}"}
     decoded = aiediag.decode_dma_status(raw)
@@ -977,7 +1939,22 @@ def _worst(states):
     return "idle"
 
 
-def grid_dma(st, target=None):
+def _make_reg_read_fn(st, device, target):
+    """Return a reg-read callable for (phys_col, row, offset) -> int|None.
+
+    For the simulator device, use the IPC debug socket directly (no aiedbg).
+    For all other devices, delegate to aiediag.run_aiedbg_reg_read with target.
+    """
+    if (device or "").strip().lower() == "simulator":
+        return st.sim_ipc_reg_read
+    tgt = target or st.target
+    def _aiedbg_read(phys_col, row, offset):
+        return aiediag.run_aiedbg_reg_read(phys_col, row, offset,
+                                           target=tgt, device=st.device)
+    return _aiedbg_read
+
+
+def grid_dma(st, target=None, reg_read_fn=None):
     cells = {}
     for t in st.tiles():
         col, row = t["loc"][0], t["loc"][1]
@@ -990,14 +1967,15 @@ def grid_dma(st, target=None):
                 continue
             chans[f"{d}{c}"] = _read_dma_channel(st, t["type"], phys_col,
                                                  row, d, c,
-                                                 target=target or st.target)
+                                                 target=target or st.target,
+                                                 reg_read_fn=reg_read_fn)
         state = _worst([v["state"] for v in chans.values()]) if chans else "idle"
         cells[f"{col},{row}"] = {"state": state, "type": t["type"],
                                  "phys_col": phys_col, "channels": chans}
     return {"what": "dma", "cells": cells}
 
 
-def grid_cores(st, target=None):
+def grid_cores(st, target=None, reg_read_fn=None):
     cells = {}
     entries, _ = aiediag.load_linemap()
     for t in st.tiles():
@@ -1005,10 +1983,13 @@ def grid_cores(st, target=None):
         if t["type"] != "core":
             continue
         phys_col = col + st.startcol
-        raw = aiediag.run_aiedbg_reg_read(phys_col, row,
-                                          aiediag.CORE_PC_OFFSET,
-                                          target=target or st.target,
-                                          device=st.device)
+        if reg_read_fn is not None:
+            raw = reg_read_fn(phys_col, row, aiediag.CORE_PC_OFFSET)
+        else:
+            raw = aiediag.run_aiedbg_reg_read(phys_col, row,
+                                              aiediag.CORE_PC_OFFSET,
+                                              target=target or st.target,
+                                              device=st.device)
         if raw is None:
             cells[f"{col},{row}"] = {"state": "unreachable"}
             continue
@@ -1023,7 +2004,7 @@ def grid_cores(st, target=None):
     return {"what": "cores", "cells": cells}
 
 
-def grid_events(st, target=None):
+def grid_events(st, target=None, reg_read_fn=None):
     cells = {}
     for t in st.tiles():
         col, row = t["loc"][0], t["loc"][1]
@@ -1034,9 +2015,12 @@ def grid_events(st, target=None):
             regs = aiediag.MEM_EVT_STATUS_REGS
         words = []
         for off in regs:
-            raw = aiediag.run_aiedbg_reg_read(phys_col, row, off,
-                                              target=target or st.target,
-                                              device=st.device)
+            if reg_read_fn is not None:
+                raw = reg_read_fn(phys_col, row, off)
+            else:
+                raw = aiediag.run_aiedbg_reg_read(phys_col, row, off,
+                                                  target=target or st.target,
+                                                  device=st.device)
             words.append(None if raw is None else f"0x{raw:08X}")
         if all(w is None for w in words):
             cells[f"{col},{row}"] = {"state": "unreachable"}
@@ -1047,7 +2031,7 @@ def grid_events(st, target=None):
     return {"what": "events", "cells": cells}
 
 
-def do_cmd(st, body, target=None):
+def do_cmd(st, body, target=None, reg_read_fn=None):
     tgt = target or st.target
     op = str(body.get("op", "")).strip().lower()
     parts = op.split()
@@ -1063,6 +2047,12 @@ def do_cmd(st, body, target=None):
     phys_col = col + startcol
     tile_type = str(body.get("type", "core")).lower()
 
+    def _read(pc, r, off):
+        if reg_read_fn is not None:
+            return reg_read_fn(pc, r, off)
+        return aiediag.run_aiedbg_reg_read(pc, r, off, target=tgt,
+                                           device=st.device)
+
     if verb == "reg":
         if len(parts) < 2:
             return {"error": "reg requires an offset, e.g. 'reg 0x1DF00'"}
@@ -1070,8 +2060,7 @@ def do_cmd(st, body, target=None):
             off = int(parts[1], 0)
         except ValueError:
             return {"error": f"bad offset: {parts[1]}"}
-        raw = aiediag.run_aiedbg_reg_read(phys_col, row, off,
-                                          target=tgt, device=st.device)
+        raw = _read(phys_col, row, off)
         return {"op": op, "phys_col": phys_col, "row": row,
                 "offset": f"0x{off:X}",
                 "value": None if raw is None else f"0x{raw:08X}"}
@@ -1080,15 +2069,14 @@ def do_cmd(st, body, target=None):
         d, c = _parse_dir_ch(body.get("dir_ch"))
         if d is None:
             return {"error": "dma needs dir_ch like 'mm2s0' or 's2mm1'"}
-        res = _read_dma_channel(st, tile_type, phys_col, row, d, c, target=tgt)
+        res = _read_dma_channel(st, tile_type, phys_col, row, d, c,
+                                target=tgt, reg_read_fn=reg_read_fn)
         res.update({"op": op, "phys_col": phys_col, "row": row,
                     "dir_ch": f"{d}{c}"})
         return res
 
     if verb in ("pc", "core"):
-        raw = aiediag.run_aiedbg_reg_read(phys_col, row,
-                                          aiediag.CORE_PC_OFFSET,
-                                          target=tgt, device=st.device)
+        raw = _read(phys_col, row, aiediag.CORE_PC_OFFSET)
         if raw is None:
             return {"op": op, "phys_col": phys_col, "row": row,
                     "error": "unreachable"}
@@ -1107,15 +2095,12 @@ def do_cmd(st, body, target=None):
             regs = aiediag.MEM_EVT_STATUS_REGS
         words = []
         for off in regs:
-            raw = aiediag.run_aiedbg_reg_read(phys_col, row, off,
-                                              target=tgt,
-                                              device=st.device)
+            raw = _read(phys_col, row, off)
             words.append({"offset": f"0x{off:X}",
                           "value": None if raw is None else f"0x{raw:08X}"})
         return {"op": op, "phys_col": phys_col, "row": row, "words": words}
 
     if verb == "chans":
-        # list this tile's channels + coarse live DMA state
         chans = []
         for t in st.tiles():
             if t["loc"][0] == col and t["loc"][1] == row:
@@ -1125,7 +2110,7 @@ def do_cmd(st, body, target=None):
                     if d not in ("mm2s", "s2mm"):
                         continue
                     r = _read_dma_channel(st, tile_type, phys_col, row, d, c,
-                                          target=tgt)
+                                          target=tgt, reg_read_fn=reg_read_fn)
                     chans.append({"dir_ch": f"{d}{c}",
                                   "flow_index": ch.get("flow_index"),
                                   "state": r.get("state")})
@@ -1134,6 +2119,8 @@ def do_cmd(st, body, target=None):
                 "channels": chans}
 
     if verb == "chanevent":
+        if reg_read_fn is not None:
+            return {"error": "chanevent not supported for simulator (IPC)"}
         d, c = _parse_dir_ch(body.get("dir_ch"))
         if d is None:
             return {"error": "chanevent needs dir_ch like 'mm2s0'"}
@@ -1195,12 +2182,31 @@ class Handler(BaseHTTPRequestHandler):
             self._send_file(st.html_path(), "text/html; charset=utf-8")
         elif path == "/schedule_view.json":
             self._send_file(st.json_path(), "application/json")
+        elif path == "/config":
+            # Board defaults so the browser preselects the device + hostname.
+            self._send_json(_ui_defaults(st))
         elif path == "/applog":
             offset = int(q.get("offset", ["0"])[0])
             self._send_json(st.applog_since(offset))
         elif path == "/hwsrv_log":
             offset = int(q.get("offset", ["0"])[0])
             self._send_json(st.hwsrv_log_since(offset))
+        elif path == "/sim/log":
+            offset = int(q.get("offset", ["0"])[0])
+            self._send_json(st.simlog_since(offset))
+        elif path == "/sim/applog":
+            offset = int(q.get("offset", ["0"])[0])
+            self._send_json(st.sim_applog_since(offset))
+        elif path == "/sim/status":
+            self._send_json(st.sim_status())
+        elif path == "/devices":
+            # Extra device options for the board dropdown (e.g. simulator).
+            # Returns list of {value, label} objects ready for <option> injection.
+            self._send_json({"devices": [
+                {"value": d["value"], "label": d["label"]}
+                for d in st._extra_devices
+                if d.get("value") and d.get("label")
+            ]})
         elif path == "/llm/auth":
             # Unprotected: lets the browser learn whether to prompt for a password.
             self._send_json({"required": st.llm_auth_required()})
@@ -1232,20 +2238,25 @@ class Handler(BaseHTTPRequestHandler):
             if st.run_in_progress():
                 self._send_json({"error": "disabled during run", "cells": {}})
                 return
-            if not _hw_available():
+            device = q.get("device", [""])[0]
+            host = q.get("host", [""])[0]
+            is_sim = (device or "").strip().lower() == "simulator"
+            if not is_sim and not _hw_available():
                 self._send_json({"error": "aiedbg not found in PATH",
                                  "cells": {}})
                 return
-            device = q.get("device", [""])[0]
-            host = q.get("host", [""])[0]
             tgt = resolve_target(st, device, host)
+            rrfn = _make_reg_read_fn(st, device, tgt)
             try:
                 if what == "cores":
-                    self._send_json(grid_cores(st, target=tgt))
+                    self._send_json(grid_cores(st, target=tgt,
+                                               reg_read_fn=rrfn))
                 elif what == "events":
-                    self._send_json(grid_events(st, target=tgt))
+                    self._send_json(grid_events(st, target=tgt,
+                                                reg_read_fn=rrfn))
                 else:
-                    self._send_json(grid_dma(st, target=tgt))
+                    self._send_json(grid_dma(st, target=tgt,
+                                             reg_read_fn=rrfn))
             except Exception as e:  # never crash the poll loop
                 self._send_json({"error": str(e), "cells": {}}, code=500)
         else:
@@ -1271,16 +2282,23 @@ class Handler(BaseHTTPRequestHandler):
                                          board_host=body.get("board_host")))
         elif u.path == "/stop":
             self._send_json(st.stop_run())
+        elif u.path == "/sim/run":
+            self._send_json(st.start_sim())
+        elif u.path == "/sim/stop":
+            self._send_json(st.stop_sim())
         elif u.path == "/cmd":
-            if st.run_in_progress():
-                self._send_json({"error": "disabled during run"})
+            if st.run_blocks_debug():
+                self._send_json({"error": "disabled during run setup"})
                 return
-            if not _hw_available():
+            dev = body.get("device", "")
+            is_sim = (dev or "").strip().lower() == "simulator"
+            if not is_sim and not _hw_available():
                 self._send_json({"error": "aiedbg not found in PATH"})
                 return
-            tgt = resolve_target(st, body.get("device"), body.get("host"))
+            tgt = resolve_target(st, dev, body.get("host"))
+            rrfn = _make_reg_read_fn(st, dev, tgt)
             try:
-                self._send_json(do_cmd(st, body, target=tgt))
+                self._send_json(do_cmd(st, body, target=tgt, reg_read_fn=rrfn))
             except Exception as e:
                 self._send_json({"error": str(e)}, code=500)
         elif u.path == "/settarget":
@@ -1290,10 +2308,24 @@ class Handler(BaseHTTPRequestHandler):
             # we just resolve device+host the same way /ping did and hand it to
             # retarget(). Without this, the aiegdb console stays pinned to the
             # daemon's startup target no matter what host the UI selects.
-            if st.run_in_progress():
+            dev = body.get("device", "")
+            is_sim = (dev or "").strip().lower() == "simulator"
+            # Simulator is not a board run, so don't block on run_in_progress().
+            if not is_sim and st.run_in_progress():
                 self._send_json({"ok": False, "detail": "disabled during run"})
                 return
-            tgt = resolve_target(st, body.get("device"), body.get("host"))
+            if is_sim:
+                # Simulator reads go through IPC debug socket, not aiegdb.
+                # Just report readiness without touching the aiegdb subprocess.
+                ready = st._sim_ipc_ready
+                self._send_json({
+                    "ok": True,
+                    "target": "simulator-ipc",
+                    "detail": ("IPC debug socket ready" if ready
+                               else "simulator not started yet"),
+                })
+                return
+            tgt = resolve_target(st, dev, body.get("host"))
             if not tgt:
                 self._send_json({"ok": False, "target": None,
                                  "detail": "no target configured"})
@@ -1304,8 +2336,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "target": tgt,
                                  "detail": str(e)}, code=500)
         elif u.path == "/aiegdb":
-            if st.run_in_progress():
-                self._send_json({"error": "disabled during run"})
+            if st.run_blocks_debug():
+                self._send_json({"error": "disabled during run setup"})
                 return
             # No _hw_available hard-gate: navigation/help work without aiedbg;
             # live reads fail gracefully inside aiegdb.
@@ -1314,8 +2346,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json({"error": str(e)}, code=500)
         elif u.path == "/aiegdb/reload":
-            if st.run_in_progress():
-                self._send_json({"error": "disabled during run"})
+            if st.run_blocks_debug():
+                self._send_json({"error": "disabled during run setup"})
                 return
             try:
                 self._send_json(st.gdb_reload())
@@ -1371,8 +2403,24 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def ping(st, device, host):
-    """Probe the live-debug connection by having xsdb connect to the JTAG
-    hw_server for the resolved target. Returns {ok, xsdb, target, detail}."""
+    """Probe the live-debug connection.
+
+    For the simulator: probe the IPC debug socket directly (no xsdb needed).
+    For boards: have xsdb connect to the JTAG hw_server.
+    Returns {ok, xsdb, target, detail}.
+    """
+    if (device or "").strip().lower() == "simulator":
+        with st._sim_lock:
+            ready = st._sim_ipc_ready
+            dbg = st._sim_dbg_socket
+        if ready and dbg and sim_ipc_ping(dbg):
+            return {"ok": True, "xsdb": False, "target": "simulator-ipc",
+                    "detail": f"IPC debug socket ready ({os.path.basename(dbg)})"}
+        if st.sim_in_progress():
+            return {"ok": False, "xsdb": False, "target": None,
+                    "detail": "simulator running but IPC not ready yet"}
+        return {"ok": False, "xsdb": False, "target": None,
+                "detail": "simulator not running — press Run to start it"}
     if not _xsdb_available():
         return {"ok": False, "xsdb": False, "target": None,
                 "detail": "xsdb not found in PATH"}
@@ -1414,6 +2462,7 @@ def resolve_target(st, device, host):
 
     * vek385 + host → xsdb://<host>:3121 (the board hostname from the UI).
     * palmyra       → xsdb://<PALIP>:3121 ($PALIP, fallback xx.xx.xx.213).
+    * simulator     → None (reads go through IPC debug socket, not aiedbg).
     * otherwise     → the daemon's configured/env target (st.target).
     """
     device = (device or "").strip().lower()
@@ -1421,7 +2470,25 @@ def resolve_target(st, device, host):
         return f"xsdb://{host}:3121"
     if device == "palmyra":
         return f"xsdb://{os.environ.get('PALIP', 'xx.xx.xx.213')}:3121"
+    if device == "simulator":
+        return None  # reads go through IPC debug socket, not aiedbg
     return st.target
+
+
+def _ui_defaults(st):
+    """Default board selection for the browser's device dropdown + hostname box.
+
+    Derives the board hostname from $VEK385IP (what envlocal.sh exports) or, as a
+    fallback, the host component of the daemon's resolved JTAG target
+    (xsdb://<host>:port). When a hostname is known we preselect the vek385 device
+    so the user doesn't have to pick it manually on every load.
+    """
+    host = os.environ.get("VEK385IP", "").strip()
+    if not host and st.target:
+        m = re.match(r"xsdb://([^:/]+)", st.target)
+        if m:
+            host = m.group(1)
+    return {"device": "vek385" if host else "", "board_host": host}
 
 
 def _target_from_aiedbg_env():
@@ -1607,8 +2674,9 @@ def main():
                     help="dir with host_schedule.html + schedule_view.json "
                          "+ provenance JSONs (default: aout/worklocal)")
     ap.add_argument("--elf", default=None,
-                    help="ELF to deploy via /run (default: omit; apppaltest -y "
-                         "auto-picks its default elf)")
+                    help="ELF to deploy via /run (default: project aout ELF "
+                         "<workdir>/build/host or aout/main.elf; falls back to "
+                         "apppaltest -y auto-pick if none exists)")
     ap.add_argument("--host", default="0.0.0.0",
                     help="bind address (default: 0.0.0.0 = all interfaces, "
                          "reachable from other machines; use 127.0.0.1 for "
@@ -1652,9 +2720,10 @@ def main():
     args = ap.parse_args()
 
     workdir = os.path.abspath(args.workdir)
-    # No --elf → omit the elf positional so apppaltest -y auto-picks its default,
-    # matching the manual `apppaltest.py -y -nonreboot` invocation.
-    elf = os.path.abspath(args.elf) if args.elf else None
+    # --elf wins. Otherwise default to the project's freshly-built tiling ELF
+    # (<workdir>/build/host or aout/main.elf); only if none exists do we leave
+    # elf=None so apppaltest -y auto-picks its own default.
+    elf = os.path.abspath(args.elf) if args.elf else _resolve_default_elf(workdir)
     apppaltest = args.apppaltest or os.path.join(
         _REPO_ROOT, "script", "test", "apppaltest.py")
     applog = args.applog or os.path.join(_REPO_ROOT, "applog")
@@ -1748,6 +2817,13 @@ def main():
                 print("  WARNING: LLM tab claude could not reach the aiegdb "
                       "MCP server; the chat still works but AIE debug tools "
                       "may be unavailable.", file=sys.stderr)
+    st = Handler.state
+    st._write_backend_status()
+    if st.sim_script:
+        print(f"  sim:        {st.sim_script}")
+        print(f"  sim-dir:    {st.sim_example_dir or 'NOT SET'}")
+    else:
+        print("  sim:        not configured (add debug_ui_config.json to workdir)")
     print(f"  target:     {target or 'NONE'}")
     print(f"  startcol:   {startcol}{'' if args.startcol is not None else ' (from provenance JSON)'}   device={args.device}   aie={aie_version}{'' if args.aie_version is not None else ' (from provenance JSON)'}")
     if _hw_available() and not target:

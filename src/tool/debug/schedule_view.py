@@ -586,6 +586,126 @@ def build_summary(channels):
 
 
 # ----------------------------------------------------------------------------
+# supply/demand balance analysis (per data flow)
+#
+# Flags flows where the producer side and consumer side do not move a matching
+# number of bytes PER ROUND. We deliberately use per-round byte *coverage*
+# (bd_len based) instead of total static bytes, because core-tile DMA channels
+# are lock-driven: their static start_io repeat_count is 1 even though they
+# re-fire many times under kernel/lock control. bd_len (the per-fire chunk) is
+# always explicit and reliable, so comparing per-round coverage avoids false
+# positives on correct lock-driven designs. Verified against a 4x4 matmul:
+#   broadcast  shim_bd_len 16384 == 4 cores x 4096   (balanced)
+#   gather     4 cores x 1024   == shim_bd_len 1024 x 4 fires (balanced)
+# ----------------------------------------------------------------------------
+
+def _loop_trips(entry):
+    """Number of outer-loop iterations from a flow_summary entry's loop_range
+    ('a..b' -> b-a). Returns 1 when there is no enclosing scf.for."""
+    lr = entry.get('loop_range')
+    if not lr or '..' not in lr:
+        return 1
+    try:
+        a, b = lr.split('..', 1)
+        n = int(b) - int(a)
+        return n if n > 0 else 1
+    except (ValueError, TypeError):
+        return 1
+
+
+def _entry_fires(entry):
+    """Explicit BD fire count = repeat_count * outer-loop trips (default 1)."""
+    rc = entry.get('repeat_count') or 1
+    return rc * _loop_trips(entry)
+
+
+def compute_flow_balance(flow_summary):
+    """Analyze each flow's producer (MM2S) vs consumer (S2MM) byte coverage.
+
+    Returns a list of per-flow dicts:
+      {flow_index, direction, pattern, supply_per_round, demand_per_round,
+       balanced, note, participants:[{loc,io_direction,channel,bd_len,fires,
+       is_shim,role}]}
+    `balanced` is None when the pattern is not one we can check reliably.
+    """
+    out = []
+    for f in flow_summary or []:
+        entries = f.get('entries', []) or []
+        parts = []
+        producers, consumers = [], []
+        for e in entries:
+            io = e.get('io_direction')
+            is_shim = e.get('tile_row') == 0
+            rec = {
+                'loc': [e.get('tile_col'), e.get('tile_row')],
+                'io_direction': io,
+                'channel': e.get('channel'),
+                'bd_len': e.get('bd_len') or 0,
+                'fires': _entry_fires(e),
+                'repeat_count': e.get('repeat_count') or 1,
+                'is_shim': is_shim,
+                'role': 'producer' if io == 'MM2S' else 'consumer',
+            }
+            parts.append(rec)
+            (producers if io == 'MM2S' else consumers).append(rec)
+
+        shim_prod = [p for p in producers if p['is_shim']]
+        core_prod = [p for p in producers if not p['is_shim']]
+        shim_cons = [c for c in consumers if c['is_shim']]
+        core_cons = [c for c in consumers if not c['is_shim']]
+
+        pattern = 'unknown'
+        supply = demand = None
+        balanced = None
+        note = ''
+
+        if len(shim_prod) == 1 and core_cons and not core_prod and not shim_cons:
+            # Broadcast: one shim MM2S feeds N core S2MM. The shim's per-fire
+            # chunk must cover the sum of what all cores read that round.
+            pattern = 'broadcast'
+            supply = shim_prod[0]['bd_len']
+            demand = sum(c['bd_len'] for c in core_cons)
+            balanced = (supply == demand)
+            note = 'shim per-fire bytes vs sum of %d core reads' % len(core_cons)
+        elif len(shim_cons) == 1 and core_prod and not core_cons and not shim_prod:
+            # Gather: N core MM2S drain into one shim S2MM. We compare PER-FIRE
+            # byte coverage (shim per-fire vs core per-fire), NOT startio repeat
+            # counts. The shim's startio repeat is numCoreTiles x oooIterWrap
+            # (e.g. 4x4=16), which is NOT an over-demand: each core is lock-driven
+            # and re-fires m_rounds*n_rounds times under kernel control (its static
+            # repeat=1 hides this), so aggregate shim fires == aggregate core fires.
+            # Comparing shim repeat against the producer count would false-flag this
+            # correct, byte-balanced design (verified against the 4x4 256^3 matmul).
+            pattern = 'gather'
+            supply = sum(p['bd_len'] for p in core_prod)
+            demand = shim_cons[0]['bd_len'] * len(core_prod)
+            balanced = (supply == demand)
+            note = 'sum of %d core writes vs shim per-fire x %d gather fires' % (
+                len(core_prod), len(core_prod))
+        elif len(producers) == 1 and len(consumers) == 1:
+            # Point-to-point: per-fire chunks must match.
+            pattern = 'p2p'
+            supply = producers[0]['bd_len']
+            demand = consumers[0]['bd_len']
+            balanced = (supply == demand)
+            note = 'producer per-fire vs consumer per-fire'
+        else:
+            note = 'unrecognized fan pattern; coverage check skipped'
+
+        out.append({
+            'flow_index': f.get('flow_index'),
+            'direction': f.get('direction'),
+            'pattern': pattern,
+            'supply_per_round': supply,
+            'demand_per_round': demand,
+            'balanced': balanced,
+            'note': note,
+            'participants': parts,
+        })
+    return out
+
+
+# ----------------------------------------------------------------------------
 # Kernel code show (core tiles): parse kernel.cc and correlate each core-tile
 # DMA channel with the kernel window/argument it feeds or drains.
 #
@@ -608,6 +728,25 @@ RE_KARG = re.compile(r'get_(input|output)_async_window\w*\(\s*window_window_(\w+
 # buffer args) and the .bcf symbol lines that map each buffer name -> address.
 RE_KBUF = re.compile(r'\bbuf_\w+')
 RE_BCF_SYMBOL = re.compile(r'^\s*_symbol\s+(\S+)\s+(0x[0-9A-Fa-f]+)')
+
+# Alternate patterns for aiecompiler-generated kernel.cc (baremetal flow).
+# Naming convention differs: window names are pingpong buffer pairs (buf0_buf0d),
+# lock #defines are tile-scoped (LOCK_<col>_<row>_<id>_<PRD|CNS>), and the
+# kernel invocation comment is absent (direct call).
+#   window_init(window_buf0_buf0d, 1, buf0, LOCK_4_0_0_PRD, buf0d, LOCK_4_0_1_CNS, 8, 8)
+#   get_input_async_window_int32(window_buf0_buf0d)
+#   // Kernel call : i2:square  -> kernel function name
+RE_KWININIT_BC = re.compile(
+    r'window_init\(\s*window_(\w+)\s*,\s*\d+\s*,'      # window_<pingpong_name>
+    r'\s*(\w+)\s*,'                                      # ping_buf
+    r'\s*LOCK_\w+\s*,'                                   # ACQ lock (any name)
+    r'\s*(\w+)\s*,'                                      # pong_buf
+    r'\s*LOCK_\w+\s*,'                                   # REL lock (any name)
+    r'\s*(\d+)\s*,')                                     # buf_size (words)
+RE_KARG_BC = re.compile(r'get_(input|output)_async_window\w*\(\s*window_(\w+)\s*\)')
+RE_KINVOKE_BC = re.compile(r'//\s*Kernel call\s*:\s*\w+:(\w+)')
+# Also match buf0/buf0d style buffer names (not just buf_xxx)
+RE_KBUF_BC = re.compile(r'\b(buf\w+)\b')
 
 
 def _win_dir(name):
@@ -816,13 +955,37 @@ def parse_kernel(kernel_cc_path):
                     w['buffers'].append(bm.group(0))
             marker_lines.append({'line': i, 'code': ln})
             continue
+        # Alternate: aiecompiler baremetal kernel.cc format.
+        # window_init(window_<name>, 1, ping_buf, LOCK_x, pong_buf, LOCK_y, size, size)
+        m = RE_KWININIT_BC.search(ln)
+        if m and not RE_KWININIT.search(ln):
+            win_name  = m.group(1)
+            ping_buf  = m.group(2)
+            pong_buf  = m.group(3)
+            buf_size  = int(m.group(4))
+            w = _win(win_name)
+            w['buf_size']  = buf_size
+            w['init_line'] = i
+            for buf in (ping_buf, pong_buf):
+                if buf and buf not in w['buffers']:
+                    w['buffers'].append(buf)
+            marker_lines.append({'line': i, 'code': ln})
+            continue
         m = RE_KINVOKE.search(ln)
         if m:
             function = m.group(1)
             marker_lines.append({'line': i, 'code': ln})
             continue
+        # Alternate: aiecompiler kernel invoke comment format.
+        # // Kernel call : i2:square
+        m = RE_KINVOKE_BC.search(ln)
+        if m and function is None:
+            function = m.group(1)
+            marker_lines.append({'line': i, 'code': ln})
+            continue
 
     # Buffer declaration lines (`<type> buf_xxx[N];`) per window, for highlight.
+    # Also handle baremetal buf0/buf0d style names.
     for w in windows.values():
         for buf in w['buffers']:
             decl_re = re.compile(r'\b' + re.escape(buf) + r'\s*\[')
@@ -832,19 +995,47 @@ def parse_kernel(kernel_cc_path):
                         w['buf_decl_lines'].append(i)
 
     # Invoke call line: the call to <function>( ... ) with the arg windows.
+    # In aiehlc_aiesim format the get_input/output_async_window calls appear on
+    # the same line as the kernel call.  In the aiecompiler baremetal format they
+    # appear earlier as separate variable assignments; we collect those first,
+    # then find the bare invoke line.
     args = []
+    # Pre-pass: collect window→direction from standalone get_input/output lines.
+    # Maps window_name -> (direction, line_no) for later arg ordering.
+    win_dir_by_line = {}   # line_no -> (direction, win_name)
+    for i, ln in enumerate(src, 1):
+        for am in list(RE_KARG.finditer(ln)) + list(RE_KARG_BC.finditer(ln)):
+            d = 'input' if am.group(1) == 'input' else 'output'
+            wn = am.group(2)
+            win_dir_by_line[i] = (d, wn)
+            if wn in windows:
+                windows[wn]['dir'] = d
     if function:
         call_re = re.compile(r'\b' + re.escape(function) + r'\s*\(')
         for i, ln in enumerate(src, 1):
-            if call_re.search(ln) and 'get_' in ln:
-                invoke_line = i
-                marker_lines.append({'line': i, 'code': ln})
-                for pos, am in enumerate(RE_KARG.finditer(ln)):
-                    d = 'input' if am.group(1) == 'input' else 'output'
-                    args.append({'arg': pos, 'window': am.group(2), 'dir': d})
-                    if am.group(2) in windows:
-                        windows[am.group(2)]['dir'] = d
-                break
+            if call_re.search(ln):
+                # Primary: get_* calls on same line (aiehlc_aiesim format).
+                arg_matches = list(RE_KARG.finditer(ln)) + list(RE_KARG_BC.finditer(ln))
+                if arg_matches:
+                    invoke_line = i
+                    marker_lines.append({'line': i, 'code': ln})
+                    for pos, am in enumerate(arg_matches):
+                        d = 'input' if am.group(1) == 'input' else 'output'
+                        win_name = am.group(2)
+                        args.append({'arg': pos, 'window': win_name, 'dir': d})
+                        if win_name in windows:
+                            windows[win_name]['dir'] = d
+                    break
+                # Baremetal: invoke is a bare call like square((var1),(var2)).
+                # Reconstruct arg order from the pre-collected win_dir_by_line,
+                # sorted by line number (assignment order == param order).
+                if 'get_' not in ln and win_dir_by_line:
+                    invoke_line = i
+                    marker_lines.append({'line': i, 'code': ln})
+                    for pos, (d, wn) in enumerate(
+                            v for _, v in sorted(win_dir_by_line.items())):
+                        args.append({'arg': pos, 'window': wn, 'dir': d})
+                    break
 
     marker_lines.sort(key=lambda r: r['line'])
     # Resolve and parse the actual kernel function body (follows #include "*.cc").
@@ -901,10 +1092,15 @@ def parse_bcf(bcf_path):
 # Buffer base offset: a core-tile proc address minus this yields the DMA-view
 # address literal that host.cc passes to __runtime_buffer_arg((void*)ADDR); the
 # .bcf `_symbol <name> 0x...` addresses are proc addresses (ADDR + WIN_BASE).
+# The default 0x70000 matches aiehlc_aiesim's memory map.  Baremetal designs
+# (aiecompiler Work directory flow) embed win_base in dfscheduleprovenancemap.json
+# from the .bcf _reserved DMb 0x0 <WIN_BASE> line; build_view() reads it and
+# overrides this default when present.
 WIN_BASE = 0x70000
 
 
-def match_channels_to_kernel(channels, kernel_view, bcf_view, host_lines, var_def):
+def match_channels_to_kernel(channels, kernel_view, bcf_view, host_lines, var_def,
+                             win_base=WIN_BASE):
     """Correlate each core-tile DMA channel with a kernel window/argument by the
     BD buffer address (deterministic, no lock/positional heuristics).
 
@@ -942,7 +1138,7 @@ def match_channels_to_kernel(channels, kernel_view, bcf_view, host_lines, var_de
             proc_addr = int(s['addr'], 16)
         except (ValueError, TypeError, KeyError):
             continue
-        dmaview = proc_addr - WIN_BASE
+        dmaview = proc_addr - win_base
         addr2sym[dmaview] = s['name']
         w = buf2win.get(s['name'])
         if w is not None:
@@ -966,9 +1162,33 @@ def match_channels_to_kernel(channels, kernel_view, bcf_view, host_lines, var_de
             return None
         return int(ma.group(1))
 
+    # window name -> window object (baremetal port-name resolution path).
+    win_by_name = {w['name']: w for w in wins}
+
     matches = []
     for c in channels:
         direction = c.get('direction')
+
+        # Baremetal: work2provenance resolved the window by port name (address
+        # arithmetic is unreliable because buffers land in different memory
+        # modules).  Use it directly when present.
+        pwin = c.get('kernel_window')
+        if pwin and pwin in win_by_name:
+            w = win_by_name[pwin]
+            matches.append({
+                'direction': direction,
+                'channel': c.get('channel'),
+                'window': w['name'],
+                'arg': arg_of.get(w['name']),
+                'buf_size': w.get('buf_size'),
+                'method': 'port',
+                'bcf_syms': list(c.get('kernel_buffers', []) or w.get('buffers', [])),
+                'addrs': [],
+                'addrs_hex': [],
+                'port_id': c.get('kernel_port_id'),
+            })
+            continue
+
         addrs = []
         method = 'none'
         # Primary: host.cc SSA (user's path) for every BD line of this channel.
@@ -1252,6 +1472,311 @@ class DfscheduleSlicer:
 
 
 # ----------------------------------------------------------------------------
+# Communication path loader (dmaphop provenance map → structured hop list)
+# ----------------------------------------------------------------------------
+
+import re as _re
+
+def _load_comm_paths(workdir):
+    """Load comm_paths from dmaphopprovenacemap.json + optional routingprovenancemap.json.
+
+    For each communication path, builds an ordered tile waypoint list and hop list.
+
+    Push paths: shim is producer, data flows shim→cores.
+      - dmaphop hops are in order: (shim→core0), (core0→core1), ...
+    Pull paths: cores are producers, data flows cores→shim.
+      - dmaphop hops are in REVERSE order: (coreN→shim), ..., (core0→core1)
+      - We reverse them to get data-flow order.
+
+    When routingprovenancemap.json exists, intermediate routing tiles (stream-switch path
+    through MEM tiles) are filled in via circuit_connect chain reconstruction.
+    """
+    _OPPOSITE = {'NORTH': 'SOUTH', 'SOUTH': 'NORTH', 'EAST': 'WEST', 'WEST': 'EAST'}
+    _DELTA    = {'NORTH': (0, 1), 'SOUTH': (0, -1), 'EAST': (1, 0), 'WEST': (-1, 0)}
+
+    def parse_coord(s):
+        m = _re.search(r'\((\d+),(\d+)\)', s)
+        return (int(m.group(1)), int(m.group(2))) if m else None
+
+    # ── Load dmaphop ──────────────────────────────────────────────────────────
+    hop_path = os.path.join(workdir, 'dmaphopprovenacemap.json')
+    if not os.path.exists(hop_path):
+        return []
+    try:
+        with open(hop_path) as f:
+            hop_data = json.load(f)
+    except Exception:
+        return []
+
+    shim_row = 0
+
+    # ── Load routing provenance (optional) ────────────────────────────────────
+    rp_path = os.path.join(workdir, 'routingprovenancemap.json')
+    rp_groups = []
+    if os.path.exists(rp_path):
+        try:
+            with open(rp_path) as f:
+                rp_groups = json.load(f).get('routing_groups', [])
+        except Exception:
+            pass
+
+    # Build routing group lookup keyed by the frozenset of DMA terminal (col,row) tiles.
+    # Col groups (ioid=13-16) have 4 DMA tiles in a single column.
+    # Row groups (ioid=17,19,21,23) have 4 DMA tiles in a single row.
+    # This key is unambiguous regardless of IOID/flow_index mismatch and regardless of
+    # which shim column feeds the group.
+    rp_by_dma_tiles = {}
+    rp_by_flow_index = {}
+    for g in rp_groups:
+        conns = g.get('connections', [])
+        dma_key = frozenset(
+            (c['tile']['col'], c['tile']['row'])
+            for c in conns
+            if c.get('kind') == 'circuit_connect'
+            and c.get('master', {}).get('dir') == 'DMA'
+        )
+        if dma_key:
+            rp_by_dma_tiles[dma_key] = g
+        # Baremetal (work2provenance) groups are point-to-point and tag each group
+        # with its flow_index, since two nets can share the same physical tile set.
+        if 'flow_index' in g:
+            rp_by_flow_index[g['flow_index']] = g
+
+    def routing_edges_for_flow(direction, nonshim_tiles, flow_index=None):
+        """Extract adjacency edges from the routing group for this flow.
+
+        When groups carry a `flow_index` (baremetal provenance), match on that —
+        point-to-point nets can traverse identical tiles so a tile-set key is
+        ambiguous.  Otherwise fall back to the DMA-tile frozenset key used by
+        native aiehlc broadcast/gather groups.
+
+        Row groups store both push and pull circuit_connect entries in one list,
+        split at the shim_aie_to_ext marker. Col groups have push entries only.
+        Off-grid edges (destination row < 0) are dropped.
+        Returns (edges, tiles_seen, dma_tiles) where dma_tiles is the set of
+        core tiles that are DMA consumers (used for intermediate-tap markers)."""
+        g = None
+        if rp_by_flow_index and flow_index is not None:
+            g = rp_by_flow_index.get(flow_index)
+        if g is None:
+            g = rp_by_dma_tiles.get(frozenset(nonshim_tiles))
+        if not g:
+            return [], set(), set(), set()
+        conns = g.get('connections', [])
+
+        # Find split point: connections before shim_aie_to_ext = push path,
+        # connections after = pull path. Col groups have no shim_aie_to_ext.
+        split_idx = next(
+            (i for i, c in enumerate(conns) if c.get('kind') == 'shim_aie_to_ext'),
+            None
+        )
+        if split_idx is not None:
+            cc_conns = conns[:split_idx] if direction == 'push' else conns[split_idx + 1:]
+        else:
+            cc_conns = conns
+
+        # packet_connect tiles in the push section are the DMA core tiles that also
+        # send results back via packet routing. Any adjacent hop between two of these
+        # tiles is a packet-routed stream connection, not shmem.
+        push_conns = conns[:split_idx] if split_idx is not None else conns
+        packet_tiles = {(c['tile']['col'], c['tile']['row'])
+                        for c in push_conns if c.get('kind') == 'packet_connect'}
+
+        # For pull paths: packet_connect tile in cc_conns is the packet collector.
+        pc_tiles = {(c['tile']['col'], c['tile']['row'])
+                    for c in cc_conns if c.get('kind') == 'packet_connect'}
+
+        edges = []
+        tiles_seen = set()
+        dma_tiles = set()
+        first_cc = True
+        for c in cc_conns:
+            if c.get('kind') != 'circuit_connect':
+                continue
+            t = c['tile']
+            fc, fr = t['col'], t['row']
+            mdir = c['master']['dir']
+            if mdir == 'DMA':
+                tiles_seen.add((fc, fr))
+                dma_tiles.add((fc, fr))
+                continue
+            d = _DELTA.get(mdir)
+            if not d:
+                continue
+            tc, tr = fc + d[0], fr + d[1]
+            if tr < 0:
+                continue   # off-grid — south of shim row
+            # Stitch packet_connect collector → this relay (pull path only, once).
+            if first_cc and pc_tiles:
+                first_cc = False
+                sdir = c.get('slave', {}).get('dir')
+                sd = _DELTA.get(sdir)
+                if sd:
+                    src_c, src_r = fc + sd[0], fr + sd[1]
+                    if (src_c, src_r) in pc_tiles and src_r >= 0:
+                        edges.append([[src_c, src_r], [fc, fr]])
+                        tiles_seen.add((src_c, src_r))
+            else:
+                first_cc = False
+            edges.append([[fc, fr], [tc, tr]])
+            tiles_seen.add((fc, fr))
+            tiles_seen.add((tc, tr))
+
+        # For pull paths: extract the gather chain from packet_connect forward_master.
+        # Each packet_connect tile has a forward_master direction that shows the
+        # lateral routing of gathered results (e.g. EAST for (0,4)→(1,4)→(2,4)→(3,4)).
+        if direction == 'pull' and split_idx is not None:
+            for c in push_conns:
+                if c.get('kind') != 'packet_connect':
+                    continue
+                t = c['tile']
+                fc, fr = t['col'], t['row']
+                fm = c.get('forward_master', {})
+                fmdir = fm.get('dir')
+                d = _DELTA.get(fmdir)
+                if not d:
+                    continue  # NONE or unknown — this is the chain terminus
+                tc, tr = fc + d[0], fr + d[1]
+                if tr < 0 or (tc, tr) not in packet_tiles:
+                    continue
+                edge = [[fc, fr], [tc, tr]]
+                if edge not in edges:
+                    edges.append(edge)
+                    tiles_seen.add((fc, fr))
+                    tiles_seen.add((tc, tr))
+
+        return edges, tiles_seen, dma_tiles, packet_tiles
+
+    # ── Parse each communication path ────────────────────────────────────────
+    result = []
+    for p in hop_data.get('communication_paths', []):
+        path_id  = p.get('id', '')
+        direction = p.get('direction', 'push')
+
+        producer = next((s for s in p.get('stages', []) if s.get('role') == 'producer'), None)
+        consumer = next((s for s in p.get('stages', []) if s.get('role') == 'consumer'), None)
+        channel  = next((s for s in p.get('stages', []) if s.get('role') == 'channel'),  None)
+
+        # Flow index: push → producer port_sym; pull → consumer port_sym
+        if direction == 'push':
+            port_sym = (producer or {}).get('port_sym', '')
+            shim_tile = (producer or {}).get('tile') or {}
+        else:
+            port_sym = (consumer or {}).get('port_sym', '')
+            shim_tile = (consumer or {}).get('tile') or {}
+
+        fm = _re.match(r'f(\d+)_', port_sym)
+        seq_m = _re.search(r'(\d+)$', path_id)
+        flow_index = int(fm.group(1)) if fm else (int(seq_m.group(1)) if seq_m else 0)
+
+        shim_col = shim_tile.get('col')
+        shim_row_val = shim_tile.get('row', shim_row)
+
+        # Raw hops from channel stage. A hop may carry an explicit 'hop_type'
+        # (e.g. baremetal shared-memory hops) which overrides classification.
+        raw_pairs = []
+        if channel:
+            for h in channel.get('hops', []):
+                src = parse_coord(h.get('from', ''))
+                dst = parse_coord(h.get('to', ''))
+                if src and dst:
+                    raw_pairs.append((src, dst, h.get('hop_type'), h.get('shmem_kind')))
+
+        # Pull hops are stored in reverse (last→first); reverse to get data-flow order
+        if direction == 'pull':
+            raw_pairs = list(reversed(raw_pairs))
+
+        # Non-shim tiles for routing-group matching = stream-hop tiles only
+        # (explicit shmem hops are not part of the stream-switch routing group).
+        nonshim_tiles = list({(c, r) for (c, r) in
+                              [p for (s, d, hint, kind) in raw_pairs if hint != 'shmem'
+                               for p in (s, d)]
+                              if r != shim_row})
+
+        # Extract exact adjacency edges from routing provenance circuit_connect entries.
+        # Matched by DMA terminal tile set so push and pull are split correctly.
+        routing_edges, routing_tiles, routing_dma_tiles, routing_packet_tiles = routing_edges_for_flow(direction, nonshim_tiles, flow_index)
+
+        if routing_edges:
+            edges_out      = routing_edges
+            tiles_list     = [list(t) for t in routing_tiles]
+            dma_tiles_out  = [list(t) for t in routing_dma_tiles]
+            packet_tiles_out = [list(t) for t in routing_packet_tiles]
+        else:
+            # Fallback: derive edges directly from dmaphop pairs (may skip MEM rows).
+            # Skip non-adjacent hops and explicit shmem hops (shmem is drawn in
+            # its own layer, not as a stream edge).
+            edges_out  = [[[fc, fr], [tc, tr]] for (fc, fr), (tc, tr), hint, kind in raw_pairs
+                          if hint != 'shmem' and abs(fc - tc) + abs(fr - tr) == 1]
+            tiles_list = []
+            seen = set()
+            for (fc, fr), (tc, tr), hint, kind in raw_pairs:
+                for t in ((fc, fr), (tc, tr)):
+                    if t not in seen:
+                        seen.add(t); tiles_list.append(list(t))
+            dma_tiles_out    = []
+            packet_tiles_out = []
+
+        # Classify dmaphop hops:
+        # - Multi-tile hops (manhattan > 1) are abstract aggregations — not drawable as shmem.
+        # - Adjacent hops covered by routing provenance circuit_connect are circuit-switched stream.
+        # - Adjacent hops between packet_connect tiles are packet-switched stream.
+        # - Adjacent hops in none of the above are true shared-memory connections.
+        routing_edge_set = {(e[0][0], e[0][1], e[1][0], e[1][1]) for e in routing_edges}
+        packet_tile_set  = {(t[0], t[1]) for t in routing_packet_tiles}
+        hops_out = []
+        for (fc, fr), (tc, tr), hint, kind in raw_pairs:
+            dist = abs(fc - tc) + abs(fr - tr)
+            if hint:
+                htype = hint      # explicit (e.g. baremetal shared-memory hop)
+            elif dist != 1:
+                htype = 'stream'
+            elif ((fc, fr, tc, tr) in routing_edge_set or
+                  (tc, tr, fc, fr) in routing_edge_set):
+                htype = 'stream'  # circuit-switched stream
+            elif (fc, fr) in packet_tile_set and (tc, tr) in packet_tile_set:
+                htype = 'stream'  # packet-switched stream — still a hardware stream-switch connection
+            else:
+                htype = 'shmem'   # true shared memory
+            hop = {'from_col': fc, 'from_row': fr,
+                   'to_col': tc, 'to_row': tr,
+                   'type': htype}
+            if kind:
+                hop['kind'] = kind   # 'window' (ping-pong) | 'dma' (direct DMA bridge)
+            hops_out.append(hop)
+
+        prod = [shim_col, shim_row_val]
+
+        # Attach raw routing group (connections list) for the detail panel.
+        rg = None
+        if rp_by_flow_index and flow_index is not None:
+            rg = rp_by_flow_index.get(flow_index)
+        if rg is None:
+            rg = rp_by_dma_tiles.get(frozenset(nonshim_tiles))
+        rg_connections = rg.get('connections', []) if rg else []
+
+        # Attach dmaphop raw stages (producer/consumer info) from the original hop_data.
+        stages_raw = p.get('stages', [])
+
+        result.append({
+            'id': path_id,
+            'flow_index': flow_index,
+            'direction': direction,
+            'prod_col': prod[0],
+            'prod_row': prod[1],
+            'tiles':     tiles_list,     # used only for tileMap merging in JS
+            'edges':     edges_out,      # [[fc,fr],[tc,tr]] adjacency pairs for drawing
+            'dma_tiles':    dma_tiles_out,    # core tiles that are DMA consumers (tap markers)
+            'packet_tiles': packet_tiles_out, # tiles connected via packet-routed streams
+            'hops':      hops_out,       # dmaphop hop pairs (all stream-switch; pull core hops = packet gather)
+            'routing_connections': rg_connections,  # raw stream-switch circuit_connect list
+            'stages':    stages_raw,     # producer/channel/consumer stage metadata
+        })
+
+    return result
+
+
+# ----------------------------------------------------------------------------
 # main
 # ----------------------------------------------------------------------------
 
@@ -1263,12 +1788,33 @@ def build_view(workdir):
     with open(host_path) as f:
         host_lines = f.read().split('\n')
 
-    # Kernel code show: parse kernel.cc once (graceful skip if absent) so each
-    # core tile can correlate its DMA channels to kernel windows/arguments.
+    # Kernel code show: parse the top-level kernel.cc once (graceful skip if
+    # absent).  This is the global fallback; when a tile carries per-tile
+    # `kernel_cc`/`bcf` paths (baremetal, one kernel per core) those take
+    # precedence and are loaded/cached below.
     kernel_view = parse_kernel(os.path.join(workdir, 'kernel.cc'))
     # .bcf buffer symbol map (buffer name -> tile address), for the new "*.bcf"
     # sub-tab correlated to the focused channel's window buffers.
     bcf_view = parse_bcf(find_bcf(workdir))
+
+    # Per-tile kernel.cc / .bcf caches (baremetal: each core runs its own kernel
+    # with its own buffer layout). Keyed by out_dir-relative path.
+    _kernel_cache = {}
+    _bcf_cache = {}
+    def _tile_kernel_view(rel):
+        if not rel:
+            return None
+        if rel not in _kernel_cache:
+            p = os.path.join(workdir, rel)
+            _kernel_cache[rel] = parse_kernel(p) if os.path.isfile(p) else None
+        return _kernel_cache[rel]
+    def _tile_bcf_view(rel):
+        if not rel:
+            return None
+        if rel not in _bcf_cache:
+            p = os.path.join(workdir, rel)
+            _bcf_cache[rel] = parse_bcf(p) if os.path.isfile(p) else None
+        return _bcf_cache[rel]
 
     fstart, fend = find_function_range(host_lines)
     owner, var2loc, _ = attribute_lines(host_lines, fstart, fend)
@@ -1278,6 +1824,11 @@ def build_view(workdir):
 
     # Rename-robust, filtered per-channel line mapping (comment/type anchored).
     channel_map = map_relevant_lines(host_lines, fstart, fend, prov, loops)
+
+    # Supply/demand balance per data flow (flag over/under supply). Indexed by
+    # flow_index so each tile channel can surface its flow's balance verdict.
+    supply_demand = compute_flow_balance(prov.get('flow_summary', []))
+    balance_by_flow = {b['flow_index']: b for b in supply_demand}
 
     # SSA value/def maps for the per-channel full-block arg trace-back.
     cmap = build_const_map(host_lines, fstart, fend)
@@ -1361,6 +1912,17 @@ def build_view(workdir):
             c['middle_ir'] = (slicer.channel_slice(col, row, c['direction'],
                                                     c['channel'])
                               if slicer else mid_fallback)
+            # Attach this channel's flow supply/demand verdict (if any).
+            fb = balance_by_flow.get(c.get('flow_index'))
+            if fb is not None:
+                c['flow_balance'] = {
+                    'flow_index': fb['flow_index'],
+                    'pattern': fb['pattern'],
+                    'supply_per_round': fb['supply_per_round'],
+                    'demand_per_round': fb['demand_per_round'],
+                    'balanced': fb['balanced'],
+                    'note': fb['note'],
+                }
             for e in entries:
                 line_kinds.setdefault(e['line'], set()).add(e['kind'])
                 if e.get('bd_comment'):
@@ -1379,13 +1941,20 @@ def build_view(workdir):
         relevant_code = '\n'.join(
             'L%d: %s' % (n, host_lines[n - 1].strip()) for n in relevant_lines)
 
+        # Per-tile kernel/bcf (baremetal) with graceful fallback to the global
+        # top-level kernel.cc/.bcf (native aiehlc, shared kernel).
+        t_kernel_view = _tile_kernel_view(t.get('kernel_cc')) or kernel_view
+        t_bcf_view    = _tile_bcf_view(t.get('bcf')) or bcf_view
+        t_win_base    = t.get('win_base', prov.get('win_base', WIN_BASE))
+
         # Kernel channel<->argument correlation (core tiles only). None for
         # shim/other tiles or when kernel.cc is absent.
-        kernel_match = (match_channels_to_kernel(channels, kernel_view, bcf_view,
-                                                 host_lines, var_def)
-                        if ttype == 'core' and kernel_view else None)
+        kernel_match = (match_channels_to_kernel(channels, t_kernel_view, t_bcf_view,
+                                                 host_lines, var_def,
+                                                 win_base=t_win_base)
+                        if ttype == 'core' and t_kernel_view else None)
 
-        tiles_out.append({
+        tile_out = {
             'loc': [col, row],
             'type': ttype,
             'high_level': {
@@ -1408,7 +1977,18 @@ def build_view(workdir):
             'relevant_detail': relevant_detail,
             'relevant_code': relevant_code,
             'dma_channels': channels,
-        })
+        }
+        # Attach per-tile kernel/bcf views (baremetal) so the UI shows the kernel
+        # source specific to this core rather than the global fallback. Only set
+        # when a distinct per-tile artifact was found.
+        if ttype == 'core':
+            tk = _tile_kernel_view(t.get('kernel_cc'))
+            tb = _tile_bcf_view(t.get('bcf'))
+            if tk is not None:
+                tile_out['kernel'] = tk
+            if tb is not None:
+                tile_out['bcf'] = tb
+        tiles_out.append(tile_out)
 
     # global (non-tile) lines: kernel group load/launch, final wait, dbg snapshot
     glns = owner_lines.get('__global__', [])
@@ -1448,6 +2028,8 @@ def build_view(workdir):
         'bcf': bcf_view,
         'invariant_checks': prov.get('invariant_checks', []),
         'flow_summary': prov.get('flow_summary', []),
+        'supply_demand': supply_demand,
+        'comm_paths': _load_comm_paths(workdir),
         'dfschedule_ir': {
             'name': DFSCHED_IR_NAME,
             'path': os.path.abspath(ir_path) if ir_path else None,
@@ -1483,8 +2065,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #right { flex:1 1 0; min-width:200px; padding:16px; overflow:hidden;
            display:flex; flex-direction:column; }
   #panel { flex:1 1 0; overflow:auto; min-height:0; }
-  #rhsplitter { flex:0 0 6px; cursor:row-resize; background:#333; margin-top:8px;
-                border-top:1px solid #444; border-bottom:1px solid #444; }
+  #rhsplitter { display:none; flex:0 0 6px; cursor:row-resize; background:#333;
+                margin-top:8px; border-top:1px solid #444; border-bottom:1px solid #444; }
+  #right:has(#cmdconsole:not(.hide)) #rhsplitter { display:block; }
   #rhsplitter:hover, #rhsplitter.drag { background:#5a5a5a; }
   /* fixed default height + flex column so console output scrolls inside the
      frame instead of inflating it; drag #rhsplitter to resize. */
@@ -1534,6 +2117,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .tile.core { background:var(--core); }
   .tile:hover { outline:2px solid #fff6; }
   .tile.sel { outline:3px solid var(--sel); }
+  .tile.sdmismatch { box-shadow:0 0 0 2px #d64545 inset; }
+  .tile .badge.sdwarn { background:#5a2020; color:#ffb0b0; cursor:default; }
   .tile .loc { font-weight:700; font-size:12px; }
   .tile .badge { display:inline-block; background:#0006; border-radius:3px;
                  padding:0 4px; margin:1px 2px 0 0; font-size:10px; }
@@ -1561,6 +2146,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   ul.sum { margin:4px 0; padding-left:18px; font-size:13px; }
   ul.sum li { margin:2px 0; }
   .contract { color:#c9a; font-size:12px; }
+  /* supply/demand balance flags */
+  .sdrow { margin:3px 0 6px; }
+  .sdbadge { display:inline-block; font-size:10px; font-weight:700; padding:1px 6px;
+             border-radius:3px; margin-right:6px; vertical-align:1px; }
+  .sdbadge.sdok  { background:#1f4d2e; color:#8fe0a8; }
+  .sdbadge.sdbad { background:#5a2020; color:#ff9a9a; }
+  .sdbadge.sdna  { background:#3a3a3a; color:#bbb; }
+  .sdmeta { color:#9aa; font-size:11px; }
+  .sdfig  { color:#ccd; font-size:12px; margin:2px 0 0 2px; }
+  .sdnote { color:#888; font-size:11px; font-style:italic; margin-left:2px; }
   pre.code { background:#111; border:1px solid #333; border-radius:6px; padding:10px;
              overflow:auto; font-size:12px; line-height:1.4; white-space:pre; }
   .lref { color:#888; font-size:12px; margin:4px 0; }
@@ -1593,6 +2188,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .kmap .mlock { color:#6a9; }
   .kmap .morder { color:#c93; }
   .kmap .mnone { color:#a55; }
+  /* net detail panel tables (stream-switch connections, hops, channels) */
+  .rctbl { border-collapse:collapse; margin:6px 0 8px; font-size:12px; width:100%; }
+  .rctbl th, .rctbl td { border:1px solid #333; padding:3px 7px; text-align:left;
+                          white-space:nowrap; }
+  .rctbl th { background:#252525; color:#bbb; font-weight:600; }
+  .rctbl td:first-child { color:#9cc; font-family:monospace; }
+  .dimtxt { color:#888; font-size:12px; }
+  /* search chip shared style (used in #sr-chips) */
+  .lk-chip { display:inline-flex; align-items:center; gap:4px;
+             background:#2a1e0a; border:1px solid #c8905a; border-radius:12px;
+             color:#f0c070; font-size:11px; padding:1px 8px 1px 6px;
+             font-family:monospace; }
+  .lk-chip .lk-x { cursor:pointer; color:#c8905a; font-size:13px;
+                    line-height:1; margin-left:2px; }
+  .lk-chip .lk-x:hover { color:#ff9a6c; }
   /* kernel source view (Low level tab, core tiles) */
   .khl { background:#3a3410; border-left:3px solid #e0a800; }
   .kshowall { margin:4px 0 8px; padding:3px 10px; font-size:12px; cursor:pointer;
@@ -1666,6 +2276,47 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #console { flex:1 1 auto; max-height:none; min-height:100px; }
   .livebar { display:block; margin-top:3px; font-size:9px; font-weight:700; color:#fff;
              border-radius:3px; padding:0 4px; text-align:center; letter-spacing:.5px; }
+  /* ── view switcher (Grid / Device Map) ─────────────────────── */
+  #viewswitcher { display:flex; gap:0; margin-bottom:10px; }
+  .vsw { padding:4px 14px; font-size:12px; font-weight:600; border:1px solid #444;
+         background:#252525; color:#888; cursor:pointer; transition:all .12s; }
+  .vsw:first-child { border-radius:5px 0 0 5px; }
+  .vsw:last-child  { border-radius:0 5px 5px 0; }
+  .vsw.act { background:#0d2a3a; color:#7ec8e3; border-color:#2d6a9f; }
+  /* ── Device Map panel ───────────────────────────────────────── */
+  #devmap { display:none; flex-direction:column; }
+  #devmap.show { display:flex; }
+  #devmap-netlabel { font-size:10px; color:#888; margin-bottom:4px; user-select:none; }
+  #devmap-netbar { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:6px; align-items:center; }
+  .dm-chip { display:inline-flex; align-items:center; gap:4px; padding:2px 8px 2px 6px;
+             border-radius:9999px; font-size:10px; font-weight:500;
+             cursor:pointer; border:1px solid var(--stroke,#e4e4e433); user-select:none;
+             transition:opacity .15s, background .15s; white-space:nowrap;
+             background:transparent; color:var(--fg,#e4e4e4); }
+  .dm-chip .chdot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+  .dm-chip.all-chip { border-color:#e4e4e433; }
+  .dm-chip.all-chip.act { background:#e4e4e41e; border-color:#e4e4e488; }
+  .dm-chip.net-chip.act { background:#e4e4e411; border-color:#e4e4e433; opacity:1; }
+  .dm-chip.net-chip:not(.act) { opacity:0.25; }
+  #devmap-vp { overflow:hidden; position:relative; height:calc(100vh - 280px); min-height:420px;
+               border:1px solid #e4e4e420; border-radius:6px; background:#181818;
+               cursor:grab; }
+  #devmap-vp.panning { cursor:grabbing; }
+  #devmap-canvas { position:absolute; top:0; left:0; transform-origin:0 0; }
+  #devmap-hint { position:absolute; bottom:6px; right:8px; font-size:9px;
+                 color:#e4e4e45e; pointer-events:none; letter-spacing:.2px; }
+  #devmap-spacehint { position:absolute; top:6px; left:8px; font-size:9px;
+                      color:#e4e4e45e; pointer-events:none; }
+  #devmap-reset { position:absolute; top:6px; right:7px; font-size:10px; padding:2px 9px;
+                  border:1px solid #e4e4e433; background:#e4e4e411; color:#e4e4e4bb;
+                  border-radius:4px; cursor:pointer; z-index:10; }
+  #devmap-reset:hover { background:#e4e4e41e; color:#e4e4e4; }
+  #devmap-legend { display:flex; gap:10px; flex-wrap:wrap; margin-top:5px; font-size:10px;
+                   color:#e4e4e45e; align-items:center; }
+  .dml-item { display:flex; align-items:center; gap:4px; }
+  .dml-swatch { width:16px; height:7px; border-radius:2px; }
+  .dml-line { width:18px; height:0; }
+  .dml-dot { width:7px; height:7px; border-radius:50%; }
   .dbgpanel { margin-top:10px; border:1px solid #333; border-radius:6px; padding:10px; }
   .dbgpanel h2 { margin-top:0; }
   .dbgpresets { margin-bottom:6px; }
@@ -1685,41 +2336,57 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   /* ID rules above (specificity 1,0,0) beat the base .hide (0,1,0); this
      ID-qualified rule (1,1,0) lets the tab switch actually hide a pane. */
   #conpane.hide, #llmpane.hide { display:none; }
-  /* LLM (embedded Claude Code) pane — mirrors #conterm/#conout/#conin. */
+  /* LLM (embedded Claude Code) pane */
   #llmterm { flex:1 1 0; display:flex; flex-direction:column; min-height:0;
              margin-top:6px; padding:6px; background:#111; border:1px solid #444;
              border-radius:4px; overflow:hidden; cursor:text; }
-  #llmout { flex:1 1 auto; min-height:0; overflow:auto; margin:0;
-            background:transparent; white-space:pre-wrap; word-break:break-word;
-            font-family:monospace; font-size:12px; line-height:1.4; }
-  /* LLM transcript syntax coloring (markers only). */
-  #llmout .llm-you       { color:#8ec; font-weight:bold; }
-  #llmout .llm-tool      { color:#7aa2f7; }
-  #llmout .llm-toolname  { color:#e0af68; font-weight:bold; }
-  #llmout .llm-toolresult{ color:#666; }
-  #llmout .llm-error     { color:#f7768e; font-weight:bold; }
-  #llmout .llm-file      { color:#9ece6a; }
-  #llmout .llm-line      { color:#e0af68; }
-  /* LLM markdown + fenced-code highlighting. */
-  #llmout .md-h        { color:#7dcfff; font-weight:bold; }
-  #llmout .md-bullet   { color:#7aa2f7; }
-  #llmout strong       { color:#c0caf5; font-weight:bold; }
-  #llmout .md-code     { background:#1b1b2b; color:#e0af68; padding:0 3px;
-                         border-radius:3px; }
-  #llmout .md-block    { background:#0d0d16; border:1px solid #2a2a3a;
-                         border-radius:4px; padding:6px 8px; margin:4px 0;
-                         overflow:auto; white-space:pre; }
-  #llmout .md-block code { background:none; padding:0; color:#c0caf5; }
-  #llmout .cm-keyword  { color:#bb9af7; }
-  #llmout .cm-string   { color:#9ece6a; }
-  #llmout .cm-comment  { color:#565f89; font-style:italic; }
-  #llmout .cm-number   { color:#ff9e64; }
-  #llminline { flex:0 0 auto; display:flex; align-items:center; margin-top:6px;
-               border-top:1px solid #333; padding-top:6px; }
-  #llmprompt { color:#8ec; margin-right:6px; white-space:nowrap;
-               font-family:monospace; }
+  /* Scrolling message list */
+  #llmmsg { flex:1 1 0; min-height:0; overflow-y:auto; padding:2px 0; }
+  /* Per-message bubbles */
+  .llm-msg { margin:3px 0; padding:5px 8px; border-radius:3px;
+             font-family:monospace; font-size:12px; line-height:1.45;
+             white-space:pre-wrap; word-break:break-word; }
+  .llm-msg-you { background:#152015; border-left:2px solid #6ab; color:#cee; }
+  .llm-msg-ai  { background:transparent; color:#ccc; border-left:2px solid #333; }
+  .llm-msg-ctx { background:transparent; color:#555; font-style:italic;
+                 border-left:2px solid #2a2a2a; font-size:11px; }
+  /* Marker colors inside AI bubbles */
+  .llm-msg-ai .llm-you       { color:#8ec; font-weight:bold; }
+  .llm-msg-ai .llm-tool      { color:#7aa2f7; }
+  .llm-msg-ai .llm-toolname  { color:#e0af68; font-weight:bold; }
+  .llm-msg-ai .llm-toolresult{ color:#555; }
+  .llm-msg-ai .llm-error     { color:#f7768e; font-weight:bold; }
+  .llm-msg-ai .llm-file      { color:#9ece6a; }
+  .llm-msg-ai .llm-line      { color:#e0af68; }
+  /* Markdown inside AI bubbles */
+  .llm-msg-ai .md-h      { color:#7dcfff; font-weight:bold; display:block; margin-top:4px; }
+  .llm-msg-ai .md-bullet { color:#7aa2f7; }
+  .llm-msg-ai strong     { color:#c0caf5; font-weight:bold; }
+  .llm-msg-ai .md-code   { background:#1b1b2b; color:#e0af68; padding:0 3px; border-radius:3px; }
+  .llm-msg-ai .md-block  { background:#0d0d16; border:1px solid #2a2a3a; border-radius:3px;
+                            padding:5px 8px; margin:3px 0; overflow-x:auto; white-space:pre; }
+  .llm-msg-ai .md-block code { background:none; padding:0; color:#c0caf5; }
+  .llm-msg-ai .cm-keyword { color:#bb9af7; }
+  .llm-msg-ai .cm-string  { color:#9ece6a; }
+  .llm-msg-ai .cm-comment { color:#565f89; font-style:italic; }
+  .llm-msg-ai .cm-number  { color:#ff9e64; }
+  /* Thinking indicator */
+  #llmthink { padding:4px 8px 2px; }
+  .llm-dot  { display:inline-block; width:4px; height:4px; border-radius:50%;
+              background:#555; margin-right:3px;
+              animation:llmblink 1.1s ease-in-out infinite; }
+  .llm-dot:nth-child(2){ animation-delay:.18s; }
+  .llm-dot:nth-child(3){ animation-delay:.36s; }
+  @keyframes llmblink{ 0%,80%,100%{opacity:.15} 40%{opacity:.8} }
+  /* Input row */
+  #llminline { flex:0 0 auto; display:flex; align-items:flex-start; margin-top:5px;
+               border-top:1px solid #2a2a2a; padding-top:5px; }
+  #llmprompt { color:#6ab; margin-right:6px; white-space:nowrap;
+               font-family:monospace; padding-top:2px; }
   #llmin { flex:1 1 auto; background:transparent; border:none; outline:none;
-           color:#ddd; font-family:monospace; padding:0; }
+           color:#ddd; font-family:monospace; padding:0; resize:none;
+           overflow-y:auto; max-height:120px; line-height:1.4;
+           font-size:inherit; }
   #llmsend, #llmreset { margin-left:6px; padding:3px 10px; cursor:pointer; }
   /* LLM password modal overlay (matches the #llmout dark palette). */
   #llmauth { position:absolute; inset:0; display:flex; align-items:center;
@@ -1736,6 +2403,37 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                font-family:monospace; padding:5px 6px; outline:none; }
   #llmauthok { margin-top:10px; padding:4px 12px; cursor:pointer; }
   #llmautherr { color:#f7768e; font-size:11px; margin-top:6px; min-height:14px; }
+  /* ── Search pane ── */
+  #searchpane { flex:1 1 0; display:flex; flex-direction:column; min-height:0; }
+  #searchpane.hide { display:none; }
+  #sr-inputrow { flex:0 0 auto; display:flex; align-items:center; gap:6px;
+                 margin-bottom:6px; position:relative; }
+  #sr-input { flex:1 1 auto; background:#111; border:1px solid #444; border-radius:4px;
+              color:#ddd; font-size:12px; font-family:monospace; padding:4px 8px;
+              outline:none; }
+  #sr-input:focus { border-color:#7ac; }
+  #sr-suggest { position:absolute; top:100%; left:0; right:0; z-index:200;
+                background:#1a1a1a; border:1px solid #555; border-radius:0 0 6px 6px;
+                max-height:200px; overflow-y:auto; font-size:12px; font-family:monospace;
+                box-shadow:0 4px 12px rgba(0,0,0,0.5); }
+  .sr-sug-item { padding:4px 10px; cursor:pointer; display:flex; gap:8px;
+                 align-items:baseline; white-space:nowrap; overflow:hidden; }
+  .sr-sug-item:hover, .sr-sug-item.sel { background:#2a2a2a; }
+  .sr-sug-kind { color:#7ac; font-size:10px; min-width:52px; }
+  .sr-sug-label { color:#ddd; overflow:hidden; text-overflow:ellipsis; }
+  .sr-sug-match { color:#ffd200; }
+  .sr-sug-tile { color:#666; font-size:10px; margin-left:auto; white-space:nowrap; }
+  #sr-chips { flex:0 0 auto; display:flex; flex-wrap:wrap; gap:4px; margin-bottom:6px; }
+  #sr-results { flex:1 1 0; overflow-y:auto; min-height:0; }
+  #sr-results table { border-collapse:collapse; width:100%; font-size:12px; }
+  #sr-results th, #sr-results td { border:1px solid #2a2a2a; padding:3px 7px;
+                                    text-align:left; white-space:nowrap; }
+  #sr-results th { background:#1c1c1c; color:#888; font-weight:600; font-size:11px; }
+  #sr-results td:first-child { font-family:monospace; }
+  .sr-group-hdr { padding:5px 7px 2px; color:#7ac; font-size:11px; font-weight:700;
+                  background:#141414; border-bottom:1px solid #222; }
+  .sr-empty { color:#555; font-size:12px; padding:8px; }
+  .sr-stat { color:#666; font-size:11px; padding:2px 7px 6px; }
 </style>
 </head>
 <body>
@@ -1743,7 +2441,31 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div id="lefttop">
   <h1>AIE Schedule View</h1>
   <div class="sub" id="meta"></div>
+  <div id="viewswitcher">
+    <span class="vsw act" onclick="switchView('grid',this)">Grid</span>
+    <span class="vsw" onclick="switchView('map',this)">Device Map</span>
+  </div>
   <div id="grid"></div>
+  <div id="devmap">
+    <div id="devmap-netlabel">Click a stream to isolate its route in the map below.</div>
+    <div id="devmap-netbar"></div>
+    <div id="devmap-vp">
+      <button id="devmap-reset" onclick="dmReset()">Reset view</button>
+      <div id="devmap-spacehint">double-drag · space+drag · right-drag to pan · scroll to zoom · click tile to inspect</div>
+      <div id="devmap-canvas"><svg id="devmap-svg"></svg></div>
+      <div id="devmap-hint">col 0–3 · row 0 (shim) at bottom</div>
+    </div>
+    <div id="devmap-legend">
+      <div class="dml-item"><div class="dml-swatch" style="background:#e4e4e41e;border:1px solid #e4e4e433"></div>SHIM = PL/NoC gateway</div>
+      <div class="dml-item"><div class="dml-swatch" style="background:#e4e4e411;border:1px solid #e4e4e41f"></div>MEM = memory tiles</div>
+      <div class="dml-item"><div class="dml-swatch" style="background:#e4e4e41e;border:1px solid #e4e4e433"></div>AIE = compute cores</div>
+      <div class="dml-item"><div class="dml-line" style="border-top:2.5px solid #599ce7"></div>solid = stream-switch route</div>
+      <div class="dml-item"><div class="dml-line" style="border-top:2px solid #599ce7;border-bottom:2px solid #599ce7;height:5px"></div><span style="color:#599ce7">&#9642;</span> double line + square = ping-pong window (kernel&harr;kernel)</div>
+      <div class="dml-item"><div class="dml-line" style="border-top:2px dashed #599ce7"></div>dashed = direct shared-memory (DMA&harr;kernel)</div>
+      <div class="dml-item"><div class="dml-dot" style="background:#599ce7;border:1.2px solid #181818"></div>● solid = injects into stream (source / contributor)</div>
+      <div class="dml-item"><div class="dml-dot" style="background:#181818;border:2.2px solid #599ce7"></div>○ hollow = takes from stream (destination / tap)</div>
+    </div>
+  </div>
   <!-- live status overlay controls belong to the array/partition view: they
        drive the per-tile overlay rendered onto #grid above. -->
   <div id="overlayctl">
@@ -1755,7 +2477,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <div id="livestatus"></div>
   </div>
-  <div class="legend">
+  <div id="gridlegend" class="legend">
     <div><span class="sw" style="background:var(--shim)"></span>shim (row 0, host&lt;-&gt;array)</div>
     <div><span class="sw" style="background:var(--core)"></span>core (compute)</div>
     <div>badge = channel dir (S2MM recv / MM2S send)</div>
@@ -1800,13 +2522,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="splitter" title="Drag to resize"></div>
 <div id="right">
   <div id="panel" class="panel">
-    <div class="placeholder">Click a tile to see its high-level summary and low-level host.cc code.</div>
+    <div class="placeholder">Click a tile or a net (in device map) to see details.</div>
   </div>
-  <div id="rhsplitter" class="hide" title="Drag to resize (panel / console)"></div>
+  <div id="rhsplitter" title="Drag to resize (panel / console)"></div>
   <div id="cmdconsole" class="hide">
     <div id="contabs">
       <span class="contab act" data-pane="conpane">aiegdb</span>
       <span class="contab" data-pane="llmpane">LLM</span>
+      <span class="contab" data-pane="searchpane">Search</span>
     </div>
     <div id="conpane">
     <div id="conhdr">aiegdb &mdash; <span id="contarget">partition</span>
@@ -1827,9 +2550,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div id="conhelp">Ask about this schedule, the applog, or the codebase.
         Tool calls appear as [tool: ...] markers. Streams live.</div>
       <div id="llmterm">
-        <div id="llmout">(LLM console &mdash; type a question and press Enter)</div>
-        <div id="llminline"><span id="llmprompt">you&gt;</span><input id="llmin"
-          placeholder="ask Claude Code (e.g. summarize this schedule), press Enter">
+        <div id="llmmsg"></div>
+        <div id="llmthink" class="hide"><span class="llm-dot"></span><span class="llm-dot"></span><span class="llm-dot"></span></div>
+        <div id="llminline"><span id="llmprompt">you&gt;</span><textarea id="llmin"
+          rows="1" placeholder="ask about this design — Enter to send, Shift+Enter for newline"></textarea>
           <button id="llmsend">Send</button></div>
       </div>
       <div id="llmauth" class="hide">
@@ -1841,6 +2565,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <div id="llmautherr"></div>
         </div>
       </div>
+    </div>
+    <div id="searchpane" class="hide">
+      <div id="sr-inputrow">
+        <input id="sr-input" type="text" autocomplete="off" spellcheck="false"
+               placeholder="kernel, window, net, GMIO, port, len&hellip;">
+        <div id="sr-suggest" class="hide"></div>
+      </div>
+      <div id="sr-chips"></div>
+      <div id="sr-results"><div class="sr-empty">Type above to search, Enter or click a suggestion to pin a term and see results.</div></div>
     </div>
   </div>
 </div>
@@ -1867,9 +2600,13 @@ function renderRelevant(t){
 // Kernel channel<->argument mapping (High level tab, core tiles). Renders the
 // channel->window/arg correlation table plus the relevant kernel.cc slice so the
 // user can match each DMA channel to the kernel input/output parameter.
+// Per-tile kernel/bcf when present (baremetal: one kernel per core), else the
+// global fallback (native aiehlc: shared kernel).
+function tileKernel(t){ return (t && t.kernel) || DATA.kernel; }
+function tileBcf(t){ return (t && t.bcf) || DATA.bcf; }
 function renderKernelMatch(t){
   const km = t.high_level && t.high_level.kernel_match;
-  const kv = DATA.kernel;
+  const kv = tileKernel(t);
   if(!km || !kv) return '';
   const rows = (km.matches||[]).map(m => {
     const mcls = m.method==='addr'?'mlock':(m.method==='addr(prov)'?'morder':'mnone');
@@ -1908,7 +2645,8 @@ function renderKernelMatch(t){
 // (win_a/win_b/win_c) and offers a "Show all" toggle that reveals the whole
 // function with those lines highlighted. For a tile it shows the full body.
 function renderKernelSource(t, ch, focused){
-  const src = DATA.kernel && DATA.kernel.source;
+  const kv = tileKernel(t);
+  const src = kv && kv.source;
   if(!src) return '<div class="placeholder">(no kernel source found)</div>';
   const km = t.high_level && t.high_level.kernel_match;
   let refset = null, param = null, argn = null;
@@ -1951,13 +2689,14 @@ function focusedWindow(t, ch, focused){
   const m = (km.matches||[]).find(x =>
     x.direction===ch.direction && x.channel===ch.channel);
   if(!m || !m.window) return null;
-  return ((DATA.kernel && DATA.kernel.windows) || [])
+  const kv = tileKernel(t);
+  return ((kv && kv.windows) || [])
     .find(w => w.name===m.window) || null;
 }
 // "kernel.cc" sub-tab: the generated wrapper (window_init / LOCK #defines /
 // buffer decls). When a channel is focused, highlight its window's lines.
 function renderKernelCC(t, ch, focused){
-  const k = DATA.kernel;
+  const k = tileKernel(t);
   if(!k || !k.kernel_lines) return '<div class="placeholder">(no kernel.cc found)</div>';
   const win = focusedWindow(t, ch, focused);
   const hset = {};
@@ -1981,7 +2720,7 @@ function renderKernelCC(t, ch, focused){
 // "*.bcf" sub-tab: buffer name -> tile address map. When a channel is focused,
 // highlight the address lines of that window's ping/pong buffers.
 function renderBcf(t, ch, focused){
-  const b = DATA.bcf;
+  const b = tileBcf(t);
   if(!b || !b.lines) return '<div class="placeholder">(no .bcf found)</div>';
   const win = focusedWindow(t, ch, focused);
   const hset = {};
@@ -2029,11 +2768,12 @@ function renderKFolded(lines, hset, prefix){
 // to where the kernel body consumes it.
 function renderKernelCode(t, ch, focused){
   const sections = [];
-  if(DATA.bcf && DATA.bcf.lines)
+  const kv = tileKernel(t), b = tileBcf(t);
+  if(b && b.lines)
     sections.push(['buffer address map', renderBcf(t, ch, focused)]);
-  if(DATA.kernel && DATA.kernel.kernel_lines)
+  if(kv && kv.kernel_lines)
     sections.push(['generated wrapper', renderKernelCC(t, ch, focused)]);
-  if(DATA.kernel && DATA.kernel.source)
+  if(kv && kv.source)
     sections.push(['kernel source', renderKernelSource(t, ch, focused)]);
   if(!sections.length)
     return '<div class="placeholder">(no kernel code found)</div>';
@@ -2363,9 +3103,13 @@ rowsDesc.forEach(r => {
     let badges = (t.dma_channels||[]).map((ch,ci) =>
       '<span class="badge" data-flow="'+ch.flow_index+'" data-role="'+ch.direction+'" data-idx="'+ci+'">'
         + ch.direction + ch.channel + '</span>').join('');
+    const sdBad = (t.dma_channels||[]).some(ch => ch.flow_balance && ch.flow_balance.balanced===false);
+    if (sdBad){ cell.classList.add('sdmismatch');
+      badges += '<span class="badge sdwarn" title="supply/demand mismatch">&#9888;</span>'; }
     cell.innerHTML = '<div class="loc">('+t.loc[0]+','+t.loc[1]+')</div>' +
                      '<div>'+t.type+'</div>' + badges;
     cell.title = (t.high_level.contracts||[]).join('\n') || t.type;
+    if (sdBad) cell.title += '\n\u26a0 supply/demand mismatch on a flow';
     cellByLoc[c+','+r] = cell;
     const lbar = document.createElement('div');
     lbar.className = 'livebar hide';
@@ -2386,6 +3130,1233 @@ rowsDesc.forEach(r => {
   }
 });
 
+// ── View switcher (Grid / Device Map) ────────────────────────
+function switchView(name, btn){
+  document.querySelectorAll('.vsw').forEach(b=>b.classList.remove('act'));
+  btn.classList.add('act');
+  const showGrid = name==='grid';
+  document.getElementById('grid').style.display = showGrid ? '' : 'none';
+  document.getElementById('overlayctl').style.display = showGrid ? '' : 'none';
+  document.getElementById('gridlegend').style.display = showGrid ? '' : 'none';
+  document.getElementById('devmap').classList.toggle('show', !showGrid);
+  if(!showGrid) buildDeviceMap();
+}
+
+// ── Device Map (SVG, pan/zoom) ────────────────────────────────
+const DM_COLORS = [
+  '#7BAFE9','#81A1C1','#9386F2','#B48EAD',
+  '#3FA266','#F1B467','#DD7F76','#FC6B83',
+  '#88C0D0','#A3BE8C','#EBCB8B','#BF616A',
+];
+const dmFlowIds = Object.keys(flowMembers).map(Number).sort((a,b)=>a-b);
+function dmColor(fi){ return DM_COLORS[dmFlowIds.indexOf(fi)%DM_COLORS.length]; }
+
+let dmActiveFi = -1;
+let dmBuilt = false;
+
+// Pan/zoom state
+let dmTx=20, dmTy=20, dmScale=0.9, dmDragging=false, dmLx=0, dmLy=0;
+let dmSpaceHeld=false;
+
+function dmApply(){
+  document.getElementById('devmap-canvas').style.transform=
+    'translate('+dmTx+'px,'+dmTy+'px) scale('+dmScale+')';
+}
+function dmReset(){
+  const vp=document.getElementById('devmap-vp');
+  const svg=document.getElementById('devmap-svg');
+  const vpW=vp.clientWidth, vpH=vp.clientHeight;
+  const svgW=parseFloat(svg.getAttribute('width')||'400');
+  const svgH=parseFloat(svg.getAttribute('height')||'300');
+  if(svgW>0&&svgH>0){
+    const scaleX=vpW/svgW, scaleY=vpH/svgH;
+    dmScale=Math.min(scaleX,scaleY)*0.92;
+    dmTx=(vpW-svgW*dmScale)/2;
+    dmTy=(vpH-svgH*dmScale)/2;
+  } else { dmTx=20; dmTy=20; dmScale=0.9; }
+  dmApply();
+}
+
+(function initPanZoom(){
+  const vp = document.getElementById('devmap-vp');
+
+  // Spacebar: suppress page scroll when devmap is active (capture phase).
+  // Skip when focus is on an input/textarea so the search bar can type spaces.
+  document.addEventListener('keydown',e=>{
+    if(e.code!=='Space'||e.repeat) return;
+    if(!document.getElementById('devmap').classList.contains('show')) return;
+    const tag=(document.activeElement||{}).tagName||'';
+    if(tag==='INPUT'||tag==='TEXTAREA') return;
+    e.preventDefault();
+  }, true);
+
+  // Scroll to zoom (always)
+  vp.addEventListener('wheel', e=>{
+    e.preventDefault();
+    const r=vp.getBoundingClientRect();
+    const mx=e.clientX-r.left, my=e.clientY-r.top;
+    const d=e.deltaY<0?1.12:1/1.12;
+    const ns=Math.max(0.12,Math.min(6,dmScale*d));
+    dmTx=mx-(mx-dmTx)*(ns/dmScale);
+    dmTy=my-(my-dmTy)*(ns/dmScale);
+    dmScale=ns; dmApply();
+  },{passive:false});
+
+  // Suppress text selection on the viewport at all times.
+  vp.addEventListener('selectstart', e=>e.preventDefault());
+
+  // Left-click always pans. Track start position to distinguish click from drag.
+  let dmDownX=0, dmDownY=0;
+  const DM_DRAG_THRESHOLD=4; // px — move less than this = it's a click, not a drag
+
+  vp.addEventListener('mousedown',e=>{
+    if(e.button!==0) return;
+    e.preventDefault();
+    dmDownX=e.clientX; dmDownY=e.clientY;
+    dmDragging=false;
+    dmLx=e.clientX; dmLy=e.clientY;
+    vp.classList.add('panning');
+  });
+
+  // Suppress right-click context menu on the viewport.
+  vp.addEventListener('contextmenu',e=>e.preventDefault());
+
+  window.addEventListener('mousemove',e=>{
+    if(!vp.classList.contains('panning')) return;
+    const dx=e.clientX-dmDownX, dy=e.clientY-dmDownY;
+    if(!dmDragging && Math.sqrt(dx*dx+dy*dy)>DM_DRAG_THRESHOLD) dmDragging=true;
+    if(dmDragging){
+      dmTx+=e.clientX-dmLx; dmTy+=e.clientY-dmLy;
+      dmLx=e.clientX; dmLy=e.clientY; dmApply();
+    }
+  });
+
+  window.addEventListener('mouseup',e=>{
+    if(e.button!==0) return;
+    vp.classList.remove('panning');
+    // Short tap (no drag) — let click events on child elements fire normally.
+    // dmDragging stays true until next mousedown so child click handlers can check it.
+    if(!dmDragging) dmDragging=false;
+    // Reset after a tick so child click handlers see the correct dmDragging value.
+    setTimeout(()=>{ dmDragging=false; }, 0);
+  });
+})();
+
+// ── General symbol search ─────────────────────────────────────────────────────
+// searchIndex: array of hit objects, built once at page load.
+// Each hit: {kind, tkey, fi, description, label}
+//   kind: 'kernel'|'window'|'buffer'|'port'|'gmio'|'net'|'flow'|'bd_len'|'contract'
+//   tkey: "col,row" (always set; for flow-only hits the DMA tile)
+//   fi:   flow_index or null
+//   description: human-readable detail string
+//   label: the raw string that was indexed (used for substring match)
+const searchIndex = [];
+
+(function buildSearchIndex(){
+  // Helper to add an entry
+  function add(kind, tkey, fi, label, description){
+    // searchText covers kind + label + description so any of those words are findable.
+    const searchText=(kind+' '+label+' '+description).toLowerCase();
+    searchIndex.push({kind,tkey,fi,label:label.toLowerCase(),labelRaw:label,description,searchText});
+  }
+
+  // Index from DATA.tiles
+  (DATA.tiles||[]).forEach(t=>{
+    if(!t||!t.loc) return;
+    const [tc,tr]=t.loc;
+    const tkey=tc+','+tr;
+
+    // Kernel names — high_level.kernel and legacy top-level callee
+    const hl=t.high_level||{};
+    if(hl.kernel) add('kernel',tkey,null,hl.kernel,'kernel on ('+tc+','+tr+')');
+    (t.kernels||[]).forEach(k=>{
+      if(k.callee) add('kernel',tkey,null,k.callee,'kernel on ('+tc+','+tr+')');
+    });
+    if(t.callee) add('kernel',tkey,null,t.callee,'kernel on ('+tc+','+tr+')');
+
+    // DMA channels — direction, window, buffers, port, logical name, BD lengths, contracts
+    (t.dma_channels||[]).forEach(ch=>{
+      const fi=ch.flow_index!=null?ch.flow_index:null;
+      const chDesc=ch.direction+' ch'+ch.channel+' on ('+tc+','+tr+')';
+      // Direction string itself (e.g. "MM2S", "S2MM") + channel number
+      if(ch.direction) add('channel',tkey,fi,ch.direction+ch.channel,chDesc);
+      if(ch.direction) add('channel',tkey,fi,ch.direction,chDesc);
+      // kernel_window: "buf31_buf31d"
+      if(ch.kernel_window) add('window',tkey,fi,ch.kernel_window,chDesc);
+      // kernel_buffers: ["buf31","buf31d"]
+      (ch.kernel_buffers||[]).forEach(b=>{
+        if(b) add('buffer',tkey,fi,b,chDesc);
+      });
+      // kernel_port: graph port string e.g. "gradf.g_kernel[3][3].out[0]"
+      if(ch.kernel_port) add('port',tkey,fi,ch.kernel_port,chDesc);
+      // logical_name: GMIO name e.g. "gmioin0"
+      if(ch.logical_name) add('gmio',tkey,fi,ch.logical_name,chDesc);
+      // contract string
+      if(ch.contract) add('contract',tkey,fi,ch.contract,chDesc);
+      // BD chain — lengths and BCF buffer symbols
+      (ch.bd_chain||[]).forEach(bd=>{
+        if(bd.len!=null) add('bd_len',tkey,fi,String(bd.len),
+          'BD'+bd.bd_id+' len='+bd.len+' '+ch.direction+' ch'+ch.channel+' ('+tc+','+tr+')');
+        (bd.bcf_syms||[]).forEach(sym=>{
+          if(sym) add('buffer',tkey,fi,sym,
+            'BD'+bd.bd_id+' buffer on ('+tc+','+tr+') '+ch.direction+' ch'+ch.channel);
+        });
+      });
+    });
+
+    // Legacy port connections array (aiehlc_aiesim path)
+    (t.ports||[]).forEach(p=>{
+      if(p.port_id) add('port',tkey,null,p.port_id,'port on ('+tc+','+tr+')');
+      if(p.kernel_port) add('port',tkey,null,p.kernel_port,'port on ('+tc+','+tr+')');
+      if(p.graph_port) add('port',tkey,null,p.graph_port,'port on ('+tc+','+tr+')');
+    });
+  });
+
+  // Index from DATA.comm_paths
+  (DATA.comm_paths||[]).forEach(p=>{
+    if(!p) return;
+    const fi=p.flow_index!=null?p.flow_index:null;
+    // Derive a representative tkey from the first DMA tile
+    const dmaTiles=(p.dma_tiles||[]);
+    const repTile=dmaTiles[0]||null;
+    const tkey=repTile?repTile[0]+','+repTile[1]:'0,0';
+
+    // Net ID: "net7"
+    if(p.net_id) add('net',tkey,fi,p.net_id,'net ('+p.net_id+') f'+fi);
+    // Flow index string: "f7"
+    if(fi!=null){ add('flow',tkey,fi,'f'+fi,'flow index '+fi); }
+    // GMIO logical name (from producer/consumer data blocks)
+    const gmioNames=[];
+    (p.producer||[]).forEach(s=>{ if(s.gmio_name) gmioNames.push(s.gmio_name); });
+    (p.consumer||[]).forEach(s=>{ if(s.gmio_name) gmioNames.push(s.gmio_name); });
+    // Also from nested data blocks
+    ['producer_data','consumer_data'].forEach(dk=>{
+      const d=p[dk]; if(!d) return;
+      if(d.logical_name) gmioNames.push(d.logical_name);
+      if(d.name) gmioNames.push(d.name);
+    });
+    // config_ref GMIO names
+    if(p.config_ref) add('gmio',tkey,fi,p.config_ref,'config ref for f'+fi);
+    gmioNames.forEach(n=>{ if(n) add('gmio',tkey,fi,n,'GMIO for f'+fi); });
+
+    // Hops — pick up any extra names embedded there
+    (p.hops||[]).forEach(h=>{
+      if(h.port_name) add('port',tkey,fi,h.port_name,'hop port in f'+fi);
+    });
+  });
+
+  // Index from DATA.flow_summary (supply/demand)
+  (DATA.flow_summary||[]).forEach(fs=>{
+    if(!fs) return;
+    const fi=fs.flow_index!=null?fs.flow_index:null;
+    const tkey=fs.tile?fs.tile[0]+','+fs.tile[1]:'0,0';
+    if(fs.kernel_port) add('port',tkey,fi,fs.kernel_port,'supply/demand port f'+fi);
+  });
+})();
+
+// ── Search pane state ─────────────────────────────────────────────────────────
+// srSearchTerms: pinned search terms that drive LAYER 2.5 highlights.
+let srSearchTerms=new Set();
+
+// Kind badge colours (shared by suggest and results table)
+const SR_KIND_COLOR={
+  kernel:'#7ac',window:'#9f9',buffer:'#9f9',port:'#c9a',
+  gmio:'#f0c070',net:'#aaf',flow:'#aaf',bd_len:'#f9c',contract:'#ccc'
+};
+
+// Split query on whitespace into tokens; every token must appear in searchText.
+function srTokens(term){ return term.toLowerCase().trim().split(/\s+/).filter(Boolean); }
+
+// Exact per-token substring match — used by highlight layer and results table.
+function srResolve(term){
+  const tokens=srTokens(term);
+  if(!tokens.length) return [];
+  return searchIndex.filter(h=>tokens.every(t=>h.searchText.includes(t))).map(h=>({
+    kind:h.kind, tkey:h.tkey, fi:h.fi, labelRaw:h.labelRaw, description:h.description
+  }));
+}
+
+// Returns {tileLockKeys, flowLockFis} for LAYER 2.5 SVG highlight.
+function lkActiveSets(){
+  const tileLockKeys=new Set();
+  const flowLockFis=new Set();
+  srSearchTerms.forEach(term=>{
+    srResolve(term).forEach(h=>{
+      tileLockKeys.add(h.tkey);
+      if(h.fi!=null) flowLockFis.add(h.fi);
+    });
+  });
+  return {tileLockKeys,flowLockFis};
+}
+
+// ── Fuzzy suggest ─────────────────────────────────────────────────────────────
+// Score a single candidate label against the query using a contiguous-run bonus
+// fuzzy algorithm: each matched character scores 1; consecutive run adds bonus.
+// Spaces split into tokens; each token is scored independently and summed.
+function srFuzzyScore(label_lc, q){
+  function scoreOne(lc, tok){
+    let li=0, qi=0, score=0, run=0;
+    while(li<lc.length && qi<tok.length){
+      if(lc[li]===tok[qi]){ score+=1+run*0.5; run++; qi++; }
+      else { run=0; }
+      li++;
+    }
+    return qi===tok.length ? score : -1;
+  }
+  const tokens=q.split(/\s+/).filter(Boolean);
+  let total=0;
+  for(const tok of tokens){
+    const s=scoreOne(label_lc, tok);
+    if(s<0) return -1;
+    total+=s;
+  }
+  return total;
+}
+
+// Return up to `limit` unique label candidates matching `q` fuzzily, sorted by score.
+function srSuggest(q, limit=12){
+  const ql=q.toLowerCase().trim();
+  if(!ql) return [];
+  const scored=[];
+  const seen=new Set();
+  searchIndex.forEach(h=>{
+    if(seen.has(h.labelRaw)) return;
+    // Score primarily against label; fall back to searching searchText so kind/description hits surface.
+    let s=srFuzzyScore(h.label, ql);
+    if(s<0) s=srFuzzyScore(h.searchText, ql)*0.5; // half-weight for description/kind matches
+    if(s<0) return;
+    seen.add(h.labelRaw);
+    scored.push({s, kind:h.kind, labelRaw:h.labelRaw, tkey:h.tkey, fi:h.fi});
+  });
+  scored.sort((a,b)=>b.s-a.s);
+  return scored.slice(0,limit);
+}
+
+// Highlight matched chars in a label string for the suggestion dropdown.
+function srHighlightMatch(labelRaw, q){
+  const lc=labelRaw.toLowerCase(), ql=q.toLowerCase();
+  let result='', qi=0;
+  for(let i=0;i<labelRaw.length;i++){
+    if(qi<ql.length && lc[i]===ql[qi]){
+      result+='<span class="sr-sug-match">'+esc(labelRaw[i])+'</span>';
+      qi++;
+    } else {
+      result+=esc(labelRaw[i]);
+    }
+  }
+  return result;
+}
+
+// ── Suggest dropdown ──────────────────────────────────────────────────────────
+let srSugIdx=-1; // keyboard-selected row index
+
+function srShowSuggest(q){
+  const box=document.getElementById('sr-suggest');
+  if(!q.trim()){ box.classList.add('hide'); box.innerHTML=''; srSugIdx=-1; return; }
+  const candidates=srSuggest(q);
+  if(!candidates.length){ box.classList.add('hide'); box.innerHTML=''; srSugIdx=-1; return; }
+  box.innerHTML=candidates.map((c,i)=>{
+    const kc=SR_KIND_COLOR[c.kind]||'#ccc';
+    const tileTxt=c.tkey?'('+c.tkey+')':'';
+    return '<div class="sr-sug-item" data-i="'+i+'" data-label="'+esc(c.labelRaw)+'">'
+      +'<span class="sr-sug-kind" style="color:'+kc+'">'+esc(c.kind)+'</span>'
+      +'<span class="sr-sug-label">'+srHighlightMatch(c.labelRaw,q)+'</span>'
+      +'<span class="sr-sug-tile">'+esc(tileTxt)+'</span>'
+      +'</div>';
+  }).join('');
+  srSugIdx=-1;
+  box.classList.remove('hide');
+  box.querySelectorAll('.sr-sug-item').forEach(item=>{
+    item.onmousedown=e=>{
+      e.preventDefault();
+      srPinTerm(item.dataset.label);
+      document.getElementById('sr-input').value='';
+      box.classList.add('hide'); box.innerHTML=''; srSugIdx=-1;
+    };
+  });
+}
+
+function srMoveSug(dir){
+  const box=document.getElementById('sr-suggest');
+  const items=box.querySelectorAll('.sr-sug-item');
+  if(!items.length) return;
+  items.forEach(x=>x.classList.remove('sel'));
+  srSugIdx=Math.max(0,Math.min(items.length-1,(srSugIdx<0?-1:srSugIdx)+dir));
+  items[srSugIdx].classList.add('sel');
+  items[srSugIdx].scrollIntoView({block:'nearest'});
+}
+
+function srSugSelected(){
+  const box=document.getElementById('sr-suggest');
+  const sel=box.querySelector('.sr-sug-item.sel');
+  return sel ? sel.dataset.label : null;
+}
+
+// ── Pin term + chip + results ─────────────────────────────────────────────────
+function srPinTerm(raw){
+  if(!raw||!raw.trim()) return;
+  srSearchTerms.add(raw.trim());
+  srRenderChips();
+  srRenderResults();
+  buildDeviceMap();
+  if(srSearchTerms.size>0)
+    llmPushCtx('[context] Search: pinned "'+[...srSearchTerms].join('", "')+'"');
+}
+
+function srRenderChips(){
+  const wrap=document.getElementById('sr-chips');
+  wrap.innerHTML='';
+  srSearchTerms.forEach(term=>{
+    const chip=document.createElement('span');
+    chip.className='lk-chip';
+    chip.appendChild(document.createTextNode(term));
+    const x=document.createElement('span');
+    x.className='lk-x'; x.textContent='×';
+    x.onclick=()=>{ srSearchTerms.delete(term); srRenderChips(); srRenderResults(); buildDeviceMap(); };
+    chip.appendChild(x);
+    wrap.appendChild(chip);
+  });
+}
+
+function srRenderResults(){
+  const out=document.getElementById('sr-results');
+  if(!srSearchTerms.size){
+    out.innerHTML='<div class="sr-empty">Type above to search, Enter or click a suggestion to pin a term and see results.</div>';
+    return;
+  }
+  let html='';
+  srSearchTerms.forEach(term=>{
+    const hits=srResolve(term);
+    html+='<div class="sr-group-hdr">'+esc(term)
+      +(hits.length?' <span style="color:#555;font-weight:400">('+hits.length+' match'+(hits.length!==1?'es':'')+')</span>':'')
+      +'</div>';
+    if(!hits.length){ html+='<div class="sr-empty">no matches</div>'; return; }
+    html+='<table><thead><tr>'
+      +'<th>kind</th><th>tile</th><th>flow</th><th>matched</th><th>detail</th>'
+      +'</tr></thead><tbody>';
+    const seen=new Set();
+    hits.forEach(h=>{
+      const rowKey=h.kind+':'+h.tkey+':'+h.fi+':'+h.labelRaw;
+      if(seen.has(rowKey)) return; seen.add(rowKey);
+      const [tc,tr]=(h.tkey||'?,?').split(',');
+      const kc=SR_KIND_COLOR[h.kind]||'#ccc';
+      html+='<tr>'
+        +'<td><span style="color:'+kc+'">'+esc(h.kind)+'</span></td>'
+        +'<td>('+esc(tc)+','+esc(tr)+')</td>'
+        +'<td>'+(h.fi!=null?'f'+h.fi:'—')+'</td>'
+        +'<td style="font-family:monospace;max-width:120px;overflow:hidden;text-overflow:ellipsis">'+esc(h.labelRaw)+'</td>'
+        +'<td style="color:#666;font-size:11px">'+esc(h.description)+'</td>'
+        +'</tr>';
+    });
+    html+='</tbody></table>';
+  });
+  out.innerHTML=html;
+}
+
+// ── Wire up the search pane input ─────────────────────────────────────────────
+(function initSearchPane(){
+  const inp=document.getElementById('sr-input');
+  const sug=document.getElementById('sr-suggest');
+  if(!inp) return;
+
+  inp.addEventListener('input',()=>srShowSuggest(inp.value));
+
+  inp.addEventListener('keydown',e=>{
+    if(e.key==='ArrowDown'){ e.preventDefault(); srMoveSug(1); return; }
+    if(e.key==='ArrowUp'){ e.preventDefault(); srMoveSug(-1); return; }
+    if(e.key==='Escape'){ sug.classList.add('hide'); sug.innerHTML=''; srSugIdx=-1; return; }
+    if(e.key==='Enter'){
+      e.preventDefault();
+      const sel=srSugSelected();
+      const raw=sel||inp.value.trim();
+      if(!raw) return;
+      srPinTerm(raw);
+      inp.value='';
+      sug.classList.add('hide'); sug.innerHTML=''; srSugIdx=-1;
+    }
+  });
+
+  // Hide suggest when focus leaves the input (but not on mousedown in the list)
+  inp.addEventListener('blur',()=>{ setTimeout(()=>{ sug.classList.add('hide'); sug.innerHTML=''; srSugIdx=-1; },150); });
+})();
+
+function buildNetBar(){
+  const bar=document.getElementById('devmap-netbar');
+  bar.innerHTML='';
+  // "All nets" chip
+  const allc=document.createElement('button');
+  allc.className='dm-chip all-chip'+(dmActiveFi===-1?' act':'');
+  allc.textContent='All nets';
+  allc.onclick=()=>dmSelectNet(-1);
+  bar.appendChild(allc);
+  // Per-flow chips — derive label from flow_summary if available
+  const fsSummary={};
+  (DATA.flow_summary||[]).forEach(f=>{ fsSummary[f.flow_index]=f; });
+  const fiDir={};
+  (DATA.comm_paths||[]).forEach(p=>{ fiDir[p.flow_index]=p.direction; });
+  dmFlowIds.forEach(fi=>{
+    const isAct=dmActiveFi===-1||dmActiveFi===fi;
+    const chip=document.createElement('button');
+    chip.className='dm-chip net-chip'+(isAct?' act':'');
+    chip.dataset.fi=fi;
+    const dot=document.createElement('span');
+    dot.className='chdot'; dot.style.background=dmColor(fi);
+    chip.appendChild(dot);
+    const dir=fiDir[fi]==='push'?'→':'←';
+    chip.appendChild(document.createTextNode('net'+fi+' '+dir));
+    chip.style.color=dmColor(fi);
+    chip.title='Click to isolate net '+fi+' in map';
+    chip.onclick=()=>dmSelectNet(dmActiveFi===fi?-1:fi);
+    bar.appendChild(chip);
+  });
+}
+
+function dmSelectNet(fi){
+  dmActiveFi=fi;
+  document.querySelector('.dm-chip.all-chip').classList.toggle('act',fi===-1);
+  document.querySelectorAll('.dm-chip.net-chip').forEach(c=>{
+    c.classList.toggle('act',fi===-1||parseInt(c.dataset.fi)===fi);
+  });
+  buildDeviceMap();
+  if(fi===-1){ renderNetDetail(null); llmPushCtx(null); }
+  else {
+    const path=(DATA.comm_paths||[]).find(p=>p.flow_index===fi)||null;
+    renderNetDetail(path);
+    if(path){
+      const prod=path.producer?(path.producer.gmio_name||path.producer.logical_name||'?'):'?';
+      const cons=path.consumer?(path.consumer.gmio_name||path.consumer.logical_name||'?'):'?';
+      llmPushCtx('[context] Selected net/flow f'+fi+' — producer: '+prod+', consumer: '+cons
+        +(path.direction?' ('+path.direction+')':''));
+    }
+  }
+}
+
+function renderNetDetail(p){
+  const panel=document.getElementById('panel');
+  if(!p){
+    // Deselected — restore placeholder
+    panel.innerHTML='<div class="placeholder">Click a tile or net for details</div>';
+    return;
+  }
+  const fi=p.flow_index;
+  const color=dmColor(fi);
+  const dir=p.direction==='push'?'push (host → array)':'pull (array → host)';
+  const dot='<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'+color+';vertical-align:middle;margin-right:6px;border:1.2px solid #181818"></span>';
+
+  // ── Producer / Consumer from stages ──────────────────────────────────────
+  const stages=p.stages||[];
+  const prodStage=stages.find(s=>s.role==='producer');
+  const consStage=stages.find(s=>s.role==='consumer');
+  const chanStage=stages.find(s=>s.role==='channel');
+
+  function fmtTile(t){ return t?'('+t.col+','+t.row+') '+esc(t.type||''):'-'; }
+  function fmtTiles(arr){ return (arr||[]).map(fmtTile).join(', ')||'-'; }
+
+  let prodHtml='', consHtml='';
+  if(prodStage){
+    const t=prodStage.tile||((prodStage.tiles||[])[0]);
+    prodHtml='<div class="kv"><b>producer:</b> '+fmtTile(t)
+      +(prodStage.contract?' &mdash; <span class="dimtxt">'+esc(prodStage.contract)+'</span>':'')+'</div>';
+    if(prodStage.config_ref)
+      prodHtml+='<div class="kv"><span class="dimtxt">config: '+esc(prodStage.config_ref)+'</span></div>';
+  }
+  if(consStage){
+    const t=consStage.tile||((consStage.tiles||[])[0]);
+    consHtml='<div class="kv"><b>consumer:</b> '+fmtTile(t)
+      +(consStage.contract?' &mdash; <span class="dimtxt">'+esc(consStage.contract)+'</span>':'')+'</div>';
+    if(consStage.config_ref)
+      consHtml+='<div class="kv"><span class="dimtxt">config: '+esc(consStage.config_ref)+'</span></div>';
+  }
+
+  // ── Participating tile DMA channels (from DATA.tiles) ────────────────────
+  const tileMap={};
+  (DATA.tiles||[]).forEach(t=>{ tileMap[t.loc[0]+','+t.loc[1]]=t; });
+
+  const allTilePairs=new Set();
+  (p.edges||[]).forEach(e=>{ allTilePairs.add(e[0][0]+','+e[0][1]); allTilePairs.add(e[1][0]+','+e[1][1]); });
+  (p.dma_tiles||[]).forEach(t=>allTilePairs.add(t[0]+','+t[1]));
+
+  let chanRows='';
+  allTilePairs.forEach(key=>{
+    const t=tileMap[key]; if(!t) return;
+    const ch=(t.dma_channels||[]).filter(c=>c.flow_index===fi);
+    ch.forEach(c=>{
+      const bd=(c.bd_chain||[])[0]||{};
+      const acq=(bd.acquire_lock||[])[0]||{};
+      const rel=(bd.release_lock||[])[0]||{};
+      const lock=(acq.id!=null||rel.id!=null)?' lock '+acq.id+'/'+rel.id:'';
+      chanRows+='<tr><td>('+t.loc[0]+','+t.loc[1]+')</td><td>'+esc(t.type)+'</td>'
+        +'<td>'+esc(c.direction)+' ch'+c.channel+'</td>'
+        +'<td>'+(bd.len!=null?bd.len+'B':'?')+'</td>'
+        +'<td>'+(c.bd_chain||[]).length+'</td>'
+        +'<td>'+esc(lock)+'</td>'
+        +(c.kernel_port?'<td>'+esc(c.kernel_port)+'</td>':'<td>-</td>')
+        +'</tr>';
+    });
+  });
+  const chanTable=chanRows
+    ?'<table class="rctbl"><thead><tr><th>tile</th><th>type</th><th>ch</th>'
+      +'<th>len</th><th>BDs</th><th>lock acq/rel</th><th>port</th></tr></thead>'
+      +'<tbody>'+chanRows+'</tbody></table>'
+    :'<div class="placeholder">(no DMA channels on participating tiles)</div>';
+
+  // ── Stream-switch connections (routing_connections) ───────────────────────
+  let swRows='';
+  const connKindLabel={'circuit_connect':'circuit','packet_connect':'packet',
+    'shim_ext_to_aie':'shim→AIE','shim_aie_to_ext':'AIE→shim'};
+  (p.routing_connections||[]).forEach(c=>{
+    const t=c.tile||{};
+    const kind=connKindLabel[c.kind]||esc(c.kind);
+    let detail='';
+    if(c.slave&&c.master) detail=esc(c.slave.dir)+'['+c.slave.idx+'] → '+esc(c.master.dir)+'['+c.master.idx+']';
+    else if(c.stream_id!=null) detail='stream_id='+c.stream_id;
+    swRows+='<tr><td>('+t.col+','+t.row+')</td><td>'+kind+'</td><td>'+detail+'</td></tr>';
+  });
+  const swTable=swRows
+    ?'<table class="rctbl"><thead><tr><th>tile</th><th>kind</th><th>ports</th></tr></thead>'
+      +'<tbody>'+swRows+'</tbody></table>'
+    :'<div class="placeholder">(no routing data)</div>';
+
+  // ── All hops (stream + shmem) ─────────────────────────────────────────────
+  let hopRows='';
+  (p.hops||[]).forEach(h=>{
+    const kind=h.kind||'';
+    const typeLabel=h.type==='shmem'
+      ?(kind==='window'?'shmem (window)':'shmem (dma bridge)')
+      :'stream';
+    hopRows+='<tr><td>('+h.from_col+','+h.from_row+')</td>'
+      +'<td>→</td>'
+      +'<td>('+h.to_col+','+h.to_row+')</td>'
+      +'<td>'+typeLabel+'</td></tr>';
+  });
+  const hopTable=hopRows
+    ?'<table class="rctbl"><thead><tr><th>from</th><th></th><th>to</th><th>type</th></tr></thead>'
+      +'<tbody>'+hopRows+'</tbody></table>'
+    :'<div class="placeholder">(no hops)</div>';
+
+  // ── Supply/demand balance ─────────────────────────────────────────────────
+  const bal=(DATA.supply_demand||[]).find(b=>b.flow_index===fi);
+  const balHtml=bal?renderFlowBalance(bal):'';
+
+  panel.innerHTML=
+    '<h2>'+dot+'net'+fi+' &mdash; '+esc(dir)+'</h2>'+
+    '<div class="tabs">'+
+      '<span class="tab act" data-t="nd-hi">Overview</span>'+
+      '<span class="tab" data-t="nd-sw">Stream switch</span>'+
+      '<span class="tab" data-t="nd-hops">All hops</span>'+
+    '</div>'+
+    '<div class="tabbody">'+
+      '<div id="tab-nd-hi">'+
+        prodHtml+consHtml+
+        (balHtml?'<div class="kv"><b>supply / demand:</b></div>'+balHtml:'')+
+        '<div class="kv"><b>DMA channels:</b></div>'+chanTable+
+      '</div>'+
+      '<div id="tab-nd-sw" class="hide">'+
+        '<div class="lref">stream-switch connections from routingprovenancemap</div>'+
+        swTable+
+      '</div>'+
+      '<div id="tab-nd-hops" class="hide">'+
+        '<div class="lref">hop-by-hop path from dmaphopprovenacemap</div>'+
+        hopTable+
+      '</div>'+
+    '</div>';
+
+  // Attach tab switching (reuses same logic as tile panel)
+  panel.querySelectorAll('.tab').forEach(tab=>{
+    tab.onclick=()=>{
+      panel.querySelectorAll('.tab').forEach(t=>t.classList.remove('act'));
+      tab.classList.add('act');
+      const id='tab-'+tab.dataset.t;
+      panel.querySelectorAll('.tabbody>div').forEach(d=>{
+        d.classList.toggle('hide',d.id!==id);
+      });
+    };
+  });
+}
+
+function svgN(tag,attrs){
+  const el=document.createElementNS('http://www.w3.org/2000/svg',tag);
+  for(const[k,v] of Object.entries(attrs)) el.setAttribute(k,v);
+  return el;
+}
+function svgT(el, txt){ el.textContent=txt; return el; }
+
+// ── Hover tooltip state ────────────────────────────────────────
+let dmTooltipEl=null;
+function dmShowTip(clientX, clientY, lines){
+  dmHideTip();
+  const d=document.createElement('div');
+  d.style.cssText='position:fixed;z-index:9999;pointer-events:none;'
+    +'background:#252525;border:1px solid #e4e4e433;border-radius:4px;'
+    +'padding:5px 9px;font:10px/1.5 monospace;color:#e4e4e4;'
+    +'white-space:nowrap;box-shadow:0 2px 10px #0008;';
+  d.innerHTML=lines.map(l=>'<div>'+l+'</div>').join('');
+  document.body.appendChild(d);
+  const tw=d.offsetWidth, th=d.offsetHeight;
+  let lx=clientX+14, ly=clientY-th-10;
+  if(lx+tw>window.innerWidth-8) lx=clientX-tw-14;
+  if(ly<8) ly=clientY+14;
+  d.style.left=lx+'px'; d.style.top=ly+'px';
+  dmTooltipEl=d;
+}
+function dmHideTip(){
+  if(dmTooltipEl){ dmTooltipEl.remove(); dmTooltipEl=null; }
+}
+
+function buildDeviceMap(){
+  if(!DATA.tiles||!DATA.tiles.length){ console.warn('buildDeviceMap: no tiles'); return; }
+  buildNetBar();
+  const svg=document.getElementById('devmap-svg');
+  svg.innerHTML='';
+
+  // Layout: compute tile size to fill the viewport well at fit-zoom.
+  // Gaps are 30% of tile size so tiles dominate the space.
+  const vp=document.getElementById('devmap-vp');
+  const vpW=vp.clientWidth||800, vpH=vp.clientHeight||600;
+  const ML=44, MT=28, MR=16, MB=12;
+
+  // Compute col/row counts first (need tileMap for this)
+  // Defer sizing until after tileMap is built — use temp values here,
+  // then recalculate SVG size after allCols/allRows are known.
+  const TW=148, TH=56, GX=24, GY=16;
+  const COLSTEP=TW+GX, ROWSTEP=TH+GY;
+
+  // Merge DATA.tiles with every tile referenced in comm_paths (waypoints + hops)
+  const tileMap={};
+  DATA.tiles.forEach(t=>{ tileMap[t.loc[0]+','+t.loc[1]]=t; });
+  (DATA.comm_paths||[]).forEach(p=>{
+    // Register tiles from both edges and the tiles list
+    (p.tiles||[]).forEach(([c,r])=>{
+      const k=c+','+r;
+      if(!tileMap[k]) tileMap[k]={loc:[c,r],type:'mem',dma_channels:[]};
+    });
+    (p.edges||[]).forEach(([src,dst])=>{
+      [[src[0],src[1]],[dst[0],dst[1]]].forEach(([c,r])=>{
+        const k=c+','+r;
+        if(!tileMap[k]) tileMap[k]={loc:[c,r],type:'mem',dma_channels:[]};
+      });
+    });
+  });
+
+  // Synthesize MEM tiles (rows 1–2) for columns that have a shim (row 0) and a
+  // core (row 3+). The stream-switch path always traverses these rows physically
+  // even when the abstract hop chain skips them.
+  const shimCols=new Set(), coreCols=new Set();
+  Object.values(tileMap).forEach(t=>{
+    if(t.loc[1]===0) shimCols.add(t.loc[0]);
+    if(t.loc[1]>=3) coreCols.add(t.loc[0]);
+  });
+  const memCols=new Set([...shimCols].filter(c=>coreCols.has(c)));
+  memCols.forEach(c=>{
+    [1,2].forEach(r=>{
+      const k=c+','+r;
+      if(!tileMap[k]) tileMap[k]={loc:[c,r],type:'mem',dma_channels:[]};
+    });
+  });
+  const allTiles=Object.values(tileMap);
+  const allCols=[...new Set(allTiles.map(t=>t.loc[0]))].sort((a,b)=>a-b);
+  const allRows=[...new Set(allTiles.map(t=>t.loc[1]))].sort((a,b)=>a-b);
+  const minC=allCols[0], maxC=allCols[allCols.length-1];
+  const maxR=allRows[allRows.length-1];
+  const NCOLS=maxC-minC+1, NROWS=maxR+1;
+
+  const SVG_W=ML+NCOLS*TW+(NCOLS-1)*GX+MR;
+  const SVG_H=MT+NROWS*TH+(NROWS-1)*GY+MB;
+  svg.setAttribute('width',SVG_W); svg.setAttribute('height',SVG_H);
+  svg.setAttribute('viewBox','0 0 '+SVG_W+' '+SVG_H);
+
+  // Position helpers (mirrors the reference exactly)
+  const tx=c=>ML+(c-minC)*COLSTEP;
+  const ty=r=>MT+(maxR-r)*ROWSTEP;
+  const cx=c=>tx(c)+TW/2;
+  const cy=r=>ty(r)+TH/2;
+
+  // Per-flow (ox,oy) offsets — spreads parallel polylines apart so they're all visible.
+  // Mirrors the reference: evenly stepped from -MAX to +MAX across all flows.
+  const N=dmFlowIds.length;
+  const dmOx={}, dmOy={};
+  const OX_STEP=8, OY_STEP=5;           // pixels between adjacent lines
+  const OX_MAX=OX_STEP*(N-1)/2;
+  dmFlowIds.forEach((fi,i)=>{
+    dmOx[fi]=Math.round((i-(N-1)/2)*OX_STEP);
+    dmOy[fi]=Math.round((i-(N-1)/2)*OY_STEP);
+  });
+
+  // ── Defs: arrowhead markers (userSpaceOnUse = no scale distortion) ──
+  const defs=svgN('defs',{});
+  svg.appendChild(defs);
+  dmFlowIds.forEach(fi=>{
+    const mk=svgN('marker',{id:'ar-'+fi,markerWidth:'9',markerHeight:'9',
+      refX:'7',refY:'4.5',orient:'auto','markerUnits':'userSpaceOnUse'});
+    mk.appendChild(svgN('path',{d:'M0,1 L8,4.5 L0,8 Z',fill:dmColor(fi)}));
+    defs.appendChild(mk);
+  });
+  const mkInt=svgN('marker',{id:'ar-int',markerWidth:'8',markerHeight:'8',
+    refX:'6.5',refY:'4',orient:'auto','markerUnits':'userSpaceOnUse'});
+  mkInt.appendChild(svgN('path',{d:'M0,1 L7,4 L0,7 Z',fill:'#e4e4e45e'}));
+  defs.appendChild(mkInt);
+
+  // ── LAYER 1: axis labels (bottom layer) ─────────────────────────
+  for(let c=minC;c<=maxC;c++){
+    svg.appendChild(svgT(svgN('text',{x:cx(c),y:'20','text-anchor':'middle',
+      'font-size':'12','font-family':'monospace',fill:'#e4e4e45e'}), 'col '+c));
+  }
+  for(let r=0;r<=maxR;r++){
+    svg.appendChild(svgT(svgN('text',{x:ML-12,y:cy(r)+4,'text-anchor':'end',
+      'font-size':'11','font-family':'monospace',fill:'#e4e4e45e'}), 'r'+r));
+  }
+
+  // ── LAYER 2: tile rectangles (drawn first → lines go on top) ─────
+  const tileType=r=>{
+    if(r===0) return 'shim';
+    if(r<=2)  return 'mem';
+    return 'core';
+  };
+  const usedKeys=new Set(DATA.tiles.map(t=>t.loc[0]+','+t.loc[1]));
+  let dmSelKey=null;
+  const tileGroups={};
+
+  allTiles.forEach(t=>{
+    const [tc,tr]=t.loc;
+    const key=tc+','+tr;
+    const ttype=tileType(tr);
+    const used=usedKeys.has(key);
+    const fill=ttype==='mem'?'var(--fill,#e4e4e411)':'var(--fill2,#e4e4e41e)';
+    const stroke=used?'var(--stroke,#e4e4e433)':'var(--stroke2,#e4e4e41f)';
+    const baseOp=used?1:0.32;
+
+    const g=svgN('g',{opacity:baseOp,cursor:'pointer',class:'dm-tile','data-key':key});
+    tileGroups[key]=g;
+
+    const rect=svgN('rect',{x:tx(tc),y:ty(tr),width:TW,height:TH,rx:'6',
+      fill,stroke,'stroke-width':'1'});
+    g.appendChild(rect);
+
+    // Coord top-left, type badge top-right
+    const typStr=ttype==='shim'?'SHIM':ttype==='mem'?'MEM':'AIE';
+    g.appendChild(svgT(svgN('text',{x:tx(tc)+6,y:ty(tr)+13,
+      'font-size':'9','font-family':'monospace',fill:'#e4e4e848'}),
+      '('+tc+','+tr+')'));
+    g.appendChild(svgT(svgN('text',{x:tx(tc)+TW-6,y:ty(tr)+13,
+      'text-anchor':'end','font-size':'8','font-family':'monospace',fill:'#e4e4e43a'}),
+      typStr));
+
+    // Show only terminal DMA channels (S2MM=input, MM2S=output) — not pass-through.
+    // Each line: colored arrow + "f{fi}" compactly at bottom of tile.
+    if(used&&t.dma_channels&&t.dma_channels.length){
+      const chans=dmActiveFi===-1?t.dma_channels
+        :t.dma_channels.filter(ch=>ch.flow_index===dmActiveFi);
+      // Split into inputs (S2MM) and outputs (MM2S)
+      const ins=chans.filter(ch=>ch.direction==='S2MM');
+      const outs=chans.filter(ch=>ch.direction==='MM2S');
+      // Render inputs on left half, outputs on right half, centered vertically
+      const midY=ty(tr)+TH/2+4;
+      ins.slice(0,3).forEach((ch,i)=>{
+        const fc=dmColor(ch.flow_index);
+        const y=midY+(i-(ins.length-1)/2)*11;
+        // Arrow pointing in: ▶ f{fi}
+        g.appendChild(svgT(svgN('text',{x:tx(tc)+7,y,
+          'font-size':'8.5','font-family':'monospace',fill:fc}),
+          '▶ f'+ch.flow_index));
+      });
+      outs.slice(0,3).forEach((ch,i)=>{
+        const fc=dmColor(ch.flow_index);
+        const y=midY+(i-(outs.length-1)/2)*11;
+        // Arrow pointing out: f{fi} ▶
+        g.appendChild(svgT(svgN('text',{x:tx(tc)+TW-7,y,
+          'text-anchor':'end','font-size':'8.5','font-family':'monospace',fill:fc}),
+          'f'+ch.flow_index+' ▶'));
+      });
+    }
+
+    g.addEventListener('mouseenter',e=>{
+      rect.setAttribute('stroke','#e4e4e488');
+      rect.setAttribute('stroke-width','1.5');
+      const lines=['('+tc+','+tr+') '+typStr];
+      if(t.dma_channels&&t.dma_channels.length){
+        const vis=dmActiveFi===-1?t.dma_channels
+          :t.dma_channels.filter(ch=>ch.flow_index===dmActiveFi);
+        // Terminal channels
+        vis.filter(ch=>ch.direction==='S2MM').forEach(ch=>lines.push('in  f'+ch.flow_index));
+        vis.filter(ch=>ch.direction==='MM2S').forEach(ch=>lines.push('out f'+ch.flow_index));
+        // Pass-through flows (edge touches this tile but it's not a DMA terminal)
+        const termFis=new Set(vis.map(ch=>ch.flow_index));
+        const tileInEdges=p=>(p.edges||[]).some(e=>
+          (e[0][0]===tc&&e[0][1]===tr)||(e[1][0]===tc&&e[1][1]===tr));
+        const thru=(DATA.comm_paths||[]).filter(p=>{
+          if(dmActiveFi!==-1&&p.flow_index!==dmActiveFi) return false;
+          return tileInEdges(p)&&!termFis.has(p.flow_index);
+        });
+        if(thru.length) lines.push('── pass-through ──');
+        thru.slice(0,4).forEach(p=>lines.push('    f'+p.flow_index+' ('+p.direction+')'));
+      } else {
+        // Ghost tile — only pass-through
+        const tileInEdgesG=p=>(p.edges||[]).some(e=>
+          (e[0][0]===tc&&e[0][1]===tr)||(e[1][0]===tc&&e[1][1]===tr));
+        const thru=(DATA.comm_paths||[]).filter(p=>{
+          if(dmActiveFi!==-1&&p.flow_index!==dmActiveFi) return false;
+          return tileInEdgesG(p);
+        });
+        if(thru.length) thru.slice(0,4).forEach(p=>lines.push('pass f'+p.flow_index));
+        else lines.push('routing tile');
+      }
+      dmShowTip(e.clientX, e.clientY, lines);
+    });
+    g.addEventListener('mousemove',e=>{
+      if(!dmTooltipEl) return;
+      const tw=dmTooltipEl.offsetWidth, th=dmTooltipEl.offsetHeight;
+      let lx=e.clientX+14, ly=e.clientY-th-10;
+      if(lx+tw>window.innerWidth-8) lx=e.clientX-tw-14;
+      if(ly<8) ly=e.clientY+14;
+      dmTooltipEl.style.left=lx+'px'; dmTooltipEl.style.top=ly+'px';
+    });
+    g.addEventListener('mouseleave',()=>{
+      if(dmSelKey!==key){
+        rect.setAttribute('stroke',stroke);
+        rect.setAttribute('stroke-width','1');
+      }
+      dmHideTip();
+    });
+    g.addEventListener('click',e=>{
+      if(dmDragging) return;
+      if(dmSelKey&&tileGroups[dmSelKey]){
+        const prev=tileGroups[dmSelKey];
+        const pr=prev.querySelector('rect');
+        if(pr){ pr.setAttribute('stroke','var(--stroke,#e4e4e433)'); pr.setAttribute('stroke-width','1'); }
+      }
+      if(dmSelKey===key){ dmSelKey=null; return; }
+      dmSelKey=key;
+      rect.setAttribute('stroke','#599ce7'); rect.setAttribute('stroke-width','2');
+      const match=DATA.tiles.find(dt=>dt.loc[0]===tc&&dt.loc[1]===tr);
+      if(match){
+        const cells=document.querySelectorAll('#grid .tile');
+        let found=null;
+        cells.forEach(cell=>{
+          const locEl=cell.querySelector('.loc');
+          if(locEl&&locEl.textContent==='('+tc+','+tr+')') found=cell;
+        });
+        select(match, found||g);
+      }
+    });
+    svg.appendChild(g);
+  });
+
+  // ── LAYER 3: packet-switched and shmem links ──────────────────────
+  // 'packet' hops: adjacent core tiles connected via packet-routed streams
+  //   (e.g. gather path from compute cores to collector) — drawn as dashed lines.
+  // 'shmem' hops: true shared-memory transfers not covered by stream-switch — drawn
+  //   as shorter dashed lines with a different dash pattern.
+  // Both run tile-edge to tile-edge.
+  function edgeCoords(fc, fr, tc, tr){
+    const dc=tc-fc, dr=tr-fr;
+    if(dc>0)       return [tx(fc)+TW, cy(fr), tx(tc),    cy(tr)];
+    if(dc<0)       return [tx(fc),    cy(fr), tx(tc)+TW, cy(tr)];
+    if(dr>0)       return [cx(fc), ty(fr),    cx(tc), ty(tr)+TH];
+    /* dr<0 */     return [cx(fc), ty(fr)+TH, cx(tc), ty(tr)   ];
+  }
+  // Shmem links live in a RESERVED lane outside the stream-edge offset band, so
+  // dashed shared-memory links never draw on top of the solid stream edges.
+  // Stream edges are fanned within +/-streamMax(X|Y) around tile centres; shmem
+  // links start just beyond that band and step outward, alternating sides so
+  // several links between the same tile pair (e.g. swapped-neighbour DMA/kernel
+  // bridges running both ways) each get their own lane.
+  const streamMaxX = OX_STEP*(N-1)/2;
+  const streamMaxY = OY_STEP*(N-1)/2;
+  const SH_GAP=7, SH_STEP=7;
+  const shKey = h => {
+    const a=h.from_col+','+h.from_row, b=h.to_col+','+h.to_row;
+    return a<b ? a+'-'+b : b+'-'+a;
+  };
+  const shGroups={};
+  (DATA.comm_paths||[]).forEach(p=>{
+    (p.hops||[]).filter(h=>h.type==='shmem').forEach(h=>{
+      (shGroups[shKey(h)]=shGroups[shKey(h)]||[]).push(h);
+    });
+  });
+  const shIndex=new Map();
+  Object.values(shGroups).forEach(list=>{
+    list.forEach((h,i)=>shIndex.set(h,{idx:i,count:list.length}));
+  });
+  // Reserved-lane offset for the idx-th shmem link of a tile-pair group.
+  // idx 0 -> +base, idx 1 -> -base, idx 2 -> +base+step, ... (alternating sides).
+  function shOffset(idx, streamMax){
+    const base = streamMax + SH_GAP;
+    const side = (idx % 2 === 0) ? 1 : -1;
+    const lane = Math.floor(idx / 2);
+    return side * (base + lane*SH_STEP);
+  }
+
+  // ── LAYER 2.5: symbol-search highlights ──────────────────────────
+  // Drawn here (after edgeCoords/shIndex/shOffset/dmOx/dmOy are all defined)
+  // so halos use the exact same coordinates as the actual drawn lines.
+  if(srSearchTerms.size){
+    const {tileLockKeys,flowLockFis}=lkActiveSets();
+
+    // Tile overlays — semi-transparent yellow rect inset from the tile border
+    tileLockKeys.forEach(tkey=>{
+      const parts=tkey.split(','); const tc=parseInt(parts[0]), tr=parseInt(parts[1]);
+      svg.appendChild(svgN('rect',{
+        x:tx(tc)+2,y:ty(tr)+2,width:TW-4,height:TH-4,rx:'5',
+        fill:'rgba(255,210,0,0.18)',stroke:'#ffd200',
+        'stroke-width':'2','stroke-dasharray':'4 3',
+        'pointer-events':'none'}));
+    });
+
+    // Stream edge halos — match the per-flow (ox,oy) spread offset used by LAYER 4.
+    (DATA.comm_paths||[]).forEach(p=>{
+      if(!flowLockFis.has(p.flow_index)) return;
+      const fi=p.flow_index;
+      const ox=dmOx[fi]||0, oy=dmOy[fi]||0;
+      (p.edges||[]).forEach(e=>{
+        const [fc,fr]=e[0],[tc,tr]=e[1];
+        svg.appendChild(svgN('line',{
+          x1:cx(fc)+ox,y1:cy(fr)+oy,x2:cx(tc)+ox,y2:cy(tr)+oy,
+          stroke:'rgba(255,210,0,0.40)','stroke-width':'10',
+          'stroke-linecap':'round','pointer-events':'none'}));
+      });
+    });
+
+    // Shmem link halos — match edgeCoords() + shOffset() used by LAYER 3.
+    (DATA.comm_paths||[]).forEach(p=>{
+      (p.hops||[]).forEach(h=>{
+        if(h.type!=='shmem') return;
+        const fk=h.from_col+','+h.from_row, tk=h.to_col+','+h.to_row;
+        if(!tileLockKeys.has(fk)&&!tileLockKeys.has(tk)&&!flowLockFis.has(p.flow_index)) return;
+        let [x1,y1,x2,y2]=edgeCoords(h.from_col,h.from_row,h.to_col,h.to_row);
+        const gi=shIndex.get(h)||{idx:0,count:1};
+        const vertical=h.from_row!==h.to_row;
+        if(vertical){ const o=shOffset(gi.idx,streamMaxX); x1+=o; x2+=o; }
+        else         { const o=shOffset(gi.idx,streamMaxY); y1+=o; y2+=o; }
+        svg.appendChild(svgN('line',{
+          x1,y1,x2,y2,
+          stroke:'rgba(255,210,0,0.35)','stroke-width':'9',
+          'stroke-linecap':'round','pointer-events':'none'}));
+      });
+    });
+  }
+
+  (DATA.comm_paths||[]).forEach(p=>{
+    const fi=p.flow_index;
+    const dim=dmActiveFi!==-1&&dmActiveFi!==fi;
+    if(dim) return;
+    const color=dmColor(fi);
+    const RAIL=2.4;   // half-gap between the two rails of a ping-pong window link
+    const BUFSZ=6;    // buffer glyph (filled square) side
+    (p.hops||[]).filter(h=>h.type==='shmem').forEach(h=>{
+      let [x1,y1,x2,y2]=edgeCoords(h.from_col,h.from_row,h.to_col,h.to_row);
+      const gi=shIndex.get(h)||{idx:0,count:1};
+      const vertical = h.from_row!==h.to_row;
+      // Horizontal link -> offset vertically; vertical link -> offset horizontally.
+      if(vertical){ const o=shOffset(gi.idx,streamMaxX); x1+=o; x2+=o; }
+      else        { const o=shOffset(gi.idx,streamMaxY); y1+=o; y2+=o; }
+      // Differentiate the two shared-memory kinds so they read at any zoom:
+      //   'dma'    = direct shared-memory write/read (DMA<->kernel):
+      //             a single dashed line.
+      //   'window' = ping-pong buffered window between two kernels:
+      //             two parallel rails (the ping/pong buffers) + a filled
+      //             square (buffer glyph) at the midpoint.
+      if(h.kind==='dma'){
+        svg.appendChild(svgN('line',{
+          x1, y1, x2, y2,
+          stroke:color,
+          'stroke-width':'1.5',
+          'stroke-opacity':'0.6',
+          'stroke-dasharray':'5 3',
+          'stroke-linecap':'round',
+          'marker-end':'url(#ar-'+fi+')'}));
+      } else {
+        const dx = vertical ? RAIL : 0;   // rails offset perpendicular to the link
+        const dy = vertical ? 0 : RAIL;
+        [-1, 1].forEach(s=>{
+          svg.appendChild(svgN('line',{
+            x1:x1+s*dx, y1:y1+s*dy, x2:x2+s*dx, y2:y2+s*dy,
+            stroke:color,
+            'stroke-width':'1.6',
+            'stroke-opacity':'0.8',
+            'stroke-linecap':'round',
+            'marker-end':'url(#ar-'+fi+')'}));
+        });
+        const mx=(x1+x2)/2, my=(y1+y2)/2;
+        svg.appendChild(svgN('rect',{
+          x:mx-BUFSZ/2, y:my-BUFSZ/2, width:BUFSZ, height:BUFSZ,
+          fill:color, 'fill-opacity':'0.9',
+          stroke:'#181818', 'stroke-width':'0.8'}));
+      }
+      // Wide transparent hit area (covers both rails for window links).
+      const hit=svgN('line',{x1,y1,x2,y2,stroke:'transparent','stroke-width':'12',
+        cursor:'pointer','pointer-events':'stroke'});
+      hit.addEventListener('click',ev=>{
+        if(dmDragging) return;
+        ev.stopPropagation();
+        dmSelectNet(dmActiveFi===fi?-1:fi);
+      });
+      svg.appendChild(hit);
+    });
+  });
+
+  // ── LAYER 4: stream edges (over tiles, colored) ─────────────────
+  // Two-pass render: dim flows first, then active flow on top.
+  // Each visible line gets an invisible wide hit-area line on top for easy clicking.
+  function drawEdges(p, dim){
+    const fi=p.flow_index;
+    const color=dmColor(fi);
+    const ox=dmOx[fi]||0, oy=dmOy[fi]||0;
+    const edges=p.edges||[];
+    const srcKeys=new Set(edges.map(e=>e[0][0]+','+e[0][1]));
+    edges.forEach(e=>{
+      const [fc,fr]=e[0], [tc,tr]=e[1];
+      const isTerminal=!srcKeys.has(tc+','+tr);
+      const x1=cx(fc)+ox, y1=cy(fr)+oy, x2=cx(tc)+ox, y2=cy(tr)+oy;
+      svg.appendChild(svgN('line',{
+        x1, y1, x2, y2,
+        stroke:color,
+        'stroke-width':dim?'1':'3',
+        'stroke-opacity':dim?'0.05':'0.95',
+        'stroke-linecap':'round',
+        'marker-end':(dim||!isTerminal)?'':'url(#ar-'+fi+')'}));
+      // Wide transparent hit area — only on active lines so dim flows aren't clickable.
+      if(!dim){
+        const hit=svgN('line',{x1,y1,x2,y2,stroke:'transparent','stroke-width':'12',
+          cursor:'pointer','pointer-events':'stroke'});
+        hit.addEventListener('click',e=>{
+          if(dmDragging) return;
+          e.stopPropagation();
+          dmSelectNet(dmActiveFi===fi?-1:fi);
+        });
+        svg.appendChild(hit);
+      }
+    });
+  }
+  if(dmActiveFi===-1){
+    // All-nets mode: draw every flow (all bright, no dimming needed since all active).
+    (DATA.comm_paths||[]).forEach(p=>drawEdges(p, false));
+  } else {
+    // Single-net mode: draw dim flows first, active on top.
+    // Dim lines are very faint so shared segments don't occlude the active color.
+    (DATA.comm_paths||[]).forEach(p=>{
+      if(p.flow_index!==dmActiveFi) drawEdges(p, true);
+    });
+    (DATA.comm_paths||[]).forEach(p=>{
+      if(p.flow_index===dmActiveFi) drawEdges(p, false);
+    });
+  }
+
+  // ── LAYER 5a: solid dots (sources, contributors, forks) ──────────
+  // Solid = injects into stream: source (push origin) or contributor (pull gather inject).
+  // Fork = pure routing split (not a data producer or consumer).
+  // Drawn before hollow dots so hollow dots always render on top.
+  (DATA.comm_paths||[]).forEach(p=>{
+    const fi=p.flow_index;
+    const active=dmActiveFi===-1||dmActiveFi===fi;
+    if(!active) return;
+    const color=dmColor(fi);
+    const ox=dmOx[fi]||0, oy=dmOy[fi]||0;
+    const edges=p.edges||[];
+    if(!edges.length) return;
+
+    const dmaTileSet=new Set((p.dma_tiles||[]).map(t=>t[0]+','+t[1]));
+    const pktTileSet=new Set((p.packet_tiles||[]).map(t=>t[0]+','+t[1]));
+    const isPull=p.direction==='pull';
+
+    const outCount={}, inCount={};
+    edges.forEach(e=>{
+      const sk=e[0][0]+','+e[0][1], dk=e[1][0]+','+e[1][1];
+      outCount[sk]=(outCount[sk]||0)+1;
+      inCount[dk]=(inCount[dk]||0)+1;
+    });
+
+    // Source dot — solid filled circle: no incoming edges, not a gather contributor.
+    const srcTile=edges.find(e=>!inCount[e[0][0]+','+e[0][1]]);
+    if(srcTile){
+      const [sc,sr]=srcTile[0];
+      if(!(isPull&&pktTileSet.has(sc+','+sr))){
+        svg.appendChild(svgN('circle',{cx:cx(sc)+ox,cy:cy(sr)+oy,r:'4.5',
+          fill:color,stroke:'#181818','stroke-width':'1.2'}));
+      }
+    }
+
+    // Contributor dots (pull flows) — solid: each packet_tile injects computed results
+    // into the gather stream. Same solid style as source (both are injectors).
+    if(isPull){
+      const seen=new Set();
+      (p.packet_tiles||[]).forEach(t=>{
+        const [tc,tr]=t, k=tc+','+tr;
+        if(seen.has(k)) return;
+        seen.add(k);
+        svg.appendChild(svgN('circle',{cx:cx(tc)+ox,cy:cy(tr)+oy,r:'4.5',
+          fill:color,stroke:'#181818','stroke-width':'1.2'}));
+      });
+    }
+
+    // Fork dots — solid with outer ring: pure split point (1 in, 2+ out), not a DMA tap.
+    const forkSeen=new Set();
+    edges.forEach(e=>{
+      const [fc,fr]=e[0], k=fc+','+fr;
+      if(fr<0) return;
+      const outC=outCount[k]||0, inC=inCount[k]||0;
+      if(outC>=2 && inC===1 && !dmaTileSet.has(k) && !forkSeen.has(k)){
+        forkSeen.add(k);
+        svg.appendChild(svgN('circle',{
+          cx:cx(fc)+ox,cy:cy(fr)+oy,
+          r:'5',fill:color,stroke:'#e4e4e4','stroke-width':'1.5'}));
+      }
+    });
+  });
+
+  // ── LAYER 5b: hollow dots — drawn LAST so they always sit on top of lines ──
+  // Hollow = takes from stream: terminal consumer or mid-stream tap (receives + relays).
+  // All hollow dots use fill:'#181818' so the opaque background covers any line passing
+  // through the dot center, making the ring visually "cut into" the stream.
+  (DATA.comm_paths||[]).forEach(p=>{
+    const fi=p.flow_index;
+    const active=dmActiveFi===-1||dmActiveFi===fi;
+    if(!active) return;
+    const color=dmColor(fi);
+    const ox=dmOx[fi]||0, oy=dmOy[fi]||0;
+    const edges=p.edges||[];
+    if(!edges.length) return;
+
+    const dmaTileSet=new Set((p.dma_tiles||[]).map(t=>t[0]+','+t[1]));
+
+    const outCount={}, inCount={};
+    edges.forEach(e=>{
+      const sk=e[0][0]+','+e[0][1], dk=e[1][0]+','+e[1][1];
+      outCount[sk]=(outCount[sk]||0)+1;
+      inCount[dk]=(inCount[dk]||0)+1;
+    });
+
+    // Terminal dots — hollow ring, opaque background: final consumer, no outgoing edges.
+    const dstSeen=new Set();
+    edges.forEach(e=>{
+      const [tc,tr]=e[1], dk=tc+','+tr;
+      if(!outCount[dk] && tr>=0 && !dstSeen.has(dk)){
+        dstSeen.add(dk);
+        svg.appendChild(svgN('circle',{cx:cx(tc)+ox,cy:cy(tr)+oy,r:'4.5',
+          fill:'#181818',stroke:color,'stroke-width':'2.2'}));
+      }
+    });
+
+    // Tap dots — hollow ring, opaque background: DMA tile receives AND relays onward.
+    // Slightly larger ring to distinguish from terminal.
+    // Require BOTH inCount and outCount: a pull DMA source has outgoing edges but
+    // no incoming edges and must not be drawn as a tap (it gets the solid source dot).
+    const tapSeen=new Set();
+    edges.forEach(e=>{
+      const [sc,sr]=e[0], sk=sc+','+sr;
+      if(sr>=0 && dmaTileSet.has(sk) && outCount[sk] && inCount[sk] && !tapSeen.has(sk)){
+        tapSeen.add(sk);
+        svg.appendChild(svgN('circle',{cx:cx(sc)+ox,cy:cy(sr)+oy,r:'5',
+          fill:'#181818',stroke:color,'stroke-width':'2.5'}));
+      }
+    });
+  });
+
+  dmReset();
+  dmBuilt=true;
+}
+
+buildNetBar();
+
 // One-line summary for a single channel (mirrors build_summary in schedule_view.py).
 function chanSummary(ch){
   const bd = (ch.bd_chain||[])[0] || {};
@@ -2399,6 +4370,43 @@ function chanSummary(ch){
   let lock = '';
   if (acq.id!=null || rel.id!=null) lock = ' lock'+acq.id+'/'+rel.id;
   return verb+' '+len+'B ch'+ch.channel+' '+ch.direction+reps+lock;
+}
+// Supply/demand verdict for one flow (from DATA.supply_demand). Renders a
+// balanced/mismatch badge with the per-round byte figures so the user can see
+// exactly where a flow supplies more (or less) than it consumes.
+function renderFlowBalance(b){
+  if(!b) return '';
+  const s = b.supply_per_round, d = b.demand_per_round;
+  let badge, cls;
+  if (b.balanced === true){ badge='balanced'; cls='sdok'; }
+  else if (b.balanced === false){
+    badge = (s>d ? 'OVER-SUPPLY' : 'UNDER-SUPPLY'); cls='sdbad';
+  } else { badge='unchecked'; cls='sdna'; }
+  let fig = '';
+  if (s!=null && d!=null){
+    fig = '<div class="sdfig">supply '+s+'B/round vs demand '+d+'B/round'+
+          (b.balanced===false ? '  (\u0394 '+(s-d)+'B)' : '')+'</div>';
+  }
+  return '<div class="sdrow">'+
+    '<span class="sdbadge '+cls+'">'+badge+'</span>'+
+    '<span class="sdmeta">flow '+b.flow_index+' &middot; '+esc(b.pattern)+'</span>'+
+    fig+
+    (b.note?'<div class="sdnote">'+esc(b.note)+'</div>':'')+
+  '</div>';
+}
+// All distinct flow balances a tile participates in (dedup by flow_index).
+function renderTileBalances(t){
+  const seen = {}, rows = [];
+  (t.dma_channels||[]).forEach(c => {
+    const b = c.flow_balance;
+    if (b && !(b.flow_index in seen)){ seen[b.flow_index]=1; rows.push(b); }
+  });
+  if (!rows.length) return '';
+  rows.sort((a,b)=>a.flow_index-b.flow_index);
+  const bad = rows.some(b=>b.balanced===false);
+  const hdr = '<div class="kv"><b>supply / demand'+
+    (bad?' <span class="sdbadge sdbad">MISMATCH</span>':'')+':</b></div>';
+  return hdr + rows.map(renderFlowBalance).join('');
 }
 // Relevant host.cc lines for a single channel (from its host_lines entries).
 function renderChannelLines(ch){
@@ -2442,11 +4450,13 @@ function select(t, el, ch, badgeEl){
   let hiBody;
   if (focused) {
     const con = ch.contract ? '<div class="contract">'+esc(ch.contract)+'</div>' : '';
+    const sd = ch.flow_balance ? renderFlowBalance(ch.flow_balance) : '';
     hiBody =
       '<div class="kv"><b>role:</b> '+esc(hlv.role)+'</div>' +
       (hlv.kernel?'<div class="kv"><b>kernel:</b> '+esc(hlv.kernel)+'</div>':'') +
       '<div class="kv"><b>channel:</b> '+ch.direction+ch.channel+' (flow '+ch.flow_index+')</div>' +
       '<div class="kv"><b>transfer:</b> '+esc(chanSummary(ch))+'</div>' +
+      (sd?'<div class="kv"><b>supply / demand:</b></div>'+sd:'') +
       (con?'<div class="kv"><b>contract:</b></div>'+con:'');
   } else {
     const sum = (hlv.summary||[]).map(s=>'<li>'+esc(s)+'</li>').join('');
@@ -2455,6 +4465,7 @@ function select(t, el, ch, badgeEl){
       '<div class="kv"><b>role:</b> '+esc(hlv.role)+'</div>' +
       (hlv.kernel?'<div class="kv"><b>kernel:</b> '+esc(hlv.kernel)+'</div>':'') +
       '<div class="kv"><b>transfers:</b></div><ul class="sum">'+sum+'</ul>' +
+      renderTileBalances(t) +
       (con?'<div class="kv"><b>contracts:</b></div>'+con:'') +
       renderKernelMatch(t);
   }
@@ -2472,15 +4483,15 @@ function select(t, el, ch, badgeEl){
   // --- code-piece file (debugcache/code) for the file-frame header + LLM ---
   const codeFile = focused ? (ch.code_file||'') : (t.code_file||'');
   // Core tiles carry a parsed kernel function body; surface its file name.
-  const ksrc = (t.type==='core' && DATA.kernel && DATA.kernel.source)
-    ? DATA.kernel.source : null;
+  const tkv = tileKernel(t), tbf = tileBcf(t);
+  const ksrc = (t.type==='core' && tkv && tkv.source) ? tkv.source : null;
   const isCore = !!ksrc;
   // Single "kernel code" sub-tab (core tiles): merges the kernel source
   // (conv2d_spatial.cc), the generated wrapper (kernel.cc) and the buffer
   // address map (.bcf) into one stacked view, each section headed by its file.
   const kcodeOn = (t.type==='core' &&
-    ((DATA.kernel && (DATA.kernel.source || DATA.kernel.kernel_lines)) ||
-     (DATA.bcf && DATA.bcf.lines)));
+    ((tkv && (tkv.source || tkv.kernel_lines)) ||
+     (tbf && tbf.lines)));
   const kfile = ksrc ? ksrc.file : '';
   const kfileTag = isCore
     ? ' <span class="kfileref">+ kernel '+esc(kfile)+'</span>' : '';
@@ -2618,15 +4629,21 @@ function select(t, el, ch, badgeEl){
   setLLMContext(t, ch, codeFile);
 }
 
-// Prepare the pending LLM context string from the clicked tile/channel and its
-// code-piece file. Nothing is sent here; llmSend attaches it to the next user
-// message (deduped against the last attached context).
+// Set LLM context from anywhere; llmSend attaches it to the next message (deduped).
+function llmPushCtx(text){ LLM.ctx = text || null; }
+
+// Richer tile/channel context: include role, kernel, contract, port.
 function setLLMContext(t, ch, codeFile){
-  if (!codeFile){ LLM.ctx = null; return; }
-  const where = ch
-    ? 'tile ('+t.loc[0]+','+t.loc[1]+') channel '+ch.direction+ch.channel
-    : 'tile ('+t.loc[0]+','+t.loc[1]+')';
-  LLM.ctx = '[context] Currently inspecting '+where+'. The related code is '+codeFile;
+  const hl = (t && t.high_level) || {};
+  const loc = t ? 'tile ('+t.loc[0]+','+t.loc[1]+')' : '';
+  const parts = ['[context] Selected: '+loc
+    + (ch ? ' channel '+ch.direction+ch.channel : '')
+    + ' — type: '+(t&&t.type||'?')+', role: '+(hl.role||'?')];
+  if (hl.kernel) parts.push('kernel: '+hl.kernel);
+  if (ch && ch.contract) parts.push('contract: '+ch.contract);
+  if (ch && ch.kernel_port) parts.push('port: '+ch.kernel_port);
+  if (codeFile) parts.push('code: '+codeFile);
+  LLM.ctx = parts.join('; ');
 }
 
 // ─── aiegdb console (right-bottom, drives aiegdb.py --server) ─────────────────
@@ -2714,14 +4731,12 @@ document.getElementById('conreload').onclick = () => {
 };
 
 // ─── LLM console (embedded Claude Code, drives claude -p streaming) ───────────
-// The daemon runs one persistent `claude -p --output-format stream-json` process
-// in the repo root. llmSend writes one user turn; llmPoll tails the decoded
-// transcript buffer (reusing the applog-tail idiom) until the turn ends.
-// ctx: pending tile/file context prepared on the last tile/channel click.
-// ctxSent: the context string last attached to a message (for change-only dedup).
-const LLM = { off:0, poll:null, busy:false, text:'', ctx:null, ctxSent:null };
-// Escape HTML so model output (which may contain <, >, &, code) is inert before
-// we inject it as innerHTML for coloring.
+// One persistent `claude -p --output-format stream-json` process in the repo
+// root. Each user turn becomes a .llm-msg-you bubble; streamed reply tokens
+// accumulate into a .llm-msg-ai bubble via llmAppendToMsg.
+const LLM = { off:0, poll:null, busy:false, pendingId:null, ctx:null, ctxSent:null };
+let llmMessages = [];
+let llmMsgIdCtr = 0;
 function llmEscape(s){
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
@@ -2740,10 +4755,7 @@ function llmColorizeMarkers(s){
       + (line ? ':<span class="llm-line">' + line + '</span>' : ''));
   return s;
 }
-// Minimal offline highlighter for one fenced code block. `raw` is UNESCAPED
-// code; escape first, then one alternation regex colors comments/strings/
-// numbers/keywords. First-match-wins means a keyword inside a string or comment
-// is left alone (the string/comment alt starts earlier and consumes it).
+// Minimal offline highlighter for one fenced code block.
 const LLM_TOK = /(\/\*[\s\S]*?\*\/|\/\/[^\n]*|#\s[^\n]*)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|\b(0x[0-9a-fA-F]+|\d+\.?\d*)\b|\b(if|else|elif|for|while|do|return|break|continue|switch|case|default|goto|int|float|double|char|bool|void|long|short|unsigned|signed|const|static|struct|class|public|private|protected|namespace|template|typename|typedef|enum|union|new|delete|sizeof|this|nullptr|true|false|NULL|auto|using|include|define|import|from|def|lambda|None|True|False|self|and|or|not|in|is|print|std)\b/g;
 function llmHighlightCode(raw){
   return llmEscape(raw.replace(/\n$/,'')).replace(LLM_TOK, (m,c,s,n,k) =>
@@ -2752,8 +4764,6 @@ function llmHighlightCode(raw){
     n ? '<span class="cm-number">'  + n + '</span>' :
     k ? '<span class="cm-keyword">' + k + '</span>' : m);
 }
-// Render one prose (non-code) segment: escape, apply light markdown (headings,
-// bullets, inline code, bold), then the marker colorizer.
 function llmProse(raw){
   let s = llmEscape(raw);
   s = s.replace(/^(#{1,6})\s+(.*)$/gm, (m,h,t) => '<span class="md-h">' + t + '</span>');
@@ -2762,28 +4772,54 @@ function llmProse(raw){
   s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
   return llmColorizeMarkers(s);
 }
-// Split the transcript on ``` fences: even segments are prose, odd are code
-// blocks (an unclosed trailing fence mid-stream is treated as code, so partial
-// /llm/poll chunks still render safely).
+// Split on ``` fences: even segments are prose, odd are code blocks.
+// Unclosed trailing fence mid-stream is treated as code for safe partial renders.
 function llmRenderText(raw){
   const parts = raw.split('```');
   let html = '';
   for (let i = 0; i < parts.length; i++){
     if (i % 2 === 0){ html += llmProse(parts[i]); continue; }
     const blk = parts[i], nl = blk.indexOf('\n');
-    const body = nl >= 0 ? blk.slice(nl + 1) : blk;   // drop optional ```lang line
+    const body = nl >= 0 ? blk.slice(nl + 1) : blk;
     html += '<pre class="md-block"><code>' + llmHighlightCode(body) + '</code></pre>';
   }
   return html;
 }
-function llmRender(){
-  const out = document.getElementById('llmout');
-  if (!out) return;
-  const atBottom = (out.scrollHeight - out.scrollTop - out.clientHeight) < 4;
-  out.innerHTML = llmRenderText(LLM.text);
-  if (atBottom) out.scrollTop = out.scrollHeight;
+
+// Append a new message bubble; returns its DOM id.
+function llmAddMsg(role, html){
+  const id = 'llmm' + (++llmMsgIdCtr);
+  const rec = {id, role, html, _raw:''};
+  llmMessages.push(rec);
+  const list = document.getElementById('llmmsg');
+  if (!list) return id;
+  const near = list.scrollHeight - list.scrollTop - list.clientHeight < 60;
+  const div = document.createElement('div');
+  div.id = id;
+  div.className = 'llm-msg llm-msg-' + role;
+  div.innerHTML = html;
+  list.appendChild(div);
+  if (near) list.scrollTop = list.scrollHeight;
+  return id;
 }
-function llmAppend(text){ LLM.text += text; llmRender(); }
+// Stream raw text into an existing AI bubble, re-rendering markdown each chunk.
+function llmAppendToMsg(id, rawChunk){
+  const rec = llmMessages.find(x => x.id === id);
+  if (!rec) return;
+  const list = document.getElementById('llmmsg');
+  const near = list ? (list.scrollHeight - list.scrollTop - list.clientHeight < 60) : false;
+  rec._raw += rawChunk;
+  rec.html = llmRenderText(rec._raw);
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = rec.html;
+  if (near && list) list.scrollTop = list.scrollHeight;
+}
+function llmShowThink(on){
+  const t = document.getElementById('llmthink');
+  if (t) t.classList.toggle('hide', !on);
+}
+
 function llmStopPoll(){ if (LLM.poll){ clearInterval(LLM.poll); LLM.poll = null; } }
 function llmPollOnce(){
   if (LLM.busy) return;
@@ -2791,49 +4827,53 @@ function llmPollOnce(){
   api('/llm/poll?offset=' + LLM.off).then(r => {
     if (r.auth){ llmLock(); return; }
     if (r.error){ llmStopPoll(); return; }
-    if (r.data) llmAppend(r.data);
+    if (r.data && LLM.pendingId){ llmShowThink(false); llmAppendToMsg(LLM.pendingId, r.data); }
     if (r.next != null) LLM.off = r.next;
-    if (r.active === false) llmStopPoll();   // turn finished
-  }).catch(() => { llmStopPoll(); llmAppend('\n[daemon offline (static mode)]\n'); })
+    if (r.active === false){ llmStopPoll(); LLM.pendingId = null; llmShowThink(false); }
+  }).catch(() => { llmStopPoll(); llmShowThink(false); })
     .finally(() => { LLM.busy = false; });
 }
 function llmSend(prompt){
   prompt = (prompt || '').trim();
   if (!prompt) return;
-  // Attach the prepared tile/file context ONLY when it changed since the last
-  // attach (first click, or a different tile/channel). Unchanged context is not
-  // re-sent, so repeat messages about the same selection stay clean.
+  llmStopPoll();
   let toSend = prompt;
   if (LLM.ctx && LLM.ctx !== LLM.ctxSent){
     toSend = LLM.ctx + '\n' + prompt;
     LLM.ctxSent = LLM.ctx;
-    llmAppend((LLM.text.endsWith('\n') || LLM.text === '' ? '' : '\n')
-              + LLM.ctx + '\n');
+    llmAddMsg('ctx', llmEscape(LLM.ctx));
   }
-  llmAppend((LLM.text.endsWith('\n') || LLM.text === '' ? '' : '\n')
-            + 'you> ' + prompt + '\n');
+  llmAddMsg('you', llmEscape(prompt));
+  const aiId = llmAddMsg('ai', '');
+  LLM.pendingId = aiId;
+  llmShowThink(true);
   api('/llm', {method:'POST', headers:{'Content-Type':'application/json'},
                body: JSON.stringify({prompt:toSend})})
     .then(r => {
       if (r.auth){ llmLock(); return; }
-      if (!r.ok){ llmAppend('\n[llm error: ' + (r.error || 'unknown') + ']\n'); return; }
+      if (!r.ok){ llmShowThink(false);
+        llmAppendToMsg(aiId, '[llm error: ' + (r.error || 'unknown') + ']'); return; }
       if (r.offset != null) LLM.off = r.offset;
       llmStopPoll();
       llmPollOnce();
       LLM.poll = setInterval(llmPollOnce, 700);
     })
-    .catch(() => llmAppend('\n[daemon offline: LLM tab needs schedule_debug_server]\n'));
+    .catch(() => { llmShowThink(false);
+      llmAppendToMsg(aiId, '[daemon offline: LLM tab needs schedule_debug_server]'); });
 }
 function llmReset(){
   llmStopPoll();
   api('/llm/reset', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})
     .then(r => {
       if (r && r.auth){ llmLock(); return; }
-      // New chat: forget which context was attached so it re-attaches next send.
-      LLM.ctxSent = null;
-      LLM.off = 0; LLM.text = '(new chat \u2014 context reset)\n'; llmRender();
+      LLM.ctxSent = null; LLM.off = 0; LLM.pendingId = null;
+      llmMessages = [];
+      const list = document.getElementById('llmmsg');
+      if (list) list.innerHTML = '';
+      llmShowThink(false);
+      llmAddMsg('ctx', 'new chat \u2014 context reset');
     })
-    .catch(() => llmAppend('\n[daemon offline: cannot reset]\n'));
+    .catch(() => { llmAddMsg('ctx', '[daemon offline: cannot reset]'); });
 }
 // ── LLM password modal ──────────────────────────────────────────────────────
 function llmAuthShow(){ const m=document.getElementById('llmauth');
@@ -2842,11 +4882,10 @@ function llmAuthShow(){ const m=document.getElementById('llmauth');
 function llmAuthHide(){ const m=document.getElementById('llmauth');
   if (m) m.classList.add('hide');
   const e=document.getElementById('llmautherr'); if (e) e.textContent=''; }
-// Lock the LLM tab: drop the (bad/absent) token, stop polling, show the modal.
 function llmLock(){
   sessionStorage.removeItem('LLM_AUTH');
   llmStopPoll();
-  llmAppend('\n[locked: enter password]\n');
+  llmAddMsg('ctx', '[locked: enter password]');
   llmAuthShow();
 }
 // Ask the daemon whether auth is required; prompt if so and no token stored yet.
@@ -2860,20 +4899,27 @@ function llmCheckAuth(){
   const snd = document.getElementById('llmsend');
   const rst = document.getElementById('llmreset');
   const term = document.getElementById('llmterm');
+  function autoGrow(){
+    if (!inp) return;
+    inp.style.height = 'auto';
+    inp.style.height = inp.scrollHeight + 'px';
+  }
+  function submitLLM(){
+    if (!inp) return;
+    const v = inp.value.trim();
+    if (v){ llmSend(v); inp.value=''; autoGrow(); }
+  }
   if (inp) inp.addEventListener('keydown', e => {
-    if (e.key === 'Enter'){ const v = e.target.value.trim();
-      if (v){ llmSend(v); e.target.value=''; } }
+    if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); submitLLM(); }
   });
-  if (snd) snd.onclick = () => { const v = inp.value.trim();
-    if (v){ llmSend(v); inp.value=''; } };
+  if (inp) inp.addEventListener('input', autoGrow);
+  if (snd) snd.onclick = submitLLM;
   if (rst) rst.onclick = llmReset;
   if (term) term.onclick = () => {
     const sel = window.getSelection();
     if (sel && sel.toString()) return;
     if (inp) inp.focus();
   };
-  // Password modal: store the entered value as the session token, then hide.
-  // Validation is implicit on the next /llm call (a 401 re-locks).
   const authin = document.getElementById('llmauthin');
   const authok = document.getElementById('llmauthok');
   const doUnlock = () => {
@@ -2887,19 +4933,20 @@ function llmCheckAuth(){
   if (authin) authin.addEventListener('keydown', e => {
     if (e.key === 'Enter') doUnlock();
   });
-  // Prompt on first load if the daemon requires a password.
   llmCheckAuth();
 })();
-// Console tab switching: toggle .hide on #conpane/#llmpane + .act on the tabs.
+// Console tab switching: toggle .hide on panes + .act on the tabs.
+const _CON_PANES = ['conpane', 'llmpane', 'searchpane'];
 document.querySelectorAll('#contabs .contab').forEach(tab => tab.onclick = () => {
   document.querySelectorAll('#contabs .contab').forEach(x => x.classList.remove('act'));
   tab.classList.add('act');
   const pane = tab.dataset.pane;
-  const con = document.getElementById('conpane');
-  const llm = document.getElementById('llmpane');
-  if (con) con.classList.toggle('hide', pane !== 'conpane');
-  if (llm) llm.classList.toggle('hide', pane !== 'llmpane');
+  _CON_PANES.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('hide', id !== pane);
+  });
   if (pane === 'llmpane') llmCheckAuth();
+  if (pane === 'searchpane') document.getElementById('sr-input').focus();
 });
 
 document.getElementById('gbtn').onclick = () => {
@@ -2917,7 +4964,7 @@ document.getElementById('gbtn').onclick = () => {
 // and the page silently stays in static mode.
 const LIVE = { enabled:false, connected:false, what:'dma', gridTimer:null,
                conTimer:null, logoff:0, gridBusy:false, logBusy:false,
-               runActive:false, device:'', host:'',
+               runActive:false, debugUnlocked:false, device:'', host:'',
                hwsrvOff:0, hwsrvTimer:null, hwsrvBusy:false };
 const LSTATE = {
   running:['#2e7d32','RUN'], stalled:['#b8860b','STALL'], error:['#c62828','ERR'],
@@ -2989,6 +5036,19 @@ function setLive(on){
 // Disable ALL aiedbg-driven features while a board run is live so their JTAG
 // reads don't collide with apppaltest's device program/reset/dow -force over
 // the single serialized xsdb://<PALIP>:3121 link (intermittent download fail).
+// Auto-unlock the aiegdb console mid-run (called from pollLog when the daemon
+// reports r.debuggable). Enables ONLY the console input + reload — the live
+// overlay checkbox / grid-poll stay off so the only JTAG traffic is the
+// commands the user types, which won't collide with the parked run's reads.
+function unlockConsoleForDebug(){
+  if (LIVE.debugUnlocked) return;   // idempotent: only flip once per run
+  LIVE.debugUnlocked = true;
+  const cr = document.getElementById('conreload');
+  const ci = document.getElementById('conin');
+  if (cr) cr.disabled = false;
+  if (ci){ ci.disabled = false; ci.classList.remove('disabled'); }
+  setStatus('run parked \u2014 aiegdb console unlocked for live debug (overlay stays off)');
+}
 function setDebugEnabled(on){
   const cb = document.getElementById('liveToggle');
   const tc = document.getElementById('testconn');
@@ -2996,13 +5056,14 @@ function setDebugEnabled(on){
   const ci = document.getElementById('conin');
   if (!on){
     LIVE.runActive = true;
+    LIVE.debugUnlocked = false;   // new run → re-lock until it's debuggable again
     stopGridPoll(); clearBars();
     if (cb){ cb.checked = false; cb.disabled = true;
       cb.closest('label').classList.toggle('disabled', true); }
     if (tc) tc.disabled = true;
     if (cr) cr.disabled = true;
     if (ci){ ci.disabled = true; ci.classList.add('disabled'); }
-    setStatus('debug disabled during run');
+    setStatus('debug disabled during run setup');
   } else {
     LIVE.runActive = false;
     if (tc) tc.disabled = false;
@@ -3045,8 +5106,15 @@ function updateDeviceUI(){
   if (stopbtn) stopbtn.disabled = true;
   if (testconn) testconn.disabled = !has;
   if (boardHost) boardHost.classList.toggle('hide', dev !== 'vek385');
+  // For simulator, "Test connect" label stays but skips JTAG; still require
+  // the test step so the user explicitly enables Run/Stop for it.
+  if (testconn) testconn.textContent = (dev === 'simulator') ? 'Activate' : 'Test connect';
   setConnStatus(has ? 'click "Test connect" to enable live features' : '');
-  setConnHint(false);                            // clear stale failure hint
+  setConnHint(false);
+  if(deviceSel&&has){
+    const opt=deviceSel.options[deviceSel.selectedIndex];
+    llmPushCtx('[context] Device selected: '+(opt?opt.text:dev));
+  }
 }
 if (deviceSel) deviceSel.onchange = updateDeviceUI;
 // Apply a successful connection: unlock Run test / Force stop / overlay and
@@ -3072,6 +5140,8 @@ function applyConnected(r){
     .then(sr => {
       if (sr && sr.ok){
         setConnStatus('connected \u2014 ' + (sr.target || ((r && r.detail) || 'ok')));
+        llmPushCtx('[context] Connected to '+(LIVE.host||LIVE.device)
+          +' \u2014 AIEDBG_TARGET: '+(sr.target||'unknown'));
         conSend('', false);   // spawn aiegdb with the new target; shows scope
       } else {
         setConnStatus('target switch failed: ' + ((sr && sr.detail) || 'unknown'));
@@ -3176,6 +5246,37 @@ function pollHwSrv(){
 function testConnect(){
   const dev = deviceSel ? deviceSel.value : '';
   if (!dev){ setConnStatus('select a device first'); return; }
+  // Simulator: probe IPC readiness. If already ready, apply connected immediately.
+  // Otherwise, unlock Run/Stop so the user can start the sim and the aiegdb
+  // console will auto-connect once the IPC debug socket appears.
+  if (dev === 'simulator'){
+    LIVE.device = dev; LIVE.host = '';
+    api('/sim/status').then(ss => {
+      if (ss && ss.ipc_ready){
+        applyConnected({detail: 'simulator IPC ready'});
+      } else {
+        // Not ready yet — still unlock all live controls so Run sim works and
+        // the overlay checkbox is available once the sim is running.
+        LIVE.connected = true;
+        if (runbtn) runbtn.disabled = false;
+        if (stopbtn) stopbtn.disabled = true;
+        if (liveToggle){ liveToggle.disabled = false;
+          liveToggle.closest('label').classList.remove('disabled'); }
+        const box = document.getElementById('cmdconsole');
+        if (box) box.classList.remove('hide');
+        const rsp = document.getElementById('rhsplitter');
+        if (rsp) rsp.classList.remove('hide');
+        setConnStatus('simulator activated — run it to enable live grid reads');
+      }
+    }).catch(() => {
+      LIVE.connected = true;
+      if (runbtn) runbtn.disabled = false;
+      if (liveToggle){ liveToggle.disabled = false;
+        liveToggle.closest('label').classList.remove('disabled'); }
+      setConnStatus('simulator activated (daemon offline)');
+    });
+    return;
+  }
   const host = boardHost ? boardHost.value.trim() : '';
   if (dev === 'vek385' && !host){ setConnStatus('enter vek385 board hostname'); return; }
   // Remember the selection so applyConnected can tell the daemon which target
@@ -3206,7 +5307,20 @@ document.querySelectorAll('#overlaytabs .ltab').forEach(tab => tab.onclick = () 
   document.querySelectorAll('#overlaytabs .ltab').forEach(x => x.classList.remove('act'));
   tab.classList.add('act');
   LIVE.what = tab.dataset.w;
-  if (LIVE.enabled) pollGridOnce();
+  // Make the tab self-activating: if the overlay is already live, just refetch
+  // for the new 'what'. Otherwise auto-enable the overlay when we're connected,
+  // so clicking Cores/Events actually shows its data (core PCs / DMA events)
+  // without also having to tick the "Live status overlay" box. If we can't poll
+  // (no connection or a run is holding the JTAG) explain why nothing appears.
+  if (LIVE.enabled){ pollGridOnce(); return; }
+  if (LIVE.runActive){ setStatus('overlay paused during run (JTAG busy)'); return; }
+  if (LIVE.connected){
+    const cb = document.getElementById('liveToggle');
+    if (cb) cb.checked = true;
+    setLive(true);   // flips LIVE.enabled + starts the grid poll for this 'what'
+  } else {
+    setStatus('pick a device, "Test connect", then this tab shows live '+LIVE.what);
+  }
 });
 
 function pollLog(){
@@ -3220,6 +5334,11 @@ function pollLog(){
     if (r.next != null) LIVE.logoff = r.next;
     if (atBottom) con.scrollTop = con.scrollHeight;
     setStatus('run: ' + r.status);
+    // Auto-unlock the aiegdb console mid-run once the daemon reports the run is
+    // past the exclusive-JTAG setup phase (download/program/reset done → app
+    // running/parked/hung). Only typed commands hit JTAG; the live overlay
+    // grid-poll stays OFF so we don't compete with the run's own reads.
+    if (r.running === true && r.debuggable) unlockConsoleForDebug();
     // Stop only when the subprocess has actually exited — NOT on a derived
     // pass/fail. apppaltest keeps writing (summary/cleanup/reboot) long after
     // the teardown marker first appears mid-run.
@@ -3233,10 +5352,31 @@ function pollLog(){
 document.getElementById('runbtn').onclick = () => {
   const dev = deviceSel ? deviceSel.value : '';
   if (!dev){ setStatus('select a device first'); return; }
-  const host = boardHost ? boardHost.value.trim() : '';
-  if (dev === 'vek385' && !host){ setStatus('enter vek385 board hostname'); return; }
   const con = document.getElementById('console');
   con.classList.remove('hide'); con.textContent = '';
+  // Simulator path: route to /sim/run and tail /sim/log.
+  if (dev === 'simulator'){
+    SIM.logoff = 0; SIM.applogoff = 0; SIM.applogSeen = false;
+    if (runbtn) runbtn.disabled = true;
+    if (stopbtn) stopbtn.disabled = false;
+    api('/sim/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})
+      .then(r => {
+        if (r.error){ con.textContent = 'sim error: ' + r.error;
+          if (runbtn) runbtn.disabled = false; if (stopbtn) stopbtn.disabled = true; return; }
+        con.textContent = '[simulator started \u2192 ' + (r.sim_log||'ipc_sim.log') + ']\n'
+          + '[waiting for IPC debug socket\u2026]\n';
+        llmPushCtx('[context] Simulator run started');
+        SIM.ipcReady = false;
+        if (SIM.timer) clearInterval(SIM.timer);
+        SIM.timer = setInterval(pollSimLog, 1000);
+        pollSimLog();
+      })
+      .catch(() => { con.textContent = 'daemon offline: cannot start simulator.';
+        if (runbtn) runbtn.disabled = false; if (stopbtn) stopbtn.disabled = true; });
+    return;
+  }
+  const host = boardHost ? boardHost.value.trim() : '';
+  if (dev === 'vek385' && !host){ setStatus('enter vek385 board hostname'); return; }
   LIVE.logoff = 0;
   // Stop aiedbg polling/console BEFORE the download starts so its JTAG reads
   // don't collide with device program/reset/dow -force. Re-enabled in pollLog
@@ -3248,12 +5388,24 @@ document.getElementById('runbtn').onclick = () => {
       // Run didn't actually start → re-enable debug (no pollLog will run).
       if (r.error){ con.textContent = 'run error: ' + r.error; setDebugEnabled(true); return; }
       con.textContent = '[run ' + r.run_id + ' started \u2192 ' + (r.applog||'applog') + ']\n';
+      llmPushCtx('[context] Hardware run '+r.run_id+' started on '+dev);
       if (LIVE.conTimer) clearInterval(LIVE.conTimer);
       LIVE.conTimer = setInterval(pollLog, 1000);
     })
     .catch(() => { con.textContent = 'daemon offline: cannot start a run (open via schedule_debug_server).'; setDebugEnabled(true); });
 };
 document.getElementById('stopbtn').onclick = () => {
+  const dev = deviceSel ? deviceSel.value : '';
+  if (dev === 'simulator'){
+    api('/sim/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})
+      .then(r => {
+        if (r.error){ setStatus('stop: ' + r.error); return; }
+        setStatus('simulator stopped (pid ' + r.pid + ')');
+        pollSimLog();
+      })
+      .catch(() => { setStatus('daemon offline: cannot stop simulator.'); });
+    return;
+  }
   api('/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})
     .then(r => {
       if (r.error){ setStatus('stop: ' + r.error); return; }
@@ -3267,8 +5419,28 @@ document.getElementById('stopbtn').onclick = () => {
 // Load the existing applog from the start (one-shot, no live tail). Useful for
 // inspecting the last run without launching a new one.
 document.getElementById('loadlogbtn').onclick = () => {
+  const dev = deviceSel ? deviceSel.value : '';
   const con = document.getElementById('console');
   con.classList.remove('hide'); con.textContent = '';
+  if (dev === 'simulator'){
+    SIM.logoff = 0; SIM.applogoff = 0; SIM.applogSeen = false;
+    if (SIM.timer){ clearInterval(SIM.timer); SIM.timer=null; }
+    Promise.all([
+      api('/sim/log?offset=0'),
+      api('/sim/applog?offset=0').catch(() => ({data:'',next:0}))
+    ]).then(([r, ra]) => {
+      con.textContent = r.data || '(sim log is empty)';
+      if (r.next != null) SIM.logoff = r.next;
+      if (ra.data){
+        con.textContent += '\n--- PS application output (ipc_app.log) ---\n' + ra.data;
+        SIM.applogSeen = true;
+      }
+      if (ra.next != null) SIM.applogoff = ra.next;
+      con.scrollTop = con.scrollHeight;
+      setStatus('loaded sim log (' + (r.running ? 'running' : 'idle') + ')');
+    }).catch(() => { con.textContent = 'daemon offline: cannot load sim log.'; });
+    return;
+  }
   LIVE.logoff = 0;
   // Cancel any active tail so the one-shot load isn't fought by polling.
   if (LIVE.conTimer){ clearInterval(LIVE.conTimer); LIVE.conTimer=null; }
@@ -3280,96 +5452,152 @@ document.getElementById('loadlogbtn').onclick = () => {
   }).catch(() => { con.textContent = 'daemon offline: cannot load applog.'; });
 };
 
-// Draggable splitter: resize left/right panes by dragging (default 50/50).
-(function(){
-  const sp = document.getElementById('splitter');
-  const left = document.getElementById('left');
-  if (!sp || !left) return;
-  let dragging = false;
-  sp.addEventListener('mousedown', e => {
-    dragging = true;
+// ── Extra devices (simulator etc): populated from /devices at startup ──
+// The server reads debug_ui_config.json from the workdir and returns any
+// extra devices (e.g. simulator) that it can run.  Each entry is injected
+// as an <option> in the board dropdown; selecting "simulator" short-circuits
+// the JTAG "Test connect" and routes Run/Stop/Load-log to /sim/* endpoints.
+const SIM = { timer: null, logoff: 0, logBusy: false, ipcReady: false,
+              applogoff: 0, applogSeen: false };
+function pollSimLog(){
+  if (SIM.logBusy) return;
+  SIM.logBusy = true;
+  const con = document.getElementById('console');
+  // Poll both the simulator engine log and the PS application log in parallel.
+  Promise.all([
+    api('/sim/log?offset='+SIM.logoff),
+    api('/sim/applog?offset='+SIM.applogoff).catch(() => ({data:'',next:SIM.applogoff,running:false}))
+  ]).then(([r, ra]) => {
+    const atBottom = con ? (con.scrollHeight - con.scrollTop - con.clientHeight) < 4 : true;
+    if (r.data && con){ con.textContent += r.data; }
+    if (r.next != null) SIM.logoff = r.next;
+    // PS app output: prefix with a header the first time it appears, then stream.
+    if (ra.data && con){
+      if (!SIM.applogSeen){
+        con.textContent += '\n--- PS application output (ipc_app.log) ---\n';
+        SIM.applogSeen = true;
+      }
+      con.textContent += ra.data;
+    }
+    if (ra.next != null) SIM.applogoff = ra.next;
+    if (atBottom && con) con.scrollTop = con.scrollHeight;
+    // Enable live grid reads once the IPC debug socket is ready.
+    if (r.ipc_ready && !SIM.ipcReady){
+      SIM.ipcReady = true;
+      LIVE.device = 'simulator'; LIVE.host = '';
+      if (liveToggle){ liveToggle.disabled = false;
+        liveToggle.closest('label').classList.remove('disabled'); }
+      setConnStatus('simulator IPC ready \u2014 live grid reads active');
+    }
+    setStatus('sim: ' + (r.running ? 'running' : 'stopped'));
+    if (!r.running){
+      if (SIM.timer){ clearInterval(SIM.timer); SIM.timer = null; }
+      SIM.ipcReady = false;
+      if (runbtn)  runbtn.disabled  = false;
+      if (stopbtn) stopbtn.disabled = true;
+    }
+  }).catch(() => {}).finally(() => { SIM.logBusy = false; });
+}
+api('/devices').then(r => {
+  if (!r || !r.devices || !deviceSel) return;
+  r.devices.forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = d.value; opt.textContent = d.label;
+    deviceSel.appendChild(opt);
+  });
+}).catch(() => {});
+// Splitter helper: pointer-capture drag with anchor-relative sizing.
+// onStart(e) → opaque state recorded at pointerdown.
+// onMove(e, state) → applies the drag delta using that state.
+function _makeSplitter(spId, bodyCls, onStart, onMove){
+  const sp = document.getElementById(spId);
+  if (!sp) return;
+  let state = null;
+  sp.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    sp.setPointerCapture(e.pointerId);
     sp.classList.add('drag');
-    document.body.classList.add('resizing');
+    document.body.classList.add(bodyCls);
+    state = onStart(e);
     e.preventDefault();
   });
-  document.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    // Clamp so neither pane collapses below its min-width.
-    const min = 200, max = window.innerWidth - 200 - sp.offsetWidth;
-    let w = Math.max(min, Math.min(max, e.clientX));
-    left.style.flex = '0 0 ' + w + 'px';
+  sp.addEventListener('pointermove', e => {
+    if (!sp.hasPointerCapture(e.pointerId)) return;
+    onMove(e, state);
   });
-  document.addEventListener('mouseup', () => {
-    if (!dragging) return;
-    dragging = false;
+  const _end = e => {
+    if (!sp.hasPointerCapture(e.pointerId)) return;
+    sp.releasePointerCapture(e.pointerId);
     sp.classList.remove('drag');
-    document.body.classList.remove('resizing');
-  });
-})();
+    document.body.classList.remove(bodyCls);
+    state = null;
+  };
+  sp.addEventListener('pointerup', _end);
+  sp.addEventListener('pointercancel', _end);
+}
 
-// Draggable horizontal splitter: resize the top-left / bottom-left regions.
+// Left/right pane splitter.
 (function(){
-  const sp = document.getElementById('lhsplitter');
-  const top = document.getElementById('lefttop');
   const left = document.getElementById('left');
-  if (!sp || !top || !left) return;
-  let dragging = false;
-  sp.addEventListener('mousedown', e => {
-    dragging = true;
-    sp.classList.add('drag');
-    document.body.classList.add('vresizing');
-    e.preventDefault();
-  });
-  document.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    // Clamp so neither region collapses below a usable height.
-    const rect = left.getBoundingClientRect();
-    const min = 80, max = rect.height - 80 - sp.offsetHeight;
-    let h = Math.max(min, Math.min(max, e.clientY - rect.top));
-    top.style.flex = '0 0 ' + h + 'px';
-  });
-  document.addEventListener('mouseup', () => {
-    if (!dragging) return;
-    dragging = false;
-    sp.classList.remove('drag');
-    document.body.classList.remove('vresizing');
-  });
+  const sp   = document.getElementById('splitter');
+  if (!left || !sp) return;
+  _makeSplitter('splitter', 'resizing',
+    e => ({ x: e.clientX, w: left.getBoundingClientRect().width }),
+    (e, s) => {
+      const min = 200, max = window.innerWidth - 200 - sp.offsetWidth;
+      left.style.flex = '0 0 ' + Math.max(min, Math.min(max, s.w + e.clientX - s.x)) + 'px';
+    });
 })();
 
-// Draggable splitter for the right pane: resize the command-console frame.
+// Top/bottom left-pane splitter.
 (function(){
-  const sp = document.getElementById('rhsplitter');
-  const con = document.getElementById('cmdconsole');
+  const top  = document.getElementById('lefttop');
+  const left = document.getElementById('left');
+  const sp   = document.getElementById('lhsplitter');
+  if (!top || !left || !sp) return;
+  _makeSplitter('lhsplitter', 'vresizing',
+    e => ({ y: e.clientY, h: top.getBoundingClientRect().height }),
+    (e, s) => {
+      const rect = left.getBoundingClientRect();
+      const min = 80, max = rect.height - 80 - sp.offsetHeight;
+      top.style.flex = '0 0 ' + Math.max(min, Math.min(max, s.h + e.clientY - s.y)) + 'px';
+    });
+})();
+
+// Panel/console right-pane splitter.
+// Dragging up (negative dy) grows the console; dragging down shrinks it.
+(function(){
+  const con   = document.getElementById('cmdconsole');
   const right = document.getElementById('right');
-  if (!sp || !con || !right) return;
-  let dragging = false;
-  sp.addEventListener('mousedown', e => {
-    dragging = true;
-    sp.classList.add('drag');
-    document.body.classList.add('vresizing');
-    e.preventDefault();
-  });
-  document.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    // Console height = distance from cursor to the bottom of the right pane.
-    const rect = right.getBoundingClientRect();
-    const min = 80, max = rect.height - 120;
-    let h = Math.max(min, Math.min(max, rect.bottom - e.clientY));
-    con.style.flex = '0 0 ' + h + 'px';
-  });
-  document.addEventListener('mouseup', () => {
-    if (!dragging) return;
-    dragging = false;
-    sp.classList.remove('drag');
-    document.body.classList.remove('vresizing');
-  });
+  if (!con || !right) return;
+  _makeSplitter('rhsplitter', 'vresizing',
+    e => ({ y: e.clientY, h: con.getBoundingClientRect().height }),
+    (e, s) => {
+      const min = 80, max = right.getBoundingClientRect().height - 120;
+      con.style.flex = '0 0 ' + Math.max(min, Math.min(max, s.h - (e.clientY - s.y))) + 'px';
+    });
 })();
 
 // Served over HTTP by the daemon: leave live controls gated on device choice
 // (updateDeviceUI disables Run/overlay until a device is picked). On file://
 // there is no daemon, so stay static.
+// Ask the daemon for board defaults (device + hostname) so the dropdown and
+// hostname box come pre-filled instead of empty. Falls back silently on
+// file:// or if the daemon doesn't answer.
+function applyBoardDefaults(){
+  api('/config').then(c => {
+    if (!c || c.error) return;
+    if (c.device && deviceSel){
+      const has = Array.from(deviceSel.options).some(o => o.value === c.device);
+      if (has) deviceSel.value = c.device;
+    }
+    if (c.board_host && boardHost) boardHost.value = c.board_host;
+    updateDeviceUI();   // reveal/enable controls for the preselected device
+  }).catch(() => {});
+}
 if (location.protocol === 'http:' || location.protocol === 'https:') {
   updateDeviceUI();   // device empty ⇒ controls disabled, overlay off
+  applyBoardDefaults();
 } else {
   setStatus('static mode — open via schedule_debug_server.py for live status');
   updateDeviceUI();
@@ -3389,7 +5617,7 @@ function probeLLM(){
     const tab = document.querySelector('#contabs .contab[data-pane="llmpane"]');
     if (tab) tab.click();
     // Show any transcript already buffered (e.g. after a page reload).
-    if (r.data){ LLM.text = r.data; llmRender(); }
+    if (r.data){ llmAddMsg('ai', llmRenderText(r.data)); }
     if (r.next != null) LLM.off = r.next;
   }).catch(() => {});   // no daemon → stay static
 }
@@ -3431,6 +5659,21 @@ def _tile_cache_content(t):
         out.append('// kernel: %s' % hl['kernel'])
     for s in hl.get('summary', []) or []:
         out.append('//   transfer: %s' % s)
+    seen_fb = set()
+    for c in t.get('dma_channels', []) or []:
+        fb = c.get('flow_balance')
+        if not fb or fb['flow_index'] in seen_fb:
+            continue
+        seen_fb.add(fb['flow_index'])
+        if fb.get('balanced') is False:
+            verd = 'OVER-SUPPLY' if (fb['supply_per_round'] or 0) > (fb['demand_per_round'] or 0) else 'UNDER-SUPPLY'
+        elif fb.get('balanced') is True:
+            verd = 'balanced'
+        else:
+            verd = 'unchecked'
+        out.append('//   supply/demand flow %s (%s): %s  supply=%s demand=%s'
+                   % (fb['flow_index'], fb['pattern'], verd,
+                      fb['supply_per_round'], fb['demand_per_round']))
     km = hl.get('kernel_match')
     if km and km.get('matches'):
         out.append('// channel <-> kernel argument (by BD buffer address):')
@@ -3463,6 +5706,17 @@ def _channel_cache_content(t, c):
            % (col, row, d, ch, c.get('flow_index'))]
     if c.get('contract'):
         out.append('// contract: %s' % c['contract'])
+    fb = c.get('flow_balance')
+    if fb:
+        if fb.get('balanced') is False:
+            verd = 'OVER-SUPPLY' if (fb['supply_per_round'] or 0) > (fb['demand_per_round'] or 0) else 'UNDER-SUPPLY'
+        elif fb.get('balanced') is True:
+            verd = 'balanced'
+        else:
+            verd = 'unchecked'
+        out.append('// supply/demand (%s): %s  supply=%s demand=%s  [%s]'
+                   % (fb['pattern'], verd, fb['supply_per_round'],
+                      fb['demand_per_round'], fb['note']))
     out.append('')
     entries = sorted(c.get('host_lines', []) or [], key=lambda e: e['line'])
     if not entries:

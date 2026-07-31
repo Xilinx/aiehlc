@@ -1374,6 +1374,49 @@ def render_html(
 
     routing_json_str = json.dumps(routing_json_data) if routing_json_data else "{}"
 
+    # --- Build Device Map data (full dataflow view) ---
+    map_tile_data = []
+    for loc in sorted(all_tile_locs):
+        tile_type = TILE_TYPE_BY_ROW(loc[1])
+        rt_info = routing_summary.get(loc, [])
+        dma_info_loc = dma_tiles.get(loc)
+        connected_flow_ids = set()
+        for r in rt_info:
+            bk = r.get("block_key", r["block"])
+            for fid in block_to_flow.get(bk, []):
+                connected_flow_ids.add(fid)
+        if dma_info_loc:
+            for io in dma_info_loc.ios:
+                if io.flow_id >= 0:
+                    connected_flow_ids.add(io.flow_id)
+        # Collect per-flow labels inside this tile (buf names + stream IDs)
+        tile_labels = []
+        if dma_info_loc:
+            seen_bufs = set()
+            for bd in dma_info_loc.bds:
+                if bd.buf_source and bd.buf_source not in seen_bufs:
+                    seen_bufs.add(bd.buf_source)
+                    fid = bd.flow_id
+                    tile_labels.append({"text": bd.buf_source[:14], "flow_id": fid})
+            for io in dma_info_loc.ios:
+                tile_labels.append({"text": f"ch{io.channel_id} {io.direction}", "flow_id": io.flow_id})
+        # Routing edges passing through this tile (for gray core-to-core lines)
+        rt_edges = []
+        for r in rt_info:
+            if r["type"] == "circuit":
+                rt_edges.append({"slave": r["slave"], "master": r["master"],
+                                 "block": r["block"],
+                                 "flow_ids": list(block_to_flow.get(r.get("block_key", r["block"]), []))})
+        map_tile_data.append({
+            "col": loc[0], "row": loc[1],
+            "type": tile_type,
+            "active": loc in (routing_tiles or set()) or loc in dma_tiles,
+            "flow_ids": sorted(connected_flow_ids),
+            "labels": tile_labels,
+            "rt_edges": rt_edges,
+        })
+    map_tile_data_str = json.dumps(map_tile_data)
+
     # --- Build flow filter panel ---
     flow_panel_html = ""
     flow_json_str = "[]"
@@ -1633,11 +1676,108 @@ svg.routing-overlay line, svg.routing-overlay path {{
     margin-left: 2px; vertical-align: middle; transition: all .15s;
 }}
 .flow-solo-btn:hover {{ background: #ffecb3; border-color: #ffa000; }}
+
+/* ── Tab bar ─────────────────────────────────────────────────── */
+.tab-bar {{
+    display: flex; gap: 0; border-bottom: 2px solid #ddd;
+    max-width: 1200px; margin: 0 auto 20px auto;
+}}
+.tab-btn {{
+    padding: 8px 22px; font-size: 13px; font-weight: 600;
+    border: none; background: none; cursor: pointer; color: #888;
+    border-bottom: 3px solid transparent; margin-bottom: -2px;
+    transition: color .15s, border-color .15s;
+}}
+.tab-btn:hover {{ color: #1976d2; }}
+.tab-btn.active {{ color: #1976d2; border-bottom-color: #1976d2; }}
+.tab-panel {{ display: none; }}
+.tab-panel.active {{ display: block; }}
+
+/* ── Pan/zoom canvas (shared by both tabs) ────────────────────── */
+.pan-viewport {{
+    width: 100%; height: calc(100vh - 180px); min-height: 500px;
+    overflow: hidden; position: relative; background: #f6f7f9;
+    border: 1px solid #e0e0e0; border-radius: 6px; cursor: grab;
+    user-select: none;
+}}
+.pan-viewport.panning {{ cursor: grabbing; }}
+.pan-canvas {{
+    position: absolute; top: 0; left: 0;
+    transform-origin: 0 0; will-change: transform;
+}}
+.pan-hint {{
+    position: absolute; bottom: 8px; right: 12px;
+    font-size: 10px; color: #bbb; pointer-events: none;
+}}
+.pan-reset-btn {{
+    position: absolute; top: 8px; right: 8px;
+    padding: 4px 10px; font-size: 11px; font-weight: 600;
+    border: 1px solid #ccc; border-radius: 4px; background: #fff;
+    cursor: pointer; z-index: 20; transition: all .15s;
+}}
+.pan-reset-btn:hover {{ background: #e3f2fd; border-color: #42a5f5; }}
+
+/* ── Device Map net bar ───────────────────────────────────────── */
+.map-header {{
+    padding: 10px 16px 0; background: #fff;
+    border-bottom: 1px solid #e8e8e8;
+}}
+.map-header-title {{
+    font-size: 12px; color: #666; margin-bottom: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}}
+.map-net-bar {{
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding-bottom: 10px; align-items: center;
+}}
+.map-net-chip {{
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 10px 3px 8px; border-radius: 14px; font-size: 11px;
+    font-family: monospace; font-weight: 600; cursor: pointer;
+    border: 2px solid transparent; user-select: none;
+    transition: opacity .15s, border-color .15s, background .15s;
+    white-space: nowrap;
+}}
+.map-net-chip .chip-dot {{ width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }}
+.map-net-chip.all-chip {{ background: #f0f2f5; border-color: #aaa; color: #333; }}
+.map-net-chip.all-chip.active {{ background: #333; color: #fff; border-color: #333; }}
+.map-net-chip.net-chip {{ background: #f9f9f9; border-color: #ddd; color: #555; }}
+.map-net-chip.net-chip.active {{ opacity: 1; }}
+.map-net-chip.net-chip:not(.active) {{ opacity: 0.35; }}
+
+/* ── Device Map SVG canvas tiles (drawn by JS into SVG) ────────── */
+/* no DOM tile elements — all drawn in SVG for pan/zoom performance */
+
+/* ── Map legend bar ───────────────────────────────────────────── */
+.map-legend-bar {{
+    display: flex; gap: 20px; align-items: center;
+    padding: 8px 16px; font-size: 11px; color: #666;
+    border-top: 1px solid #e8e8e8; background: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    flex-wrap: wrap;
+}}
+.map-legend-item {{ display: flex; align-items: center; gap: 5px; }}
+.map-legend-swatch {{
+    width: 28px; height: 14px; border-radius: 3px; border: 1.5px solid #aaa;
+}}
+.map-legend-line {{
+    width: 28px; height: 3px; border-radius: 2px;
+}}
+.map-legend-dot {{
+    width: 10px; height: 10px; border-radius: 50%;
+}}
 </style>
 </head>
 <body>
 <h1>{title}</h1>
 <div class="subtitle">Generated from routing.cc + host.cc</div>
+
+<nav class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('detail', this)">Routing Detail</button>
+    <button class="tab-btn" onclick="switchTab('map', this)">Device Map</button>
+</nav>
+
+<div id="panel-detail" class="tab-panel active">
 
 <div class="controls">
     <button id="btn-expand" onclick="expandAll()">Expand All</button>
@@ -1659,30 +1799,75 @@ svg.routing-overlay line, svg.routing-overlay path {{
     <div class="legend-item"><div class="legend-swatch" style="background:#fff;border:2px dashed #7b1fa2"></div> Packet (dashed)</div>
 </div>
 
-<div class="grid-container">
-<div class="grid-wrapper">
-<div class="grid" id="tile-grid">
-{"".join(tile_cards)}
+<div class="pan-viewport" id="detail-viewport">
+    <button class="pan-reset-btn" onclick="resetDetailPan()">Reset View</button>
+    <div class="pan-canvas" id="detail-canvas">
+        <div style="padding:20px; position:relative;">
+        <div class="grid-wrapper">
+        <div class="grid" id="tile-grid">
+        {"".join(tile_cards)}
+        </div>
+        <svg class="routing-overlay" id="routing-svg">
+            <defs>
+                <marker id="arrowhead" markerWidth="8" markerHeight="6"
+                        refX="7" refY="3" orient="auto" fill="currentColor">
+                    <polygon points="0 0, 8 3, 0 6"/>
+                </marker>
+                <marker id="arrowhead-dashed" markerWidth="8" markerHeight="6"
+                        refX="7" refY="3" orient="auto" fill="currentColor">
+                    <polygon points="0 0, 8 3, 0 6"/>
+                </marker>
+                <marker id="arrowhead-sm" markerWidth="6" markerHeight="5"
+                        refX="5" refY="2.5" orient="auto" fill="currentColor">
+                    <polygon points="0 0, 6 2.5, 0 5"/>
+                </marker>
+            </defs>
+        </svg>
+        <div class="arrow-tooltip" id="arrow-tooltip"></div>
+        </div>
+        </div>
+    </div>
+    <div class="pan-hint">Scroll to zoom · Drag to pan</div>
 </div>
-<svg class="routing-overlay" id="routing-svg">
-    <defs>
-        <marker id="arrowhead" markerWidth="8" markerHeight="6"
-                refX="7" refY="3" orient="auto" fill="currentColor">
-            <polygon points="0 0, 8 3, 0 6"/>
-        </marker>
-        <marker id="arrowhead-dashed" markerWidth="8" markerHeight="6"
-                refX="7" refY="3" orient="auto" fill="currentColor">
-            <polygon points="0 0, 8 3, 0 6"/>
-        </marker>
-        <marker id="arrowhead-sm" markerWidth="6" markerHeight="5"
-                refX="5" refY="2.5" orient="auto" fill="currentColor">
-            <polygon points="0 0, 6 2.5, 0 5"/>
-        </marker>
-    </defs>
-</svg>
-<div class="arrow-tooltip" id="arrow-tooltip"></div>
-</div>
-</div>
+
+</div><!-- /panel-detail -->
+
+<div id="panel-map" class="tab-panel">
+    <div class="map-header">
+        <div class="map-header-title">Device map — full dataflow (streams + core-to-core) &nbsp;·&nbsp; <span style="float:right;color:#aaa">col 0–{ncols-1} &middot; row 0 (shim) at bottom</span></div>
+        <div class="map-net-bar" id="map-net-bar"></div>
+    </div>
+    <div class="pan-viewport" id="map-viewport" style="border-radius:0;border-left:none;border-right:none;">
+        <button class="pan-reset-btn" onclick="resetMapPan()">Reset View</button>
+        <div class="pan-canvas" id="map-canvas">
+            <svg id="map-svg" style="display:block;"></svg>
+        </div>
+        <div class="pan-hint">Scroll to zoom · Drag to pan · Click net chip to isolate</div>
+    </div>
+    <div class="map-legend-bar">
+        <div class="map-legend-item">
+            <div class="map-legend-swatch" style="background:#dbeafe;border-color:#93c5fd"></div> SHIM (PL/NoC gateway)
+        </div>
+        <div class="map-legend-item">
+            <div class="map-legend-swatch" style="background:#dcfce7;border-color:#86efac"></div> MEM (memory tiles)
+        </div>
+        <div class="map-legend-item">
+            <div class="map-legend-swatch" style="background:#fef9c3;border-color:#fde047"></div> AIE (compute cores)
+        </div>
+        <div class="map-legend-item">
+            <div class="map-legend-line" style="background:#6366f1;height:2px"></div> colored = stream-switch route
+        </div>
+        <div class="map-legend-item">
+            <div class="map-legend-line" style="background:#9ca3af;height:1.5px"></div> gray = core-to-core
+        </div>
+        <div class="map-legend-item">
+            <div class="map-legend-dot" style="background:#333"></div> source (DMA / NoC)
+        </div>
+        <div class="map-legend-item">
+            <div class="map-legend-dot" style="background:#fff;border:2px solid #333"></div> destination
+        </div>
+    </div>
+</div><!-- /panel-map -->
 
 <script>
 const routingData = {routing_json_str};
@@ -2055,10 +2240,368 @@ function drawArrows() {{
 
 }}
 
+// ── Pan/Zoom shared factory ────────────────────────────────────
+function makePanZoom(viewportId, canvasId, onAfterTransform) {{
+    const vp = document.getElementById(viewportId);
+    const canvas = document.getElementById(canvasId);
+    let tx = 0, ty = 0, scale = 1;
+    let dragging = false, lastX = 0, lastY = 0;
+
+    function applyTransform() {{
+        canvas.style.transform = `translate(${{tx}}px,${{ty}}px) scale(${{scale}})`;
+        if (onAfterTransform) onAfterTransform(scale);
+    }}
+
+    vp.addEventListener('wheel', e => {{
+        e.preventDefault();
+        const rect = vp.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        const delta = e.deltaY < 0 ? 1.12 : 1/1.12;
+        const newScale = Math.max(0.15, Math.min(5, scale * delta));
+        tx = mx - (mx - tx) * (newScale / scale);
+        ty = my - (my - ty) * (newScale / scale);
+        scale = newScale;
+        applyTransform();
+    }}, {{ passive: false }});
+
+    vp.addEventListener('mousedown', e => {{
+        if (e.button !== 0) return;
+        dragging = true; lastX = e.clientX; lastY = e.clientY;
+        vp.classList.add('panning');
+    }});
+    window.addEventListener('mousemove', e => {{
+        if (!dragging) return;
+        tx += e.clientX - lastX; ty += e.clientY - lastY;
+        lastX = e.clientX; lastY = e.clientY;
+        applyTransform();
+    }});
+    window.addEventListener('mouseup', () => {{
+        dragging = false; vp.classList.remove('panning');
+    }});
+
+    function reset(initScale, initTx, initTy) {{
+        scale = initScale || 1; tx = initTx || 0; ty = initTy || 0;
+        applyTransform();
+    }}
+    return {{ reset, applyTransform, getState: () => ({{ tx, ty, scale }}) }};
+}}
+
+// ── Tab switching ─────────────────────────────────────────────
+function switchTab(name, btn) {{
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('panel-' + name).classList.add('active');
+    if (name === 'map') setTimeout(buildMapSvg, 30);
+    else setTimeout(drawArrows, 60);
+}}
+
+// ── Device Map (SVG canvas) ───────────────────────────────────
+const mapTileData = {map_tile_data_str};
+
+const NET_COLORS = [
+    '#3b82f6','#ec4899','#10b981','#f59e0b',
+    '#8b5cf6','#06b6d4','#ef4444','#6366f1',
+    '#14b8a6','#f97316','#84cc16','#a855f7',
+];
+const allFlowIds = [...new Set(mapTileData.flatMap(t => t.flow_ids))].sort((a,b)=>a-b);
+
+function netColor(fid) {{
+    const idx = allFlowIds.indexOf(fid);
+    return NET_COLORS[idx >= 0 ? idx % NET_COLORS.length : 0];
+}}
+function netLabel(fid) {{
+    const fd = flowData.find(f => f.flow_id === fid);
+    return fd ? `net${{fid}} · ${{fd.label}}` : `net${{fid}}`;
+}}
+
+let mapActiveFid = -1;
+let mapPZ = null;
+
+// SVG drawing constants
+const TW = 160, TH = 90, GAP_X = 20, GAP_Y = 16;
+const ROW_LABEL_W = 36, COL_LABEL_H = 24, PAD = 16;
+
+function tilePos(col, row, cols, rows) {{
+    const ci = cols.indexOf(col);
+    const ri = rows.indexOf(row);  // rows is sorted descending, so ri=0 is top
+    const x = ROW_LABEL_W + PAD + ci * (TW + GAP_X);
+    const y = COL_LABEL_H + PAD + ri * (TH + GAP_Y);
+    return {{ x, y, cx: x + TW/2, cy: y + TH/2 }};
+}}
+
+function buildNetBar() {{
+    const netBar = document.getElementById('map-net-bar');
+    netBar.innerHTML = '';
+    const allChip = document.createElement('span');
+    allChip.className = 'map-net-chip all-chip active';
+    allChip.textContent = 'All nets';
+    allChip.addEventListener('click', () => selectMapNet(-1));
+    netBar.appendChild(allChip);
+
+    allFlowIds.forEach(fid => {{
+        const fd = flowData.find(f => f.flow_id === fid);
+        const dir = fd ? (fd.direction === 'S2MM' ? 'gradf.in' : 'gradf.out') : '';
+        const chip = document.createElement('span');
+        chip.className = 'map-net-chip net-chip active';
+        chip.dataset.fid = fid;
+        const dot = document.createElement('span');
+        dot.className = 'chip-dot';
+        dot.style.background = netColor(fid);
+        chip.appendChild(dot);
+        chip.appendChild(document.createTextNode(`net${{fid}} · ${{dir}}[${{fid}}]`));
+        chip.style.borderColor = netColor(fid);
+        chip.style.color = netColor(fid);
+        chip.addEventListener('click', () => selectMapNet(fid));
+        netBar.appendChild(chip);
+    }});
+}}
+
+function selectMapNet(fid) {{
+    mapActiveFid = fid;
+    document.querySelector('.map-net-chip.all-chip').classList.toggle('active', fid === -1);
+    document.querySelectorAll('.map-net-chip.net-chip').forEach(c => {{
+        c.classList.toggle('active', fid === -1 || parseInt(c.dataset.fid) === fid);
+    }});
+    buildMapSvg();
+}}
+
+function svgEl(tag, attrs) {{
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    return el;
+}}
+
+function buildMapSvg() {{
+    if (!mapTileData.length) return;
+    const svg = document.getElementById('map-svg');
+    svg.innerHTML = '';
+
+    const cols = [...new Set(mapTileData.map(t => t.col))].sort((a,b)=>a-b);
+    const rows = [...new Set(mapTileData.map(t => t.row))].sort((a,b)=>b-a);  // top row first
+
+    const totalW = ROW_LABEL_W + PAD*2 + cols.length*(TW+GAP_X) - GAP_X;
+    const totalH = COL_LABEL_H + PAD*2 + rows.length*(TH+GAP_Y) - GAP_Y;
+    svg.setAttribute('width', totalW);
+    svg.setAttribute('height', totalH);
+
+    const defs = svgEl('defs', {{}});
+    // Build arrow markers for each flow
+    allFlowIds.forEach(fid => {{
+        if (mapActiveFid !== -1 && fid !== mapActiveFid) return;
+        const color = netColor(fid);
+        const mid = `arr-${{fid}}`;
+        const mk = svgEl('marker', {{ id: mid, markerWidth:'8', markerHeight:'6',
+            refX:'7', refY:'3', orient:'auto', fill: color }});
+        mk.appendChild(svgEl('polygon', {{ points:'0 0,8 3,0 6' }}));
+        defs.appendChild(mk);
+    }});
+    // Gray arrow marker for core-to-core
+    const mkGray = svgEl('marker', {{ id:'arr-gray', markerWidth:'7', markerHeight:'5',
+        refX:'6', refY:'2.5', orient:'auto', fill:'#9ca3af' }});
+    mkGray.appendChild(svgEl('polygon', {{ points:'0 0,7 2.5,0 5' }}));
+    defs.appendChild(mkGray);
+    svg.appendChild(defs);
+
+    // Column labels
+    cols.forEach((c, ci) => {{
+        const x = ROW_LABEL_W + PAD + ci*(TW+GAP_X) + TW/2;
+        const t = svgEl('text', {{ x, y: COL_LABEL_H-4, 'text-anchor':'middle',
+            'font-size':'11', fill:'#9ca3af', 'font-family':'monospace' }});
+        t.textContent = `col ${{c}}`;
+        svg.appendChild(t);
+    }});
+
+    // Row labels
+    rows.forEach((r, ri) => {{
+        const y = COL_LABEL_H + PAD + ri*(TH+GAP_Y) + TH/2 + 4;
+        const t = svgEl('text', {{ x: ROW_LABEL_W-4, y, 'text-anchor':'end',
+            'font-size':'11', fill:'#9ca3af', 'font-family':'monospace' }});
+        t.textContent = `r${{r}}`;
+        svg.appendChild(t);
+    }});
+
+    // Tile backgrounds
+    const TILE_FILL = {{ Shim:'#dbeafe', Mem:'#dcfce7', AIE:'#fef9c3' }};
+    const TILE_STROKE = {{ Shim:'#93c5fd', Mem:'#86efac', AIE:'#fde047' }};
+    const TILE_INACTIVE_OPACITY = '0.3';
+
+    mapTileData.forEach(t => {{
+        const p = tilePos(t.col, t.row, cols, rows);
+        const fill = TILE_FILL[t.type] || '#f3f4f6';
+        const stroke = TILE_STROKE[t.type] || '#d1d5db';
+        const opacity = t.active ? '1' : TILE_INACTIVE_OPACITY;
+
+        // Tile rect
+        svg.appendChild(svgEl('rect', {{
+            x: p.x, y: p.y, width: TW, height: TH,
+            rx:'6', ry:'6', fill, stroke, 'stroke-width':'1.5', opacity
+        }}));
+
+        // Tile type badge (top right)
+        const typeLabel = t.type === 'Shim' ? 'SHIM' : t.type === 'Mem' ? 'MEM' : 'AIE';
+        const badge = svgEl('text', {{ x: p.x+TW-6, y: p.y+13, 'text-anchor':'end',
+            'font-size':'9', fill:'#9ca3af', 'font-family':'monospace', opacity }});
+        badge.textContent = typeLabel;
+        svg.appendChild(badge);
+
+        // Tile coord (top left)
+        const coord = svgEl('text', {{ x: p.x+6, y: p.y+13,
+            'font-size':'11', 'font-weight':'700', fill:'#374151',
+            'font-family':'monospace', opacity }});
+        coord.textContent = `(${{t.col}},${{t.row}})`;
+        svg.appendChild(coord);
+
+        // Buffer/stream labels inside tile
+        if (t.active && t.labels && t.labels.length) {{
+            const visLabels = mapActiveFid === -1
+                ? t.labels
+                : t.labels.filter(lb => lb.flow_id === mapActiveFid || lb.flow_id === -1);
+            visLabels.slice(0,3).forEach((lb, i) => {{
+                const color = lb.flow_id >= 0 ? netColor(lb.flow_id) : '#6b7280';
+                const dimmed = mapActiveFid !== -1 && lb.flow_id !== mapActiveFid && lb.flow_id !== -1;
+                const lbl = svgEl('text', {{ x: p.cx, y: p.y+30+i*14,
+                    'text-anchor':'middle', 'font-size':'9', fill: dimmed ? '#d1d5db' : color,
+                    'font-family':'monospace' }});
+                lbl.textContent = lb.text;
+                svg.appendChild(lbl);
+            }});
+        }}
+    }});
+
+    // ── Gray core-to-core arrows (routing edges, no flow association) ──
+    const grp_gray = svgEl('g', {{ opacity: mapActiveFid === -1 ? '0.55' : '0.12' }});
+    mapTileData.forEach(t => {{
+        if (!t.rt_edges) return;
+        const p = tilePos(t.col, t.row, cols, rows);
+        t.rt_edges.forEach((edge, i) => {{
+            // Only draw EAST/WEST edges as horizontal core-to-core lines
+            // (NORTH/SOUTH are handled by stream lines)
+            const masterDir = (edge.master || '').split(':')[0];
+            if (!['EAST','WEST','NORTH','SOUTH'].includes(masterDir)) return;
+            if (edge.flow_ids && edge.flow_ids.length > 0) return; // has flow — skip gray
+            // Draw a small directed stub from tile center toward master direction
+            const offX = masterDir === 'EAST' ? TW/2+GAP_X/2 : masterDir === 'WEST' ? -(TW/2+GAP_X/2) : 0;
+            const offY = masterDir === 'NORTH' ? -(TH/2+GAP_Y/2) : masterDir === 'SOUTH' ? TH/2+GAP_Y/2 : 0;
+            const x1 = p.cx + (offX > 0 ? TW*0.3 : offX < 0 ? -TW*0.3 : 0);
+            const y1 = p.cy + (offY > 0 ? TH*0.3 : offY < 0 ? -TH*0.3 : 0);
+            const x2 = p.cx + offX * 0.6;
+            const y2 = p.cy + offY * 0.6;
+            grp_gray.appendChild(svgEl('line', {{
+                x1, y1, x2, y2, stroke:'#9ca3af', 'stroke-width':'1.5',
+                'marker-end':'url(#arr-gray)'
+            }}));
+        }});
+    }});
+    svg.appendChild(grp_gray);
+
+    // ── Colored stream lines (one vertical line per flow per column) ──
+    // For each flow, draw a vertical line in the shim column and horizontal
+    // lines branching to each connected tile — matching the reference image style.
+    const tileMap = {{}};
+    mapTileData.forEach(t => {{ tileMap[t.col+','+t.row] = tilePos(t.col, t.row, cols, rows); }});
+
+    // Assign each flow a horizontal offset slot within its shim column
+    const colFlowSlots = {{}};  // col -> [fid, ...]
+    flowData.forEach(fd => {{
+        const c = fd.shim_tile[0];
+        if (!colFlowSlots[c]) colFlowSlots[c] = [];
+        colFlowSlots[c].push(fd.flow_id);
+    }});
+
+    flowData.forEach(fd => {{
+        const fid = fd.flow_id;
+        const visible = mapActiveFid === -1 || mapActiveFid === fid;
+        const color = netColor(fid);
+        const alpha = visible ? '1' : '0.1';
+
+        const shimP = tileMap[fd.shim_tile[0]+','+fd.shim_tile[1]];
+        if (!shimP) return;
+
+        // Slot offset so multiple flows in the same column don't overlap
+        const slots = colFlowSlots[fd.shim_tile[0]] || [fid];
+        const slotIdx = slots.indexOf(fid);
+        const slotCount = slots.length;
+        const xOffset = (slotIdx - (slotCount-1)/2) * 10;
+        const lineX = shimP.cx + xOffset;
+
+        // Shim anchor dot
+        const isSource = fd.direction === 'MM2S';
+        svg.appendChild(svgEl('circle', {{
+            cx: lineX, cy: isSource ? shimP.y+TH : shimP.y,
+            r:'5', fill: isSource ? color : 'white',
+            stroke: color, 'stroke-width':'2', opacity: alpha
+        }}));
+
+        // Arrow marker at bottom of line into shim
+        const markerId = `arr-${{fid}}`;
+
+        (fd.connected_tiles || []).forEach(ct => {{
+            const ctP = tileMap[ct[0]+','+ct[1]];
+            if (!ctP) return;
+            const ctSlots = colFlowSlots[ct[0]] || [fid];
+            const ctSlotIdx = ctSlots.indexOf(fid);
+            const ctSlotCount = ctSlots.length;
+            const ctXOffset = (ctSlotIdx - (ctSlotCount-1)/2) * 10;
+            const ctLineX = ctP.cx + ctXOffset;
+
+            // Vertical segment from shim to compute tile row
+            const shimAnchorY = isSource ? shimP.y + TH/2 : shimP.y + TH/2;
+            const ctAnchorY = isSource ? ctP.cy : ctP.cy;
+
+            // Draw L-shaped path: vertical in shim column, then step to compute col if different
+            let d;
+            if (fd.shim_tile[0] === ct[0]) {{
+                // Same column: straight vertical
+                const y1 = isSource ? shimP.y + TH : shimP.y;
+                const y2 = isSource ? ctP.y + TH/2 : ctP.y + TH/2;
+                d = `M${{lineX}},${{y1}} L${{lineX}},${{y2}}`;
+            }} else {{
+                // Different column: vertical then horizontal then vertical
+                const shimTopY = Math.min(shimP.y, ctP.y) - GAP_Y;
+                const y1 = isSource ? shimP.y + TH : shimP.y;
+                const y2 = isSource ? ctP.y + TH/2 : ctP.y + TH/2;
+                d = `M${{lineX}},${{y1}} L${{lineX}},${{shimTopY}} L${{ctLineX}},${{shimTopY}} L${{ctLineX}},${{y2}}`;
+            }}
+
+            svg.appendChild(svgEl('path', {{
+                d, stroke: color, 'stroke-width':'2', fill:'none',
+                opacity: alpha,
+                'marker-end': visible ? `url(#${{markerId}})` : ''
+            }}));
+
+            // Destination dot on compute tile
+            svg.appendChild(svgEl('circle', {{
+                cx: ctLineX, cy: ctP.cy,
+                r:'4', fill: isSource ? 'white' : color,
+                stroke: color, 'stroke-width':'2', opacity: alpha
+            }}));
+        }});
+    }});
+
+}}
+
+let detailPZ = null;
+
+function resetDetailPan() {{
+    if (detailPZ) detailPZ.reset(1, 20, 20);
+}}
+function resetMapPan() {{
+    if (mapPZ) mapPZ.reset(0.85, 20, 20);
+}}
+
 window.addEventListener('load', () => {{
+    detailPZ = makePanZoom('detail-viewport', 'detail-canvas', null);
+    detailPZ.reset(1, 20, 20);
+    mapPZ = makePanZoom('map-viewport', 'map-canvas', null);
+    mapPZ.reset(0.85, 20, 20);
+    drawArrows();
+    buildNetBar();
+    // Build SVG map on first switch to map tab
+}});
+window.addEventListener('resize', () => {{
     drawArrows();
 }});
-window.addEventListener('resize', drawArrows);
 </script>
 </body>
 </html>
