@@ -4,6 +4,14 @@
  *
  * AIE Programming Model — Matrix Multiplication (Parameterized Kernel API)
  */
+/* Single-tile tiling baseline: small matrix on a 1x1 mesh (one compute tile).
+ * Array matrix in/out (A,B,C) through the full tilinglinalg pipeline. Override
+ * the defaults in simplematmul.h before including it. */
+#define M 32
+#define K 32
+#define N 32
+#define HW_ROWS 1
+#define HW_COLS 1
 #include "simplematmul.h"
 #pragma aie_debug_level(2 | AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN)
 constexpr aie::SpatialPolicy RowBC = {
