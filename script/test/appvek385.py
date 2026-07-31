@@ -79,6 +79,8 @@ host = f"{username}@{vek385ip}"
 
 # Configuration
 PALBOARD_SCRIPTS_DIR = f"/proj/xsjsswstaff/{username}/palboard_scripts"
+# VEK385PDI = f"/home/{username}/aiehlc/vek385.pdi"
+# VEK385PDI = f"/home/{username}/aiehlc/vek385_revb.pdi"
 VEK385PDI = f"/home/{username}/aiehlc/vek385.pdi"
 #XSDB_ALT_PATH = "/everest/set_vnc_bkup/vnc/t50/es1/tools/Labtools/9999.0/bin/xsdb"
 XSDB_ALT_PATH = "/proj/xbuilds/2025.2_daily_latest/installs/lin64/HEAD/Vitis/bin/xsdb"
@@ -205,6 +207,20 @@ def console_reader(child, output_queue, stop_event):
             if output:
                 buffer += output
                 output_queue.put(output)
+                # Robustness: the systest "connect com3" console runs over
+                # telnet whose escape char is ^] (0x1d). Stray 0x1d bytes in
+                # the raw UART stream (common during PLM boot / reset noise)
+                # drop telnet into command mode ("telnet>") and it STOPS
+                # relaying UART data — so we silently miss later output like
+                # the partition-init "Error ID: 0x11" (ME_NCR) line. Detect the
+                # prompt and send an empty line (Enter) to return to the
+                # connected session and keep capturing.
+                if "telnet>" in output:
+                    output_queue.put("[console_reader] telnet escape detected — resuming session\n")
+                    try:
+                        child.send("\r")
+                    except Exception:
+                        pass
         except pexpect.TIMEOUT:
             # No data available, continue polling
             continue
@@ -296,27 +312,43 @@ def setup_first_connection():
     child.sendline(f"source {VITIS_SETTINGS}")
     child.expect(r'Systest[#>]', timeout=30)
 
-    # Step 6: Start xsdb (try default first, then alternative path)
+    # Step 6: Start xsdb (try default first, then alternative path).
+    # The system xsdb may be a newer version that takes >15 s to print its
+    # prompt (it runs rlwrap which buffers differently).  If we time out on
+    # the first attempt we must exit that xsdb cleanly before launching the
+    # alt-path one, otherwise two xsdb instances race on the same terminal
+    # and their interleaved prompts corrupt the expect state machine.
     child.sendline("xsdb")
     index = child.expect([r'xsdb%', r'command not found', r'Unrecognized', pexpect.TIMEOUT], timeout=15)
 
     if index != 0:
-        print("[Connection 1] xsdb not found, trying alternative path...")
+        print("[Connection 1] xsdb not found / timed-out, exiting and trying alternative path...")
+        # Kill/exit whichever shell is running (xsdb or bash) and wait for
+        # the systest prompt to come back before launching the known-good path.
+        child.sendline("exit")
+        try:
+            child.expect(r'Systest[#>]', timeout=15)
+        except pexpect.TIMEOUT:
+            # If exit didn't work, send Ctrl-C then exit again
+            child.sendcontrol('c')
+            time.sleep(1)
+            child.sendline("exit")
+            child.expect(r'Systest[#>]', timeout=15)
         child.sendline(XSDB_ALT_PATH)
         child.expect(r'xsdb%', timeout=60)
-    
+
     print("[Connection 1] In xsdb, connecting...")
-    
+
     # Step 7: Connect
     child.sendline("conn")
     child.expect(r'xsdb%', timeout=60)
     print("[Connection 1] Connected, targeting device 1...")
-    
-    # Step 8: Target 1
+
+    # Step 8: Target 1 (the Versal device root)
     child.sendline("tar 1")
     child.expect(r'xsdb%', timeout=60)
-    print("[Connection 1] Programming Palboard.BIN...")
-    
+    print("[Connection 1] Programming PDI...")
+
     # Step 9: Program device – detect PLM stall and abort early
     child.sendline(f"device program {VEK385PDI}")
     index = child.expect([r'xsdb%', r'PLM stalled'], timeout=120)
@@ -324,20 +356,36 @@ def setup_first_connection():
         # Consume the rest of the error output up to the prompt
         child.expect(r'xsdb%', timeout=60)
         raise RuntimeError(
-            "PLM stalled during BOOT.BIN programming. "
+            "PLM stalled during PDI programming. "
             "The board may need a power cycle. Run 'plm log' for details."
         )
-    time.sleep(5)  # allow PLM to fully initialise before continuing
-    print("[Connection 1] Device programmed, targeting device 20...")
-    
-    # Step 10: Target 20
+    # Give PLM time to release PS POR so APU targets appear.
+    # 5 s is sometimes insufficient; use 15 s to be safe.
+    print("[Connection 1] PDI programmed, waiting for PS POR release...")
+    time.sleep(15)
+    print("[Connection 1] Targeting APU core (Cortex-A78AE #0.0)...")
+
+    # Step 10: Select target 20 (Cortex-A78AE #0.0 on VEK385).
+    # We use tar 20 directly; the targets list above confirmed it is stable
+    # for this board.  Avoid "targets -filter" which prints target info to
+    # the console and interleaves with the following expect.
     child.sendline("tar 20")
-    child.expect(r'xsdb%', timeout=60)
+    child.expect(r'xsdb%', timeout=30)
     print("[Connection 1] Resetting processor...")
-    
-    # Step 11: Reset processor
-    child.sendline("rst -proc")
+
+    # Step 11: On Versal, when the PDI doesn't include PS ELFs the APU core
+    # stays in (Power On Reset).  "rst -processor" activates the default
+    # subsystem via IPI-5 and releases POR so we can dow the ELF.
+    # xsdb 2026.2 returns "Invalid reset type" for "-processor" when the
+    # current target is an individual core in POR; we need to target the
+    # APU parent (target 18 = APU) and use rst -cores instead.
+    # Sequence: tar 18 → rst -cores → tar 20.
+    child.sendline("tar 18")
+    child.expect(r'xsdb%', timeout=30)
+    child.sendline("rst -cores")
     child.expect(r'xsdb%', timeout=60)
+    child.sendline("tar 20")
+    child.expect(r'xsdb%', timeout=30)
 
     # Drain any stale xsdb% prompts left in the buffer.
     # xsdb sometimes emits double prompts after rst -proc; if the second
@@ -365,19 +413,20 @@ def setup_second_connection():
     
     # Wait for shell prompt
     child.expect([r'\$\s*$', r'#\s*$', r'>\s*$'], timeout=60)
-    #print("[Connection 2] Connected, starting systest...")
-    
+    print("[Connection 2] Connected, starting systest...")
+
     # Step 2: Run systest
-    #child.sendline("/opt/systest/common/bin/systest-client")
-    #child.expect(r'Systest[#>]', timeout=60)
-    #print("[Connection 2] In systest, connecting to com0...")
-    
-    # Step 3: Connect to com0 (no output until ELF runs on first connection)
-    #child.sendline("connect com0")
-    child.sendline("telnet 10.10.71.1 4001")
-    child.expect(r'Versal PS UART0', timeout=60)
-    print("[Connection 2] Connected to com0, listening for output...")
-    
+    child.sendline("/opt/systest/common/bin/systest-client")
+    child.expect(r'Systest[#>]', timeout=60)
+    print("[Connection 2] In systest, connecting to com3...")
+
+    # Step 3: Connect to com3 (board console; no output until ELF runs on
+    # the first connection). Board-agnostic systest path (replaces the
+    # board-specific "telnet 10.10.71.1 4001" that only worked on portobello13).
+    child.sendline("connect com3")
+    child.expect(r'Connecting to device com3.*escape', timeout=60)
+    print("[Connection 2] Connected to com3, listening for output...")
+
     return child
 
 
@@ -491,7 +540,7 @@ Examples:
     parser.add_argument(
         "-y", "--yes",
         action="store_true",
-        default=False,
+        default=True,
         help="Non-interactive mode: auto-confirm all prompts"
     )
     parser.add_argument(
