@@ -157,10 +157,7 @@ struct ConversionState {
 
     // Track (col,row,lock_id) tuples that have already had XAie_LockSetValue emitted
     std::set<std::tuple<int32_t, int32_t, int32_t>> initializedLocks;
-    // Pending lock init verbatim strings — collected during ConfigDmaBdOp lowering and
-    // flushed by LaunchKernelGroupInnerPattern BEFORE the launch call so the host
-    // never races against a running kernel trying to acquire the same lock.
-    std::vector<std::pair<std::string, std::string>> pendingLockInits; // (comment, call)
+    std::vector<std::pair<std::string, std::string>> pendingLockInits;
 
     // Debug snapshot data (populated when enableDebug is true)
     SmallVector<IoDebugInfo> debugIos;
@@ -2096,11 +2093,6 @@ struct LaunchKernelGroupInnerPattern : public OpConversionPattern<dfschedule::La
         llvm::errs() << "  Kernel Group type: " << kernelGroup.getType() << "\n";
         // rewriter.eraseOp(op);
         // return success();
-        //  Flush all deferred lock inits BEFORE launching the kernels.
-        //  Lock inits must precede launch_kernel_group: once cores are running they
-        //  immediately try to acquire these locks, and XAie_LockSetValue blocks until
-        //  the hardware lock is settable.  Emitting inits after launch causes lock
-        //  contention that inflates each ~35K-cycle call to ~7M cycles.
         if (!state.pendingLockInits.empty()) {
             rewriter.create<emitc::VerbatimOp>(loc,
                                                "/* Lock inits — must precede kernel launch to avoid contention */");
@@ -3301,18 +3293,9 @@ void DfscheduleToApiPass::runOnOperation() {
     });
     llvm::errs() << "[Pass] Total declare_data ops: " << declareDataCount << "\n";
 
-    // Pre-scan: collect all lock inits before conversion runs.
-    // applyPartialConversion processes patterns in an order determined by benefits and
-    // IR traversal — LaunchKernelGroupOp may be rewritten before ConfigDmaBdOps, so the
-    // deferred-emit approach (populate during ConfigDmaBd, flush in LaunchKernelGroup)
-    // races against the conversion order.  Pre-scanning resolves this: walk all
-    // ConfigDmaBdOps now (before any rewriting), compute the same lock-init logic,
-    // and populate state.pendingLockInits.  LaunchKernelGroupInnerPattern then finds a
-    // fully-populated list regardless of which pattern fires first.
     {
         std::set<std::tuple<int32_t, int32_t, int32_t>> preScannedLocks;
         moduleOp->walk([&](dfschedule::ConfigDmaBdOp bdOp) {
-            // Only core tiles with lock-based DMA (acquireLockVal != 0)
             int32_t acquireLockId = static_cast<int32_t>(bdOp.getAcquireLockId());
             int32_t acquireLockVal = static_cast<int32_t>(bdOp.getAcquireLockVal());
             int32_t releaseLockId = static_cast<int32_t>(bdOp.getReleaseLockId());
@@ -3324,7 +3307,6 @@ void DfscheduleToApiPass::runOnOperation() {
             int32_t tileCol = declareTileOp.getCol();
             int32_t tileRow = declareTileOp.getRow();
 
-            // Determine direction by walking BD result -> create_io user
             bool isOutput = false;
             SmallVector<Operation *, 4> worklist;
             for (auto *user : bdOp.getResult().getUsers())
@@ -3341,7 +3323,6 @@ void DfscheduleToApiPass::runOnOperation() {
                         worklist.push_back(uu);
             }
 
-            // Single-buffer vs ping-pong
             int32_t nextBdVal = static_cast<int32_t>(bdOp.getNextBd());
             bool isSingleBuffer = (nextBdVal == -1) && !bdOp.getLinkedBd();
             int32_t lockInitValue = isSingleBuffer ? 1 : 2;
@@ -3360,11 +3341,8 @@ void DfscheduleToApiPass::runOnOperation() {
             };
 
             if (isOutput) {
-                // Output (MM2S): kernel acquire lock = BD's release lock (lock 0)
                 emitLock(releaseLockId, lockInitValue, "(kernel output acquire)");
-                // BD's acquire lock (lock 1/4) stays at default 0 — no explicit init
             } else {
-                // Input (S2MM): DMA acquire lock
                 emitLock(acquireLockId, lockInitValue, "");
             }
         });

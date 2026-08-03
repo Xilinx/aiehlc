@@ -1023,12 +1023,9 @@ struct PushOpConversion : public OpConversionPattern<dmaphop::push> {
                                         static_cast<int32_t>(1 * wordBytes),       // D0: 4 bytes
                                         static_cast<int32_t>(fullK_w * wordBytes), // D1: fullK bytes
                                         static_cast<int32_t>(effK_w * wordBytes)   // D2: effectiveK bytes
-                                        // NOTE: D2 is the k-round stride (advance one effectiveK chunk
-                                        // along K per round). It must be byte-scaled like D0/D1 via
-                                        // (words * wordBytes). Using raw `effectiveK` was only correct
-                                        // for i8 (elemsPerWord==4 => effK_w*wordBytes == effectiveK);
-                                        // for i16/i32 it under-advanced the DDR address and starved the
-                                        // cores (DMA wait_io TIMEOUT). Mirrors output D2 (tileW_w*wordBytes).
+                                        // D2 (k-round stride) must be byte-scaled like D0/D1: raw
+                                        // `effectiveK` only matched for i8 and under-advanced the DDR
+                                        // address for i16/i32, starving the cores (wait_io TIMEOUT).
                                     };
                                     SmallVector<int32_t> wraps = {
                                         static_cast<int32_t>(effK_w),     // D0: effectiveK/4

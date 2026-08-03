@@ -660,7 +660,7 @@ void FlowTransferConversion::emitCoreSingleBufferBd(FlowLoweringCtx &c, CoreTile
         rewriter.getI32IntegerAttr(t.coreBdPacketId),  // packet_id
         rewriter.getI32IntegerAttr(-1),                // next_bd = -1 (no chaining)
         rewriter.getI32IntegerAttr(t.bdAcquireLockId), // acquire_lock_id
-        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val (-1: acquire-always; matches exp58 baseline)
+        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val
         rewriter.getI32IntegerAttr(t.bdReleaseLockId), // release_lock_id
         rewriter.getI32IntegerAttr(1),                 // release_lock_val
         rewriter.getI32IntegerAttr(-1),                // data_id
@@ -717,7 +717,7 @@ void FlowTransferConversion::emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx 
         rewriter.getI32IntegerAttr(t.coreBdPacketId),  // packet_id
         rewriter.getI32IntegerAttr(pingBdId),          // next_bd -> ping
         rewriter.getI32IntegerAttr(t.bdAcquireLockId), // acquire_lock_id
-        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val (-1: acquire-always; matches exp58 baseline)
+        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val
         rewriter.getI32IntegerAttr(t.bdReleaseLockId), // release_lock_id
         rewriter.getI32IntegerAttr(1),                 // release_lock_val
         rewriter.getI32IntegerAttr(-1),                // data_id
@@ -741,7 +741,7 @@ void FlowTransferConversion::emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx 
         rewriter.getI32IntegerAttr(t.coreBdPacketId),  // packet_id
         rewriter.getI32IntegerAttr(pongBdId),          // next_bd -> pong
         rewriter.getI32IntegerAttr(t.bdAcquireLockId), // acquire_lock_id
-        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val (-1: acquire-always; matches exp58 baseline)
+        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val
         rewriter.getI32IntegerAttr(t.bdReleaseLockId), // release_lock_id
         rewriter.getI32IntegerAttr(1),                 // release_lock_val
         rewriter.getI32IntegerAttr(-1),                // data_id

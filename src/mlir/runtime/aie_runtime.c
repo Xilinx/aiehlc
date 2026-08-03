@@ -46,21 +46,8 @@ XAie_DevInst *g_DevInst = NULL;
 
 XAie_DevInst *getOrCreateDeviceInstance(void) { return g_DevInst; }
 
-/* ===========================================================================
- * Optional profiling runtime layer (compile-time gated).
- *
- * Enable with  -DAIEHLC_PROFILING=1  (default: disabled).
- *   - Disabled: every RT_PROF_* instrumentation macro below compiles to nothing
- *     (zero overhead — the clean hot-path perf behavior is fully preserved) and
- *     the reader functions return zeros. Profiling example variants (e.g.
- *     simplematmul2_prof.cc) still link and run, reporting all-zero counters.
- *   - Enabled: the PS PMU cycle counter (PMCCNTR_EL0, ÷1 CPU cycles) is read at
- *     phase boundaries and around hot XAie calls to build a launch-time budget;
- *     the reader functions return the accumulated values. Core-module / MM2S
- *     perf counters are additionally armed at launch when the corresponding
- *     runtime debug flags (AIE_DEBUG_FLAG_CORE_PERF_COUNTER /
- *     AIE_DEBUG_FLAG_MM2SBDFINISH_COUNTER) are set.
- * =========================================================================== */
+/* Profiling layer, -DAIEHLC_PROFILING=1 (default off). Disabled, the RT_PROF_* macros
+ * compile to nothing and the readers return zeros so profiling variants still link. */
 #ifndef AIEHLC_PROFILING
 #define AIEHLC_PROFILING 0
 #endif
@@ -75,8 +62,7 @@ static inline unsigned long long __rt_pmccntr(void) {
 static inline unsigned long long __rt_pmccntr(void) { return 0ULL; }
 #endif
 
-/* Instrumentation macros: expand to no-ops when profiling is disabled so the hot
- * paths carry zero overhead and no unused-variable warnings are produced. */
+/* No-ops when profiling is disabled, so the hot paths carry zero overhead. */
 #if AIEHLC_PROFILING
 #define RT_PROF_TIC() __rt_pmccntr()
 #define RT_PROF_ADD(cyc, n, t0)                                                                                        \
@@ -104,8 +90,7 @@ static inline unsigned long long __rt_pmccntr(void) { return 0ULL; }
     } while (0)
 #endif
 
-/* Accumulators (always defined; only written through the RT_PROF_* macros, i.e.
- * only when profiling is enabled, so they stay 0 in the default build). */
+/* Accumulators: only written through RT_PROF_*, so they stay 0 in the default build. */
 static unsigned long long g_wait_io_cycles = 0ULL;
 static unsigned int g_wait_io_calls = 0U;
 static unsigned long long g_wait_io_iters = 0ULL;
@@ -199,13 +184,8 @@ void __Runtime_kload_split_cycles(unsigned long long *elf_cyc, unsigned int *elf
         *rst_n = g_kl_rst_n;
 }
 
-/* --- Core-module cycle-budget perf counters (single probe tile) ---
- * All four counters use the SELF-EVENT form (start==stop==level-event) so each
- * accumulates the number of cycles its condition is asserted over the whole run:
- *   0 active  1 vector-instr  2 stream-stall  3 lock-stall.
- * The probe is the first compute tile of the launched kernel group, armed at
- * launch (see __Runtime_launch_kernel_group) when AIE_DEBUG_FLAG_CORE_PERF_COUNTER
- * is set. Reader functions are always defined and return zeros when no probe. */
+/* Probe tile = first compute tile of the launched group; readers return zeros when no
+ * probe was armed. Counter assignment is documented in aie_runtime.h. */
 static int s_core_perf_probe_valid = 0;
 static XAie_LocType s_core_perf_probe_tile;
 static XAie_DevInst *s_core_perf_probe_dev = NULL;
@@ -1570,14 +1550,9 @@ struct_ioevent _Runtime_startio_ooo(XAie_DevInst *dev, struct_io io, int32_t bd_
  * Load kernel ELF into tiles
  * Reference: aieml_perf.cc lines 123-125
  */
-/* [skip-bss] Load only PT_LOAD segments that carry file bytes (.text/.data),
- * skipping pure-.bss segments (p_filesz==0). For a DMA-fed kernel the .bss holds
- * the ping-pong window buffers, which are DMA-filled before the core reads them,
- * so the driver's default XAie_LoadElfMem() -> XAIE_LOAD_ELF_ALL block-write of
- * zeros across the whole .bss on every tile is pure kernel-load overhead. Opt-in
- * (see __Runtime_skip_bss_enabled) so it is easy to A/B.
- * WARNING: only safe when no global is read before being written. If a kernel
- * relies on zero-initialized .bss globals, leave the skip disabled. */
+/* Load only PT_LOAD segments carrying file bytes, skipping pure-.bss ones.
+ * WARNING: only safe when no global is read before being written. If a kernel relies
+ * on zero-initialized .bss globals, leave the skip disabled. */
 #if !defined(__AIESIM__)
 static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc, const unsigned char *elfmem) {
     const Elf32_Ehdr *ehdr = (const Elf32_Ehdr *)elfmem;
@@ -1600,10 +1575,8 @@ static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc
 }
 #endif
 
-/* Returns 1 to skip .bss zero-init on kernel load, else 0.
- * Compile-time -DAIEHLC_SKIP_BSS_DEFAULT=1 wins (needed on baremetal newlib where
- * getenv() always returns NULL); otherwise fall back to the AIEHLC_SKIP_BSS env
- * var so a Linux host can A/B without a rebuild. */
+/* Returns 1 to skip .bss zero-init on kernel load. -DAIEHLC_SKIP_BSS_DEFAULT=1 wins
+ * (baremetal newlib getenv() always returns NULL); else the AIEHLC_SKIP_BSS env var. */
 #if !defined(__AIESIM__)
 static int __Runtime_skip_bss_enabled(void) {
 #if defined(AIEHLC_SKIP_BSS_DEFAULT)
@@ -1761,9 +1734,7 @@ struct_event __Runtime_launch_kernel_group(XAie_DevInst *dev, struct_kernel_grou
     AIEHLC_LOG(printf("[aie_runtime] launch_kernel_group num_tiles=%u\n", (unsigned)kg.num_tiles););
 
 #if AIEHLC_PROFILING
-    /* Arm perf counters AFTER kernel load (which CoreResets and would clear them)
-     * and just BEFORE CoreEnable, so they count from when the cores start. The
-     * first compute tile becomes the probe read back after the run. */
+    /* Must arm after kernel load (CoreReset clears them) and before CoreEnable. */
     if (AIE_DEBUG_HAS_FLAG(g_runtime_debug_level, AIE_DEBUG_FLAG_MM2SBDFINISH_COUNTER)) {
         for (uint32_t i = 0; i < kg.num_tiles; i++) {
             if (__Runtime_is_aie_core_tile(kg.tiles[i]))
@@ -1837,14 +1808,9 @@ void __Runtime_wait_event(XAie_DevInst *dev, struct_event event) {
             printf("[aie_runtime] wait_event TIMEOUT after %u iters - continuing to debug snapshot\n", iter);
     }
 #else
-    /* Completion is gated by the downstream output-DMA drain (__Runtime_wait_io),
-     * NOT by Core_Done. These GEMM cores are delivery-bound: their status latches
-     * LOCK_STALL with DONE=0 and only latches Done AFTER the output S2MM fully
-     * drains, which the host's subsequent wait_io enforces. Spinning on
-     * XAie_CoreWaitForDone here just burns a spurious wait (the driver default
-     * timeout per tile, across N tiles) that never gates the launch. So skip the
-     * poll entirely; an optional per-tile core-status snapshot is emitted only at
-     * debug level >=1 for observability. */
+    /* Completion is gated by the output-DMA drain in __Runtime_wait_io, not Core_Done:
+     * these cores only latch Done after the output S2MM drains, so polling
+     * XAie_CoreWaitForDone here just burns a per-tile timeout. */
     (void)allDone;
     AIEHLC_LOG(printf("[aie_runtime] wait_event: not polling Core_Done (completion gated on"
                       " output-DMA drain in wait_io)\n"));
@@ -1902,13 +1868,9 @@ void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
         }
     }
 #else
-    /* Busy-poll DmaGetPendingBdCount instead of sleeping between checks. The output
-     * S2MM DMA drains in microseconds, but a usleep-based poll blocked a full
-     * interval before re-checking, dominating the launch wall. A tight poll returns
-     * the instant the channel drains; a large iteration cap bounds a genuine stall.
-     * DmaGetPendingBdCount returns 0 only when the start queue is empty AND no BD is
-     * running (the driver adds 1 for any active BD), so pending==0 means the last BD
-     * has finished executing, not merely started. */
+    /* Busy-poll rather than usleep: the output S2MM drains in microseconds, so a
+     * sleeping poll dominated the launch wall. pending==0 means the last BD finished
+     * executing, not merely started (the driver adds 1 for any active BD). */
     const uint32_t max_iters = 50000000U; /* ~seconds of busy-poll worst case */
     u8 numPendingBDs = 1;
     uint32_t iter = 0;
@@ -1926,7 +1888,6 @@ void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
                    (unsigned)tile.Row, (unsigned)channel, (int)dir, (unsigned)numPendingBDs);
             return;
         }
-        /* busy-poll: no usleep — output S2MM drain is sub-millisecond */
     }
 #endif
 
@@ -1953,7 +1914,7 @@ void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
         }
     }
 #endif
-    /* normal-path drain cost (error/timeout early-returns are failure paths, excluded) */
+    /* Normal-path drain only: the error/timeout early-returns are excluded. */
     RT_PROF_ADD(g_wait_io_cycles, g_wait_io_calls, __wio_t0);
 }
 

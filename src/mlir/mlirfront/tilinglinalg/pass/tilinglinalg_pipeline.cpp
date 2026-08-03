@@ -1533,8 +1533,7 @@ after_host_emit:
                                    rstage, "RoutingHWVerifyPass"))
             return false;
 
-        // Generate physical routing provenance map JSON while routinghw ops are
-        // still present (RoutingHWLowerPass below lowers them into emitc.call).
+        // Must run before RoutingHWLowerPass lowers the routinghw ops into emitc.call.
         {
             auto routingProvenancePass = std::make_unique<RoutingProvenanceMapPass>(outputDir, partStartCol, aieGen);
             runPipelineSinglePass(ctx, routingDmaphopModule, std::move(routingProvenancePass), routingIrDir, rstage,

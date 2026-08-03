@@ -7,10 +7,8 @@
 #define AIE_RUNTIME_H
 
 #include "xaiengine.h"
-// Pull in XAie_RoutingInstance when using Vitis aie-codegen umbrella (xaiengine.h -> aie_codegen.h)
-// which omits xaie_routing.h. BSP-sourced xaiengine.h includes it directly.
-// extern "C" guard: xaie_routing.h has no extern "C" but its implementations are
-// compiled as C (C linkage) in libxaienginea78.a, so we must declare them as C here.
+// The Vitis aie-codegen umbrella omits xaie_routing.h (the BSP xaiengine.h includes it).
+// It carries no extern "C" of its own, but libxaienginea78.a builds it with C linkage.
 #ifndef XAIE_ROUTING_H
 #ifdef __cplusplus
 extern "C" {
@@ -68,10 +66,8 @@ XAie_DevInst *getOrCreateDeviceInstance(void);
 // back. These are the same counters aiegdb.py "dma counter" reads (0x11020/24).
 #define AIE_DEBUG_FLAG_MM2SBDFINISH_COUNTER (1 << 6)
 // bit 7 reserved (AIE_DMA_ISSUE_COUNT in aiehlc flag map)
-/* When set (and the runtime is built with -DAIEHLC_PROFILING=1), arm core-module
- * perf counters (active/vec/stream-stall/lock-stall) on every compute tile at
- * kernel launch so a profiling host can read the per-tile cycle budget after the
- * run via __Runtime_core_perf_read_probe(). */
+/* With -DAIEHLC_PROFILING=1, arms core-module perf counters on every compute tile at
+ * kernel launch; read back via __Runtime_core_perf_read_probe(). */
 #define AIE_DEBUG_FLAG_CORE_PERF_COUNTER (1 << 8)
 // bit 7 reserved
 // bit 8 reserved
@@ -415,14 +411,11 @@ void __Runtime_perfcnt_read_mm2s_bd_finished_partition(XAie_DevInst *dev, uint8_
                                                        uint8_t start_row, uint8_t end_row);
 
 // ---------------------------------------------------------------------------
-// Core-module performance counters (cycle-budget profiling), mirroring the
-// AEG OOB profiling probe. Uses CORE_MOD counters 0..3 on a single core tile:
-// All self-counting (start==stop==level-event) so all four are in cycles over the
-// full run (budget = active+stalls; vec_util = vec_instr/active is meaningful):
-//   0: active cycles       (ACTIVE_CORE self-counting)
-//   1: vector instr cycles (INSTR_VECTOR_CORE self-counting)
-//   2: stream stall cycles (STREAM_STALL_CORE self-counting)
-//   3: lock stall cycles   (LOCK_STALL_CORE self-counting)
+// Core-module cycle-budget counters (CORE_MOD 0..3 on one probe tile)
+// ---------------------------------------------------------------------------
+// All self-counting (start==stop), so each reads out as cycles over the full run:
+//   0 active, 1 vector-instr, 2 stream-stall, 3 lock-stall.
+
 // Arm on a tile (resets the 4 counters to 0 and configures their events).
 AieRC __Runtime_core_perf_setup(XAie_DevInst *dev, XAie_LocType tile);
 // Read the 4 core-module counters from a tile (any out-param may be NULL).
@@ -430,12 +423,10 @@ AieRC __Runtime_core_perf_read(XAie_DevInst *dev, XAie_LocType tile, uint32_t *a
                                uint32_t *stream_stall, uint32_t *lock_stall);
 // 1 if a probe tile was armed during the last kernel launch, else 0.
 int __Runtime_core_perf_probe_valid(void);
-// Read the 4 core-module counters from the armed probe tile (first compute
-// tile of the launched kernel group). Sets zeros if no probe tile is valid.
+// Read the armed probe tile (first compute tile of the group); zeros if none is valid.
 void __Runtime_core_perf_read_probe(uint32_t *active, uint32_t *vec_instr, uint32_t *stream_stall,
                                     uint32_t *lock_stall);
-// Read MM2S ch0/ch1 BD-finished counts (MEM_MOD counters 0/1) from the probe
-// tile. Requires AIE_DEBUG_FLAG_MM2SBDFINISH_COUNTER so they were set up.
+// Read probe-tile MM2S ch0/ch1 BD-finished counts; needs AIE_DEBUG_FLAG_MM2SBDFINISH_COUNTER.
 void __Runtime_perfcnt_read_mm2s_probe(uint32_t *ch0, uint32_t *ch1);
 
 // ---------------------------------------------------------------------------

@@ -293,24 +293,18 @@ std::shared_ptr<DataIO> ResourceMgr::createDataIO(IOType tp, int r, int c, DMADI
     return dataioptr;
 }
 // ---------- linkAvailable ----------
-// Link a→b: A's slave port (output side) and B's master port (input side) must both be free.
-// Also guard against bidirectional conflicts: the same physical port cannot simultaneously
-// carry traffic in both directions.  Check that the reverse-direction banks (A.master[dir]
-// and B.slave[odir]) at the same port index are also free, so that a port already used as
-// an input relay (A.master occupied) cannot also be claimed as an output driver (A.slave),
-// and vice versa.
+// Needs A's slave port and B's master port free, plus both reverse-direction banks:
+// one physical port cannot carry traffic both ways.
 bool ResourceMgr::linkAvailable(Point a, Point b, int& portIdx) const {
     PortDirection dir=getDir(a,b), odir=opposite(dir);
     const auto &va_slave = tile(a.r, a.c).bank(dir).slave;    // A output toward B
     const auto &vb_master = tile(b.r, b.c).bank(odir).master; // B input from A
-    // Reverse-direction banks for bidirectional conflict check
     const auto &va_master = tile(a.r, a.c).bank(dir).master; // A input from dir (must be free)
     const auto &vb_slave = tile(b.r, b.c).bank(odir).slave;  // B output toward dir (must be free)
     int lim = std::min<int>(va_slave.size(), vb_master.size());
     for (int ch = 0; ch < lim; ++ch) {
         if (va_slave[ch].used || vb_master[ch].used)
             continue; // forward-direction port occupied
-        // Bidirectional guard: reject if reverse direction is already driving this port
         bool a_reverse_used = (ch < (int)va_master.size()) && va_master[ch].used;
         bool b_reverse_used = (ch < (int)vb_slave.size()) && vb_slave[ch].used;
         if (a_reverse_used || b_reverse_used)
