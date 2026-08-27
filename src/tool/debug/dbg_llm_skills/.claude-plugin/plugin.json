@@ -1,6 +1,0 @@
-{
-  "name": "dbg-llm-skills",
-  "description": "Live AIE debug procedures for the embedded debug assistant in the browser debug UI",
-  "version": "0.1.0",
-  "author": {"name": "AMD"}
-}
