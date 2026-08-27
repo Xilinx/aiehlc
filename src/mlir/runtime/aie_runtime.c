@@ -1754,7 +1754,7 @@ void __Runtime_aie_trace_profile_dump(AieTraceProfile *p) {
 
 #define AIE_TRACE_SESSION_CAP 16u     /* max tiles armed per run            */
 #define AIE_TRACE_SLOTS_PER_COL 4u    /* strm_ch / S2MM ch range 0..3       */
-#define AIE_TRACE_BUF_LEN 0x2000u     /* 8 KB raw trace words per tile      */
+#define AIE_TRACE_BUF_LEN 0x4000u     /* 12 KB raw trace words per tile      */
 #define AIE_TRACE_REGION_BASE 0x8000u /* MemTile-loc read view base offset  */
 #define AIE_TRACE_DMA_HI 0x80000u     /* OR'd in for the DMA-view (setup)   */
 
