@@ -192,7 +192,11 @@ def ConnectStreamPktSwitchPort:RoutingHWOp<"connectpktstreamswitchport"> {
         DefaultValuedAttr<I32Attr, "0">:$localdmaarbiter,
         DefaultValuedAttr<I32Attr, "0">:$localdmaslot,
         DefaultValuedAttr<I32Attr, "0">:$forwardmasterarbiter,
-        DefaultValuedAttr<I32Attr, "1">:$forwardmastermselen
+        DefaultValuedAttr<I32Attr, "1">:$forwardmastermselen,
+        // Local stream-switch master port that the packet terminates into.
+        // "DMA" (default) => S2MM data path; "CTRL" => in-tile register/memory
+        // write via the control stream-switch port (control-packet flow).
+        DefaultValuedStrAttr<StrAttr, "DMA">:$localsinkport
      );
 
      let results = (outs

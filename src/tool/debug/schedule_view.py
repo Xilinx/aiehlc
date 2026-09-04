@@ -9962,43 +9962,6 @@ function markDisconnected(){
   if (liveToggle) liveToggle.disabled = true;
   hideConsole();
 }
-// Recovery: when the JTAG connect fails but the daemon is up, have the daemon
-// ssh to the board, start hw_server (ssh -> systest -> xsdb -> exec hw_server),
-// then re-probe once. The launch runs async on the daemon; we tail its per-step
-// progress into the left-bottom console (#console) via /hwsrv_log so the user
-// sees each step live. On success we're connected; otherwise show the hint.
-function autoLaunchHwServer(dev, host, why){
-  markDisconnected();
-  // Keep the selection so applyConnected (reached via pollHwSrv on success)
-  // switches the aiegdb console target to this same host.
-  LIVE.device = dev; LIVE.host = host;
-  setConnStatus('connect failed (' + why + ') \u2014 starting hw_server on board\u2026');
-  setConnHint(false);
-  // Reveal + reset the left-bottom console so the launch steps stream in.
-  const con = document.getElementById('console');
-  if (con){ con.classList.remove('hide'); con.textContent =
-    '[auto-starting hw_server on board \u2014 live progress below]\n'; }
-  LIVE.hwsrvOff = 0;
-  api('/launch_hwserver', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({device:dev, host:host})})
-    .then(r => {
-      if (r && r.started){
-        // Begin tailing the daemon's hw_server session log into #console.
-        if (LIVE.hwsrvTimer) clearInterval(LIVE.hwsrvTimer);
-        LIVE.hwsrvTimer = setInterval(pollHwSrv, 1000);
-        pollHwSrv();   // immediate first tail so steps show without a 1s delay
-      } else {
-        markDisconnected();
-        setConnStatus('auto-start failed: ' + ((r && r.detail) || 'unknown'));
-        setConnHint(true);   // fall back to the manual start-hw_server guidance
-      }
-    })
-    .catch(() => {
-      markDisconnected();
-      setConnStatus('daemon offline: cannot auto-start hw_server.');
-      setConnHint(true);
-    });
-}
 const LOG_FOLLOW_FRAC = 0.5, LOG_FOLLOW_MIN = 160;
 function logFollowing(el){
   if (!el) return true;
@@ -10006,46 +9969,6 @@ function logFollowing(el){
   return (el.scrollHeight - el.scrollTop - el.clientHeight) <= slack;
 }
 function logFollow(el, was){ if (el && was) el.scrollTop = el.scrollHeight; }
-// Tail the daemon's hw_server launch session into #console and, once the
-// background worker is done, apply the connect result (single-retry outcome).
-function pollHwSrv(){
-  if (LIVE.hwsrvBusy) return;           // guard against overlapping tails
-  LIVE.hwsrvBusy = true;
-  api('/hwsrv_log?offset='+LIVE.hwsrvOff).then(r => {
-    const con = document.getElementById('console');
-    if (con){
-      const follow = logFollowing(con);
-      if (r.data){ con.textContent += r.data; }
-      logFollow(con, follow);
-    }
-    if (r.next != null) LIVE.hwsrvOff = r.next;
-    setConnStatus('hw_server: ' + (r.status || 'starting') + '\u2026');
-    if (r.done){
-      if (LIVE.hwsrvTimer){ clearInterval(LIVE.hwsrvTimer); LIVE.hwsrvTimer=null; }
-      if (r.ok){ applyConnected(r); }    // connected on the single retry
-      else {
-        LIVE.connected = false;
-        updateConnectionPresentation();
-        updateRunButtons();
-        if (liveToggle) liveToggle.disabled = true;
-        if (con){
-          con.textContent += '\n[auto-start failed \u2014 connection still down: '
-            + ((r && r.detail) || 'unknown') + ']\n'
-            + 'Connection failed. On the target hw board, start hw_server via xsdb:\n'
-            + '    exec hw_server -stcp:0.0.0.0:3121\n';
-          con.scrollTop = con.scrollHeight;
-        }
-        setConnStatus('connection failed \u2014 run "exec hw_server -stcp:0.0.0.0:3121" on the target board');
-        setConnHint(true);   // also show the persistent manual-start hint banner
-      }
-    }
-  }).catch(() => {
-    if (LIVE.hwsrvTimer){ clearInterval(LIVE.hwsrvTimer); LIVE.hwsrvTimer=null; }
-    markDisconnected();
-    setConnStatus('daemon offline: cannot auto-start hw_server.');
-    setConnHint(true);
-  }).finally(() => { LIVE.hwsrvBusy = false; });
-}
 // Test the daemon + JTAG target; on success unlock the overlay + reveal console.
 function testConnect(){
   const dev = deviceSel ? deviceSel.value : '';
@@ -10112,7 +10035,7 @@ function testConnect(){
   const host = boardHost ? boardHost.value.trim() : '';
   if (dev !== 'pal' && !host){ setConnStatus('enter the ' + dev + ' board hostname'); return; }
   // Remember the selection so applyConnected can tell the daemon which target
-  // to switch the aiegdb console to (mirrors autoLaunchHwServer's closure).
+  // to switch the aiegdb console to.
   LIVE.device = dev; LIVE.host = host;
   setConnStatus('testing\u2026');
   const qs = '?device='+encodeURIComponent(dev)+'&host='+encodeURIComponent(host);
@@ -10126,9 +10049,18 @@ function testConnect(){
       setConnStatus('a board run is still in progress; press "Stop run" then Connect again');
       setConnHint(false);
     } else {
-      // Daemon answered but the JTAG connect failed → try to auto-start
-      // hw_server on the board and retry once.
-      autoLaunchHwServer(dev, host, (r && r.detail) || 'no response');
+      // Daemon answered but the JTAG connect failed. Auto-starting hw_server
+      // on the board over ssh proved unstable (intermittent failures), so we
+      // no longer attempt it; guide the user to start it manually instead.
+      markDisconnected();
+      const con = document.getElementById('console');
+      if (con){ con.classList.remove('hide'); con.textContent =
+        '[connection failed: ' + ((r && r.detail) || 'no response') + ']\n'
+        + 'Connection failed. On the target hw board, start hw_server via xsdb:\n'
+        + '    exec hw_server -stcp:0.0.0.0:3121\n'; }
+      setConnStatus('connection failed \u2014 start hw_server on the target board: '
+        + 'exec hw_server -stcp:0.0.0.0:3121');
+      setConnHint(true);   // show the persistent manual-start guidance banner
     }
   }).catch(() => {
     // Daemon itself is unreachable (static mode) → can't ssh from a dead

@@ -2119,8 +2119,17 @@ class DebugState:
             # -u: unbuffered stdout for realtime tail; -y: auto-confirm ELF pick.
             cmd = [sys.executable, "-u", script, "-y", "-nonreboot"]
             if not cfg_dev:
-                if self.elf and not os.path.isfile(self.elf):
-                    return {"error": f"ELF not found: {self.elf}"}
+                # The ELF is resolved once at app-select time, so a later
+                # clean/rebuild (build/host removed, aout/main.elf produced)
+                # leaves a stale path. Re-resolve before giving up so the
+                # search order (build/host -> parent *.elf -> aout/main.elf)
+                # picks whatever exists now instead of failing the run.
+                if not self.elf or not os.path.isfile(self.elf):
+                    fallback = _resolve_default_elf(self.workdir)
+                    if fallback:
+                        self.elf = fallback
+                    elif self.elf:
+                        return {"error": f"ELF not found: {self.elf}"}
                 if self.elf:
                     cmd.append(self.elf)
             try:
@@ -5786,6 +5795,42 @@ def make_server(host, requested_port, handler, max_scan=50):
     sys.exit(1)
 
 
+def _open_browser(url):
+    """Best-effort open `url` in a browser, tolerant of headless/SSH sessions.
+
+    In a VS Code Remote-SSH terminal, $BROWSER points at the `code` CLI, which
+    tries to reach the editor over a per-session IPC socket
+    ($VSCODE_IPC_HOOK_CLI). When that socket is stale (window closed/reconnected)
+    the opener dies with ECONNREFUSED and a noisy Node deprecation warning. None
+    of that should surface here: the daemon is already serving, so a failed
+    auto-open must be silent and non-fatal. We try a plain opener first
+    (xdg-open / open) and only fall back to webbrowser, suppressing all output
+    and exceptions either way.
+    """
+    time.sleep(0.5)
+    # Prefer a plain OS opener that never touches the VS Code IPC socket.
+    for opener in ("xdg-open", "open"):
+        path = shutil.which(opener)
+        if not path:
+            continue
+        try:
+            subprocess.Popen(
+                [path, url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+            return
+        except OSError:
+            continue
+    # Last resort: webbrowser (may invoke the `code` opener over SSH). Swallow
+    # any failure so a dead IPC socket can't crash the open thread.
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Live AIE debug/test daemon for host_schedule.html")
@@ -6033,8 +6078,7 @@ def main():
               "--target xsdb://<host>:3121)", file=sys.stderr)
     print("  Ctrl-C to stop.")
     if args.open:
-        threading.Thread(target=lambda: (time.sleep(0.5),
-                                         webbrowser.open(url)),
+        threading.Thread(target=_open_browser, args=(url,),
                         daemon=True).start()
     try:
         server.serve_forever()

@@ -194,7 +194,7 @@ __global__ void controlperf_dummy(input_window_int32 *win
 // A high BD slot reserved for the raw path so its writes never overwrite the
 // BD registers the real-API benchmarks program (all timing-only, but keep them
 // disjoint for clarity). 16 BDs per tile, so slot 15 is always valid.
-#define RAW_BD_SLOT 15
+#define RAW_BD_SLOT 10
 
 // Absolute register address of word `w` of BD `bd` on `tile`. row/col occupy the
 // XAIE_{ROW,COL}_SHIFT fields; the backend adds XAIE_BASE_ADDR. Matches
@@ -415,7 +415,7 @@ int run_control_perf(XAie_DevInst *dev) {
     printf("Each __Runtime_* config call = a burst of AXI-MM register writes to the device.\n");
     printf("%-36s %6s %12s %12s\n", "API", "iters", "total_us", "us/call");
     printf("-------------------------------------------------------------------------\n");
-
+#ifdef __PERF_TEST__
     // ---- Baseline / CPU-only (no device register writes) ---------------------
     BENCH("XAie_TileLoc (cpu)", LIGHT_ITERS, {
         XAie_LocType _l = XAie_TileLoc(0, 3);
@@ -516,7 +516,273 @@ int run_control_perf(XAie_DevInst *dev) {
             g_sink += _rdsink;
         });
     }
+#endif
+    // ---- Control-packet send: one shim MM2S BD carrying a CTRL-port write -----
+    // A control packet is an in-band (header + payload) stream the shim MM2S BD
+    // pushes into the array; the target tile's CTRL stream-switch port decodes
+    // the control header and performs the register/memory write. This is the
+    // mechanism behind stream-switch ELF load and generic config writes.
+    // __Runtime_ctrl_pktize_write builds the two-header payload in a DMA buffer;
+    // __Runtime_ctrl_push then configures ONE shim MM2S BD (XAie_DmaSetAddrLen +
+    // XAie_DmaWriteBd = RAW_SHIM_BD_WORDS register writes) and starts it. The raw
+    // analogue is that same shim-BD word burst, so delta_us exposes the pktize +
+    // BD-build host overhead the control-packet path adds over the bus writes.
 
+    // ---- ISOLATION TEST: single write + single read-with-return -------------
+    // Minimal control-packet round trip (1 write to 0x1000, then 1 read-back of
+    // 0x1000) as ONE tiny shim MM2S transfer. This isolates the read-with-return
+    // response path from the 1000-write bulk framing: if this lone read returns a
+    // response (S2MM pending->0), the write+read-in-one-buffer path is the issue;
+    // if even this fails, the read encoding / return route itself is at fault.
+    {
+        // Phase A: WRITE 0xABCD1234 to 0x1000 as its OWN push (separate TLAST).
+        // Phase B: READ 0x1000 back as a SECOND push. Separating them tests whether
+        // the write persists independent of write+read-in-one-buffer ordering.
+#define WDATA_NUM 10000
+        uint32_t _wbuf_h[8 * WDATA_NUM];
+        uint32_t _wdata[WDATA_NUM];
+        for (int i = 0; i < WDATA_NUM; i++) {
+            _wdata[i] = 0xAB001234u + (uint32_t)i;
+        }
+        uint32_t _ww =
+            __Runtime_ctrl_pktize_write(_wbuf_h, 8 * WDATA_NUM, /*stream_id=*/0u, /*tile_addr=*/0x1000u, _wdata,
+                                        /*nwords=*/WDATA_NUM, /*lastwriteack=*/1, 0u, NULL);
+        // Read a KNOWN non-zero, side-effect-free CORE-module register instead of
+        // 0x1000 to isolate the read-with-return DATA path from write-landing.
+        // CORE_MODULE_EVENT_GROUP_0_ENABLE @ local 0x34500 has POR value 0x00000FFF
+        // (xaie2psgbl_params.h:2914/2916, reginit.c:3720). If token[1]==0xFFF the
+        // read-data return path works end-to-end; if it stays sentinel w/ pending=1
+        // the response data word never drains (return-route / framing bug).
+        uint32_t _mrsp = 0u;
+        uint32_t *_wbuf = (uint32_t *)__Runtime_alloc_buffer(dev, _ww * sizeof(uint32_t));
+#define _CONTROL_WRITE_TEST_
+#ifdef _CONTROL_WRITE_TEST_
+        if (_wbuf && _ww) {
+            for (uint32_t _i = 0u; _i < _ww; _i++)
+                _wbuf[_i] = _wbuf_h[_i];
+            __Runtime_sync_for_dev(dev, _wbuf, _ww * sizeof(uint32_t));
+            // --- Phase A: write-only push (no return expected; drain MM2S only) ---
+            __Runtime_CtrlInstance _wi = {.dev = dev,
+                                          .shim_col = 0u,
+                                          .dest_col = 0u,
+                                          .dest_row = 3u,
+                                          .stream_id = 0u,
+                                          .bd_id = RAW_BD_SLOT,
+                                          .mm2s_ch = 0,
+                                          .s2mm_ch = 1,
+                                          .token = NULL,
+                                          .resp_words = 1u};
+            XTime _tt0, _tt1;
+            AieRC _wrc = __Runtime_ctrl_setup_routing(&_wi, /*port_evt=*/1);
+            if (_wrc == XAIE_OK) {
+                printf("token[0] before push: 0x%x\n", _wi.token[0]);
+                __Runtime_sync_for_dev(dev, _wi.token, _wi.resp_words * sizeof(uint32_t));
+                XTime_GetTime(&_tt0);
+                __Runtime_ctrl_push(&_wi, _wbuf, _ww, /*block=*/0, /*log=*/0);
+                // printf("[controlperf] MINI-A write 0xABCD1234 -> (0,3) 0x1000 done\n");
+                uint8_t _mp = 1u;
+                for (uint32_t _s = 0u; _s < 1000000u && _mp != 0u; _s++) {
+                    XAie_DmaGetPendingBdCount(dev, shim, /*s2mm_ch=*/1u, DMA_S2MM, &_mp);
+                    // usleep(1);
+                    // if (_wi.token[0] != 0u) break;
+                }
+                uint32_t curtokenv = _wi.token[0];
+                XTime_GetTime(&_tt1);
+                printf("curtokenv after push: 0x%x\n", curtokenv);
+                double _tus = 1.0 * (double)(_tt1 - _tt0) / ((double)COUNTS_PER_SECOND / 1000000.0);
+                printf("[controlperf] MINI-A write 0xABCD1234 -> (0,3) 0x1000 elapsed time:  (%.2f us) "
+                       "COUNTS_PER_SECOND=%llu\n",
+                       _tus, COUNTS_PER_SECOND);
+                uint32_t packet_id, type, row, col;
+                __Runtime_ctrl_parse_pkt_hdr(_wi.token[0], &packet_id, &type, &row, &col);
+                printf("write ack is [%u]=0x%x (packet_id=%u type=%u row=%u col=%u)\n", 0, _wi.token[0], packet_id,
+                       type, row, col);
+
+                printf("[controlperf] MINI-A write 0xABCD1234 -> (0,3) 0x1000 pending=%u\n", (unsigned)_mp);
+                __Runtime_free_buffer(dev, _wi.token);
+                __Runtime_free_buffer(dev, _wbuf);
+            }
+        }
+#endif /* _CONTROL_WRITE_TEST_ */
+
+// #define _CONTRL_READ_TEST_
+#ifdef _CONTRL_READ_TEST_
+            // --- Phase B: read-only push (separate TLAST); expect 0xABCD1234 ---
+            // Arm S2MM for 4 words (over-provision) so we can see exactly how many
+            // response words drain before TLAST, distinguishing header-only from
+            // header+data-truncated.
+            const uint32_t _RD_ADDR = 0x34504u;      /* EVENT_GROUP_0_ENABLE, POR 0xFFF */
+            -const uint32_t _RD_EXPECT = 0xABCD1234; // 0x0000003Fu
+            uint32_t _rbuf_h[4];
+            uint32_t _rw =
+                __Runtime_ctrl_pktize_read(_rbuf_h, 4u, /*req_sid=*/0u, /*ret_sid=*/0u, /*tile_addr=*/_RD_ADDR,
+                                           /*nwords=*/1u, &_mrsp);
+            uint32_t *_rbuf = (uint32_t *)__Runtime_alloc_buffer(dev, _rw * sizeof(uint32_t));
+            if (_rbuf && _rw) {
+                for (uint32_t _i = 0u; _i < _rw; _i++)
+                    _rbuf[_i] = _rbuf_h[_i];
+                __Runtime_sync_for_dev(dev, _rbuf, _rw * sizeof(uint32_t));
+
+                uint32_t _rspcap = 1u;
+                __Runtime_CtrlInstance _ri = {.dev = dev,
+                                              .shim_col = 0u,
+                                              .dest_col = 0u,
+                                              .dest_row = 3u,
+                                              .stream_id = 0u,
+                                              .bd_id = RAW_BD_SLOT,
+                                              .mm2s_ch = 0,
+                                              .s2mm_ch = 1,
+                                              .token = NULL,
+                                              .resp_words = _rspcap};
+                AieRC _rrc = __Runtime_ctrl_setup_routing(&_ri, /*port_evt=*/1);
+                if (_rrc == XAIE_OK) {
+                    for (uint32_t _i = 0u; _i < _rspcap; _i++)
+                        _ri.token[_i] = 0xDEADBEEFu;
+                    __Runtime_sync_for_dev(dev, _ri.token, _rspcap * sizeof(uint32_t));
+                    __Runtime_ctrl_push(&_ri, _rbuf, _rw, /*block=*/0, /*log=*/1);
+                    uint8_t _mp = 1u;
+                    for (uint32_t _s = 0u; _s < 100000u && _mp != 0u; _s++)
+                        XAie_DmaGetPendingBdCount(dev, shim, /*s2mm_ch=*/1u, DMA_S2MM, &_mp);
+                    __Runtime_sync_for_cpu(dev, _ri.token, _rspcap * sizeof(uint32_t));
+                    uint32_t _drained = 0u;
+                    for (uint32_t _i = 0u; _i < _rspcap; _i++)
+                        if (_ri.token[_i] != 0xDEADBEEFu)
+                            _drained++;
+                    printf("[controlperf] MINI-B read 0x%x pending=%u drained=%u raw:", _RD_ADDR, (unsigned)_mp,
+                           _drained);
+                    for (uint32_t _i = 0u; _i < _rspcap; _i++)
+                        printf(" [%u]=0x%x", _i, _ri.token[_i]);
+                    printf(" (data expect 0x%x) %s\n", _RD_EXPECT, (_ri.token[1] == _RD_EXPECT) ? "OK" : "MISMATCH");
+                    __Runtime_free_buffer(dev, _ri.token);
+                }
+                __Runtime_free_buffer(dev, _rbuf);
+            }
+#endif /* _CONTRL_READ_TEST_ */
+    }
+// #define _CTRL_PKT_1000_TEST_
+#ifdef _CTRL_PKT_1000_TEST_
+    {
+        // Prepare a 1000-write control payload targeting tile-local address 0x1000
+        // onward, routed on stream id 0 into the target tile's CTRL port, THEN
+        // append ONE trailing READ control packet (read back the first written
+        // word at 0x1000). The target CTRL port processes control packets in
+        // order, so the trailing read's response is a completion barrier for all
+        // preceding writes: once that response lands in the shim S2MM DDR buffer,
+        // every write has been applied. Instead of polling an interior tile
+        // register we check that DDR buffer for available data at the API end.
+        const unsigned int ctrl_iter = 1000;
+        enum { CTRL_NWRITES = ctrl_iter };
+        uint32_t ctrl_data[CTRL_NWRITES];
+        for (uint32_t _d = 0u; _d < (uint32_t)CTRL_NWRITES; _d++)
+            ctrl_data[_d] = 0xC0FFEE00u + _d;
+        uint32_t *ctrl_buf = (uint32_t *)buf;
+        const uint32_t ctrl_cap = CTRL_NWRITES * 8;
+        // WRITE packets for the 1000 target writes at 0x1000, with lastwriteack=1:
+        // re-emit the LAST written word (at 0x1000 + (NWRITES-1)*4) as its own
+        // single-word WRITE-WITH-RETURN access (op=0b10) into the SAME buffer. The
+        // whole buffer is pushed as ONE shim MM2S transfer (single TLAST); the
+        // trailing write-with-return self-delimits via its own control-info word, so
+        // the dest CTRL port emits a response (a single stream header word) via the
+        // dest CTRL slave -> shim S2MM into the DDR buffer armed by setup_routing.
+        // resp_words receives the expected response length (1). Because the dest CTRL
+        // port processes accesses in order, that ack is a completion barrier for all
+        // preceding writes.
+        uint32_t resp_words = 1u;
+        uint32_t ctrl_words = __Runtime_ctrl_pktize_write(ctrl_buf, ctrl_cap, /*stream_id=*/0u,
+                                                          /*tile_addr=*/0x1000u, ctrl_data, /*nwords=*/CTRL_NWRITES,
+                                                          /*lastwriteack=*/1, /*ret_stream_id=*/0u,
+                                                          /*resp_words_out=*/&resp_words);
+        if (ctrl_words && resp_words) {
+            printf("[controlperf] ctrl_pktize -> %u write+read words (%u resp words) for %d writes\n", ctrl_words,
+                   resp_words, (int)CTRL_NWRITES);
+            // Send context: same-column shim(0,0) -> dest core (0,3). resp_words
+            // sizes the shim S2MM drain + DDR response buffer for the read-back.
+            __Runtime_CtrlInstance _cpi = {.dev = dev,
+                                           .shim_col = 0u,
+                                           .dest_col = 0u,
+                                           .dest_row = 3u,
+                                           .stream_id = 0u,
+                                           .bd_id = RAW_BD_SLOT,
+                                           .mm2s_ch = 0,
+                                           .s2mm_ch = 1,
+                                           .token = NULL,
+                                           .resp_words = resp_words};
+            // Program shim->dest CTRL forward + dest CTRL slave->shim S2MM return
+            // route, alloc the DDR response buffer, and arm the shim S2MM once.
+            // port_evt=1: route the dest CTRL master/slave (and every hop's fwd/ret
+            // output) onto the diagnostic event-select slots so the read push log
+            // reveals whether the CTRL handler emitted a response (slave run/stall)
+            // or not (slave idle-only), and where a return-route stall sits.
+            AieRC _cpi_rc = __Runtime_ctrl_setup_routing(&_cpi, /*port_evt=*/1);
+            if (_cpi_rc != XAIE_OK) {
+                printf("[controlperf] ctrl setup_routing rc=%d; skipping ctrl_pkt send\n", (int)_cpi_rc);
+            } else {
+                // Push the write buffer as ONE shim MM2S transfer (single TLAST).
+                // With lastwriteack=1 the trailing write-with-return is embedded
+                // after the 1000 writes and self-delimits via its control-info word,
+                // so the dest CTRL port parses it as a write-with-return (op=0b10).
+                // block=0 because we run the DDR-availability check ourselves below.
+                // log=1: after the MM2S drains, print the dest CTRL master run/idle
+                // (did the read reach CTRL?) + CTRL slave run/stall/idle (did CTRL
+                // emit a response?) + per-hop fwd/ret port status, so a pending=1
+                // S2MM is localized to request vs return side.
+                XTime _tt0, _tt1;
+                XTime_GetTime(&_tt0);
+                AieRC _crc = __Runtime_ctrl_push(&_cpi, ctrl_buf, ctrl_words, /*block=*/0, /*log=*/1);
+                // ---- End-of-API logic: check the target DDR for available data ----
+                // The trailing write-with-return's ack drains into the shim S2MM DDR
+                // buffer (_cpi.token). Poll the shim S2MM pending BD count: once it
+                // reaches 0 the BD has completed, so the ack header has landed and
+                // every preceding write is done. Then sync the DDR buffer for the CPU
+                // and read the ack header back.
+                uint8_t _pend = 1u;
+                for (uint32_t _s = 0u; _s < 100000u && _pend != 0u; _s++) {
+                    XAie_DmaGetPendingBdCount(dev, shim, /*s2mm_ch=*/1u, DMA_S2MM, &_pend);
+                    // XAie_DmaGetPendingBdCount(dev, shim, /*s2mm_ch=*/0u, DMA_MM2S, &_pend);
+                }
+                XTime_GetTime(&_tt1);
+                double _tus = 1.0 * (double)(_tt1 - _tt0) / ((double)COUNTS_PER_SECOND / 1000000.0);
+                if (_pend == 0u) {
+                    __Runtime_sync_for_cpu(dev, _cpi.token, resp_words * sizeof(uint32_t));
+                    // response layout: token[0]=stream header (write-with-return ack).
+                    // The ack carries no read-back data word; its landing is the
+                    // completion barrier for the LAST written word at
+                    // 0x1000+(NWRITES-1)*4 (and all preceding writes).
+                    uint32_t _laddr = 0x1000u + (uint32_t)(CTRL_NWRITES - 1) * 4u;
+                    printf("[controlperf] ctrl DDR has data (%.2f us): rc=%d ack_hdr=0x%x for last write[0x%x]\n", _tus,
+                           (int)_crc, _cpi.token[0], _laddr);
+                } else {
+                    printf("[controlperf] ctrl DDR: NO data (shim S2MM still pending=%u, %.2f us) rc=%d\n",
+                           (unsigned)_pend, _tus, (int)_crc);
+                    // POST-WAIT snapshot: the in-push port read fires right after the
+                    // read's MM2S drains, before the CTRL handler (serial, behind the
+                    // 1000 writes) has processed the read - so its "slave idle" is
+                    // meaningless. Re-read the dest CTRL master (select 0) + slave
+                    // (select 1) here, after the full S2MM timeout, when the handler
+                    // has had time to act. slave run/stall=1 => response WAS emitted
+                    // (fault is the CTRL slave->shim S2MM return route); slave
+                    // idle-only => still no response (fault is request/CTRL side:
+                    // op=01 read not honored at this addr/tile).
+                    XAie_LocType _dl = XAie_TileLoc(_cpi.dest_col, _cpi.dest_row);
+                    uint8_t _mr = 0u, _mi = 0u, _sr = 0u, _ss = 0u, _si = 0u;
+                    XAie_EventReadStatus(dev, _dl, XAIE_CORE_MOD, XAIE_EVENT_PORT_RUNNING_0_CORE, &_mr);
+                    XAie_EventReadStatus(dev, _dl, XAIE_CORE_MOD, XAIE_EVENT_PORT_IDLE_0_CORE, &_mi);
+                    XAie_EventReadStatus(dev, _dl, XAIE_CORE_MOD, XAIE_EVENT_PORT_RUNNING_1_CORE, &_sr);
+                    XAie_EventReadStatus(dev, _dl, XAIE_CORE_MOD, XAIE_EVENT_PORT_STALLED_1_CORE, &_ss);
+                    XAie_EventReadStatus(dev, _dl, XAIE_CORE_MOD, XAIE_EVENT_PORT_IDLE_1_CORE, &_si);
+                    printf("[controlperf] post-wait dest(%u,%u) CTRL master run=%u idle=%u | slave run=%u stall=%u "
+                           "idle=%u\n",
+                           (unsigned)_cpi.dest_col, (unsigned)_cpi.dest_row, (unsigned)_mr, (unsigned)_mi,
+                           (unsigned)_sr, (unsigned)_ss, (unsigned)_si);
+                }
+                __Runtime_free_buffer(dev, _cpi.token);
+            }
+        } else {
+            printf("[controlperf] ctrl_pktize failed (buf too small); skipping ctrl_pkt send\n");
+        }
+    }
+#endif
+#ifdef __PERF_TEST_NEW_GROUP__
     // ============================================================
     // 2. Same runtime API vs its lower-level implementations
     // ============================================================
@@ -634,7 +900,7 @@ int run_control_perf(XAie_DevInst *dev) {
                _raw_us, _us - _raw_us, _raw_us / (double)_nwr * 1000.0);
         fflush(stdout);
     }
-
+#endif
     printf("==== control-plane microbenchmark done ====\n");
     fflush(stdout);
     return 0;
@@ -891,7 +1157,11 @@ int main(int argc, char *argv[]) {
         }
     }
     printf("before XAie_PartitionInitialize\n");
-    RC = XAie_PartitionInitialize(&DevInst, NULL);
+    XAie_PartInitOpts PartInitOpts;
+    PartInitOpts.Locs = NULL;
+    PartInitOpts.NumUseTiles = 0;
+    PartInitOpts.InitOpts = XAIE_PART_INIT_OPT_DEFAULT | XAIE_PART_INIT_OPT_CTRL_TLASTERROR_DISABLE;
+    RC = XAie_PartitionInitialize(&DevInst, &PartInitOpts);
 #else
     XAie_PmRequestTiles(&DevInst, NULL, 0);
 #endif

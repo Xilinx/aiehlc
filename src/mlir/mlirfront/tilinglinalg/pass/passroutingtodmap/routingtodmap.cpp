@@ -929,6 +929,15 @@ struct RoutingmovedatabyioConvertdmap : public ConversionPattern {
             return 0;
         };
         int round_idx = 0;
+        // Control-packet flow marker: if the abstract routing op is tagged as a
+        // control write (register/config delivery), propagate the marker onto the
+        // produced dmap streams so DmapToDmaphop can forward it onto create_path,
+        // and passdmaphoptoroutinghw can select the tile CTRL sink port.
+        bool isControl = op->hasAttrOfType<BoolAttr>("control") && op->getAttrOfType<BoolAttr>("control").getValue();
+        auto tagControl = [&](Operation *streamOp) {
+            if (isControl && streamOp)
+                streamOp->setAttr("control", rewriter.getBoolAttr(true));
+        };
         // get all the op
         routing::createhwmesh createhwmesh;
         routing::createscheduletensor createscheduletensor;
@@ -1089,6 +1098,7 @@ struct RoutingmovedatabyioConvertdmap : public ConversionPattern {
                 stream_dst = memiorecvconfig.getResult();
             }
             auto streamhandle1 = rewriter.create<createstream>(rewriter.getUnknownLoc(),  streamret, stream_src, stream_dst, shimToMemAttr, groupIndexAttr, streamIdAttr1);
+            tagControl(streamhandle1);
 
             if (processing_type == 0) { // Broadcast: SHIM -> MEM -> CORE
                 stream_src = memiosendconfig.getResult();
@@ -1098,6 +1108,7 @@ struct RoutingmovedatabyioConvertdmap : public ConversionPattern {
                 stream_dst = shimioconfig.getResult();
             }
             auto streamhandle2 = rewriter.create<createstream>(rewriter.getUnknownLoc(),  streamret, stream_src, stream_dst, memToCoreAttr, groupIndexAttr, streamIdAttr1);
+            tagControl(streamhandle2);
 
             // Create a chained stream from streamhandle1 and streamhandle2, then push once to the chained stream.
             auto chainType = dmap::dmapportchainstreamType::get(ctx);
@@ -1130,7 +1141,8 @@ struct RoutingmovedatabyioConvertdmap : public ConversionPattern {
                 stream_dst = shimioconfig.getResult();
             }
             auto streamhandle = rewriter.create<createstream>(rewriter.getUnknownLoc(),  streamret, stream_src, stream_dst, shimToCoreAttr, groupIndexAttr, streamIdAttr);
-            
+            tagControl(streamhandle);
+
             if (processing_type == 0) {
                 rewriter.create<push>(rewriter.getUnknownLoc(), extract_data.getResult(),streamhandle.getResult());
             } else {

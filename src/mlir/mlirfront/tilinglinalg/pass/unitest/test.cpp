@@ -2193,6 +2193,100 @@ void testReadGemmTilingScalars() {
     module->erase();
 }
 
+// ---------------------------------------------------------------------------
+// Control-packet CTRL-sink lowering test
+//
+// Builds a minimal routinghw module with a single ConnectStreamPktSwitchPort
+// whose localsinkport = "CTRL", runs RoutingHWLowerPass, and verifies the
+// emitted C++ terminates the packet at the tile's CTRL master stream-switch
+// port with the control header preserved (XAIE_SS_PKT_DONOT_DROP_HEADER).
+// A companion DMA-sink case confirms the default path is unchanged.
+// ---------------------------------------------------------------------------
+static bool lowerCtrlSinkAndEmit(const std::string &localsinkport, std::string &emitted) {
+    MLIRContext ctx;
+    routinghwmanager mtesthw;
+    mtesthw.loaddialect(&ctx);
+    ctx.getOrLoadDialect<mlir::func::FuncDialect>();
+    ctx.getOrLoadDialect<mlir::emitc::EmitCDialect>();
+    ctx.getOrLoadDialect<arith::ArithDialect>();
+
+    // A single-tile packet route into the local sink port. The func's first
+    // argument stands in for XAie_DevInst* dev (RoutingHWLowerPass reads it as
+    // the device instance).
+    std::string ir = R"MLIR(
+    func.func @route(%dev: !emitc.ptr<!emitc.opaque<"XAie_DevInst">>) {
+      %t = "routinghw.tilecreate"() {row = 2 : i32, col = 0 : i32, comments = "ctrltest"} : () -> i32
+      %o = "routinghw.connectpktstreamswitchport"(%t) {
+        receiveslavedirection = "SOUTH", receiveslaveportidx = 0 : i32,
+        receiveslavepktid = 3 : i32, receiveslavepkttype = 0 : i32,
+        localdmadirection = "NONE", localdmaportidx = 0 : i32,
+        localdmapktid = 0 : i32, localdmapkttype = 0 : i32,
+        forwardmasterdirection = "NONE", forwardmasterportidx = 0 : i32,
+        localsinkport = ")MLIR" +
+                     localsinkport + R"MLIR("
+      } : (i32) -> i32
+      return
+    }
+    )MLIR";
+
+    auto module = mlir::parseSourceString<mlir::ModuleOp>(ir, &ctx);
+    if (!module) {
+        llvm::errs() << "[ctrlwrite] failed to parse test IR\n";
+        return false;
+    }
+
+    RoutingTopology rtopology(g_aieGen);
+    mlir::PassManager pm(&ctx);
+    pm.addPass(std::make_unique<RoutingHWLowerPass>(rtopology));
+    if (failed(pm.run(*module))) {
+        llvm::errs() << "[ctrlwrite] RoutingHWLowerPass failed\n";
+        return false;
+    }
+
+    llvm::raw_string_ostream os(emitted);
+    if (failed(mlir::emitc::translateToCpp(*module, os))) {
+        llvm::errs() << "[ctrlwrite] translateToCpp failed\n";
+        return false;
+    }
+    os.flush();
+    return true;
+}
+
+static void testControlPacketCtrlSink() {
+    std::cout << "=== Control-packet CTRL-sink lowering test ===" << std::endl;
+    bool allPass = true;
+
+    // CTRL sink: must emit a CTRL master enable with the header preserved.
+    std::string ctrlOut;
+    if (!lowerCtrlSinkAndEmit("CTRL", ctrlOut)) {
+        std::cout << "  CTRL lowering: FAIL (pipeline error)" << std::endl;
+        allPass = false;
+    } else {
+        bool hasMstr = ctrlOut.find("XAie_StrmPktSwMstrPortEnable") != std::string::npos;
+        bool hasCtrl = ctrlOut.find("CTRL") != std::string::npos;
+        bool preserves = ctrlOut.find("XAIE_SS_PKT_DONOT_DROP_HEADER") != std::string::npos;
+        bool noDrop = ctrlOut.find("XAIE_SS_PKT_DROP_HEADER") == std::string::npos;
+        std::cout << "  CTRL master enable emitted: " << (hasMstr ? "PASS" : "FAIL") << std::endl;
+        std::cout << "  CTRL port targeted:         " << (hasCtrl ? "PASS" : "FAIL") << std::endl;
+        std::cout << "  header preserved:           " << (preserves ? "PASS" : "FAIL") << std::endl;
+        std::cout << "  header not dropped:         " << (noDrop ? "PASS" : "FAIL") << std::endl;
+        allPass &= (hasMstr && hasCtrl && preserves && noDrop);
+    }
+
+    // DMA sink (default): must NOT target CTRL; backward-compatibility check.
+    std::string dmaOut;
+    if (!lowerCtrlSinkAndEmit("DMA", dmaOut)) {
+        std::cout << "  DMA lowering: FAIL (pipeline error)" << std::endl;
+        allPass = false;
+    } else {
+        bool noCtrl = dmaOut.find("CTRL") == std::string::npos;
+        std::cout << "  DMA sink does not target CTRL: " << (noCtrl ? "PASS" : "FAIL") << std::endl;
+        allPass &= noCtrl;
+    }
+
+    std::cout << "=== Control-packet CTRL-sink Test " << (allPass ? "PASS" : "FAIL") << " ===" << std::endl;
+}
+
 int main(int argc, char* argv[]) {
     // Parse --gen and --output-pp-depth arguments from anywhere in argv
     for (int i = 1; i < argc; ++i) {
@@ -2360,6 +2454,9 @@ int main(int argc, char* argv[]) {
         } else if (arg == "readtiling") {
             std::cout << "Executing readGemmTilingScalars test..." << std::endl;
             testReadGemmTilingScalars();
+        } else if (arg == "ctrlwrite") {
+            std::cout << "Executing control-packet CTRL-sink test..." << std::endl;
+            testControlPacketCtrlSink();
         } else {
             std::cout << "Invalid argument. Please use hw, test, dfschedule, dmaphw, conv2d, conv2d_spatial, "
                          "dilated, pool, "

@@ -351,7 +351,7 @@ def setup_first_connection(nonreboot=False):
     print(f"[Connection 1] Connecting to {host}...")
 
     # Start SSH with X forwarding
-    child = pexpect.spawn(f"ssh -X {host}", encoding='utf-8', timeout=60)
+    child = pexpect.spawn(f"ssh -X {host}", encoding='utf-8', codec_errors='replace', timeout=60)
     child.logfile_read = sys.stdout
 
     # Wait for shell prompt
@@ -474,7 +474,7 @@ def setup_second_connection():
     # connect com0), so it needs no X GUI. Dropping -X also avoids the tcsh
     # login-script X11 setup (Xinventory/xauth), which could intermittently
     # stall a second concurrent -X session and hang the prompt wait below.
-    child = pexpect.spawn(f"ssh {host}", encoding='utf-8', timeout=60)
+    child = pexpect.spawn(f"ssh {host}", encoding='utf-8', codec_errors='replace', timeout=60)
     # Mirror connection 1 so this connection's raw output is visible; otherwise a
     # prompt-wait hang shows nothing after "waiting for shell prompt".
     child.logfile_read = sys.stdout

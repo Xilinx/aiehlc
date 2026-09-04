@@ -44,7 +44,9 @@ class MacroResolver:
     def _eval_cond(self, expr):
         e = expr.strip()
         for name, val in self.defs.items():
-            e = re.sub(r"\b%s\b" % re.escape(name), str(val), e)
+            # Function replacement so macro bodies with backslashes or \g refs
+            # (e.g. multi-line BENCH defines) are substituted literally.
+            e = re.sub(r"\b%s\b" % re.escape(name), lambda _m, v=str(val): v, e)
         e = re.sub(r"\b[A-Za-z_]\w*\b", "0", e)
         try:
             return bool(eval(e, {"__builtins__": {}}, {}))
@@ -59,6 +61,16 @@ class MacroResolver:
             s = line.strip()
             m = re.match(r"#\s*(ifdef|ifndef|if|elif|else|endif)\b(.*)", s)
             if not m:
+                # Honor inline #define/#undef in active regions so a later
+                # #ifdef of an in-file-defined macro (e.g. the controlperf
+                # `#define _CONTROL_WRITE_TEST_` guard) resolves correctly.
+                dm = re.match(r"#\s*(define|undef)\s+(\w+)(.*)", s)
+                if dm and active():
+                    if dm.group(1) == "define":
+                        body = dm.group(3).strip()
+                        self.defs[dm.group(2)] = body if body else 1
+                    else:
+                        self.defs.pop(dm.group(2), None)
                 if active():
                     out.append(line)
                 continue
@@ -99,6 +111,18 @@ RE_ROUTE = re.compile(
     r"XAie_Route\s*\([^,]+,\s*[^,]+,\s*XAie_TileLoc\s*\(([^,]+),([^)]+)\)\s*,"
     r"\s*XAie_TileLoc\s*\(([^,]+),([^)]+)\)", re.DOTALL)
 
+# Control-packet send: a __Runtime_CtrlInstance designated-initializer block, or a
+# composite __Runtime_ctrl_read_target / __Runtime_ctrl_push_target call. Both are
+# same-column (dest_col == shim_col); a send reduces to (shim_col, dest_row,
+# resp_words). The struct body may span many lines (DOTALL); the call form gives
+# shim_col/dest_col/dest_row as positional args 2/3/4.
+RE_CTRL_STRUCT = re.compile(
+    r"__Runtime_CtrlInstance\s+\w+\s*=\s*\{(.*?)\}", re.DOTALL)
+RE_CTRL_FIELD = re.compile(r"\.(\w+)\s*=\s*([^,}]+)")
+RE_CTRL_CALL = re.compile(
+    r"__Runtime_ctrl_(?:read|push)_target\s*\(\s*[^,]+,\s*"
+    r"([^,]+),\s*([^,]+),\s*([^,]+),")
+
 
 def collect_defines(src):
     """Object-like #define NAME body -> {name: body}."""
@@ -117,6 +141,44 @@ def resolve_tileloc(col_expr, row_expr, defs):
     return (c, r)
 
 
+def _ctrl_int(expr, defs, default=None):
+    """eval_int with C integer-suffix stripping (0u/3u/0x1000u) and a fallback,
+    for control-packet field exprs. eval_int rejects any [A-Za-z_], so the u/l
+    suffix on unsigned literals must be removed first (scoped here, not in the
+    shared eval_int). Only numeric literals are stripped, so identifiers like
+    _rspcap / RAW_BD_SLOT still fail to fold and take the default."""
+    cleaned = re.sub(r"\b(0[xX][0-9a-fA-F]+|\d+)[uUlL]+\b", r"\1", expr.strip())
+    v = eval_int(cleaned, defs)
+    return default if v is None else v
+
+
+def extract_ctrl_sends(active, defs):
+    """Reduce every control-packet send in @active to a same-column send dict
+    {shim_col, dest_row, resp_words}, deduped by (shim_col, dest_row). Values fold
+    through @defs; resp_words defaults to 1 when unresolvable. Sends whose shim_col
+    or dest_row cannot be resolved are skipped (mirrors tile-loc resolution)."""
+    sends, seen = [], set()
+
+    def add(shim_col, dest_row, resp_words):
+        if shim_col is None or dest_row is None:
+            return
+        key = (shim_col, dest_row)
+        if key in seen:
+            return
+        seen.add(key)
+        sends.append({"shim_col": shim_col, "dest_row": dest_row,
+                      "resp_words": resp_words if resp_words else 1})
+
+    for m in RE_CTRL_STRUCT.finditer(active):
+        fields = {k: v for k, v in RE_CTRL_FIELD.findall(m.group(1))}
+        add(_ctrl_int(fields.get("shim_col", ""), defs),
+            _ctrl_int(fields.get("dest_row", ""), defs),
+            _ctrl_int(fields.get("resp_words", "1"), defs, default=1))
+    for m in RE_CTRL_CALL.finditer(active):
+        add(_ctrl_int(m.group(1), defs), _ctrl_int(m.group(3), defs), 1)
+    return sends
+
+
 def strip_comments(src):
     """Drop C block/line comments so inline /*src=*/ notes inside XAie call
     argument lists do not break the tile-loc regexes."""
@@ -125,7 +187,9 @@ def strip_comments(src):
     return src
 
 
-RE_XAIE_CALL = re.compile(r"XAie_(LoadElfMem|MoveData\w+|Route)\b")
+RE_XAIE_CALL = re.compile(
+    r"(XAie_(LoadElfMem|MoveData\w+|Route)|__Runtime_ctrl_setup_routing"
+    r"|__Runtime_ctrl_(read|push)_target)\b")
 RE_FUNC_HDR = re.compile(r"([A-Za-z_]\w*)\s*\([^;]*\)\s*\{?\s*$")
 
 
@@ -165,12 +229,13 @@ def extract_model(raw_src, aie_gen, aiesim):
 
     tiles, seen = [], set()
 
-    def add_tile(loc):
+    def add_tile(loc, ttype=None):
         if loc is None or loc in seen:
             return
         seen.add(loc)
-        tiles.append({"col": loc[0], "row": loc[1],
-                      "type": "shim" if loc[1] == 0 else "core"})
+        if ttype is None:
+            ttype = "shim" if loc[1] == 0 else "core"
+        tiles.append({"col": loc[0], "row": loc[1], "type": ttype})
 
     kernel_placements = {}
     for km in RE_LOADELF.finditer(active):
@@ -214,8 +279,30 @@ def extract_model(raw_src, aie_gen, aiesim):
         if (src, dst) in covered:
             continue
 
+    for s in extract_ctrl_sends(active, defs):
+        col, drow = s["shim_col"], s["dest_row"]
+        length = s["resp_words"] * 4
+        for r in range(0, drow + 1):
+            add_tile((col, r), ctrl_tile_type(r, aie_gen))
+        shim, dst = (col, 0), (col, drow)
+        flows.append({"src": shim, "dst": dst, "direction": "S2MM", "len": length})
+        flows.append({"src": dst, "dst": shim, "direction": "MM2S", "len": length})
+
     return {"tiles": tiles, "kernel_placements": kernel_placements,
             "flows": flows, "entry_fn": find_entry_fn(active)}
+
+
+# AIE-core row start per generation (row 0 shim; 0<row<start memtile; row>=start
+# core). Mirrors the C rt_port_evt_base geometry and aiediag.AIE_TILE_ROW_START:
+# gen5/AIE2PS have 2 memtile rows (cores from 3), gen2 one (from 2), gen1 none.
+_CORE_ROW_START = {1: 1, 2: 2, 5: 3}
+
+
+def ctrl_tile_type(row, aie_gen):
+    if row == 0:
+        return "shim"
+    start = _CORE_ROW_START.get(int(aie_gen), 3)
+    return "memtile" if row < start else "core"
 
 
 def hw_gen_str(g):

@@ -116,7 +116,11 @@ enum class ReservationStrategy {
 // stream type
 enum class StreamType {
     FORWARDONLY,
-    BROADCAST
+    BROADCAST,
+    // Control-packet flow: shim->tile(s) carrying config/register writes that
+    // terminate at each target tile's CTRL master stream-switch port (header
+    // preserved). Uses the same packet fan-out engine as BROADCAST.
+    CONTROL
 };
 class RoutingTile {
 public:

@@ -63,6 +63,28 @@ def routing_creatbroadcast : routingop<"routingcreatebroadcast"> {
 	let assemblyFormat = "$io `,` $tilearray `:` type($io) `,` type($tilearray)  attr-dict`->` type($output)";
 }
 
+def routing_routingcontrolwrite : routingop<"routingcontrolwrite"> {
+	let summary = "routingcontrolwrite";
+	let cppNamespace = "routing";
+	let description = [{
+		High-level intent op: deliver control/config register writes (e.g.
+		kernel-ELF load or generic register config) to a set of target tiles
+		via stream-switch control packets. Lowered to a control-marked dmap
+		flow that terminates at each target tile's CTRL port. `broadcast`
+		selects whether all targets receive the same writes (shared stream id)
+		or are addressed individually.
+	}];
+
+	let arguments = (ins
+		dataio:$io,
+		tilearray:$tilearray,
+		DefaultValuedAttr<BoolAttr, "true">:$broadcast);
+
+	let results = (outs
+		I32:$output);
+	let assemblyFormat = "$io `,` $tilearray `:` type($io) `,` type($tilearray) attr-dict `->` type($output)";
+}
+
 def routing_movedatabyio : routingop<"routingmovedatabyio"> {
 	let summary = "movedatabyio";
 	let cppNamespace = "routing";

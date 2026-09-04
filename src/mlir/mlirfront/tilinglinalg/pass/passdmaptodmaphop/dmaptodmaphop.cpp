@@ -462,6 +462,30 @@ static LogicalResult lowerDataMovementOp(Operation *op, ConversionPatternRewrite
     // pkt_id is now stored per-port on each corePortOut{i} (dmapktid attribute)
     auto path = rewriter.create<dmaphop::create_path>(loc, hops, produceArray, consumeArray, rewriter.getArrayAttr({}));
 
+    // Propagate the control-packet marker from the source stream onto the path so
+    // passdmaphoptoroutinghw can select the tile CTRL sink port (register/config
+    // write) instead of the default DMA S2MM sink. Absent marker -> normal flow.
+    auto hasControlMarker = [](Operation *o) -> bool {
+        return o && o->hasAttrOfType<mlir::BoolAttr>("control") &&
+               o->getAttrOfType<mlir::BoolAttr>("control").getValue();
+    };
+    bool pathIsControl = hasControlMarker(streamOp);
+    // For a memtile chain (createchainstream), the marker lives on the member
+    // createstream ops, so inspect them too.
+    if (!pathIsControl) {
+        if (auto chainStreamOp = dyn_cast_or_null<dmap::createchainstream>(streamOp)) {
+            for (Value s : chainStreamOp.getStreams()) {
+                if (hasControlMarker(s.getDefiningOp())) {
+                    pathIsControl = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (pathIsControl) {
+        path->setAttr("control", rewriter.getBoolAttr(true));
+    }
+
     // Replaced dmaphop.alloc_buffer with tensor.extract_slice on the data tensor
     SmallVector<Value, 4> coreBuffers;
     

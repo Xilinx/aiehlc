@@ -82,7 +82,18 @@ Regex-parses generated `aout/host.cc` XAie calls — `XAie_LoadElfMem` (kernel
 placement), `XAie_MoveDataExternal2Aie` → S2MM, `XAie_MoveDataAie2External` →
 MM2S, `XAie_Route` (connectivity) — into the schema `schedule_view.py` consumes.
 
+It also recognizes **control-packet routing** (`__Runtime_CtrlInstance` /
+`__Runtime_ctrl_setup_routing` / `__Runtime_ctrl_read_target` /
+`__Runtime_ctrl_push_target`): each same-column send `(shim_col, dest_row,
+resp_words)` emits the shim tile, the vertical pass-through tiles, and the dest
+tile (geometry-aware: shim / memtile / core by `AIE_GEN`), plus two flows —
+forward S2MM up (shim→dest) and return MM2S down (dest→shim). No kernel ELF ⇒
+`kernel_placements` stays empty. This lets `schedule_debug_server.py` open a
+debug GUI for a control-packet app that has only `host.cc` (no `Work/` tree).
+
 - `MacroResolver` selects live `#if/#ifdef` branch for `AIE_GEN`/`__AIESIM__`
+  and honors inline `#define`/`#undef` (so an in-file `#define _CONTROL_WRITE_TEST_`
+  guard followed by `#ifdef` keeps its block)
 - `strip_comments()` drops inline `/*src=*/` notes that break tile-loc regexes
 - Runtime BD/lock/port/packet → placeholders (`bd_id:"runtime"`, lock id `-1`)
 - Entry function `test_routing` (not `host_canonicalized`) → `host_entry_fn`
