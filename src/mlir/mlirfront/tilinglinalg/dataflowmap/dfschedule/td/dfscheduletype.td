@@ -80,6 +80,15 @@ def dfschedule_SyncBufferType : dfscheduleype<"SyncBuffer"> {
   let summary = "Sync buffer for inter-iteration control signals";
 }
 
+//=== Control-plane Fabric Type ===//
+// SSA handle to a configured control-packet row fabric (runtime
+// __Runtime_CtrlRowFabric). Produced by dfschedule.ctrl_plan_init and threaded
+// into dfschedule.group_reg_write so grouped register writes ride the fabric.
+def dfschedule_CtrlFabricType : dfscheduleype<"CtrlFabric"> {
+  let mnemonic = "ctrl_fabric";
+  let summary = "Handle to a configured control-packet broadcast/row-multicast fabric";
+}
+
 //=== Window Types (for kernel I/O abstraction) ===//
 def dfschedule_InputWindowType : dfscheduleype<"InputWindow"> {
   let mnemonic = "input_window";

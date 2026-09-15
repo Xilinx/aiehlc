@@ -18,6 +18,7 @@
 #include "passdmaphoptoroutinghw.h"
 #include "passroutingprovenancemap.h"
 #include "passroutingresourcemap.h"
+#include "passgroupregwrite.h"
 #include "passschedulecanonicalize.h"
 #include "passschedulesequentialop.h"
 #include "passwaitmerge.h"
@@ -695,6 +696,14 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
     {
         auto hwRes = makeResource(aieGen);
         ResourceMgr::init(std::move(hwRes));
+        // Control-plane resource reservation (pkt-ids/arbiters/slots excluded from
+        // routing/scheduling) is OPT-IN via `#pragma control_plan_op_control_packet`
+        // (module attr set in aiehlc.cc). Single source of truth for the reserved
+        // resources is the reservation table (aie_runtime_resource.c).
+        if (auto cpAttr = module->getAttrOfType<mlir::IntegerAttr>("routing.control_plan_op_control_packet");
+            cpAttr && cpAttr.getInt() != 0) {
+            ResourceMgr::instance()->reserveControlPlaneResources(__Runtime_res_gen_from_name(aieGen.c_str()));
+        }
     }
 
     // Early memory check: validate that per-tile buffer requirements fit in tile data memory
@@ -764,6 +773,23 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
     if (!resolveTraceParameterSpecs(hostModule, portVarNames, tensors, traceTiles)) {
         llvm::errs() << "[TilingLinalg] ERROR: invalid #pragma aie_trace mem-DMA selection.\n";
         return false;
+    }
+
+    // Coalesce identical per-tile lock-init register writes into control-packet
+    // group writes (broadcast / row-multicast). Must run before DfscheduleToApiPass
+    // so the folded triples (module attr dfschedule.grouped_lock_inits) suppress
+    // the individual XAie_LockSetValue emission there. Opt-in only: gated on the
+    // routing.control_plan_group_reg_write module attr, published by aiehlc when
+    // the user writes #pragma CONTROL_PLAN_GROUP_REG_WRITE. Without it, lock inits
+    // are emitted as individual register writes.
+    auto grwAttr = module->getAttrOfType<mlir::IntegerAttr>("routing.control_plan_group_reg_write");
+    if (grwAttr && grwAttr.getInt() != 0) {
+        if (!runPipelineSinglePass(ctx, hostModule, std::make_unique<mlir::GroupRegWritePass>(), irDir, stage,
+                                   "GroupRegWritePass"))
+            return false;
+    } else {
+        llvm::errs() << "[TilingLinalg] GroupRegWritePass skipped (enable with "
+                        "#pragma CONTROL_PLAN_GROUP_REG_WRITE).\n";
     }
 
     if (!runPipelineSinglePass(ctx, hostModule,

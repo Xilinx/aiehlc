@@ -1268,6 +1268,7 @@ import switch_reconstruct  # noqa: E402
 import live_scan_summary  # noqa: E402
 import schedule_view  # noqa: E402  (render_html for server-side app injection)
 import work2provenance  # noqa: E402  (auto-generate worklocal/ from Work/)
+import controlpan_pmap  # noqa: E402  (parse CONTROLPAN-PMAP provenance lines)
 
 # pexpect drives the interactive ssh -> systest -> xsdb -> hw_server recovery
 # session (see DebugState.start_hwserver_async). Optional: without it the auto-start
@@ -5333,6 +5334,30 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(res)
         elif u.path == "/timeline":
             self._send_json(st.launch_timeline())
+        elif u.path == "/ctrlplan/load":
+            try:
+                with open(st.applog, "r", errors="replace") as f:
+                    text = f.read()
+            except OSError as e:
+                self._send_json({"error": f"cannot read applog: {e}",
+                                 "ports": [], "edges": [], "count": 0})
+                return
+            self._send_json(controlpan_pmap.parse(text))
+        elif u.path == "/ctrlplan/tile":
+            try:
+                with open(st.applog, "r", errors="replace") as f:
+                    text = f.read()
+            except OSError as e:
+                self._send_json({"error": f"cannot read applog: {e}",
+                                 "dirs": []})
+                return
+            try:
+                col = int(body.get("col"))
+                row = int(body.get("row"))
+            except (TypeError, ValueError):
+                self._send_json({"error": "bad col/row", "dirs": []})
+                return
+            self._send_json(controlpan_pmap.tile_switch_view(text, col, row))
         elif u.path == "/sim/run":
             self._send_json(st.start_sim())
         elif u.path == "/sim/stop":

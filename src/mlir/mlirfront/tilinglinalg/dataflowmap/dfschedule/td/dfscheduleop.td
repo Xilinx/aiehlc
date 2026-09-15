@@ -229,6 +229,61 @@ def dfschedule_LoadKernelGroupOp : dfscheduleop<"config.load_kernel_group"> {
 }
 
 // ============================================================================
+// CONTROL-PLANE GROUP REGISTER-WRITE OPERATIONS
+// ============================================================================
+// These ops coalesce identical per-tile register writes (emitted individually
+// today by BD/lock lowering) into hardware control-packet group writes: one
+// shim-DMA push fans out to N tiles through the stream switch. The coalescing
+// decision is made by GroupRegWritePass; lowering (DfscheduleToApiPass) maps
+// them onto the existing control-plane runtime.
+
+// One-shot control fabric configuration. Lowers to __Runtime_ctrl_plan_init.
+// Produces an SSA fabric handle threaded to every group_reg_write.
+def dfschedule_CtrlPlanInitOp : dfscheduleop<"ctrl_plan_init"> {
+  let summary = "Configure the control-packet row fabric once (broadcast/row-multicast)";
+  let description = [{
+    Sets up the shared control spine + per-row EAST chains used by grouped
+    register writes. `rows` is an array of dictionary attrs, each carrying
+    row/col_lo/col_hi describing one configured chain (ordered bottom-up).
+    It lowers to __Runtime_ctrl_plan_init and yields the fabric handle.
+  }];
+  let arguments = (ins
+    I32Attr:$shim_col,
+    I32Attr:$ctrl_id,
+    I32Attr:$resp_s2mm_ch,
+    ArrayAttr:$rows  // array of DictionaryAttr {row, col_lo, col_hi}
+  );
+  let results = (outs dfschedule_CtrlFabricType:$fabric);
+  let assemblyFormat = "attr-dict `:` type($fabric)";
+}
+
+// A coalesced register write delivered by control packet to a group of tiles.
+// kind = "broadcast" -> __Runtime_ctrl_row_broadcast_write (whole array)
+// kind = "row"       -> __Runtime_ctrl_row_whole_row_write (all cols of $row)
+def dfschedule_GroupRegWriteOp : dfscheduleop<"group_reg_write"> {
+  let summary = "Coalesced control-packet register write to a group of tiles";
+  let description = [{
+    Writes `data` (one or more 32-bit words) to tile-local byte address
+    `tile_addr` on every tile of the addressed group. `kind` selects the
+    delivery scope: "broadcast" (all configured tiles) or "row" (all columns of
+    `row`). Fire-and-forget over the control fabric produced by
+    dfschedule.ctrl_plan_init.
+  }];
+  let arguments = (ins
+    dfschedule_CtrlFabricType:$fabric,
+    StrAttr:$kind,                              // "broadcast" | "row"
+    DefaultValuedAttr<I32Attr, "-1">:$row,      // target row for kind="row"
+    I32Attr:$tile_addr,                         // tile-local byte address
+    I32ArrayAttr:$data,                         // words to write
+    I32Attr:$bd_id,
+    I32Attr:$mm2s_ch,
+    DefaultValuedAttr<I32Attr, "0">:$log
+  );
+  let results = (outs);
+  let assemblyFormat = "`(` $fabric `)` attr-dict `:` `(` type($fabric) `)`";
+}
+
+// ============================================================================
 // SCHEDULE PHASE OPERATIONS
 // ============================================================================
 

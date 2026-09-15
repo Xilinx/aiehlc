@@ -91,6 +91,23 @@ forward S2MM up (shim→dest) and return MM2S down (dest→shim). No kernel ELF 
 `kernel_placements` stays empty. This lets `schedule_debug_server.py` open a
 debug GUI for a control-packet app that has only `host.cc` (no `Work/` tree).
 
+It also recognizes the **row-control fabric** (`__Runtime_ctrl_plan_init(f, dev,
+shim_col, resp_s2mm_ch, ctrl_id, rows, nrows)` configures the whole fabric in one
+shot; `rows` is a `__Runtime_CtrlRowChain[]` of `{row, col_lo, col_hi}` triples, one
+EAST chain per entry). `extract_ctrl_rows` returns a **union** of EVERY fabric in
+the file (a list of `{shim_col, rows}`, grouped per spine column): it reads
+`shim_col` (arg3) and the rows-array identifier (arg6) from each `plan_init` call
+(`RE_PLAN_INIT`), pairs it with the nearest PRECEDING `__Runtime_CtrlRowChain
+<name>[] = {...}` declaration of that name (`RE_ROW_ARRAY`, so same-named `kRows`
+arrays in different functions stay distinct), and folds each `{row, col_lo,
+col_hi}` triple (`RE_ROW_TRIPLE`, deduped by `(shim_col,row,col_lo,col_hi)`) —
+resolving `#define` constants via `_ctrl_int`. Because the static parser can't
+know which fabric `main()` runs, unioning all of them means a file with several
+`plan_init` functions (e.g. a 2-row demo + a 4×4 demo) renders the combined
+topology. It then enumerates, per spine column, the spine (shim + vertical
+pass-through up to the highest configured row) and every chain tile, and draws a
+forward-up + return-down flow per chain.
+
 - `MacroResolver` selects live `#if/#ifdef` branch for `AIE_GEN`/`__AIESIM__`
   and honors inline `#define`/`#undef` (so an in-file `#define _CONTROL_WRITE_TEST_`
   guard followed by `#ifdef` keeps its block)
@@ -259,6 +276,69 @@ index; `linespans='SL'` for line-independent cache. Auth-gated on wide bind.
 - **Whole-flow hover:** `dmApplyFlowHover(fi)` highlights all segments + shmem for flow index
 - **Tile colors:** muted `--tile-*-fill/stroke` (Grid keeps original `--shim`/`--core`)
 - **Routing-only tiles:** `selectRoutingTile()` / `buildRoutingTileHtml()`
+- **Control-plan overlay (CONTROLPAN-PMAP):** the **Load control plan** button
+  (`#dmLoadCtrlPlan`) POSTs `/ctrlplan/load`; the server reads `st.applog`, runs
+  `controlpan_pmap.parse(text)` (module `controlpan_pmap.py` — parses
+  `CONTROLPAN-PMAP col=.. row=.. port=.. idx=.. dir=fwd|ret ms=master|slave id=..
+  sw=pkt|circuit slot=..` lines into `{ports, edges, count}`, pairing each master
+  port with the opposite-type slave on the neighbor tile; `sw`/`slot` are optional
+  and default to `circuit`/`-1` for legacy lines). Each edge carries `sw`, `slot`,
+  `from_idx` (master idx) and `to_idx` (slave idx). The frontend stores `j.edges`
+  in `ctrlPlanEdges` and `j.ports` in `ctrlPlanPorts`; `drawCtrlPlanOverlay(svg,
+  cx, cy)` draws per-hop edges (pink=fwd `#e91e63`, cyan=ret `#00bcd4`; `pkt`=solid,
+  `circuit`=dashed) with an arrowhead, a midpoint label `portN->M sw [sN]`
+  (`.ctrlplan-lbl`) and a hover `<title>` full detail, plus a ring on each `CTRL`
+  tile (`.ctrlplan-ctrl` consume / `.ctrlplan-ctrl-emit` emit). Toggle-able via
+  `#dmCtrlPlanToggle`; `dmClearAll()` resets both `ctrlPlanEdges` and
+  `ctrlPlanPorts`. **Tile stream-switch detail (Info panel card):** once a plan is
+  loaded, the device-map tile click handler checks `ctrlPlanPorts` for that
+  `(col,row)` and, if present, calls `showTileSwitchDetail(tc, tr)` (and returns,
+  so it does not also mutate the selection). That pushes a keyed `switch:` card
+  into the right-side Info panel (`panelItems.set(panelKey('switch',...))` +
+  `panelSync()`, replacing any prior switch card); the card's `wireBody` POSTs
+  `/ctrlplan/tile {col,row}`, which returns
+  `controlpan_pmap.tile_switch_view(text, col, row)` =
+  `{col, row, groups:[{dir, id, slot, sw, arb, msel, mask, slaves:[{port,idx}],
+  masters:[{port,idx,dest,arb,mselen}]}]}` (ports on the tile grouped by
+  `(dir,id)`: slaves=switch inputs, masters=fan-out outputs, each master
+  annotated with its neighbor `(c,r) PORT` dest from `parse_edges`,
+  `CTRL (local endpoint)` for a CTRL master, or `—` if unpaired; de-duped by
+  `(port,idx)`, group `slot` taken from the packet slave slot config, else the
+  largest master `slot>=0`). **Per AIE stream-switch packet routing the
+  packet-routing params live on the SLOT (configured on the slave port), not the
+  physical slave port** — so they are surfaced on the GROUP: a slot carries
+  `arb` (arbiter), `msel` (select) and `mask` (id match mask), captured from the
+  params-bearing slave line (`arb>=0`; `-1` for circuit/legacy). Each master
+  carries `arb` (arbiter) and `mselen` — a **bitmask** of accepted `msel` values
+  (the runtime emits it in the `msel=..` field of a master line). A master
+  receives this slot's packets iff `m.arb==g.arb && ((m.mselen>>g.msel)&1)`;
+  multiple matching masters on one arbiter = a legitimate multicast.
+  `swDetailFill` fetches the groups and `swDetailSvg` draws an enlarged
+  natural-size SVG (`#swd-host` scrolls if narrower): three columns
+  slave→`slot N (sw)`→master with bezier links (`.swd-slave` `#4a7fd4` /
+  `.swd-slot` `#ffb300` / `.swd-master` `#e91e63`), one band per group. The SLOT
+  box is sub-labeled `.swd-param` `arb A · msel M · mask 0xHH` (packet groups
+  only); each master is sub-labeled `arb A · mselen 0xHH` (with a `✗` if it does
+  not match this slot). A slot→master link is drawn only for matching masters
+  (circuit groups connect all). The clicked tile is amber ring-highlighted
+  (`dmSetSwitchHi`/`dmApplySwitchHi`, cleared on normal select or card close).
+  Empty tiles render a `.swd-empty` message. Remove the card via its panel-tab ×. **Enabling emission:** the C runtime emits the lines when
+  `AIE_CTRL_PMAP=1` is in the environment (auto-gate, resolved once via `getenv`)
+  or `__Runtime_ctrl_pmap_enable(1)` is called before the first `aie_ctrl*`
+  `setup_routing` / `row_add`. Regenerate the applog with `AIE_CTRL_PMAP=1` set
+  for the board run to populate the overlay.
+  **Return-path emit (row fabric):** the single-tile control path
+  (`rt_ctrl_route_setup_col`) always emitted both `dir=fwd` and `dir=ret` ports,
+  but the row-control fabric originally instrumented only the forward path
+  (`rt_ctrl_row_shim_entry` + `__Runtime_ctrl_row_emit`, all `fwd`) — its return
+  route builder `rt_ctrl_row_return_setup` (`aie_runtime.c`) emitted zero pmap
+  lines, so a `unicast_read`'s core→shim back route never reached the overlay.
+  It now emits one `dir=ret` port pair per return step (target CTRL slave + return
+  master, WEST pass-throughs, head EAST→SOUTH VRET turn, vertical VRET drain, shim
+  NORTH→SOUTH S2MM), mirroring the single-tile convention, so the cyan return
+  edges render. Note fire-and-forget `broadcast_write`/`unicast_write` program no
+  return route at all (only `unicast_read` calls `rt_ctrl_row_return_setup`), so
+  `ret` edges appear only when the app issues a control-packet read.
 
 ### Grid view
 

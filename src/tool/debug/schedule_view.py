@@ -2900,6 +2900,34 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               display:flex; align-items:center; gap:4px; user-select:none; }
   #dmSwWrap:hover { color:rgba(228,228,228,.9); }
   #dmSwWrap input { cursor:pointer; margin:0; }
+  #dmLoadCtrlPlan { position:absolute; top:8px; right:96px; font-size:10px; padding:3px 8px;
+                    border:1px solid rgba(228,228,228,.2); background:rgba(228,228,228,.07);
+                    color:rgba(228,228,228,.7); border-radius:4px; cursor:pointer; z-index:10; }
+  #dmLoadCtrlPlan:hover:not(:disabled) { background:rgba(228,228,228,.13); color:rgba(228,228,228,.95); }
+  #dmLoadCtrlPlan:disabled { opacity:.38; cursor:not-allowed; }
+  #dmCtrlPlanWrap { position:absolute; top:58px; right:8px; font-size:10px;
+                    color:rgba(228,228,228,.6); cursor:pointer; z-index:10;
+                    display:flex; align-items:center; gap:4px; user-select:none; }
+  #dmCtrlPlanWrap input { cursor:pointer; margin:0; }
+  .ctrlplan-edge { stroke:#e91e63; stroke-width:2; opacity:.9; }
+  .ctrlplan-ret { stroke:#00bcd4; }
+  .ctrlplan-ctrl { fill:none; stroke:#ffb300; stroke-width:2; opacity:.9; pointer-events:none; }
+  .ctrlplan-ctrl-emit { stroke:#00bcd4; }
+  /* Stream-switch connection detail (rendered into the right-side Info panel by
+     clicking a tile after a control plan is loaded). Draws slave inputs -> slot
+     node -> master fan-out. The SVG renders at its natural size so text stays
+     crisp and legible; #swd-host scrolls horizontally when the panel is narrower. */
+  #swd-host { overflow-x:auto; }
+  #swd-host .swd-svg { display:block; }
+  .swd-empty { color:#b0bec5; font-size:12px; padding:8px 2px; }
+  .swd-slave { fill:#4a7fd4; }
+  .swd-slot  { fill:#ffb300; }
+  .swd-master{ fill:#e91e63; }
+  .swd-lbl   { font-size:12px; fill:#e4e4e4; font-family:monospace; }
+  .swd-dest  { font-size:11px; fill:#b0bec5; font-family:monospace; }
+  .swd-param { font-size:10px; fill:#90a4ae; font-family:monospace; }
+  .swd-link  { stroke:#8a90a0; stroke-width:1.5; fill:none; }
+  .swd-dirhdr{ font-size:12px; fill:#ffd54f; font-family:monospace; font-weight:bold; }
   #devmap-legend { display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; font-size:10px;
                    color:rgba(228,228,228,.35); align-items:center; }
   .dml-item { display:flex; align-items:center; gap:4px; }
@@ -3326,6 +3354,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="devmap-vp">
       <button id="devmap-reset" onclick="dmReset(true)">Reset view</button>
       <label id="dmSwWrap" title="show/hide CCT/PKT routing config inside tiles"><input type="checkbox" id="dmSwToggle" checked> routing info</label>
+      <button id="dmLoadCtrlPlan" title="parse applog CONTROLPAN-PMAP lines and overlay the control-plan routing">Load control plan</button>
+      <label id="dmCtrlPlanWrap" title="show/hide the parsed control-plan overlay" hidden><input type="checkbox" id="dmCtrlPlanToggle" checked> ctrl plan</label>
       <div id="devmap-spacehint">scroll to zoom · click tile to inspect · right-click tile for routing/isolate menu · click stream to isolate</div>
       <div id="devmap-canvas"><svg id="devmap-svg"></svg></div>
       <div id="devmap-hint">col 0–3 · row 0 (shim) at bottom</div>
@@ -5472,6 +5502,11 @@ function dmClearAll(){
     srRenderResults();
     if (document.getElementById('devmap').classList.contains('show')) buildDeviceMap();
   }
+  ctrlPlanEdges = [];
+  ctrlPlanPorts = [];
+  const _cpw = document.getElementById('dmCtrlPlanWrap');
+  if (_cpw) _cpw.hidden = true;
+  if (document.getElementById('devmap')?.classList.contains('show')) buildDeviceMap();
   dmSyncClearBtn();
 }
 
@@ -5942,6 +5977,249 @@ function dmMoveTip(e){
   dmTooltipEl.style.left=lx+'px'; dmTooltipEl.style.top=ly+'px';
 }
 
+// CONTROLPAN-PMAP overlay: control-plan routing parsed from the applog by
+// /ctrlplan/load. Drawn on top of the data-flow edges, toggle-able via
+// #dmCtrlPlanToggle. Each edge: {from:[c,r], to:[c,r], dir, id, port, sw, slot,
+// from_idx, to_idx}. Each port: {col,row,port,idx,dir,ms,id,sw,slot}.
+// Style: fwd = pink, ret = cyan; circuit = dashed, pkt = solid. Forward and
+// return share the spine column, so each direction is drawn in its own
+// perpendicular lane. The overlay adds NO on-map text: each edge draws a line +
+// arrowhead and each CTRL port a ring, with all per-edge/per-port detail carried
+// in the hover <title> only (loading the plan must not clutter the map with
+// labels). CTRL rings: consume=fwd amber master / emit=ret cyan slave. Duplicate
+// routes (one per read) are de-duplicated via ctrlPlanUniq before drawing.
+// Loading the plan also turns off the data-flow SW routing rows (dmShowSW) so the
+// control plan replaces, not overlaps, the function-call routing analysis.
+let ctrlPlanEdges = [];
+let ctrlPlanPorts = [];
+// Device-map key ("col,row") of the tile whose stream-switch detail is open in
+// the Info panel, so it can be ring-highlighted and restored on the next click.
+let dmSwitchHiKey = null;
+
+function ctrlPlanTitle(svgEl, txt){
+  const t = document.createElementNS('http://www.w3.org/2000/svg','title');
+  t.textContent = txt; svgEl.appendChild(t);
+}
+
+// Dedup helper: the applog repeats identical routes (e.g. one route per read),
+// so collapse records that share every rendered field.
+function ctrlPlanUniq(items, keyer){
+  const seen=new Set(), out=[];
+  for(const it of items||[]){ const k=keyer(it); if(seen.has(k)) continue; seen.add(k); out.push(it); }
+  return out;
+}
+
+function drawCtrlPlanOverlay(svg, cx, cy){
+  if(!document.getElementById('dmCtrlPlanToggle')?.checked) return;
+  // Forward (request, pink) and return (response, cyan) share the vertical spine
+  // column, so draw each direction in its own perpendicular lane and annotate the
+  // master (emitting) and slave (receiving) endpoints, packet id, sw and slot.
+  const LANE=7;        // half-gap between the fwd and ret lanes (px)
+  const edges = ctrlPlanUniq(ctrlPlanEdges, e=>
+    e.dir+'|'+e.from+'|'+e.to+'|'+e.port+'|'+e.from_idx+'|'+e.to_idx+'|'+e.sw+'|'+e.slot+'|'+e.id);
+  for(const e of edges){
+    const ret = (e.dir==='ret');
+    const x1=cx(e.from[0]), y1=cy(e.from[1]), x2=cx(e.to[0]), y2=cy(e.to[1]);
+    const dx=x2-x1, dy=y2-y1, L=Math.hypot(dx,dy)||1, ux=dx/L, uy=dy/L;
+    // Canonicalize the perpendicular so it does NOT depend on travel direction:
+    // forward climbs the spine (up) while return drains it (down), so their raw
+    // direction vectors are opposite. Deriving px from the raw vector would flip
+    // the lane and cancel the opposite `off` sign, landing both on the same line.
+    // Fold the unit vector into a single half-plane first, then take perpendicular.
+    let cux=ux, cuy=uy;
+    if(cux<0 || (cux===0 && cuy<0)){ cux=-cux; cuy=-cuy; }
+    const px=-cuy, py=cux;               // direction-independent unit perpendicular
+    const off = ret ? LANE : -LANE;      // fwd/ret run in separate parallel lanes
+    const ox=px*off, oy=py*off;
+    const X1=x1+ox, Y1=y1+oy, X2=x2+ox, Y2=y2+oy;
+    const col = ret ? '#00bcd4' : '#e91e63';
+    const ln = svgN('line', {x1:X1, y1:Y1, x2:X2, y2:Y2,
+      class:'ctrlplan-edge '+(ret?'ctrlplan-ret':'')});
+    if(e.sw==='circuit') ln.setAttribute('stroke-dasharray','5 3');
+    ctrlPlanTitle(ln, e.dir.toUpperCase()+' '+e.port+' master['+e.from[0]+','+e.from[1]+'] idx'+
+      e.from_idx+'  ->  slave['+e.to[0]+','+e.to[1]+'] idx'+e.to_idx+
+      ' | '+e.sw+(e.slot>=0?(' slot='+e.slot):'')+' | pkt id='+e.id);
+    svg.appendChild(ln);
+    // Arrowhead near the destination end (points master -> slave).
+    const bx=X2-ux*15, by=Y2-uy*15, tx=X2-ux*8, ty=Y2-uy*8, w=4;
+    const head = svgN('path', {d:'M'+tx+','+ty+' L'+(bx-uy*w)+','+(by+ux*w)+
+      ' L'+(bx+uy*w)+','+(by-ux*w)+' Z', fill:col, stroke:'none'});
+    svg.appendChild(head);
+    // No on-map text: the master/slave role tags and midpoint id/slot label are
+    // intentionally omitted so loading the control plan adds no new text to the
+    // device map. Full per-edge detail stays available via the line's hover
+    // <title> (ctrlPlanTitle above).
+  }
+  // CTRL ports: tile-local consume (fwd request in, master) / emit (ret response
+  // out, slave). Offset the emit ring so a consume+emit on the same tile both show.
+  const ctrls = ctrlPlanUniq((ctrlPlanPorts||[]).filter(p=>p.port==='CTRL'),
+    p=>p.col+'|'+p.row+'|'+p.dir+'|'+p.ms+'|'+p.id+'|'+p.sw+'|'+p.slot);
+  for(const p of ctrls){
+    const emit = (p.dir==='ret');
+    const rx=cx(p.col)+(emit?9:-9), ry=cy(p.row);
+    const ring = svgN('circle', {cx:rx, cy:ry, r:12,
+      class:'ctrlplan-ctrl '+(emit?'ctrlplan-ctrl-emit':'')});
+    ctrlPlanTitle(ring, 'CTRL '+(emit?'emit (response out, slave)':'consume (request in, master)')+
+      ' tile('+p.col+','+p.row+') '+p.ms+' sw='+p.sw+(p.slot>=0?(' slot='+p.slot):'')+' pkt id='+p.id);
+    svg.appendChild(ring);
+    // No CTRL text label: detail lives in the ring's hover <title>.
+  }
+}
+
+async function loadCtrlPlan(){
+  const btn = document.getElementById('dmLoadCtrlPlan');
+  if(btn) btn.disabled = true;
+  try{
+    const j = await api('/ctrlplan/load', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    if(j.error){ alert('Load control plan: '+j.error); return; }
+    ctrlPlanEdges = j.edges || [];
+    ctrlPlanPorts = j.ports || [];
+    const wrap = document.getElementById('dmCtrlPlanWrap');
+    if(wrap) wrap.hidden = (ctrlPlanEdges.length===0 && ctrlPlanPorts.length===0);
+    const tog = document.getElementById('dmCtrlPlanToggle');
+    if(tog) tog.checked = true;
+    // Loading the control plan replaces the data-flow view: erase the old
+    // function-call SW routing rows (from DATA.comm_paths) so only the control
+    // plan is shown. Mirror the state in the #dmSwToggle checkbox.
+    dmShowSW = false;
+    const swTog = document.getElementById('dmSwToggle');
+    if(swTog) swTog.checked = false;
+    buildDeviceMap();
+  } finally { if(btn) btn.disabled = false; }
+}
+
+// Build the stream-switch SVG for one tile's control-plan, one section per
+// DIRECTION (fwd/ret). Left column = merged physical slave ports; middle column
+// = the packet slots each slave arms (a slave links to each of its slots); right
+// column = merged master ports. A slot->master link is drawn iff the master
+// pulls that slot (same arbiter and the slot's msel bit set in the master's
+// mselen); circuit slaves (no slots) link straight to the circuit master with
+// the matching id. Natural size; #swd-host scrolls if the panel is narrower.
+function swDetailSvg(dirs){
+  // The slot box carries the longest label ("slot N · pkt_id X · mask 0xY"), so
+  // it gets a wider width (SLOTW) and the master column is pushed right of it.
+  const BOXW=175, SLOTW=250, BOXH=24, ROWH=54, SECPAD=34;
+  const COLX={slave:20, slot:250, master:20+250+SLOTW+40};  // slave | slot(SLOTW) | master
+  const W=COLX.master+BOXW+20;
+  let y=24, svgParts=[];
+  const box=(x,yy,cls,txt,w)=>{ w=w||BOXW;
+    svgParts.push('<rect x="'+x+'" y="'+(yy-BOXH/2)+'" width="'+w+'" height="'+BOXH+'" rx="5" class="'+cls+'" opacity="0.9"/>');
+    svgParts.push('<text x="'+(x+9)+'" y="'+(yy+4)+'" class="swd-lbl">'+txt+'</text>');
+  };
+  const link=(x1,y1,x2,y2)=>svgParts.push('<path class="swd-link" d="M'+x1+','+y1+' C'+((x1+x2)/2)+','+y1+' '+((x1+x2)/2)+','+y2+' '+x2+','+y2+'"/>');
+  const esc=s=>String(s).replace(/[&<>]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
+  const hx=v=>'0x'+(v>>>0).toString(16);
+  const sub=(x,yy,txt)=>{ if(txt) svgParts.push('<text x="'+(x+9)+'" y="'+yy+'" class="swd-param">'+txt+'</text>'); };
+  dirs.forEach(d=>{
+    svgParts.push('<text x="'+COLX.slave+'" y="'+(y+4)+'" class="swd-dirhdr">'+esc(d.dir)+'</text>');
+    y += 18;
+    const y0=y;
+    // Middle-column rows: one per packet slot, plus one per circuit slave (which
+    // has no slot). Each row remembers its owning slave index.
+    const rows=[];  // {si, slot|null}
+    d.slaves.forEach((s,si)=>{
+      if(s.slots && s.slots.length) s.slots.forEach(sl=>rows.push({si:si, sl:sl}));
+      else rows.push({si:si, sl:null});
+    });
+    const rowY=i=>y0+i*ROWH;
+    const nrows=Math.max(rows.length, d.masters.length, 1);
+    // Which middle rows belong to each slave (to center its box + link it).
+    const slaveRows={};
+    rows.forEach((r,ri)=>{ (slaveRows[r.si]=slaveRows[r.si]||[]).push(ri); });
+    // Draw slot boxes (request #1: pkt_id and mask on the box, arb/msel below).
+    rows.forEach((r,ri)=>{ if(!r.sl) return; const sy=rowY(ri);
+      box(COLX.slot, sy, 'swd-slot', 'slot '+r.sl.slot+' \u00b7 pkt_id '+r.sl.pkt_id+' \u00b7 mask '+hx(r.sl.mask), SLOTW);
+      sub(COLX.slot, sy+BOXH/2+13, 'arb '+r.sl.arb+' \u00b7 msel '+r.sl.msel); });
+    // Draw merged slave boxes centered over their rows; link to their slots.
+    d.slaves.forEach((s,si)=>{ const rs=slaveRows[si]||[]; if(!rs.length) return;
+      const cy=(rowY(rs[0])+rowY(rs[rs.length-1]))/2;
+      box(COLX.slave, cy, 'swd-slave', esc(s.port)+' '+s.idx+' (slave)');
+      rs.forEach(ri=>{ if(rows[ri].sl) link(COLX.slave+BOXW, cy, COLX.slot, rowY(ri)); }); });
+    if(!d.slaves.length) box(COLX.slave, y0, 'swd-slave', '(no slave)');
+    // Draw merged master boxes; link them to every slot/circuit-slave they pull.
+    d.masters.forEach((m,mi)=>{ const my=rowY(mi);
+      box(COLX.master, my, 'swd-master', esc(m.port)+' '+m.idx+' (master)');
+      svgParts.push('<text x="'+COLX.master+'" y="'+(my+BOXH/2+13)+'" class="swd-dest">→ '+esc(m.dest)+'</text>');
+      if(m.arb>=0) sub(COLX.master, my+BOXH/2+26, 'arb '+m.arb+' \u00b7 mselen '+hx(m.mselen));
+      if(m.sw==='pkt'){
+        rows.forEach((r,ri)=>{ if(!r.sl) return;
+          // request #3: match on arbiter + (mselen>>msel)&1, across ALL slots.
+          if(m.arb===r.sl.arb && ((m.mselen>>r.sl.msel)&1)) link(COLX.slot+SLOTW, rowY(ri), COLX.master, my); });
+      } else {
+        // circuit: slave -> master directly when ids match (no slot node).
+        d.slaves.forEach((s,si)=>{ if(s.slots && s.slots.length) return;
+          if(s.id!==m.id) return; const rs=slaveRows[si]||[]; if(!rs.length) return;
+          const cy=(rowY(rs[0])+rowY(rs[rs.length-1]))/2;
+          link(COLX.slave+BOXW, cy, COLX.master, my); });
+      } });
+    y = y0 + nrows*ROWH + SECPAD;
+  });
+  const H=y+10;
+  return '<svg class="swd-svg" width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'" '+
+    'xmlns="http://www.w3.org/2000/svg">'+svgParts.join('')+'</svg>';
+}
+
+// Fetch the tile's control-plan switch view and render it into the card body's
+// #swd-host placeholder (host = the live #panel-body element passed by wireBody).
+async function swDetailFill(host, tc, tr){
+  const slot = host && host.querySelector ? host.querySelector('#swd-host') : null;
+  if(!slot) return;
+  let j;
+  try { j = await api('/ctrlplan/tile', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({col:tc,row:tr})}); }
+  catch(e){ slot.textContent = 'error: '+e; return; }
+  if(j.error){ slot.textContent = 'error: '+j.error; return; }
+  const dirs = j.dirs||[];
+  if(!dirs.length){ slot.innerHTML =
+    '<div class="swd-empty">no control-plan ports on this tile</div>'; return; }
+  slot.innerHTML = swDetailSvg(dirs);
+}
+
+// Restore a tile rect's stroke to its selected or base look (used when moving the
+// switch highlight off a tile).
+function dmRestoreTileStroke(key){
+  const r = document.querySelector('g.dm-tile[data-key="'+key+'"] rect');
+  if(!r) return;
+  if(dmSelKeys.has(key)){ r.setAttribute('stroke','var(--sel)'); r.setAttribute('stroke-width','2'); }
+  else { r.setAttribute('stroke', dmTileStroke[key]||'var(--stroke,#e4e4e433)'); r.setAttribute('stroke-width','1'); }
+}
+
+// Ring the currently open switch tile on the device map (amber, matching the slot
+// color) so it is visually tied to the Info-panel card.
+function dmApplySwitchHi(){
+  if(!dmSwitchHiKey) return;
+  const r = document.querySelector('g.dm-tile[data-key="'+dmSwitchHiKey+'"] rect');
+  if(r){ r.setAttribute('stroke','#ffb300'); r.setAttribute('stroke-width','3'); }
+}
+
+// Move the switch highlight to `key` (or null to clear), restoring the previous tile.
+function dmSetSwitchHi(key){
+  if(dmSwitchHiKey && dmSwitchHiKey!==key) dmRestoreTileStroke(dmSwitchHiKey);
+  dmSwitchHiKey = key;
+  dmApplySwitchHi();
+}
+
+// Open the tile's stream-switch connection detail as a card in the right-side
+// Info panel (replaces any prior switch card) and ring-highlight the tile. The
+// async fetch runs in wireBody, which receives the live #panel-body once the
+// placeholder is rendered.
+function showTileSwitchDetail(tc, tr){
+  const key = panelKey('switch', tc+','+tr);
+  const label = 'switch ('+tc+','+tr+')';
+  const llmCtx = 'control-plan stream-switch connection detail for tile ('+tc+','+tr+')';
+  panelItems.forEach((_,k)=>{ if(k.startsWith('switch:')) panelItems.delete(k); });
+  panelItems.set(key, {kind:'tile', label, color:null,
+    buildBody:()=>'<div class="sec"><div class="sec-hdr">Stream switch ('+tc+','+tr+')</div>'
+      +'<div id="swd-host"><div class="swd-empty">loading…</div></div></div>',
+    wireBody:(body)=>{ swDetailFill(body, tc, tr); },
+    llmCtx});
+  panelActiveKey = key;
+  panelSync();
+  dmSetSwitchHi(tc+','+tr);
+}
+
 function buildDeviceMap(){
   if(!DATA.tiles||!DATA.tiles.length){ console.warn('buildDeviceMap: no tiles'); return; }
   dmFlowHoverFi=null;
@@ -6300,8 +6578,12 @@ function buildDeviceMap(){
     }
 
     g.addEventListener('mouseenter',e=>{
-      rect.setAttribute('stroke','#e4e4e488');
-      rect.setAttribute('stroke-width','1.5');
+      // The switch-highlight (amber ring) is pinned to the open detail tile;
+      // hovering must not replace it with the gray hover stroke.
+      if(dmSwitchHiKey!==key){
+        rect.setAttribute('stroke','#e4e4e488');
+        rect.setAttribute('stroke-width','1.5');
+      }
       const lines=['('+tc+','+tr+') '+typStr];
       if(t.dma_channels&&t.dma_channels.length){
         const vis=(!dmHideAll&&dmActiveNets.size===0)?t.dma_channels
@@ -6352,7 +6634,11 @@ function buildDeviceMap(){
     });
     g.addEventListener('mousemove',dmMoveTip);
     g.addEventListener('mouseleave',()=>{
-      if(!dmSelKeys.has(key)){
+      if(dmSwitchHiKey===key){
+        // The switch-highlight (amber ring) is pinned to the open detail tile;
+        // hovering out must leave it in place, not restore the base stroke.
+        dmApplySwitchHi();
+      } else if(!dmSelKeys.has(key)){
         // Restore from dmTileStroke, not the captured `stroke`: a live scan may
         // have recolored this tile since it was built, and hovering out must
         // not wipe the status color.
@@ -6371,6 +6657,16 @@ function buildDeviceMap(){
 
     g.addEventListener('click',e=>{
       if(dmDragging) return;
+      // Control-plan mode: if a plan is loaded and this tile has control-plan
+      // ports, open the stream-switch detail in the Info panel + highlight the
+      // tile, and stop -- do not also mutate the selection / rebuild the map.
+      if((ctrlPlanPorts||[]).some(p=>p.col===tc && p.row===tr)){
+        showTileSwitchDetail(tc, tr);
+        return;
+      }
+      // A normal selection supersedes the switch view: drop its highlight so no
+      // stray amber ring survives a subsequent map rebuild.
+      dmSetSwitchHi(null);
       const ctrl=e.ctrlKey||e.metaKey||ctrlHeld;
       const selOn=k=>{ const gr=tileGroups[k]; if(!gr) return;
         const r=gr.querySelector('rect'); if(!r) return;
@@ -6417,6 +6713,8 @@ function buildDeviceMap(){
     const r=gr.querySelector('rect'); if(!r) return;
     r.setAttribute('stroke','var(--sel)'); r.setAttribute('stroke-width','2');
   });
+  // Re-apply the open switch-detail tile ring for the same reason.
+  dmApplySwitchHi();
 
   // ── LAYER 3: packet-switched and shmem links ──────────────────────
   // 'packet' hops: adjacent core tiles connected via packet-routed streams
@@ -6512,9 +6810,15 @@ function buildDeviceMap(){
     });
   }
 
+  // When the control plan is loaded and its toggle is on, it REPLACES the
+  // data-flow view: skip the function-call routing lines (LAYER 3 shmem links +
+  // LAYER 4 stream edges) so only the control-plan overlay is drawn. Unchecking
+  // the control-plan toggle brings the data-flow lines back on the next rebuild.
+  const ctrlPlanShown = !!document.getElementById('dmCtrlPlanToggle')?.checked
+    && (ctrlPlanEdges.length>0 || ctrlPlanPorts.length>0);
   (DATA.comm_paths||[]).forEach(p=>{
     const fi=p.flow_index;
-    const dim=dmHideAll||(dmActiveNets.size>0&&!dmActiveNets.has(fi));
+    const dim=dmHideAll||ctrlPlanShown||(dmActiveNets.size>0&&!dmActiveNets.has(fi));
     if(dim) return;
     const color=dmColor(fi);
     const RAIL=2.4;   // half-gap between the two rails of a ping-pong window link
@@ -6624,8 +6928,8 @@ function buildDeviceMap(){
       }
     });
   }
-  if(dmHideAll){
-    // Hide-all mode: draw nothing.
+  if(dmHideAll||ctrlPlanShown){
+    // Hide-all mode, or control plan replacing the data-flow view: draw nothing.
   } else if(dmActiveNets.size===0){
     // All-nets mode: draw every flow bright.
     (DATA.comm_paths||[]).forEach(p=>drawEdges(p, false));
@@ -6807,6 +7111,8 @@ function buildDeviceMap(){
   });
 
   svg.appendChild(dotsG);
+
+  drawCtrlPlanOverlay(svg, cx, cy);
 
   // Fit only on the first build or an explicit "Reset view". Rebuilds triggered
   // by the net chips, the tile right-click menu or a search must not throw away
@@ -7870,6 +8176,8 @@ function panelShow(key){
 }
 
 function panelRemove(key){
+  // Closing the switch-detail card also drops its device-map tile highlight.
+  if(typeof dmSwitchHiKey!=='undefined' && key==='switch:'+dmSwitchHiKey) dmSetSwitchHi(null);
   panelItems.delete(key);
   if(panelActiveKey===key){
     // activate the last remaining item, or nothing
@@ -10171,6 +10479,10 @@ function runScanNow(setMsg){
   if (gbtn) gbtn.onclick = () => runScanNow(setStatus);
   const clr = document.getElementById('dmClearBtn');
   if (clr) clr.onclick = dmClearAll;
+  const lcp = document.getElementById('dmLoadCtrlPlan');
+  if (lcp) lcp.onclick = loadCtrlPlan;
+  const cpTog = document.getElementById('dmCtrlPlanToggle');
+  if (cpTog) cpTog.onchange = () => buildDeviceMap();
   const live = document.getElementById('dmLiveToggle');
   if (live) live.onchange = e => {
     if (e.target.checked && !LIVE.connected){

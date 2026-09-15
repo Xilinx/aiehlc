@@ -143,6 +143,7 @@ list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passroutingresourcemap/passrout
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passschedulecanonicalize/passschedulecanonicalize.cpp)
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passschedulesequentialop/passschedulesequentialop.cpp)
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passwaitmerge/passwaitmerge.cpp)
+list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passgroupregwrite/passgroupregwrite.cpp)
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passdfscheduletoapi/passdfscheduletoapi.cpp)
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passdfscheduletokernelapi/passdfscheduletokernelapi.cpp)
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passcoretraceinsert/passcoretraceinsert.cpp)
@@ -151,6 +152,8 @@ list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/routingimplement/routing/routin
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/routingimplement/hw/hwresource.cpp)
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/routingimplement/hw/ResourceManager.cpp)
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/routingimplement/routing/routingtopology.cpp)
+# runtime control-plane resource reservation table (pure C, source of truth for ResourceMgr)
+list(APPEND SOURCE_LIB_FILES ../runtime/aie_runtime_resource.c)
 # tilinglinalg pipeline wrapper
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/tilinglinalg_pipeline.cpp)
 
@@ -191,6 +194,8 @@ include_directories(./tilinglinalg/routinghw/inc)
 include_directories(./tilinglinalg/routinghw/)
 #for common.h used by tilinglinalg pass headers
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../)
+#for aie_runtime_resource.h / aie_runtime_control_plan.h (runtime control-plane reservation table)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../runtime/)
 #for the routing lower pass
 include_directories(./tilinglinalg/pass/)
 # tilinglinalg pass include directories
@@ -208,6 +213,7 @@ include_directories(./tilinglinalg/pass/passdmaptodmaphop/)
 include_directories(./tilinglinalg/pass/passschedulecanonicalize/)
 include_directories(./tilinglinalg/pass/passschedulesequentialop/)
 include_directories(./tilinglinalg/pass/passwaitmerge/)
+include_directories(./tilinglinalg/pass/passgroupregwrite/)
 include_directories(./tilinglinalg/pass/passdfscheduletoapi/)
 include_directories(./tilinglinalg/pass/passdfscheduletokernelapi/)
 include_directories(./tilinglinalg/pass/passcoretraceinsert/)

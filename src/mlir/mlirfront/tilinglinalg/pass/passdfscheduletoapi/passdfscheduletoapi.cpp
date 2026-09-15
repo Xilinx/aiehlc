@@ -19,6 +19,7 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 #include <fstream>
@@ -158,6 +159,24 @@ struct ConversionState {
     // Track (col,row,lock_id) tuples that have already had XAie_LockSetValue emitted
     std::set<std::tuple<int32_t, int32_t, int32_t>> initializedLocks;
     std::vector<std::pair<std::string, std::string>> pendingLockInits;
+
+    // (col,row,lock_id) triples that GroupRegWritePass coalesced into control-packet
+    // group writes (module attr dfschedule.grouped_lock_inits). Their individual
+    // XAie_LockSetValue emission must be suppressed in BOTH the pre-scan and the
+    // ConfigDmaBd inner pattern.
+    std::set<std::tuple<int32_t, int32_t, int32_t>> foldedLockInits;
+
+    // Per-op control-fabric C variable name (ctrl_plan_init + the group_reg_writes
+    // that consume its result share the same __ctrl_fabric_N name). Precomputed
+    // before conversion so lowering order does not matter.
+    DenseMap<Operation *, std::string> ctrlFabricNames;
+    int ctrlDataIndex = 0; // unique suffix for emitted __ctrl_data_N[] arrays
+
+    // Configured row indices of each group_reg_write's fabric (from the fabric's
+    // ctrl_plan_init rows list). A "broadcast" group write expands into one
+    // blocking __Runtime_ctrl_row_write_ack per configured row so every packet
+    // lands (ack-drained) before the data-plane DMA re-arms the shim channel.
+    DenseMap<Operation *, SmallVector<int32_t, 4>> ctrlFabricRows;
 
     // Debug snapshot data (populated when enableDebug is true)
     SmallVector<IoDebugInfo> debugIos;
@@ -1540,7 +1559,10 @@ struct ConfigDmaBdInnerPattern : public OpConversionPattern<dfschedule::ConfigDm
                         // Lock 1 (DMA's acquire lock) stays at default 0.
                         int32_t kernelAcquireLock = releaseLockId; // lock 0 = BD's release lock
                         auto kernelLockKey = std::make_tuple(tileCol, tileRow, kernelAcquireLock);
-                        if (state.initializedLocks.find(kernelLockKey) == state.initializedLocks.end()) {
+                        if (state.foldedLockInits.count(kernelLockKey)) {
+                            llvm::errs() << "  Skip folded lock init tile(" << tileCol << "," << tileRow
+                                         << ") lock=" << kernelAcquireLock << " (control-packet grouped)\n";
+                        } else if (state.initializedLocks.find(kernelLockKey) == state.initializedLocks.end()) {
                             state.initializedLocks.insert(kernelLockKey);
                             std::string lockComment =
                                 "/* Lock init: tile(" + std::to_string(tileCol) + "," + std::to_string(tileRow) +
@@ -1558,6 +1580,10 @@ struct ConfigDmaBdInnerPattern : public OpConversionPattern<dfschedule::ConfigDm
                         // DMA acquire lock (lock 1) init = 0 (default, no explicit init needed)
                         llvm::errs() << "  Output flow: DMA acquire lock " << acquireLockId
                                      << " init=0 (default, skipped)\n";
+                    } else if (state.foldedLockInits.count(std::make_tuple(tileCol, tileRow, acquireLockId))) {
+                        // Input (S2MM) folded into a control-packet group write — skip.
+                        llvm::errs() << "  Skip folded lock init tile(" << tileCol << "," << tileRow
+                                     << ") lock=" << acquireLockId << " (control-packet grouped)\n";
                     } else {
                         // Input (S2MM): DMA acquires lock 0, init = lockInitValue
                         int32_t initValue = lockInitValue;
@@ -2119,6 +2145,135 @@ struct LaunchKernelGroupInnerPattern : public OpConversionPattern<dfschedule::La
         
         // Replace the op with the event
         rewriter.replaceOp(op, launchCall.getResult(0));
+        return success();
+    }
+};
+
+/// OpConversionPattern for dfschedule.ctrl_plan_init
+/// Lowers to __Runtime_ctrl_plan_init: emits a static fabric struct + a static
+/// __Runtime_CtrlRowChain rows[] initializer, then the one-shot init call. The op
+/// result (fabric handle) is replaced with an emitc constant "&__ctrl_fabric_N"
+/// so the group_reg_write ops that consume it stay well-formed; that constant is
+/// dead after those ops lower to verbatim calls and is removed by canonicalization.
+struct CtrlPlanInitInnerPattern : public OpConversionPattern<dfschedule::CtrlPlanInitOp> {
+    ConversionState &state;
+
+    CtrlPlanInitInnerPattern(TypeConverter &typeConverter, MLIRContext *ctx, ConversionState &state,
+                             PatternBenefit benefit = 1)
+        : OpConversionPattern<dfschedule::CtrlPlanInitOp>(typeConverter, ctx, benefit), state(state) {}
+
+    LogicalResult matchAndRewrite(dfschedule::CtrlPlanInitOp op, OpAdaptor adaptor,
+                                  ConversionPatternRewriter &rewriter) const override {
+        auto loc = op.getLoc();
+        auto it = state.ctrlFabricNames.find(op.getOperation());
+        std::string fab = (it != state.ctrlFabricNames.end()) ? it->second : "__ctrl_fabric_0";
+        std::string rowsArr = fab + "_rows";
+
+        std::string rowsInit = "static __Runtime_CtrlRowChain " + rowsArr + "[] = {";
+        unsigned nrows = 0;
+        for (auto a : op.getRows()) {
+            auto d = dyn_cast<DictionaryAttr>(a);
+            if (!d)
+                continue;
+            int32_t r = static_cast<int32_t>(cast<IntegerAttr>(d.get("row")).getInt());
+            int32_t lo = static_cast<int32_t>(cast<IntegerAttr>(d.get("col_lo")).getInt());
+            int32_t hi = static_cast<int32_t>(cast<IntegerAttr>(d.get("col_hi")).getInt());
+            if (nrows)
+                rowsInit += ", ";
+            rowsInit += "{" + std::to_string(r) + ", " + std::to_string(lo) + ", " + std::to_string(hi) + "}";
+            nrows++;
+        }
+        rowsInit += "};";
+
+        rewriter.create<emitc::VerbatimOp>(loc, "/* control-packet group-write fabric setup */");
+        rewriter.create<emitc::VerbatimOp>(loc, "static __Runtime_CtrlRowFabric " + fab + ";");
+        rewriter.create<emitc::VerbatimOp>(loc, rowsInit);
+
+        std::string call =
+            "__Runtime_ctrl_plan_init(&" + fab + ", dev, " + std::to_string(static_cast<int32_t>(op.getShimCol())) +
+            ", " + std::to_string(static_cast<int32_t>(op.getRespS2mmCh())) + ", " +
+            std::to_string(static_cast<int32_t>(op.getCtrlId())) + ", " + rowsArr + ", " + std::to_string(nrows) + ");";
+        rewriter.create<emitc::VerbatimOp>(loc, call);
+
+        llvm::errs() << "  ✓ Lowered ctrl_plan_init (" << nrows << " rows) fabric=" << fab << "\n";
+
+        auto fabPtrTy = emitc::PointerType::get(emitc::OpaqueType::get(getContext(), "__Runtime_CtrlRowFabric"));
+        auto fabVal =
+            rewriter.create<emitc::ConstantOp>(loc, fabPtrTy, emitc::OpaqueAttr::get(getContext(), "&" + fab));
+        rewriter.replaceOp(op, fabVal.getResult());
+        return success();
+    }
+};
+
+/// OpConversionPattern for dfschedule.group_reg_write
+/// Lowers a group_reg_write to one or more BLOCKING __Runtime_ctrl_row_write_ack
+/// calls (whole-row write whose acks drain via the fabric's free resp S2MM
+/// channel = delivery barrier). A "broadcast" expands into one write-ack per
+/// configured row; a "row" write-acks that single row. Blocking delivery is
+/// required because the shim MM2S send channel is reused by the data-plane DMA
+/// later in host.cc; the ack barrier guarantees each control packet fully lands
+/// before that channel is re-armed. Emits a static uint32_t data[] array first.
+struct GroupRegWriteInnerPattern : public OpConversionPattern<dfschedule::GroupRegWriteOp> {
+    ConversionState &state;
+
+    GroupRegWriteInnerPattern(TypeConverter &typeConverter, MLIRContext *ctx, ConversionState &state,
+                              PatternBenefit benefit = 1)
+        : OpConversionPattern<dfschedule::GroupRegWriteOp>(typeConverter, ctx, benefit), state(state) {}
+
+    LogicalResult matchAndRewrite(dfschedule::GroupRegWriteOp op, OpAdaptor adaptor,
+                                  ConversionPatternRewriter &rewriter) const override {
+        auto loc = op.getLoc();
+        auto it = state.ctrlFabricNames.find(op.getOperation());
+        std::string fab = (it != state.ctrlFabricNames.end()) ? it->second : "__ctrl_fabric_0";
+
+        int idx = state.ctrlDataIndex++;
+        std::string dataArr = "__ctrl_data_" + std::to_string(idx);
+        std::string dinit = "static uint32_t " + dataArr + "[] = {";
+        unsigned nwords = 0;
+        for (auto a : op.getData()) {
+            uint32_t v = static_cast<uint32_t>(cast<IntegerAttr>(a).getInt());
+            if (nwords)
+                dinit += ", ";
+            dinit += std::to_string(v) + "u";
+            nwords++;
+        }
+        dinit += "};";
+        rewriter.create<emitc::VerbatimOp>(loc, dinit);
+
+        std::string kind = op.getKind().str();
+        uint32_t tileAddr = static_cast<uint32_t>(op.getTileAddr());
+        std::string tileAddrHex = "0x" + llvm::utohexstr(tileAddr) + "u";
+        std::string bdId = std::to_string(static_cast<int32_t>(op.getBdId()));
+        std::string mm2sCh = std::to_string(static_cast<int32_t>(op.getMm2sCh()));
+
+        // __Runtime_ctrl_row_write_ack(f, row, tile_addr, data, nwords, bd_id, mm2s_ch)
+        // is per-row and blocking (drains ncols acks via the fabric resp S2MM
+        // channel). Broadcast = one write-ack per configured row; row = single row.
+        auto emitAck = [&](int32_t row) {
+            std::string call = "__Runtime_ctrl_row_write_ack(&" + fab + ", " + std::to_string(row) + ", " +
+                               tileAddrHex + ", " + dataArr + ", " + std::to_string(nwords) + ", " + bdId + ", " +
+                               mm2sCh + ");";
+            rewriter.create<emitc::VerbatimOp>(loc, call);
+        };
+
+        unsigned nCalls = 0;
+        if (kind == "row") {
+            emitAck(static_cast<int32_t>(op.getRow()));
+            nCalls = 1;
+        } else {
+            auto rit = state.ctrlFabricRows.find(op.getOperation());
+            if (rit != state.ctrlFabricRows.end() && !rit->second.empty()) {
+                for (int32_t row : rit->second) {
+                    emitAck(row);
+                    ++nCalls;
+                }
+            }
+        }
+
+        llvm::errs() << "  ✓ Lowered group_reg_write kind=" << kind << " -> " << nCalls
+                     << " blocking write-ack call(s) nwords=" << nwords << " tile_addr=" << tileAddrHex << "\n";
+
+        rewriter.eraseOp(op);
         return success();
     }
 };
@@ -3033,6 +3188,50 @@ void DfscheduleToApiPass::runOnOperation() {
     state.enableDebug = enableDebug_;
     state.runtimeDebugLevel = runtimeDebugLevel_;
 
+    // Load the (col,row,lock_id) triples that GroupRegWritePass coalesced into
+    // control-packet group writes; their individual XAie_LockSetValue emission is
+    // suppressed below (both the pre-scan and the ConfigDmaBd inner pattern).
+    if (auto folded = moduleOp->getAttrOfType<ArrayAttr>("dfschedule.grouped_lock_inits")) {
+        for (auto a : folded) {
+            auto triple = dyn_cast<ArrayAttr>(a);
+            if (!triple || triple.size() != 3)
+                continue;
+            int32_t c = static_cast<int32_t>(cast<IntegerAttr>(triple[0]).getInt());
+            int32_t r = static_cast<int32_t>(cast<IntegerAttr>(triple[1]).getInt());
+            int32_t l = static_cast<int32_t>(cast<IntegerAttr>(triple[2]).getInt());
+            state.foldedLockInits.insert(std::make_tuple(c, r, l));
+        }
+        llvm::errs() << "[Pass] Loaded " << state.foldedLockInits.size()
+                     << " folded lock-init triples (control-packet grouped)\n";
+    }
+
+    // Precompute the control-fabric C variable name for each ctrl_plan_init and
+    // for the group_reg_writes that consume it, so their lowering order is
+    // irrelevant (both look themselves up by Operation* in state.ctrlFabricNames).
+    {
+        int fidx = 0;
+        DenseMap<Operation *, std::string> planName;
+        moduleOp.walk([&](dfschedule::CtrlPlanInitOp p) {
+            std::string n = "__ctrl_fabric_" + std::to_string(fidx++);
+            state.ctrlFabricNames[p.getOperation()] = n;
+            planName[p.getOperation()] = n;
+        });
+        moduleOp.walk([&](dfschedule::GroupRegWriteOp g) {
+            if (auto p = g.getFabric().getDefiningOp<dfschedule::CtrlPlanInitOp>()) {
+                auto it = planName.find(p.getOperation());
+                if (it != planName.end())
+                    state.ctrlFabricNames[g.getOperation()] = it->second;
+                // Capture the fabric's configured rows so a broadcast group write
+                // can expand into one blocking write-ack per row.
+                SmallVector<int32_t, 4> rows;
+                for (auto a : p.getRows())
+                    if (auto d = dyn_cast<DictionaryAttr>(a))
+                        rows.push_back(static_cast<int32_t>(cast<IntegerAttr>(d.get("row")).getInt()));
+                state.ctrlFabricRows[g.getOperation()] = rows;
+            }
+        });
+    }
+
     // Type converter
     TypeConverter typeConverter;
     setupTypeConverter(typeConverter, ctx);  
@@ -3207,7 +3406,13 @@ void DfscheduleToApiPass::runOnOperation() {
     
     // LaunchKernelGroupOp depends on LoadKernelGroupOp (benefit = 1)
     innerPatterns.add<LaunchKernelGroupInnerPattern>(typeConverter, ctx, state, /*benefit=*/1);
-    
+
+    // Control-packet group-write ops (from GroupRegWritePass). ctrl_plan_init must
+    // run before the group_reg_writes it feeds so the fabric decl precedes them
+    // (benefit ordering; both reference the precomputed __ctrl_fabric_N name).
+    innerPatterns.add<CtrlPlanInitInnerPattern>(typeConverter, ctx, state, /*benefit=*/2);
+    innerPatterns.add<GroupRegWriteInnerPattern>(typeConverter, ctx, state, /*benefit=*/1);
+
     // Add EraseOpLowering patterns for ops that should simply be erased
     // NOTE: tensor.extract_slice, routing.partitiontensor, declare_data are NOT here - they are converted above
     // NOTE: ScheduleWaitOp, StartIoOp, GetBdIdOp, ConfigCreateIoOp, ConfigDmaBdOp, DeclareTileOp, DeclareTensorOp,
@@ -3249,6 +3454,8 @@ void DfscheduleToApiPass::runOnOperation() {
     innerTarget.addIllegalOp<dfschedule::LoadKernelGroupOp>();
     innerTarget.addIllegalOp<dfschedule::ConfigCreateIoOp>();
     innerTarget.addIllegalOp<dfschedule::ConfigDmaBdOp>();  // Converted in Phase 3 with proper benefits
+    innerTarget.addIllegalOp<dfschedule::CtrlPlanInitOp>();
+    innerTarget.addIllegalOp<dfschedule::GroupRegWriteOp>();
 
     innerTarget.addIllegalOp<dfschedule::DeclareTileOp>();
     // NOTE: LaunchHostOp is handled in Phase 4, not here
@@ -3348,6 +3555,12 @@ void DfscheduleToApiPass::runOnOperation() {
 
             auto emitLock = [&](int32_t lockId, int32_t initVal, const std::string &note) {
                 auto key = std::make_tuple(tileCol, tileRow, lockId);
+                // Suppress folded locks (coalesced into control-packet group writes).
+                if (state.foldedLockInits.count(key)) {
+                    llvm::errs() << "[Pass] Pre-scan: skip folded lock init tile(" << tileCol << "," << tileRow
+                                 << ") lock=" << lockId << " (control-packet grouped)\n";
+                    return;
+                }
                 if (preScannedLocks.insert(key).second) {
                     std::string comment = "/* Lock init: tile(" + std::to_string(tileCol) + "," +
                                           std::to_string(tileRow) + ") lock=" + std::to_string(lockId) +

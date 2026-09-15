@@ -1,4 +1,4 @@
-module attributes {routing.fullconnect_auto = 1 : i64, routing.pp_depth_map = {tensor_0 = 2 : i32, tensor_1 = 2 : i32, tensor_2 = 2 : i32}} {
+module attributes {routing.control_plan_group_reg_write = 0 : i64, routing.control_plan_op_control_packet = 0 : i64, routing.fullconnect_auto = 1 : i64, routing.pp_depth_map = {tensor_0 = 2 : i32, tensor_1 = 2 : i32, tensor_2 = 2 : i32}} {
   func.func @main(%arg0: memref<256x256xi8>, %arg1: memref<256x256xi8>, %arg2: memref<256x256xi8>) {
     %0 = routing.routingcreatehwmesh row = 4, col = 4 partition = 0, 3, 0, 6 -> i32
     %1 = bufferization.to_tensor %arg0 : memref<256x256xi8>

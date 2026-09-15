@@ -1170,6 +1170,12 @@ void routingtodfschedule(const std::string &irFilepath = "", int startStage = 0)
     if (doHostPath) {
         auto hwRes = makeResource(g_aieGen);
         ResourceMgr::init(std::move(hwRes));
+        // Control-plane resource reservation is OPT-IN: a test .mlir may set
+        // `routing.control_plan_op_control_packet = 1 : i64` to enable it.
+        if (auto cpAttr = module->getAttrOfType<mlir::IntegerAttr>("routing.control_plan_op_control_packet");
+            cpAttr && cpAttr.getInt() != 0) {
+            ResourceMgr::instance()->reserveControlPlaneResources(__Runtime_res_gen_from_name(g_aieGen.c_str()));
+        }
     }
 
     // Pre-pipeline memory check: validate buffer requirements fit in tile data memory
@@ -1958,6 +1964,13 @@ void testMultidimBd() {
     // Initialize ResourceMgr
     auto hwRes = makeResource(g_aieGen);
     ResourceMgr::init(std::move(hwRes));
+    // Control-plane resource reservation is OPT-IN: a test .mlir may set
+    // `routing.control_plan_op_control_packet = 1 : i64` to enable it. `module`
+    // is the source of the hostModule clone and carries the attribute.
+    if (auto cpAttr = module->getAttrOfType<mlir::IntegerAttr>("routing.control_plan_op_control_packet");
+        cpAttr && cpAttr.getInt() != 0) {
+        ResourceMgr::instance()->reserveControlPlaneResources(__Runtime_res_gen_from_name(g_aieGen.c_str()));
+    }
 
     // Run BlueprintToSchedulePass (host path)
     if (!runSinglePass(ctx, hostModule, std::make_unique<mlir::BlueprintToSchedulePass>(0.5, 4096, g_aieGen), irDir,

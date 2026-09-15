@@ -19,6 +19,10 @@
 #include <array>
 #include <stdexcept>
 #include <mutex>
+// Control-plane reservation table (pure C, C++-safe via its extern "C" guard).
+// ResourceMgr consults it to exclude the stream-switch resources the control
+// plane occupies (pkt-ids, arbiters, slots) from routing/scheduling.
+#include "aie_runtime_resource.h"
 inline PortDirection opposite(PortDirection d){
     return d==PortDirection::North ? PortDirection::South :
            d==PortDirection::South ? PortDirection::North :
@@ -569,6 +573,22 @@ public:
   bool releasePktId(int pktId, int ownerId = -1);
   bool isPktIdFree(int pktId) const;
 
+  // Owner sentinel marking a pkt-id reserved by the control plane (never handed
+  // out to data-plane allocations).
+  static constexpr int kControlPlaneOwner = -2;
+
+  // Mark every stream-switch resource the control plane occupies (pkt-ids,
+  // arbiters, per-port slots) for @gen as used, so routing/scheduling excludes
+  // them. Consults the reservation table (aie_runtime_resource.c) — the single
+  // source of truth. Idempotent. Always called once after ResourceMgr::init.
+  void reserveControlPlaneResources(rt_res_gen gen);
+
+  // Reserved-resource accessors for routing/scheduling to consult (the data-
+  // plane slot/arbiter picking wiring is a follow-up).
+  uint32_t reservedArbiterMask() const { return reservedArbiterMask_; }
+  // bit i => slot i is reserved on (port,is_master) by the control plane.
+  int reservedSlotMask(uint8_t port, uint8_t is_master) const;
+
   // Partition bounds accessors
   int partitionStartCol() const { return partitionStartCol_; }
   int partitionEndCol() const { return partitionEndCol_; }
@@ -587,6 +607,16 @@ private:
 
   static constexpr int kMaxPktId = 32; // 5-bit AIE pkt_id field
   std::array<PktIdSlot, kMaxPktId> pktIdPool_{};
+
+  // Control-plane reserved-resource state (populated by
+  // reserveControlPlaneResources). Number of stream port-types == acr_port /
+  // RT_RES_PORT_* count (WEST/EAST/NORTH/SOUTH/CTRL).
+  static constexpr int kNumPortTypes = 5;
+  uint32_t reservedArbiterMask_ = 0;
+  // [port][is_master] -> slot bitmask reserved by the control plane.
+  std::array<std::array<int, 2>, kNumPortTypes> reservedSlotMask_{};
+  bool controlPlaneReserved_ = false;
+
   void InitSHIMNocList();
 
   void addShimTile(std::shared_ptr<ShimTile> shim);

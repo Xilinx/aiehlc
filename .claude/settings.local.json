@@ -29,7 +29,9 @@
       "mcp__aiegdb__aie_scope",
       "WebFetch(domain:files.pythonhosted.org)",
       "Skill(superpowers:test-driven-development)",
-      "Skill(commands)"
+      "Skill(commands)",
+      "Skill(superpowers:finishing-a-development-branch)",
+      "mcp__ide__getDiagnostics"
     ],
     "deny": []
   },

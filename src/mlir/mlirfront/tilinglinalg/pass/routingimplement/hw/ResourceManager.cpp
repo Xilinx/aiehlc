@@ -817,3 +817,39 @@ bool ResourceMgr::isPktIdFree(int pktId) const {
         return false;
     return !pktIdPool_[pktId].used;
 }
+
+// ──────────────────────────────────────────────────────────────
+// Control-plane resource reservation (excludes control-plane stream-switch
+// resources from routing/scheduling). Reads the reservation table
+// (aie_runtime_resource.c) — the single source of truth.
+// ──────────────────────────────────────────────────────────────
+void ResourceMgr::reserveControlPlaneResources(rt_res_gen gen) {
+    if (controlPlaneReserved_)
+        return; // idempotent
+
+    // 1. Exclude reserved pkt-ids so allocatePktId never hands them out.
+    uint32_t pmask = __Runtime_res_reserved_pktid_mask(gen);
+    for (int i = 0; i < kMaxPktId; ++i) {
+        if (pmask & (1u << i)) {
+            pktIdPool_[i].used = true;
+            pktIdPool_[i].ownerId = kControlPlaneOwner;
+        }
+    }
+
+    // 2. Record reserved arbiter + per-port slot masks for routing/scheduling.
+    reservedArbiterMask_ = __Runtime_res_reserved_arbiter_mask(gen);
+    for (int p = 0; p < kNumPortTypes; ++p) {
+        reservedSlotMask_[p][0] = __Runtime_res_reserved_slot_mask(gen, (uint8_t)p, /*is_master=*/0);
+        reservedSlotMask_[p][1] = __Runtime_res_reserved_slot_mask(gen, (uint8_t)p, /*is_master=*/1);
+    }
+
+    controlPlaneReserved_ = true;
+    std::cout << "[ResourceMgr] control-plane resources reserved (gen=" << (int)gen << " pktidmask=0x" << std::hex
+              << pmask << " arbmask=0x" << reservedArbiterMask_ << std::dec << ")" << std::endl;
+}
+
+int ResourceMgr::reservedSlotMask(uint8_t port, uint8_t is_master) const {
+    if (port >= kNumPortTypes || is_master > 1)
+        return 0;
+    return reservedSlotMask_[port][is_master];
+}

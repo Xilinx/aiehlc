@@ -131,7 +131,8 @@ RUNTIME_OBJS := \
     $(BUILD_DIR)/aie_runtime.o \
     $(BUILD_DIR)/aie_runtime_debug.o \
     $(BUILD_DIR)/aie_runtime_stream_debug.o \
-    $(BUILD_DIR)/aie_runtime_common.o
+    $(BUILD_DIR)/aie_runtime_common.o \
+    $(BUILD_DIR)/aie_runtime_control_plan.o
 
 _FIRST_KERNEL := $(firstword $(KERNEL_NAMES))
 KERNEL_ELF_INIT_OBJ :=
@@ -195,6 +196,10 @@ $(BUILD_DIR)/aie_runtime_stream_debug.o: $(RUNTIME_SRC)/aie_runtime_stream_debug
 
 $(BUILD_DIR)/aie_runtime_common.o: $(RUNTIME_SRC)/aie_runtime_common.c | $(BUILD_DIR)
 	@echo "[compile] aie_runtime_common.c"
+	$(VITIS_CLANG) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/aie_runtime_control_plan.o: $(RUNTIME_SRC)/aie_runtime_control_plan.c | $(BUILD_DIR)
+	@echo "[compile] aie_runtime_control_plan.c"
 	$(VITIS_CLANG) $(CXXFLAGS) -c $< -o $@
 
 ifneq ($(strip $(ROUTING_SRC)),)
