@@ -374,12 +374,50 @@ struct CoreTileCtx {
     int32_t coreBdPacketId = 0;
     int32_t coreOooBdId = -1;
     Value firstCoreBdHandle;
+    // KERNELCONFIGOFFLOAD: BD ids reserved for the chain the CORE programs itself
+    // (reserveOffloadedCoreBds). -1 when not offloaded or reservation failed.
+    // Recorded so the provenance map can describe that chain to the debug UI.
+    int32_t offloadPingBdId = -1;
+    int32_t offloadPongBdId = -1;
 };
 
 // ---------------------------------------------------------------------------
 // The conversion pattern. Extracted helper member methods are declared here and
 // defined across flowtransfer_host.cpp / flowtransfer_kernel.cpp.
 // ---------------------------------------------------------------------------
+// Everything the core-tile emitters need that is NOT per-flow state.
+//
+// Exists so the core-tile lowering can be called from BOTH blueprint-lowering
+// passes: the host path (BlueprintToSchedulePass) and, under
+// #pragma KERNELCONFIGOFFLOAD, the kernel path (BlueprintToScheduleKernelPass),
+// where the core programs its own DMA and the ops belong in the kernel module.
+// Sharing the emitter — rather than each pass growing its own copy — is what
+// makes the two descriptions agree by construction: one ping/pong chain shape,
+// one set of L1 offsets, one lock convention.
+//
+// `emitCoreDma` is the who-emits switch. Under offload the HOST still reserves
+// BD ids and publishes ResourceMgr::coreOffloadPlan (the provenance map runs on
+// hostModule before the kernel pass, and the BD bank is shared hardware), but
+// does not emit; the KERNEL emits. Without offload the host emits as before and
+// the kernel emits nothing.
+struct CoreTileEmitDeps {
+    std::shared_ptr<ResourceMgr> resourceMgr;
+    std::shared_ptr<BlueprintPassState> passState;
+    double bufferRatio = 0.5;
+    int64_t maxPingPongBytes = 0;
+    // Buffer index mapping keyed by data_id, carried across flows within one pass.
+    std::unordered_map<int32_t, int> *dataIdToInputIdx = nullptr;
+    std::unordered_map<int32_t, int> *dataIdToOutputIdx = nullptr;
+    int *nextInputIdx = nullptr;
+    int *nextOutputIdx = nullptr;
+    // true  -> this caller emits the core-tile DMA ops
+    // false -> this caller only does accounting (reserve + publish)
+    bool emitCoreDma = true;
+};
+
+// Core-tile lowering, shared by the host and kernel blueprint passes.
+LogicalResult emitCoreTileConfigs(FlowLoweringCtx &c, const CoreTileEmitDeps &d);
+
 struct FlowTransferConversion : public OpConversionPattern<dfscheblueprint::FlowTransferOp> {
     std::shared_ptr<ResourceMgr> resourceMgr;
     std::shared_ptr<BlueprintPassState> passState;
@@ -390,6 +428,21 @@ struct FlowTransferConversion : public OpConversionPattern<dfscheblueprint::Flow
     mutable std::unordered_map<int32_t, int> dataIdToOutputIdx;
     mutable int nextInputIdx = 0;
     mutable int nextOutputIdx = 0;
+
+    // Bundle this pattern's members for the shared core-tile emitters.
+    CoreTileEmitDeps coreDeps(bool emitCoreDma) const {
+        CoreTileEmitDeps d;
+        d.resourceMgr = resourceMgr;
+        d.passState = passState;
+        d.bufferRatio = bufferRatio;
+        d.maxPingPongBytes = maxPingPongBytes;
+        d.dataIdToInputIdx = &dataIdToInputIdx;
+        d.dataIdToOutputIdx = &dataIdToOutputIdx;
+        d.nextInputIdx = &nextInputIdx;
+        d.nextOutputIdx = &nextOutputIdx;
+        d.emitCoreDma = emitCoreDma;
+        return d;
+    }
 
     FlowTransferConversion(MLIRContext *ctx, std::shared_ptr<ResourceMgr> mgr,
                            std::shared_ptr<BlueprintPassState> state, double ratio, int64_t maxPPBytes)
@@ -413,26 +466,32 @@ struct FlowTransferConversion : public OpConversionPattern<dfscheblueprint::Flow
     void emitScheduleOooOutput(FlowLoweringCtx &c) const;
     void emitScheduleStraightLine(FlowLoweringCtx &c) const;
 
-    // --- kernel helpers (flowtransfer_kernel.cpp) ---
-    LogicalResult emitCoreTileConfigs(FlowLoweringCtx &c) const;
-    LogicalResult emitCoreTileParams(FlowLoweringCtx &c, CoreTileCtx &t) const;
-    // Sub-helper of emitCoreTileParams: clamp buffer + compute numIterations
-    // (halo / K-round / K-split) + validate pp_depth=1. No op emission.
-    LogicalResult computeCoreIterations(FlowLoweringCtx &c, CoreTileCtx &t) const;
-    LogicalResult emitCoreBufferDma(FlowLoweringCtx &c, CoreTileCtx &t) const;
-    // Sub-helper of emitCoreBufferDma: CoreMemAllocator ping/pong address
-    // allocation (first tile only) + per-tile ping/pong L1 offset assignment.
-    void emitCoreBufferAlloc(FlowLoweringCtx &c, CoreTileCtx &t) const;
-    void emitCoreSingleBufferBd(FlowLoweringCtx &c, CoreTileCtx &t) const;
-    void emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx &t) const;
-    // KERNELCONFIGOFFLOAD counterpart of the two emitCore*Bd helpers: claims the
-    // same per-tile BD ids from the pool WITHOUT emitting any op, for the case
-    // where the core self-programs those BDs from kernel.cc. Keeps the host's
-    // allocator honest so a host-programmed flow on the same tile (e.g. MM2S
-    // output) is never handed a BD the core is already using.
-    void reserveOffloadedCoreBds(FlowLoweringCtx &c, CoreTileCtx &t) const;
+    // --- kernel helpers: see the free functions below ---
     void finalizeKernelConfig(FlowLoweringCtx &c) const;
 };
+
+// ---------------------------------------------------------------------------
+// Core-tile lowering (flowtransfer_kernel.cpp)
+// ---------------------------------------------------------------------------
+// Free functions, not members, so BOTH blueprint passes can call them — see
+// CoreTileEmitDeps above. They take their dependencies explicitly rather than
+// reading a pattern's members.
+LogicalResult emitCoreTileParams(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d);
+// Sub-helper of emitCoreTileParams: clamp buffer + compute numIterations
+// (halo / K-round / K-split) + validate pp_depth=1. No op emission.
+LogicalResult computeCoreIterations(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d);
+LogicalResult emitCoreBufferDma(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d);
+// Sub-helper of emitCoreBufferDma: CoreMemAllocator ping/pong address
+// allocation (first tile only) + per-tile ping/pong L1 offset assignment.
+void emitCoreBufferAlloc(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d);
+void emitCoreSingleBufferBd(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d);
+void emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d);
+// KERNELCONFIGOFFLOAD counterpart of the two emitCore*Bd helpers: claims the
+// same per-tile BD ids from the pool WITHOUT emitting any op, for the case
+// where the core self-programs those BDs from kernel.cc. Keeps the host's
+// allocator honest so a host-programmed flow on the same tile (e.g. MM2S
+// output) is never handed a BD the core is already using.
+void reserveOffloadedCoreBds(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d);
 
 } // namespace blueprint_sched
 

@@ -4,6 +4,10 @@
  ******************************************************************************/
 
 #include "passblueprinttoschedulekernel.h"
+// Shared core-tile lowering: under KERNELCONFIGOFFLOAD this pass emits the core's
+// DMA config using the SAME emitter as the host path, so the two descriptions
+// cannot drift. See passblueprintlowering/README.md.
+#include "../helper/flowtransfer_internal.h"
 #include "dfscheblueprintmanager.h"
 #include "dfschedulemanager.h"
 #include "hw/ResourceManager.h"
@@ -231,7 +235,9 @@ static bool hasDSKernelReceiver(Operation *rootOp, StringRef kernelName) {
 }
 
 // Helper function to check if kernel module already exists in the module
-static bool hasKernelModule(Operation *rootOp, StringRef moduleName) {
+// Look up the generated kernel module by name, or null. Used both as the
+// "already built?" guard and to retarget emission INTO the module body.
+static dfschedule::KernelModuleOp findKernelModule(Operation *rootOp, StringRef moduleName) {
     // Find the module-level operation
     Operation *moduleOp = rootOp;
     while (moduleOp->getParentOp()) {
@@ -244,13 +250,17 @@ static bool hasKernelModule(Operation *rootOp, StringRef moduleName) {
             for (Operation &op : block) {
                 if (auto kernelModule = dyn_cast<dfschedule::KernelModuleOp>(&op)) {
                     if (kernelModule.getSymName() == moduleName) {
-                        return true;
+                        return kernelModule;
                     }
                 }
             }
         }
     }
-    return false;
+    return nullptr;
+}
+
+static bool hasKernelModule(Operation *rootOp, StringRef moduleName) {
+    return findKernelModule(rootOp, moduleName) != nullptr;
 }
 
 // Helper function to get the module-level insertion point
@@ -1276,13 +1286,25 @@ struct FlowTransferConversion : public OpConversionPattern<dfscheblueprint::Flow
     // KERNELCONFIGOFFLOAD state, cached by the pass before conversion (module
     // attrs may be stripped during applyPartialConversion).
     bool kernelConfigOffload;
+    // Shared with the core-tile emitter. Carries the tiling scalars AND the
+    // constant->memref lowering (rootMemref), which gates the per-tile buffer/BD
+    // block inside emitCoreBufferDma.
+    std::shared_ptr<blueprint_sched::BlueprintPassState> passState;
 
     FlowTransferConversion(MLIRContext *ctx, double ratio, int64_t maxPPBytes, routing::GemmTilingScalars tiling,
-                           bool kernelConfigOffload)
+                           bool kernelConfigOffload, std::shared_ptr<blueprint_sched::BlueprintPassState> passState)
         : OpConversionPattern<dfscheblueprint::FlowTransferOp>(ctx), bufferRatio(ratio), maxPingPongBytes(maxPPBytes),
-          tiling(tiling), kernelConfigOffload(kernelConfigOffload) {}
+          tiling(tiling), kernelConfigOffload(kernelConfigOffload), passState(std::move(passState)) {}
 
     mutable KernelResourceManager resourceMgr;
+
+    // Cross-flow buffer-index bookkeeping for the SHARED core-tile emitter
+    // (blueprint_sched::emitCoreTileConfigs). The host pattern owns equivalents;
+    // this pass keeps its own so the two walks never alias each other's state.
+    mutable std::unordered_map<int32_t, int> coreDataIdToInputIdx;
+    mutable std::unordered_map<int32_t, int> coreDataIdToOutputIdx;
+    mutable int coreNextInputIdx = 0;
+    mutable int coreNextOutputIdx = 0;
 
     LogicalResult matchAndRewrite(dfscheblueprint::FlowTransferOp op, OpAdaptor adaptor,
                                   ConversionPatternRewriter &rewriter) const override {
@@ -1361,75 +1383,110 @@ struct FlowTransferConversion : public OpConversionPattern<dfscheblueprint::Flow
                                      tiling, kernelConfigOffload);
         }
 
-        // --- Core tile DMA IO configuration (create_io + start_io) ---
-        {
-            ArrayAttr coreTilesAttr = coreTileGroup.getTiles();
-            auto coreDmaDir = coreDmaAttr.getDirection();
-            StringRef coreDmaDirection = (coreDmaDir == dfscheblueprint::bp_direction::MM2S) ? "MM2S" : "S2MM";
-            StringRef coreIoOperation = (coreDmaDir == dfscheblueprint::bp_direction::MM2S) ? "SEND" : "RECV";
-
-            int64_t numCoreTiles = coreTilesAttr.size();
-            int64_t perTileLen = (numCoreTiles > 0) ? bufferLen / numCoreTiles : bufferLen;
-            Type elemType = kernelTensorType.getElementType();
-
-            int tileIdx = 0;
-            for (auto tileAttr : coreTilesAttr) {
-                auto tileArray = dyn_cast<ArrayAttr>(tileAttr);
-                if (!tileArray || tileArray.size() < 2)
-                    continue;
-
-                int64_t col = cast<IntegerAttr>(tileArray[0]).getInt();
-                int64_t row = cast<IntegerAttr>(tileArray[1]).getInt();
-
-                auto coreTileOp = rewriter.create<dfschedule::DeclareTileOp>(
-                    loc, dfschedule::TileType::get(rewriter.getContext()), rewriter.getI32IntegerAttr(col),
-                    rewriter.getI32IntegerAttr(row));
-
-                MemRefType coreBufType = MemRefType::get({perTileLen}, elemType);
-                Value coreBuf = rewriter.create<memref::AllocOp>(loc, coreBufType);
-
-                auto bdIdConst = rewriter.create<arith::ConstantOp>(
-                    loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(resourceMgr.allocateBdId()));
-
-                auto kernelOffsetConst =
-                    rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
-                auto coreBdOp = rewriter.create<dfschedule::ConfigDmaBdOp>(
-                    loc, dfschedule::BdHandleType::get(rewriter.getContext()), coreBuf, coreTileOp.getTile(), bdIdConst,
-                    kernelOffsetConst.getResult(), rewriter.getI32IntegerAttr(perTileLen), rewriter.getBoolAttr(true),
-                    rewriter.getI32IntegerAttr(basePacketId + tileIdx), rewriter.getI32IntegerAttr(4294967295),
-                    rewriter.getI32IntegerAttr(0), rewriter.getI32IntegerAttr(0), rewriter.getI32IntegerAttr(0),
-                    rewriter.getI32IntegerAttr(0), rewriter.getI32IntegerAttr(-1), Value(),
-                    rewriter.getI32IntegerAttr(-1), // out_of_order_bd_id
-                    /*dim_strides=*/nullptr, /*dim_wraps=*/nullptr,
-                    rewriter.getI32IntegerAttr(0),  // iter_step_size (no iteration)
-                    rewriter.getI32IntegerAttr(0)); // iter_wrap (no iteration)
-
-                auto createIoOp = rewriter.create<dfschedule::ConfigCreateIoOp>(
-                    loc, dfschedule::IoHandleType::get(rewriter.getContext()), coreBdOp.getBdHandle(),
-                    coreTileOp.getTile(), rewriter.getI32IntegerAttr(coreChannel),
-                    rewriter.getStringAttr(coreDmaDirection), rewriter.getStringAttr(coreIoOperation),
-                    rewriter.getBoolAttr(false)); // enable_out_of_order
-
-                auto getBdIdOp =
-                    rewriter.create<dfschedule::GetBdIdOp>(loc, rewriter.getI32Type(), coreTileOp.getTile());
-
-                // Core MM2S (output) repeat: when tile_m < tileRows, the kernel
-                // outputs mRounds sub-tiles. The DMA must repeat accordingly.
-                int32_t coreRepeatCount = 1;
-                if (coreDmaDir == dfscheblueprint::bp_direction::MM2S) {
-                    int64_t tileM = tiling.tileM;
-                    int64_t tileRows = tiling.tileRows;
-                    if (tileM > 0 && tileM < tileRows) {
-                        coreRepeatCount = static_cast<int32_t>(tileRows / tileM);
+        // --- Core tile DMA config (KERNELCONFIGOFFLOAD only) ---
+        //
+        // Under offload the core programs its own DMA, so these ops belong to the
+        // kernel module — the unit that represents what the core does for itself.
+        //
+        // This calls the SAME emitter the host path uses
+        // (helper/flowtransfer_kernel.cpp emitCoreTileConfigs). That matters: this
+        // block used to be a hand-rolled second implementation that produced a
+        // single un-chained BD at offset 0 with zero lock ids and a kernel-local
+        // BD counter — values that did not describe any real DMA. Sharing the host
+        // emitter gives the real ping/pong chain, the real CoreMemAllocator L1
+        // offsets, the real lock ids, and the real per-tile BD ids.
+        //
+        // When offload is OFF this emits nothing: the host path owns core config.
+        if (kernelConfigOffload) {
+            auto kernelModuleForIo = findKernelModule(op.getOperation(), "kernel_driver_" + kernelName.str());
+            if (kernelModuleForIo) {
+                // Emit inside the kernel module body, ahead of dfschedule.main, so
+                // the config reads before the entry point. Without this retarget the
+                // ops land at the rewriter's current point — inside func.func @main —
+                // and are erased by this pass's end-of-run cleanup.
+                Block &kmBody = kernelModuleForIo.getBody().front();
+                dfschedule::KernelMainOp kmMain = nullptr;
+                for (Operation &inner : kmBody)
+                    if (auto m = dyn_cast<dfschedule::KernelMainOp>(&inner)) {
+                        kmMain = m;
+                        break;
                     }
+                if (kmMain)
+                    rewriter.setInsertionPoint(kmMain);
+                else
+                    rewriter.setInsertionPointToEnd(&kmBody);
+
+                blueprint_sched::FlowLoweringCtx fc(rewriter, loc, op);
+                fc.shimFlowConfig = shimFlowConfig;
+                fc.coreFlowConfig = coreFlowConfig;
+                fc.shimIsSender = (fromType && *fromType == "shim");
+                fc.shimTileGroup = shimTileGroup;
+                fc.coreTileGroup = coreTileGroup;
+                fc.basePacketId = basePacketId;
+                fc.flowIndex = flowIndex;
+                fc.viewValue = viewValue;
+                fc.viewType = viewType;
+                fc.bufferLen = bufferLen;
+                fc.numCoreTiles = coreTileGroup.getTiles().size();
+                fc.offloadCoreDmaConfig = true;
+                // NO DDR memref on this path — deliberately.
+                //
+                // The emitted BD address does not come from DDR: BindCoreBufferOp
+                // lowers to `(void*)<l1Offset>` (passdfscheduletoapi.cpp), discarding
+                // both the token and its type, and memref_mapping lowers to a no-op.
+                // The real address is t.pingL1Offset from CoreMemAllocator. The DDR
+                // chain only ever supplied the per-tile SHAPE, which emitCoreBufferDma
+                // now takes from tileExtractSlice directly (see the shape-first path
+                // there). Reconstructing DDR geometry here would produce a value that
+                // is thrown away.
+                //
+                // partExtractSlice IS still set: it selects the per-tile offset
+                // interpretation and carries the #routing.tiling attr.
+                fc.partExtractSlice = viewValue.getDefiningOp<tensor::ExtractSliceOp>();
+                fc.shimTensorType = dyn_cast<RankedTensorType>(viewType);
+                // memrefType is read only for element size and rank.
+                fc.memrefType = MemRefType::get(kernelTensorType.getShape(), kernelTensorType.getElementType());
+                // transferType drives the many_to_one gather split; data_id keys the
+                // cross-flow input/output index bookkeeping. Both read exactly as the
+                // host prologue reads them (flowtransfer_host.cpp emitShimTileAndParams).
+                fc.transferType = op.getType();
+                auto dataIdOpt = shimFlowConfig.getDataId();
+                fc.dataId = dataIdOpt.has_value() ? static_cast<int32_t>(*dataIdOpt) : -1;
+
+                blueprint_sched::CoreTileEmitDeps deps;
+                try {
+                    deps.resourceMgr = ResourceMgr::instance();
+                } catch (...) {
+                    // ResourceMgr::init() never called (standalone unit tests).
                 }
+                // Built once at pass entry (see BlueprintToScheduleKernelPass::
+                // runOnOperation). Must be non-null: the emitter dereferences it for
+                // the tiling scalars, and `rootMemref` gates the whole per-tile
+                // buffer/BD block — without it emitCoreBufferDma emits nothing.
+                deps.passState = passState;
+                deps.bufferRatio = bufferRatio;
+                deps.maxPingPongBytes = maxPingPongBytes;
+                deps.dataIdToInputIdx = &coreDataIdToInputIdx;
+                deps.dataIdToOutputIdx = &coreDataIdToOutputIdx;
+                deps.nextInputIdx = &coreNextInputIdx;
+                deps.nextOutputIdx = &coreNextOutputIdx;
+                deps.emitCoreDma = true; // this caller IS the emitter
 
-                rewriter.create<dfschedule::StartIoOp>(loc, dfschedule::EventType::get(rewriter.getContext()),
-                                                       createIoOp.getIoHandle(), getBdIdOp.getBdId(),
-                                                       rewriter.getI32IntegerAttr(flowIndex),
-                                                       rewriter.getI32IntegerAttr(coreRepeatCount));
+                if (failed(blueprint_sched::emitCoreTileConfigs(fc, deps)))
+                    return failure();
 
-                tileIdx++;
+                // The shared emitter DEFERS core start_io (on the host path it is
+                // flushed after load_kernel_group, so ELF BSS init cannot clobber
+                // programmed DMA state). The kernel path has no such flush point —
+                // and no such hazard, since these ops sit in the kernel module
+                // rather than in the host's startup sequence — so flush here.
+                for (auto &deferred : fc.deferredCoreStartIos)
+                    rewriter.create<dfschedule::StartIoOp>(
+                        loc, dfschedule::EventType::get(rewriter.getContext()), deferred.ioHandle, deferred.bdId,
+                        rewriter.getI32IntegerAttr(deferred.flowIdx), rewriter.getI32IntegerAttr(deferred.repeatCount));
+
+                // Restore the insertion point to the op being replaced.
+                rewriter.setInsertionPoint(op);
             }
         }
 
@@ -1507,10 +1564,37 @@ void BlueprintToScheduleKernelPass::runOnOperation() {
             tiling = ir;
     }
 
+    // KERNELCONFIGOFFLOAD: state for the SHARED core-tile emitter
+    // (blueprint_sched::emitCoreTileConfigs), mirroring what BlueprintToSchedulePass
+    // builds for the host path. Two parts matter:
+    //   - the tiling scalars, which the emitter dereferences unguarded;
+    //   - preprocessConstantToMemref, which lowers the data constants to real
+    //     memrefs and fills rootMemref. That field GATES the whole per-tile
+    //     buffer/BD block in emitCoreBufferDma, so without it the emitter walks
+    //     every tile and emits nothing.
+    // Built only under offload; the non-offload kernel path never calls the emitter.
+    auto kernelPassState = std::make_shared<blueprint_sched::BlueprintPassState>();
+    if (kernelConfigOffload) {
+        if (failed(blueprint_sched::preprocessConstantToMemref(getOperation(), kernelPassState))) {
+            signalPassFailure();
+            return;
+        }
+        kernelPassState->tileM = tiling.tileM;
+        kernelPassState->tileRows = tiling.tileRows;
+        kernelPassState->tileN = tiling.tileN;
+        kernelPassState->tileCols = tiling.tileCols;
+        kernelPassState->effectiveK = tiling.effectiveK;
+        kernelPassState->fullK = tiling.fullK;
+        kernelPassState->kRounds = tiling.kRounds;
+        kernelPassState->tilingScalars = tiling;
+        kernelPassState->kernelConfigOffload = true;
+    }
+
     RewritePatternSet patterns(context);
     // FlowTransferConversion converts flow_transfer to dfschedule operations
     // It reads from FlowConfigOps to get DMA configuration
-    patterns.add<FlowTransferConversion>(context, bufferRatio_, maxPingPongBytes_, tiling, kernelConfigOffload);
+    patterns.add<FlowTransferConversion>(context, bufferRatio_, maxPingPongBytes_, tiling, kernelConfigOffload,
+                                         kernelPassState);
     // DataSliceOp replaces with input tensor
     patterns.add<DataSliceOpConversion>(context);
     // Use unified erase pattern for ops that just need to be removed
@@ -1526,8 +1610,16 @@ void BlueprintToScheduleKernelPass::runOnOperation() {
     }
 
     // Kernel-only: remove all top-level ops that are not dfschedule kernel logic.
-    // Keep DSKernelReceiverOp, KernelModuleOp, and DMA IO config ops
-    // (DeclareTile, ConfigDmaBd, ConfigCreateIo, GetBdId, StartIo + their operand producers).
+    //
+    // This walks ONLY the top-level block and tests each DIRECT child, so an op
+    // nested inside a non-kept parent dies with that parent — `func.func @main` is
+    // not on the keep-list, so everything under it goes. That is why the core-tile
+    // DMA config is emitted into the KernelModuleOp body (which IS kept) rather
+    // than at the rewriter's natural insertion point inside func.func.
+    //
+    // The DeclareTile/ConfigDmaBd/ConfigCreateIo/GetBdId/StartIo entries below are
+    // therefore only reachable for ops sitting at top level; nothing currently
+    // places them there. They are kept as a guard in case that changes.
     Operation *root = getOperation();
     while (root->getParentOp())
         root = root->getParentOp();

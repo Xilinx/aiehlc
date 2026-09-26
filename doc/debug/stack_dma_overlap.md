@@ -68,8 +68,21 @@ Address Range         Size    Region               Notes
 0x70000 - 0x727FF     10KB    Stack                  BCF: _stack DM_stack 0x70000 0x2800
 0x72800 - 0x77FFF     22KB    Gap / runtime          Heap, globals, linker-placed data
 0x78000 - 0x7F7FF     30KB    DMA ping-pong buffers  CoreMemAllocator base=0x78000
-0x7F800 - 0x7FFFF     2KB     klog region            BCF: _reserved DMb 0x7F800 0x800
+0x7F800 - 0x7FFFF     2KB     klog / TM region       BCF: _reserved DMb 0x7F800 0x800
+0x80000 and above     512KB   Not core-addressable   BCF: _reserved DMb 0x80000 0x80000
 ```
+
+**Who emits the two tail reservations.** There are two independent BCF
+generators, and they do *not* agree:
+
+| Generator | Path | `0x7F800` + `0x80000` reserved? |
+|---|---|---|
+| `Bcf` (`src/mlir/mlirfront/mlirpass/aiehybrid.{h,cc}`) | aiehlc single-kernel | **yes** — `Bcf::addlogandtmreserved()` |
+| `TilingBcf` (`.../pass/kernelconfig/kernelconfig.h`) | tilinglinalg multi-tile | **no** — commented out at `tilinglinalg_pipeline.cpp`, "This crashes the simulator" |
+
+Keep them in step only after re-checking the simulator: the tilinglinalg call
+site was deliberately reverted, so re-enabling it there is a behaviour change,
+not a cleanup.
 
 ---
 

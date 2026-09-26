@@ -75,6 +75,7 @@ include_directories(../passdmaphoptoroutinghw/)
 include_directories(../passdmaptodmaphop/)
 include_directories(../passschedulecanonicalize/)
 include_directories(../passgroupregwrite/)
+include_directories(../passdfschedulekernelaggregation/)
 include_directories(../passschedulesequentialop/)
 include_directories(../passwaitmerge/)
 include_directories(../passdfscheduletoapi/)
@@ -121,6 +122,7 @@ set(SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passdmaphoptodfscheblueprint/passdmaphoptodfscheblueprint.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passschedulecanonicalize/passschedulecanonicalize.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passgroupregwrite/passgroupregwrite.cpp
+                ${CMAKE_CURRENT_SOURCE_DIR}/../passdfschedulekernelaggregation/passdfschedulekernelaggregation.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passschedulesequentialop/passschedulesequentialop.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passwaitmerge/passwaitmerge.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passdfscheduletoapi/passdfscheduletoapi.cpp

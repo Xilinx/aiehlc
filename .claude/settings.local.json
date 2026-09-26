@@ -34,7 +34,14 @@
       "mcp__ide__getDiagnostics",
       "Bash(awk '{print $NF}')",
       "Bash(awk -F'config\\\\\\\\\\(v1, ' '{print $2}')",
-      "Bash(awk -F', ' '{print \"enpkt=\"$6\" pktid=\"$7\" ooo=\"$12}')"
+      "Bash(awk -F', ' '{print \"enpkt=\"$6\" pktid=\"$7\" ooo=\"$12}')",
+      "Bash(cd *)",
+      "Bash(awk '/enable_packet = true/,/^    } :/' ir/dfschedule/15_BlueprintToScheduleKernelPass.mlir)",
+      "Bash(git check-ignore *)",
+      "Bash(awk -F: '{print $1}')",
+      "Bash(grep -n 'I32:\\\\$\\\\|I32:\\\\\\\\$' td/dfscheduleop.td)",
+      "Bash(awk '/class ConfigDmaBdOp /,/^};/' src/mlir/mlirfront/tilinglinalg/dataflowmap/dfschedule/inc/dfscheduleop.h.inc)",
+      "Bash(awk '/ConfigDmaBdOp::getODSOperandIndexAndLength/,/^}/' src/mlir/mlirfront/tilinglinalg/dataflowmap/dfschedule/inc/dfscheduleop.cc.inc)"
     ],
     "deny": []
   },

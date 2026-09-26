@@ -75,7 +75,7 @@
 // trace-induced; set to 1 to re-enable.
 #ifndef TRACE_ENABLE
 #ifndef __AIESIM__
-#define TRACE_ENABLE 1
+// #define TRACE_ENABLE 1
 #else
 #define TRACE_ENABLE 0
 #endif
@@ -86,7 +86,7 @@
 // hex) that src/tool/debug/host_aie_timeline.py correlates into one microsecond
 // axis. Host-side only (XTime), so it is compiled out under the simulator.
 #ifndef __AIESIM__
-#define TIMESYNC 1
+// #define TIMESYNC 1
 #else
 #define TIMESYNC 0
 #endif
@@ -102,6 +102,16 @@
 #define N 4
 #define MAT_SIZE (N * N)
 
+// Tile Memory-Mapped (TM) register access. The anchor that gives the compiler
+// the TM memory space must live at FILE scope, and aiehlc regenerates the
+// kernel from the function body plus #define lines only -- so the include is
+// wrapped in the prologue markers, which aiehlc copies through verbatim.
+// See src/mlir/runtime/kernel_tm.h for why a raw pointer cast does not work.
+//
+// AIEHLC_KERNEL_PROLOGUE_BEGIN
+#include "kernel_tm.h"
+// AIEHLC_KERNEL_PROLOGUE_END
+
 // #define DISABLE_CACHE
 //__attribute__((annotate("streaming")))
 __global__ void perf(input_window_int32 *win __attribute__((annotate("mem_address:0x1000"), annotate("size_hint:512"))),
@@ -111,7 +121,30 @@ __global__ void perf(input_window_int32 *win __attribute__((annotate("mem_addres
 #define MAT_SIZE (N * N)
 #define DATA_SIZE (MAT_SIZE * 2)
 #define VECTOR_LENGTH 16
-	//aie::vector<int32_t, VECTOR_LENGTH> temp_a = window_readincr_v<VECTOR_LENGTH>(win);
+    // TM register access via kernel_tm.h. Three paths, so one HW run compares
+    // them: (A) this header, (B) AMD's adf:: API, (C) a raw pointer cast as a
+    // deliberate control -- C is expected to stay inside the core.
+    TM_W(TM_MEM_SPARE_REG, 0x7234);
+    chess_memory_fence();
+    uint32 rb = TM_R(TM_MEM_SPARE_REG);
+    uint32 corestatus = TM_R(TM_CORE_STATUS);
+    /*
+    adf::write(adf::reg_val{0x0001D100, 0x7235});
+    chess_memory_fence();
+    uint32 rb_adf = adf::read(0x0001D100);
+
+    *((volatile int *)(0x0001D100 + 8)) = 0x7236;
+    chess_memory_fence();
+    uint32 rb_raw = *((volatile int *)(0x0001D100 + 8));
+
+    // Park results in DM: data memory is passive storage, so the values survive
+    // until the host reads them (a TM register may be volatile hardware state).
+    *((volatile int *)(0x70000 + 0x0000FF04)) = (int)rb;         // expect 0x7234
+    *((volatile int *)(0x70000 + 0x0000FF08)) = (int)corestatus;
+    *((volatile int *)(0x70000 + 0x0000FF0C)) = (int)rb_adf;     // expect 0x7235
+    *((volatile int *)(0x70000 + 0x0000FF10)) = (int)rb_raw;     // expect 0x7236 on-core
+     */
+    //aie::vector<int32_t, VECTOR_LENGTH> temp_a = window_readincr_v<VECTOR_LENGTH>(win);
 	//aie::store_unaligned_v<VECTOR_LENGTH>(A_mat + (w*VECTOR_LENGTH), temp_a);
 	uint32_t * ptr_out = (uint32_t *)(0x70000 + 0x6000);
 	uint32_t * ptr_in = (uint32_t *)(0x70000 + 0x1000);
@@ -168,6 +201,8 @@ int test_routing(XAie_DevInst *DevInst)
     XAie_CoreReset(DevInst, XAie_TileLoc(4, 4));
     XAie_LoadElfMem(DevInst, XAie_TileLoc(4, 4), (unsigned char *)perf);
     XAie_CoreUnreset(DevInst, XAie_TileLoc(4, 4));
+
+    XAie_CoreProcessorBusEnable(DevInst, XAie_TileLoc(4, 4));
 
     routingInstance = XAie_InitRoutingHandler(DevInst);
     XAie_Route(routingInstance, NULL, XAie_TileLoc(shimcol, 0) /* Source*/, XAie_TileLoc(4, 4) /* destination*/);
@@ -491,6 +526,10 @@ int main(int argc, char* argv[]) {
 #endif /* __AIESIM__ */
 
     test_routing(&DevInst);
+
+    u32 v = 0;
+    XAie_Read32(&DevInst, XAie_GetTileAddr(&DevInst, 4, 4) + 0x16000, &v);
+    printf("Read value from 0x16000: 0x%x\n", v);
     return 1;
     RC = XAie_PartitionTeardown(&DevInst);
     if(RC != XAIE_OK) {

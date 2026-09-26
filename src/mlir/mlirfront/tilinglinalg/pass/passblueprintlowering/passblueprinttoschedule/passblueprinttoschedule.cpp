@@ -210,7 +210,7 @@ LogicalResult FlowTransferConversion::matchAndRewrite(dfscheblueprint::FlowTrans
     // means for a flow.
     //
     // BOTH directions are offloaded. This used to be S2MM-only (&& c.shimIsSender)
-    // because aie_kernel_config.h had no MM2S start encoder; it now has
+    // because aie_kernel_runtime.h had no MM2S start encoder; it now has
     // aie_kc_encode_mm2s_start, and emitCoreDmaConfigBlocks emits MM2S under a
     // get_coreid() dispatch (MM2S packet_id / ooo_bd_id are per-tile, and one ELF
     // runs on every tile). The per-tile row check (kOffloadCoreRowMin) is applied
@@ -234,7 +234,11 @@ LogicalResult FlowTransferConversion::matchAndRewrite(dfscheblueprint::FlowTrans
     // declaration would remove the very code meant to replace the host config
     // (and would trip the c.coreTiles.empty() bail-out below, dropping the
     // kernel launch entirely).
-    if (failed(emitCoreTileConfigs(c)))
+    // Under offload the CORE emits its own DMA config (BlueprintToScheduleKernelPass
+    // calls this same emitter into the kernel module). The host still walks the
+    // tiles here — it must reserve the BD ids and publish coreOffloadPlan — but
+    // emits no core DMA ops.
+    if (failed(emitCoreTileConfigs(c, coreDeps(/*emitCoreDma=*/!c.offloadCoreDmaConfig))))
         return failure();
 
     if (c.coreTiles.empty()) {

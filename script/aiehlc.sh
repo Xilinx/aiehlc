@@ -446,6 +446,12 @@ AIEHLC_ARGS+=(
     --extra-arg="-I$XILINX_VITIS_AIETOOLS/include" --extra-arg="-I${CLANG_INCLUDE_PATH}" --extra-arg="-I${AIEHLC_DIR}/include/llvm"
     --extra-arg="-I${SOURCE_DIR}" --extra-arg="-I${AIEHLC_DIR}/src/mlir/runtime"
     --extra-arg="-I${AIEHLC_DIR}/include"
+    # Keep LAST: fallbacks for BSP headers that only exist on the armclang
+    # branch of the standalone BSP. aiehlc parses with Clang, so __clang__ is
+    # defined and xpseudo_asm.h takes that branch, but the Gen2 (cortexa72)
+    # BSP ships only the GCC variant. Where the BSP does provide the real
+    # header (Gen5 / cortexa78) the earlier -I dirs still win.
+    --extra-arg="-I${AIEHLC_DIR}/include/bspcompat"
 )
 if [ -n "$AIEHLC_SIM_DEFINE" ]; then
     AIEHLC_ARGS+=("$AIEHLC_SIM_DEFINE")

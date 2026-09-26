@@ -63,6 +63,20 @@ static inline int32_t klog_pack_tag(const char *tag) {
 #define KLOG_PTR ((volatile int32_t *)KLOG_BASE)
 
 /*
+ * Kernel logging is OPT-IN, enabled by KERNEL_LOG_ENABLED.
+ *
+ * script/kc.sh defines it when the user writes
+ *     #pragma aie_debug_level(AIE_KERNEL_CONFIG_TRACE)
+ * (see AIE_DEBUG_FLAG_KERNEL_CONFIG_TRACE in aie_runtime.h).
+ *
+ * Gating here rather than at each call site means ONE switch covers every klog
+ * user — the compute kernel's own logging and the KERNELCONFIGOFFLOAD register
+ * trace alike — and a normal build pays nothing: klog compiles to an empty
+ * inline that the optimizer removes, so callers need no #ifdef of their own.
+ */
+#ifdef KERNEL_LOG_ENABLED
+
+/*
  * Write a log entry: 4-char tag + int32 value.
  * Each entry occupies 2 int32 slots.
  */
@@ -85,6 +99,16 @@ static inline void klog_init(void) {
     base[0] = 0; /* write_index = 0 */
     klog("KLOG", KLOG_MAGIC);
 }
+
+#else /* !KERNEL_LOG_ENABLED — compile klog out entirely */
+
+static inline void klog(const char *tag, int32_t val) {
+    (void)tag;
+    (void)val;
+}
+static inline void klog_init(void) {}
+
+#endif /* KERNEL_LOG_ENABLED */
 
 #else
 /* ---- Host side: no-op stubs + readback helper ---- */

@@ -6,6 +6,7 @@
 #include "../passblueprintlowering/passblueprinttoschedulekernel/passblueprinttoschedulekernel.h"
 #include "../passdfscheduleprovenancemap/passdfscheduleprovenancemap.h"
 #include "../passdfscheduletoapi/passdfscheduletoapi.h"
+#include "../passdfschedulekernelaggregation/passdfschedulekernelaggregation.h"
 #include "../passdfscheduletokernelapi/passdfscheduletokernelapi.h"
 #include "../passdmaphopprovenancemap/passdmaphopprovenancemap.h"
 #include "../passdmaphoptodfscheblueprint/passdmaphoptodfscheblueprint.h"
@@ -2300,6 +2301,222 @@ static void testControlPacketCtrlSink() {
     std::cout << "=== Control-packet CTRL-sink Test " << (allPass ? "PASS" : "FAIL") << " ===" << std::endl;
 }
 
+// ---------------------------------------------------------------------------
+// DfscheduleKernelAggregationPass
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Build a kernel module with `ntiles` per-tile MM2S BD groups that differ only
+// in packet_id, plus a matching core_offload_plan. Mirrors the shape
+// BlueprintToScheduleKernelPass produces: pong dma_bd -> ping dma_bd (linked)
+// -> create_io -> start_io, one chain per tile.
+//
+// `perturbLenOnTile >= 0` makes that tile's BD differ in `len`, which must be
+// rejected: one ELF runs on every core tile, so a genuinely per-tile BD program
+// cannot be expressed and silently merging it would program wrong DMA registers.
+mlir::ModuleOp buildKernelAggModule(mlir::MLIRContext &ctx, int ntiles, int perturbLenOnTile) {
+    mlir::OpBuilder b(&ctx);
+    auto loc = b.getUnknownLoc();
+    auto module = mlir::ModuleOp::create(loc);
+    b.setInsertionPointToStart(module.getBody());
+
+    auto kmod = b.create<dfschedule::KernelModuleOp>(loc, b.getStringAttr("kernel_driver_test"));
+    kmod->setAttr("dfschedule.kernel_config_offload", b.getI64IntegerAttr(1));
+
+    llvm::SmallVector<mlir::Attribute> planEntries;
+    for (int t = 0; t < ntiles; ++t) {
+        mlir::NamedAttrList d;
+        d.append("col", b.getI32IntegerAttr(t));
+        d.append("row", b.getI32IntegerAttr(3));
+        d.append("is_output", b.getBoolAttr(true));
+        d.append("channel", b.getI32IntegerAttr(0));
+        d.append("packet_id", b.getI32IntegerAttr(t + 1));
+        d.append("enable_packet", b.getBoolAttr(true));
+        d.append("ooo_bd_id", b.getI32IntegerAttr(t + 2));
+        d.append("bd_len_bytes", b.getI32IntegerAttr(256));
+        d.append("pp_depth", b.getI32IntegerAttr(2));
+        planEntries.push_back(b.getDictionaryAttr(d));
+    }
+    kmod->setAttr("dfschedule.core_offload_plan", b.getArrayAttr(planEntries));
+
+    auto &block = kmod.getBody().emplaceBlock();
+    b.setInsertionPointToStart(&block);
+
+    auto bdTy = dfschedule::BdHandleType::get(&ctx);
+    auto ioTy = dfschedule::IoHandleType::get(&ctx);
+    auto evTy = dfschedule::EventType::get(&ctx);
+    auto memTy = mlir::MemRefType::get({16, 256}, b.getI8Type());
+
+    for (int t = 0; t < ntiles; ++t) {
+        auto tile = b.create<dfschedule::DeclareTileOp>(loc, dfschedule::TileType::get(&ctx), b.getI32IntegerAttr(t),
+                                                        b.getI32IntegerAttr(3));
+        auto alloc = b.create<mlir::memref::AllocOp>(loc, memTy);
+        auto ping =
+            b.create<dfschedule::BindCoreBufferOp>(loc, memTy, alloc, tile.getTile(), b.getI64IntegerAttr(36864));
+        auto pong =
+            b.create<dfschedule::BindCoreBufferOp>(loc, memTy, alloc, tile.getTile(), b.getI64IntegerAttr(37120));
+        auto c5 = b.create<mlir::arith::ConstantOp>(loc, b.getI32IntegerAttr(5));
+        auto c4 = b.create<mlir::arith::ConstantOp>(loc, b.getI32IntegerAttr(4));
+        auto c0 = b.create<mlir::arith::ConstantOp>(loc, b.getI32IntegerAttr(0));
+        int32_t len = (t == perturbLenOnTile) ? 512 : 256;
+
+        // packet_id and out_of_order_bd_id are SSA operands (like bd_id/offset),
+        // so they are materialized as arith.constant and passed right after
+        // offset. Values match the plan (t+1 / t+2): the op and the plan are two
+        // independent derivations, and the pass fails on disagreement.
+        auto pktC = b.create<mlir::arith::ConstantOp>(loc, b.getI32IntegerAttr(t + 1));
+        auto oooC = b.create<mlir::arith::ConstantOp>(loc, b.getI32IntegerAttr(t + 2));
+        auto pongBd = b.create<dfschedule::ConfigDmaBdOp>(
+            loc, bdTy, pong, tile.getTile(), c5, c0, pktC.getResult(), oooC.getResult(), /*len=*/(uint32_t)len,
+            /*enable_packet=*/true, /*next_bd=*/4u, /*acquire_lock_id=*/5u,
+            /*acquire_lock_val=*/(uint32_t)-1, /*release_lock_id=*/4u, /*release_lock_val=*/1u,
+            /*data_id=*/(uint32_t)-1, /*linked_bd=*/mlir::Value(),
+            /*dim_strides=*/nullptr, /*dim_wraps=*/nullptr);
+        auto pingBd = b.create<dfschedule::ConfigDmaBdOp>(
+            loc, bdTy, ping, tile.getTile(), c4, c0, pktC.getResult(), oooC.getResult(), /*len=*/(uint32_t)len,
+            /*enable_packet=*/true, /*next_bd=*/5u, /*acquire_lock_id=*/5u,
+            /*acquire_lock_val=*/(uint32_t)-1, /*release_lock_id=*/4u, /*release_lock_val=*/1u,
+            /*data_id=*/(uint32_t)-1, /*linked_bd=*/pongBd.getResult(),
+            /*dim_strides=*/nullptr, /*dim_wraps=*/nullptr);
+        auto io = b.create<dfschedule::ConfigCreateIoOp>(loc, ioTy, pingBd.getResult(), tile.getTile(),
+                                                         b.getI32IntegerAttr(0), b.getStringAttr("MM2S"),
+                                                         b.getStringAttr("SEND"), b.getBoolAttr(false));
+        auto bdid = b.create<dfschedule::GetBdIdOp>(loc, b.getI32Type(), tile.getTile());
+        b.create<dfschedule::StartIoOp>(loc, evTy, io.getResult(), bdid.getResult(), b.getI32IntegerAttr(0),
+                                        b.getI32IntegerAttr(1));
+    }
+    return module;
+}
+
+int countDmaBds(mlir::ModuleOp m) {
+    int n = 0;
+    m.walk([&](dfschedule::ConfigDmaBdOp) { ++n; });
+    return n;
+}
+
+} // namespace
+
+static void testKernelAggregation() {
+    std::cout << "=== Kernel DMA-config aggregation test ===" << std::endl;
+    bool allPass = true;
+    const int kTiles = 4;
+
+    // --- Positive: 4 identical-except-packet_id tile groups collapse to 1 ---
+    {
+        mlir::MLIRContext ctx;
+        TilingLinalgPipeline::registerDialects(ctx);
+        auto module = buildKernelAggModule(ctx, kTiles, /*perturbLenOnTile=*/-1);
+
+        int before = countDmaBds(module);
+        mlir::PassManager pm(&ctx);
+        pm.addPass(std::make_unique<mlir::DfscheduleKernelAggregationPass>());
+        bool ok = mlir::succeeded(pm.run(module));
+        int after = countDmaBds(module);
+
+        std::cout << "  pass succeeded:            " << (ok ? "PASS" : "FAIL") << std::endl;
+        std::cout << "  dma_bd " << before << " -> " << after << " (expect 2): " << (after == 2 ? "PASS" : "FAIL")
+                  << std::endl;
+        allPass &= ok && (before == kTiles * 2) && (after == 2);
+
+        // The surviving MM2S BD must carry the per-tile fan-out.
+        bool coordsOk = false, pktOk = false, oooOk = false, sentinelOk = false;
+        module.walk([&](dfschedule::ConfigDmaBdOp bd) {
+            auto agg = bd->getAttrOfType<mlir::BoolAttr>("aggregated");
+            if (!agg || !agg.getValue())
+                return;
+            auto coords = bd->getAttrOfType<mlir::ArrayAttr>("tile_coords");
+            auto pkts = bd->getAttrOfType<mlir::ArrayAttr>("tile_packet_ids");
+            auto ooos = bd->getAttrOfType<mlir::ArrayAttr>("tile_ooo_bd_ids");
+            if (!coords || !pkts || !ooos)
+                return;
+            coordsOk = (coords.size() == kTiles);
+            // plan says packet_id = t+1, ooo_bd_id = t+2
+            pktOk = oooOk = true;
+            for (int t = 0; t < (int)pkts.size(); ++t) {
+                pktOk &= mlir::cast<mlir::IntegerAttr>(pkts[t]).getInt() == t + 1;
+                oooOk &= mlir::cast<mlir::IntegerAttr>(ooos[t]).getInt() == t + 2;
+            }
+            // The aggregated group must hang off declaretile.self, NOT a
+            // coordinate-bearing tile: one ELF runs on every core tile.
+            sentinelOk = bd.getTile().getDefiningOp<dfschedule::DeclareTileSelfOp>() != nullptr &&
+                         bd.getTile().getDefiningOp<dfschedule::DeclareTileOp>() == nullptr;
+        });
+        std::cout << "  tile_coords has " << kTiles << " tiles:   " << (coordsOk ? "PASS" : "FAIL") << std::endl;
+        std::cout << "  tile_packet_ids from plan: " << (pktOk ? "PASS" : "FAIL") << std::endl;
+        std::cout << "  tile_ooo_bd_ids from plan: " << (oooOk ? "PASS" : "FAIL") << std::endl;
+        std::cout << "  anchored on declaretile.self: " << (sentinelOk ? "PASS" : "FAIL") << std::endl;
+        allPass &= coordsOk && pktOk && oooOk && sentinelOk;
+
+        // Verifiers must still accept the rewritten module (no orphaned handles).
+        bool verifies = mlir::succeeded(module.verifyInvariants());
+        std::cout << "  module verifies:           " << (verifies ? "PASS" : "FAIL") << std::endl;
+        allPass &= verifies;
+    }
+
+    // --- Negative: a tile differing in `len` must FAIL the build, not merge ---
+    {
+        mlir::MLIRContext ctx;
+        TilingLinalgPipeline::registerDialects(ctx);
+        auto module = buildKernelAggModule(ctx, kTiles, /*perturbLenOnTile=*/2);
+
+        // Swallow the expected diagnostic instead of printing it as a scary error.
+        std::string diag;
+        mlir::ScopedDiagnosticHandler handler(&ctx, [&](mlir::Diagnostic &d) {
+            diag += d.str();
+            return mlir::success();
+        });
+        mlir::PassManager pm(&ctx);
+        pm.addPass(std::make_unique<mlir::DfscheduleKernelAggregationPass>());
+        bool failed = mlir::failed(pm.run(module));
+        bool namesLen = diag.find("'len'") != std::string::npos;
+        std::cout << "  mismatched len rejected:   " << (failed ? "PASS" : "FAIL") << std::endl;
+        std::cout << "  error names the attribute: " << (namesLen ? "PASS" : "FAIL") << std::endl;
+        allPass &= failed && namesLen;
+    }
+
+    // --- Negative: op vs plan ooo_bd_id disagreement must FAIL ---------------
+    // The op and dfschedule.core_offload_plan are independent derivations of the
+    // same shim S2MM BD. If they drift, the core sends its output to another
+    // tile's BD -- a silent data corruption on hardware -- so the build stops.
+    {
+        mlir::MLIRContext ctx;
+        TilingLinalgPipeline::registerDialects(ctx);
+        auto module = buildKernelAggModule(ctx, kTiles, /*perturbLenOnTile=*/-1);
+
+        // Skew ONE tile's op-side ooo away from the plan's t+2.
+        bool skewed = false;
+        module.walk([&](dfschedule::ConfigDmaBdOp bd) {
+            if (skewed || !bd.getEnablePacket())
+                return;
+            auto td = bd.getTile().getDefiningOp<dfschedule::DeclareTileOp>();
+            if (!td || td.getCol() != 1)
+                return;
+            // out_of_order_bd_id is an operand now, so skew it by swapping in a
+            // different constant rather than overwriting an attribute.
+            mlir::OpBuilder ib(bd);
+            auto skew = ib.create<mlir::arith::ConstantOp>(bd.getLoc(), ib.getI32IntegerAttr(99));
+            bd.getOutOfOrderBdIdMutable().assign(skew.getResult());
+            skewed = true;
+        });
+
+        std::string diag;
+        mlir::ScopedDiagnosticHandler handler(&ctx, [&](mlir::Diagnostic &d) {
+            diag += d.str();
+            return mlir::success();
+        });
+        mlir::PassManager pm(&ctx);
+        pm.addPass(std::make_unique<mlir::DfscheduleKernelAggregationPass>());
+        bool failed = mlir::failed(pm.run(module));
+        bool namesOoo = diag.find("out_of_order_bd_id mismatch") != std::string::npos;
+        std::cout << "  ooo/plan drift rejected:   " << (failed ? "PASS" : "FAIL") << std::endl;
+        std::cout << "  error names ooo_bd_id:     " << (namesOoo ? "PASS" : "FAIL") << std::endl;
+        allPass &= skewed && failed && namesOoo;
+    }
+
+    std::cout << "=== Kernel aggregation Test " << (allPass ? "PASS" : "FAIL") << " ===" << std::endl;
+}
+
 int main(int argc, char* argv[]) {
     // Parse --gen and --output-pp-depth arguments from anywhere in argv
     for (int i = 1; i < argc; ++i) {
@@ -2431,6 +2648,9 @@ int main(int argc, char* argv[]) {
             std::string filepath = argv[2];
             std::cout << "Executing routingtodfschedule with IR from " << filepath << std::endl;
             routingtodfschedule(filepath);
+        } else if (arg == "kernelagg") {
+            std::cout << "Executing kernel DMA-config aggregation test..." << std::endl;
+            testKernelAggregation();
         } else if (arg == "hw") {
             std::cout << "Executing routingtoroutinghw..." << std::endl;
             routingtoroutinghw();

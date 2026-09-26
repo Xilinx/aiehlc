@@ -18,6 +18,7 @@
 #include "passdmaphoptoroutinghw.h"
 #include "passroutingprovenancemap.h"
 #include "passroutingresourcemap.h"
+#include "passdfschedulekernelaggregation.h"
 #include "passgroupregwrite.h"
 #include "passschedulecanonicalize.h"
 #include "passschedulesequentialop.h"
@@ -855,6 +856,23 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
                                std::make_unique<mlir::BlueprintToScheduleKernelPass>(0.5, maxPingPongBytes), irDir,
                                stage, "BlueprintToScheduleKernelPass"))
         return false;
+
+    // Collapse the per-core-tile core DMA config into one BD group per window.
+    // BlueprintToScheduleKernelPass emits a declaretile/dma_bd/create_io/start_io
+    // group per tile (48 groups on a 4x4 mesh with 3 windows), but one kernel.cc
+    // is broadcast to every core tile, so those groups describe at most two
+    // distinct configurations -- identical for S2MM, differing only in packet_id
+    // and ooo_bd_id for MM2S. Must run before DfscheduleToKernelApiPass, which
+    // erases the KernelModuleOp. Gated on routing.kernel_config_offload: without
+    // that pragma there is no per-tile core DMA config to aggregate.
+    if (kernelConfigOffloadOn) {
+        if (!runPipelineSinglePass(ctx, kernelModule, std::make_unique<mlir::DfscheduleKernelAggregationPass>(), irDir,
+                                   stage, "DfscheduleKernelAggregationPass"))
+            return false;
+    } else {
+        llvm::errs() << "[TilingLinalg] DfscheduleKernelAggregationPass skipped (enable with "
+                        "#pragma KERNELCONFIGOFFLOAD).\n";
+    }
 
     // Extract kernel parameter info from KernelModuleOp (before DfscheduleToKernelApiPass lowers it)
     int numInputWindows = 0;

@@ -6,6 +6,7 @@
  */
 #include "simplematmul.h"
 // #pragma aie_debug_level(2 | AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN)
+// #pragma aie_debug_level(0 | AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN | AIE_KERNEL_CONFIG_TRACE)
 #pragma aie_debug_level(0 | AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN)
 // Declarative per-tile core trace: mesh/partition-relative (col,row) of the
 // compute tile to trace. Repeatable; supports ranges e.g. #pragma aie_trace(1:2, 3).
@@ -56,6 +57,7 @@ __global__(matmul_policy) void matmul(aie::port<input_window_int8 *, RowBA> win_
     // Compiler-resolved tiling parameters
     // const int eff_k = aie::get_effective_k();            // K chunk size per k-round
     // const int k_rounds = aie::get_k_rounds();            // number of K-accumulation rounds
+    printf("log offload matmul\n");
     const int k_rounds = aie::get_arg_total_rounds_in_dim(1, win_a);
     const int eff_k = aie::get_arg_per_round_size_in_dim(1, win_a);
     const int eff_k_b = aie::get_arg_per_round_size_in_dim(1, win_b);
@@ -323,7 +325,7 @@ __global__ void mul2(aie::port<input_window_int8 *, RowBA> win_a, aie::port<inpu
 
 // HOST
 int main() {
-    printf("=== Matrix Multiply with Data Caching on AIE %dx%d Mesh ===\n", HW_ROWS, HW_COLS);
+    printf("=== OFFLOAD KERNEL Matrix Multiply with Data Caching on AIE %dx%d Mesh ===\n", HW_ROWS, HW_COLS);
     printf("    C[%dx%d] = A[%dx%d] * B^T[%dx%d], int8\n", M, N, M, K, K, N);
     // --- Device + mesh ---
     aieSetDevice(0);

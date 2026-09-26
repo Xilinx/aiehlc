@@ -1797,8 +1797,17 @@ static int s_trace_sync_active = 0;       /* 1 once sync_begin ran this run     
 /* BSP header split: newer cortexa78/VEK385 BSPs expose XTime via the XilTimer
  * library (xiltimer.h + COUNTS_PER_SECOND in xtimer_config.h); older psv_*
  * (VCK190-class) BSPs use the legacy xtime_l.h. Both declare XTime and
- * XTime_GetTime, so pick the header that is actually present. */
-#if defined(__has_include) && __has_include("xiltimer.h")
+ * XTime_GetTime.
+ *
+ * __has_include alone is NOT a usable probe: the psv_cortexa72_0 (Gen2/VEK280)
+ * BSP ships xiltimer.h and xtimer_config.h even though XilTimer is not
+ * configured for that processor, so the header is present but its
+ * XSLEEPTIMER_FREQ expands to XPAR_CPU_TIMESTAMP_CLK_FREQ, which that BSP's
+ * xparameters.h never defines (it has XPAR_CPU_CORTEXA72_0_TIMESTAMP_CLK_FREQ).
+ * Gate on AIE_GEN instead - the same discriminator aiehlc.sh uses to pick the
+ * BSP and to decide whether to link -lxiltimer (EXTRA_LIBS, Gen5 only). Keep
+ * __has_include as a secondary guard for BSPs that omit the header entirely. */
+#if AIE_GEN > 2 && defined(__has_include) && __has_include("xiltimer.h")
 #include "xiltimer.h"
 #include "xtimer_config.h"
 #else

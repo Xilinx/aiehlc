@@ -125,11 +125,67 @@ emit_linemap_artifacts() {
     fi
 }
 
+# Drop the DWARF sections nothing downstream reads, keeping the line table.
+#
+# The chess backend software-pipelines a VLIW schedule, so every local variable
+# gets a location list entry per scheduling slot it moves through: on the matmul
+# kernel that is 12.9 MB of .debug_loc describing 6.7 KB of .text — 98.4% of the
+# ELF. The kernel ELF is embedded verbatim into the host ELF (`ld -r -b binary`),
+# so all of it is downloaded over JTAG by `dow -force` on every run.
+#
+# Kept: .debug_line (parse_linemap.py / aiediag pc need it — that is the whole
+# reason -g is on), plus .debug_frame/.debug_ranges, which are small.
+# Dropped: .debug_loc and the .debug_info graph that references it. .debug_info
+# has to go with it because llvm-objcopy rebuilds SHT_STRTAB sections, and in a
+# chess ELF .debug_str IS an SHT_STRTAB — it comes back empty, leaving every
+# DW_FORM_strp in .debug_info dangling. Better to remove the whole group than to
+# ship an ELF whose .debug_info makes readelf print offset-too-big warnings.
+#
+# The full-DWARF original is kept beside it as `kernel_debug`; point a DWARF
+# reader at that when you need variable locations or type info.
+#
+# Must be llvm-objcopy: the chess ELF's e_machine is 0x108, which GNU binutils
+# rejects outright ("Unable to recognise the format of the input file").
+# In place, under the same filename, because `ld -r -b binary` derives the
+# symbol names the host links against (_binary_..._start/_end) from the path.
+strip_kernel_debug_loc() {
+    local out_dir="$1"
+    local elf="${out_dir}/kernel"
+    local backup="${out_dir}/kernel_debug"
+
+    [ -f "$elf" ] || { echo "Warning: no kernel ELF at $elf; skipping DWARF strip"; return 0; }
+
+    local objcopy=""
+    for cand in llvm-objcopy llvm-objcopy-19 llvm-objcopy-18 llvm-objcopy-14; do
+        if command -v "$cand" >/dev/null 2>&1; then objcopy="$cand"; break; fi
+    done
+    if [ -z "$objcopy" ]; then
+        echo "Warning: no llvm-objcopy found; keeping full DWARF in $elf"
+        return 0
+    fi
+
+    cp -f "$elf" "$backup" || return 0
+    if "$objcopy" \
+            --remove-section=.debug_loc \
+            --remove-section=.debug_info \
+            --remove-section=.debug_abbrev \
+            --remove-section=.debug_str \
+            --remove-section=.debug_pubnames \
+            --remove-section=.debug_pubtypes \
+            "$backup" "$elf" 2>/dev/null; then
+        dbg_echo "Stripped DWARF from kernel ELF ($(stat -c%s "$backup") -> $(stat -c%s "$elf") bytes); full copy at $backup"
+    else
+        # Leave the original in place rather than half a kernel.
+        cp -f "$backup" "$elf"
+        echo "Warning: $objcopy failed on kernel ELF; keeping full DWARF"
+    fi
+}
+
 usage() {
     echo "Usage: $0 --kernel-cc <file.cc> --output-dir <dir> --func-name <name>"
     echo "           --aie-version <1|2|5> [--prx <file.prx>] [--ld-script <file.ld>]"
     echo "           [--platform <baremetal|linux>] [--use-llvm-aie] [--debug-output]"
-    echo "           [--include-base <path>] [--commons-dir <path>]"
+    echo "           [--include-base <path>] [--commons-dir <path>] [--keep-debug-loc]"
     return 1
 }
 
@@ -146,6 +202,7 @@ use_llvm_aie="false"
 DEBUG_OUTPUT=0
 include_base=""
 commons_dir=""
+KEEP_DEBUG_LOC=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -161,6 +218,7 @@ while [[ $# -gt 0 ]]; do
         --debug-output) DEBUG_OUTPUT=1;    shift ;;
         --include-base) include_base="$2"; shift 2 ;;
         --commons-dir)  commons_dir="$2";  shift 2 ;;
+        --keep-debug-loc) KEEP_DEBUG_LOC=1; shift ;;
         *)
             echo "Unknown option: $1"
             usage
@@ -260,6 +318,14 @@ KERNEL_LOG_INCLUDE="+Wllvm,-include,${AIEHLC_ROOT_DIR}/src/mlir/runtime/kernel_l
 # mapping for HW debug (see parse_linemap.py / aiediag pc). -g is routed through
 # +Wllvm, alongside -O2 because it is a clang frontend/codegen flag. NOTE: with -O2
 # the line table is approximate (inlining/optimization) — coarse PC->line only.
+#
+# -g (not -gline-tables-only) is deliberate. The variable metadata it adds is
+# what the backend turns into the multi-MB .debug_loc — swapping in
+# -gline-tables-only drops DILocalVariable to zero and would suppress .debug_loc
+# at the source. It is kept because that metadata is worth having *somewhere*:
+# strip_kernel_debug_loc removes the bulk from the deployed ELF after the link
+# and parks the full-DWARF copy at <out>/kernel_debug, so a DWARF reader still
+# has variable locations and types to work with. Use --keep-debug-loc to opt out.
 compiler_flags_aie="$silent_flag +f -p me -P $arch_model_dir_aie +P 4 +Wllvm,-O2,-g,-fno-jump-tables,-fno-discard-value-names,-mllvm,-chess-collapse-struct-types-during-linking=0,-Xclang,-chess-only-info-critical-passes -D__AIENGINE__ -D__AIE_ARCH__=10 -D__AIEARCH=10 -D__LOCK_FENCE_MODE__=0 -DAIE_OPTION_SCALAR_FLOAT_ON_VECTOR $KERNEL_LOG_INCLUDE $INCLUDE_PATH"
 compiler_flags_aieml="-aiearch aie-ml $silent_flag +f -p me -P $arch_model_dir_aieml +P 4 +Wllvm,-O2,-g,-fno-jump-tables,-fno-discard-value-names,-mllvm,-chess-collapse-struct-types-during-linking=0,-Xclang,-chess-only-info-critical-passes -D__AIENGINE__ -D__AIE_ARCH__=20 -D__AIEARCH=20 -D__LOCK_FENCE_MODE__=0 -DAIE_OPTION_SCALAR_FLOAT_ON_VECTOR -DAIE2_FP32_EMULATION_ACCURACY_FAST $KERNEL_LOG_INCLUDE $INCLUDE_PATH"
 compiler_flags_aie2ps="-aiearch aie2ps $silent_flag +f -p me -P $arch_model_dir_aie2ps +P 4 +Wllvm,-O2,-g,-fno-jump-tables,-fno-discard-value-names,-mllvm,-chess-collapse-struct-types-during-linking=0,-Xclang,-chess-only-info-critical-passes -D__AIENGINE__ -D__AIE_ARCH__=22 -D__AIEARCH=22 -D__LOCK_FENCE_MODE__=0 -DAIE_OPTION_SCALAR_FLOAT_ON_VECTOR -DAIE2_FP32_EMULATION_ACCURACY_FAST $KERNEL_LOG_INCLUDE $INCLUDE_PATH"
@@ -314,6 +380,42 @@ if [[ "$platform" == "sim" ]]; then
     chess_elf_compiler+=" -DAIEHLC_KERNEL_SIM"
 fi
 
+# Kernel-side logging + KERNELCONFIGOFFLOAD register tracing.
+#
+# Driven by the user's source:
+#
+#     #pragma aie_debug_level(AIE_KERNEL_CONFIG_TRACE)
+#
+# aiehlc parses that and writes aout/kernel_build_flags.sh (the kernel is built
+# by a separate process, so the pragma cannot reach xchesscc any other way).
+# Sourcing it here sets AIEHLC_KERNEL_LOG. The env var can also be set directly
+# to force tracing without editing the source.
+#
+# Two defines, one switch:
+#   KERNEL_LOG_ENABLED         -> compiles klog() in at all (kernel_log.h). Without
+#                                 it klog is an empty inline and ALL kernel logging
+#                                 — the compute kernel's own calls included —
+#                                 costs nothing.
+#   KERNELCONFIGOFFLOAD_TRACE  -> the generated kernel.cc additionally klogs every
+#                                 (register, value) the offload writes: BD words,
+#                                 lock inits, channel-start.
+#                                 Tags "OFF "/"VAL " per write, plus "STS2"/"STMM"
+#                                 (channel) and "STOF"/"STVL" (start reg + value).
+#
+# Off by default: klog costs cycles and trace-buffer space in a normal run.
+if [ -f "${AIEHLC_ROOT_DIR}/aout/kernel_build_flags.sh" ]; then
+    . "${AIEHLC_ROOT_DIR}/aout/kernel_build_flags.sh"
+fi
+if [ "${AIEHLC_KERNEL_LOG:-0}" != "0" ]; then
+    for _d in -DKERNEL_LOG_ENABLED -DKERNELCONFIGOFFLOAD_TRACE; do
+        compiler_flags_chess+=" $_d"
+        compiler_flags_llvm_aie_sel+=" $_d"
+        chess_elf_compiler+=" $_d"
+    done
+    unset _d
+    echo "[kc.sh] kernel logging enabled (klog + KERNELCONFIGOFFLOAD register trace)"
+fi
+
 # --- Create output directory ---
 
 mkdir -p "$output_dir"
@@ -358,6 +460,13 @@ if [[ "$use_llvm_aie" != "true" ]]; then
         return 1
     fi
 
+    # Step 3b: Shed the DWARF that only bloats the JTAG download. Before the
+    # line-map step and before embedding, so everything downstream sees the
+    # small ELF; the decodedline output is byte-identical either way.
+    if [ "$KEEP_DEBUG_LOC" = "0" ]; then
+        strip_kernel_debug_loc "$output_dir"
+    fi
+
     # Step 4: Emit DWARF line-table artifacts for PC->source debug.
     # .debug_line parsing is architecture-agnostic, so a host/aarch64 readelf
     # works on the AIE ELF. Non-fatal: a missing/empty table only warns.
@@ -375,6 +484,12 @@ else
     if [ $? -ne 0 ]; then
         echo "Error: llvm-aie clang++ compilation failed for $kernel_cc"
         return 1
+    fi
+
+    # Same treatment as the chess path: this ELF is embedded and JTAG-downloaded
+    # too, and a no-op when llvm-aie emitted no .debug_loc to begin with.
+    if [ "$KEEP_DEBUG_LOC" = "0" ]; then
+        strip_kernel_debug_loc "$output_dir"
     fi
 fi
 

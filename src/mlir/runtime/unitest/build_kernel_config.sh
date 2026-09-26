@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build and run the KERNELCONFIGOFFLOAD BD/lock/channel MMIO encoder host test.
 #
-# The test validates a standalone C encoder (include/aie_kernel_config.h) that
-# produces AIE2PS core-tile DMA buffer-descriptor / lock / channel-start
+# The test validates a standalone C encoder (src/mlir/runtime/aie_kernel_runtime.h)
+# that produces AIE2PS core-tile DMA buffer-descriptor / lock / channel-start
 # register words, by diffing it against the GOLDEN words the real aie-rt driver
 # (XAie_DmaWriteBd / XAie_LockSetValue / XAie_DmaChannelSetStartQueue) emits.
 #
@@ -24,7 +24,8 @@ lib="${TMPDIR:-/tmp}/xaie_x86/libxaiengine_x86.a"
 libdir="$(dirname "$lib")"
 
 # Collect every driver include dir once.
-incflags=(-I "$drv/include" -I "$drv/include/xaiengine" -I "$inc")
+# "$rt" is src/mlir/runtime: aie_kernel_runtime.h + the kernel_tm.h it includes.
+incflags=(-I "$drv/include" -I "$drv/include/xaiengine" -I "$inc" -I "$rt")
 while IFS= read -r d; do incflags+=(-I "$d"); done < <(find "$drvsrc" -type d)
 
 # 1. Build the x86 driver static lib (debug backend) if missing / stale.

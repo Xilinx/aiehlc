@@ -99,6 +99,38 @@ def dfschedule_DeclareTileOp : dfscheduleop<"declaretile"> {
   let assemblyFormat = "attr-dict `:` type($tile)";
 }
 
+// Declare THE tile that is executing this kernel.
+def dfschedule_DeclareTileSelfOp : dfscheduleop<"declaretile.self"> {
+  let summary = "The core tile executing this kernel (resolved at runtime)";
+  let description = [{
+    One kernel ELF is broadcast to every core tile, so core-tile DMA config is
+    not bound to a location: the core discovers its own (col,row) at runtime via
+    `get_coreid()`. This op denotes that tile, and produces the same
+    `!dfschedule.tile` handle as `dfschedule.declaretile` so every op taking a
+    tile accepts it unchanged.
+
+    KERNEL PATH ONLY. The host programs specific tiles over the config bus and
+    lowers a tile handle to `XAie_TileLoc(col, row)`, which a self-tile cannot
+    supply -- `DfscheduleToApiPass` rejects one rather than emitting a bogus
+    address.
+
+    This exists instead of a `declaretile {col = -1, row = -1}` sentinel so that
+    "no coordinates" is a TYPE-level fact: `getDefiningOp<DeclareTileOp>()`
+    returns null for a self-tile, which makes coordinate-reading code fail
+    closed instead of silently computing -1. (The sentinel was also easy to
+    test wrongly: `getCol()` returns uint32_t, so `getCol() < 0` is always
+    false.)
+
+    Example:
+    ```mlir
+    %t = dfschedule.declaretile.self : !dfschedule.tile
+    ```
+  }];
+  let arguments = (ins);
+  let results = (outs dfschedule_TileHandleType:$tile);
+  let assemblyFormat = "attr-dict `:` type($tile)";
+}
+
 // Create a packet handle
 def dfschedule_PacketOp : dfscheduleop<"packet", [Symbol]> {
   let summary = "Create a named packet associated with data and DMA channel";
@@ -146,21 +178,32 @@ def dfschedule_ConfigDmaBdOp : dfscheduleop<"config.dma_bd"> {
     dfschedule_TileHandleType:$tile,
     I32:$bd_id,
     I32:$offset,
+    // packet_id and out_of_order_bd_id are SSA operands, not attributes, for the
+    // same reason bd_id and offset are: they are per-tile values, and as operands
+    // they are visible to the normal SSA machinery (canonicalization, operand
+    // cloning, "where did this come from"). As attributes they were baked in at
+    // op-creation time, so a value that was wrong or missing at that moment
+    // stayed wrong with nothing downstream able to notice -- which is exactly how
+    // every MM2S core BD ended up with out_of_order_bd_id = -1.
+    //
+    // They must stay arith.constant-foldable: the kernel path reads them back to
+    // build the per-tile dispatch in kernel.cc and has no runtime path for them.
+    I32:$packet_id,
+    // Out-of-order BD target: when >= 0, this core MM2S BD tells the shim S2MM
+    // DMA engine to use this specific BD ID for the transfer (via
+    // XAie_DmaSetOutofOrderBdId). Value of -1 means "not used".
+    I32:$out_of_order_bd_id,
     I32Attr:$len,
     BoolAttr:$enable_packet,
-    I32Attr:$packet_id,
     I32Attr:$next_bd,
     DefaultValuedAttr<I32Attr, "-1">:$acquire_lock_id,
     DefaultValuedAttr<I32Attr, "-1">:$acquire_lock_val,
     DefaultValuedAttr<I32Attr, "-1">:$release_lock_id,
     DefaultValuedAttr<I32Attr, "-1">:$release_lock_val,
     DefaultValuedAttr<I32Attr, "-1">:$data_id,
+    // Keep this LAST among the operands: it is the only optional one, so the
+    // parser can disambiguate it positionally ("a 7th operand is linked_bd").
     Optional<dfschedule_BdHandleType>:$linked_bd,
-    // Out-of-order BD target: when >= 0, this core MM2S BD tells the shim S2MM
-    // DMA engine to use this specific BD ID for the transfer (via
-    // XAie_DmaSetOutofOrderBdId). Value of -1 means "not used" (backward
-    // compatible).
-    DefaultValuedAttr<I32Attr, "-1">:$out_of_order_bd_id,
     // Multi-dimensional addressing (optional, up to 4 dims)
     // When both present and non-empty, generates XAie_DmaSetMultiDimAddr
     // When absent, generates existing XAie_DmaSetAddrLen (no behavior change)

@@ -16,14 +16,19 @@ module {
       %tensor = tensor.empty() : tensor<1024x1024xf32>
       %gmem = "dfschedule.declaretensor"(%tensor) : () -> memref<1024xf32>
       %shim0 = dfschedule.declaretile {col = 3, row = 0} : dfschedule.tile
-      %bd_config = "dfhost.config.dma_bd"(%gmem) {
-        bd_id = 0 : i32,
-        offset = 0 : i32,
+      // bd_id, offset, packet_id and out_of_order_bd_id are SSA OPERANDS (i32),
+      // not attributes -- they are per-tile values, so they are materialized as
+      // arith.constant and passed positionally. linked_bd, when present, is the
+      // optional LAST operand.
+      %bd_id  = arith.constant 0 : i32
+      %offset = arith.constant 0 : i32
+      %pkt_id = arith.constant 10 : i32
+      %ooo_bd = arith.constant -1 : i32
+      %bd_config = dfschedule.config.dma_bd(%gmem, %shim0, %bd_id, %offset, %pkt_id, %ooo_bd) {
         len = 1024 : i32,
         enable_packet = true,
-        packet_id = 10 : i32,
         next_bd = -1 : i32
-      } : (!dfhost.tile, memref<1024xf32>) -> !dfhost.bd_handle
+      } : (memref<1024xf32>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
 
       %io_0 = "dfhost.config.create_io"(%bd_config0, %shim0) {
         channel = 0 : i32,

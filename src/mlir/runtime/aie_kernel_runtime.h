@@ -1,8 +1,8 @@
-/* aie_kernel_config.h — standalone AIE2PS (gen5) core-tile DMA config encoder.
+/* aie_kernel_runtime.h — AIE2PS (gen5) core-tile DMA config encoder + apply.
  *
  * KERNELCONFIGOFFLOAD: let the AIE CORE self-configure its own DMA buffer
- * descriptors / locks / channel-start from inside kernel.cc via raw MMIO,
- * instead of the HOST programming them over the config bus.
+ * descriptors / locks / channel-start from inside kernel.cc via MMIO, instead
+ * of the HOST programming them over the config bus.
  *
  * This header produces the SAME register (tile-local offset, value) words the
  * aie-rt gen5 driver writes via:
@@ -10,36 +10,108 @@
  *   - XAie_LockSetValue          -> _XAieMl_LockSetValue        (1 lock word)
  *   - XAie_DmaChannelSetStartQueue-> start-queue                (1 channel word)
  *
- * It has NO XAie / driver dependency (only <stdint.h>), so it is includable by
- * kernel.cc (compiled with xchesscc for the AIE core) AND by the host
- * golden-diff unit test (test_kernel_config.cpp), which validates every word
- * against the real driver output captured from an XAie transaction.
+ * TWO HALVES, different dependencies:
+ *   - the aie_kc_encode_* ENCODERS are pure computation (only <stdint.h>), so
+ *     they are includable by kernel.cc (xchesscc, AIE core) AND by the host
+ *     golden-diff unit test (test_kernel_config.cpp), which validates every
+ *     word against real driver output captured from an XAie transaction;
+ *   - the core_reg_* APPLY helpers need the TM memory space and so only do
+ *     anything on an AIE2+ core build. See kernel_tm.h, included below: on a
+ *     host parse its macros compile out, which is exactly what lets this one
+ *     header serve both builds.
  *
  * Field Lsb/Mask constants below are copied verbatim from
  * thirdparty/alib/aie-rt/driver/src/global/xaie2psgbl_params.h. Scope: 1D
  * contiguous core-tile S2MM/MM2S BDs (the shapes the offload emits); multi-dim
  * / compression / FIFO are not encoded (their descriptor defaults encode as 0).
  */
-#ifndef AIE_KERNEL_CONFIG_H
-#define AIE_KERNEL_CONFIG_H
+#ifndef AIE_KERNEL_RUNTIME_H
+#define AIE_KERNEL_RUNTIME_H
 
 #include <stdint.h>
 
-/* ---- AIE2PS memory-module (tile-local) register offsets ---- */
-#define AIE_KC_DMA_BD0_0 0x1D000u     /* MEMORY_MODULE_DMA_BD0_0 */
-#define AIE_KC_DMA_BD_STRIDE 0x20u    /* per-BD IdxOffset */
-#define AIE_KC_DMA_BD_NUM_WORDS 6u    /* XAIEML_TILEDMA_NUM_BD_WORDS */
-#define AIE_KC_S2MM0_START_Q 0x1DE04u /* MEMORY_MODULE_DMA_S2MM_0_START_QUEUE */
-#define AIE_KC_MM2S0_START_Q 0x1DE14u /* MEMORY_MODULE_DMA_MM2S_0_START_QUEUE */
-#define AIE_KC_DMA_CH_STRIDE 0x8u     /* per-channel ChIdxOffset */
-#define AIE_KC_LOCK0_VALUE 0x1F000u   /* MEMORY_MODULE_LOCK0_VALUE */
-#define AIE_KC_LOCK_STRIDE 0x10u      /* per-lock */
+/* TM_W / TM_R / TM_BASE_ADDR and the shared register offsets. Must be included
+ * at FILE scope: the TM anchor object it declares is what gives the compiler
+ * the memory space (see kernel_tm.h). */
+#include "kernel_tm.h"
 
-/* One register write: tile-local byte offset + value. */
+/* ---- Core-side address windows ----
+ *
+ * The register offsets below are TILE-LOCAL, i.e. what the XAie driver uses when
+ * it pokes a tile over the config bus from the host. Code running ON the core
+ * does not see that address space directly: the core's own memory map places the
+ * tile's control/config registers in the TM space at TM_BASE_ADDR.
+ *
+ * Writing the bare tile-local offset from the core lands in the core's DATA
+ * memory window instead of the register window — it silently scribbles on data
+ * memory and the DMA is never programmed. That is why an S2MM channel could
+ * appear "not started" even though the code ran: the start-queue write went to
+ * the wrong window entirely.
+ *
+ * Adding the bias is necessary but NOT sufficient — see core_reg_write below.
+ */
+#define AIE_KC_CORE_PC_CONTROL_BASE_ADDR TM_BASE_ADDR /* core view of tile ctrl/config regs */
+#define AIE_KC_CORE_DM_BASE_ADDR 0x70000u             /* core data memory: 0x40000-0x7FFFF (256K) */
+
+/* ---- AIE2PS memory-module (tile-local) register offsets ----
+ * Shared offsets alias kernel_tm.h so the two headers cannot drift. */
+#define AIE_KC_DMA_BD0_0 TM_DMA_BD0_0          /* MEMORY_MODULE_DMA_BD0_0 */
+#define AIE_KC_DMA_BD_STRIDE 0x20u             /* per-BD IdxOffset */
+#define AIE_KC_DMA_BD_NUM_WORDS 6u             /* XAIEML_TILEDMA_NUM_BD_WORDS */
+#define AIE_KC_S2MM0_START_Q TM_DMA_S2MM_0_START_QUEUE /* MEMORY_MODULE_DMA_S2MM_0_START_QUEUE */
+#define AIE_KC_MM2S0_START_Q 0x1DE14u          /* MEMORY_MODULE_DMA_MM2S_0_START_QUEUE */
+#define AIE_KC_DMA_CH_STRIDE 0x8u              /* per-channel ChIdxOffset */
+#define AIE_KC_LOCK0_VALUE TM_LOCK0_VALUE      /* MEMORY_MODULE_LOCK0_VALUE */
+#define AIE_KC_LOCK_STRIDE 0x10u               /* per-lock */
+
+/* One register write: tile-local byte offset + value.
+ * `off` is TILE-LOCAL — pass it to core_reg_write/core_reg_read to reach the
+ * register from code running on the core. */
 typedef struct {
     uint32_t off;
     uint32_t val;
 } AieKcReg;
+
+/* ---- Core-side register access ----
+ *
+ * Read/write a TILE-LOCAL register offset from code running on the core. ALL
+ * core-side register traffic must go through these.
+ *
+ * These delegate to TM_W/TM_R rather than casting a biased address, because
+ * THE ADDRESS DOES NOT SELECT THE INTERFACE — the compiler picks it from the
+ * pointer's memory space, which a numeric cast cannot express. A raw
+ * `*(volatile uint32_t *)(TM_BASE_ADDR + off) = v` assembles to a plain ST that
+ * never leaves the core, yet reads back correctly on-core (store and load are
+ * coherent with each other) while the host still sees 0. kernel_tm.h documents
+ * the full rule; TM_W/TM_R carry the chess_storage(TM:...) anchor that makes
+ * these lower to ST.TM / LDA.TM.
+ *
+ * On a host-side parse TM_W/TM_R compile to no-ops, so this header still builds
+ * for the golden-diff unit test — which exercises the encoders, not these.
+ *
+ * Verify the lowering, not just the value:
+ *     grep -cE '\.TM' <build>/obj/kernel.lst
+ * Zero means every access degraded to plain ST/LDA and the DMA was never
+ * programmed.
+ */
+/* The (void) casts keep -Wunused-parameter quiet on a host parse, where
+ * TM_R/TM_W expand to a constant / no-op and never touch their arguments. */
+static inline uint32_t core_reg_read(uint32_t reg_addr) {
+    (void)reg_addr;
+    return (uint32_t)TM_R(reg_addr);
+}
+
+static inline void core_reg_write(uint32_t reg_addr, uint32_t value) {
+    (void)reg_addr;
+    (void)value;
+    TM_W(reg_addr, value);
+}
+
+/* Flush an encoded register block (the AieKcReg[] the encoders below fill). */
+static inline void core_reg_write_block(const AieKcReg *regs, int n) {
+    for (int i = 0; i < n; i++)
+        core_reg_write(regs[i].off, regs[i].val);
+}
 
 /* Emulate the driver's XAie_SetField(v, Lsb, Mask) = (v << Lsb) & Mask.
  * Signed field values (e.g. a lock acquire value of -1) are passed already
@@ -149,4 +221,4 @@ static inline int aie_kc_encode_mm2s_start(AieKcReg *out, uint8_t ch, uint8_t st
     return 1;
 }
 
-#endif /* AIE_KERNEL_CONFIG_H */
+#endif /* AIE_KERNEL_RUNTIME_H */

@@ -2,14 +2,14 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Emit the (already byte-verified) `aie_kernel_config.h` MMIO encoder calls into
+**Goal:** Emit the (already byte-verified) `aie_kernel_runtime.h` MMIO encoder calls into
 `kernel.cc main()` so an offloaded AIE core self-configures its **incoming S2MM** BD
 chain + lock inits + S2MM channel-start, replacing the host's core-tile S2MM config.
 MM2S (outgoing) stays host-side for now.
 
 **Architecture:** Gate on module attr `routing.kernel_config_offload`. Kernel path
 (`passdfscheduletokernelapi.cpp::convertMainToEmitC`) emits raw `volatile uint32_t*`
-writes at tile-local config offsets, using the encoder in `include/aie_kernel_config.h`.
+writes at tile-local config offsets, using the encoder in `src/mlir/runtime/aie_kernel_runtime.h` (then `include/aie_kernel_config.h`).
 The core sources its own BD base address and length from its already-declared C buffer
 symbols (`buf_in_ping_0`, `sizeof(...)`), so the S2MM config is uniform across all core
 tiles and needs no runtime `(col,row)`. The host's `removeCoreTileHostDmaChain` becomes
@@ -17,7 +17,7 @@ tiles and needs no runtime `(col,row)`. The host's `removeCoreTileHostDmaChain` 
 same order the host resource manager did for inputs (0..2·nIn−1), so they never collide
 with host MM2S bd-ids (which the host allocated *after* inputs, at higher ids).
 
-**Tech Stack:** MLIR (dfschedule dialect, EmitC), C (aie_kernel_config.h encoder,
+**Tech Stack:** MLIR (dfschedule dialect, EmitC), C (aie_kernel_runtime.h encoder,
 xchesscc kernel), aie-rt gen5 driver (host).
 
 ## Decisions (confirmed with user, 2026-09-15)
@@ -95,12 +95,12 @@ channel. Build clean. **Commit.**
 **Files:**
 - Modify: `passdfscheduletokernelapi.cpp` `convertMainToEmitC` + `KernelModuleToEmitCPattern`
   (read `routing.kernel_config_offload` off the top-level ModuleOp).
-- Reference: `include/aie_kernel_config.h` (encoder, already committed & verified).
+- Reference: `src/mlir/runtime/aie_kernel_runtime.h` (then `include/aie_kernel_config.h`) (encoder, already committed & verified).
 
 **Emitted block** (only when offload on), after `klog_init();`, before first window_init:
 
 ```c
-#include "aie_kernel_config.h"           // emitted once near top of file
+#include "aie_kernel_runtime.h"           // emitted once near top of file
 // ---- KERNELCONFIGOFFLOAD: self-configure incoming S2MM DMA ----
 {
   AieKcReg _kc[8];
@@ -141,7 +141,7 @@ offsets (decision fork option B).
 ## Task 5: Docs
 
 **Files:** `README.md` + `CLAUDE.md` — document `#pragma KERNELCONFIGOFFLOAD` (default off),
-scope (S2MM offloaded, MM2S host-side), and the `aie_kernel_config.h` encoder.
+scope (S2MM offloaded, MM2S host-side), and the `aie_kernel_runtime.h` encoder.
 
 ## Out of scope (this plan)
 

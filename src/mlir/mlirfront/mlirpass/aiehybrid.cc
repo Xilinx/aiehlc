@@ -130,7 +130,10 @@ void HybridPass::runOnOperation() {
 		bcf.setstack(0x7e000, 0x1024);
 		//FIXME add the real reserved address
 		bcf.addreservedDMB(0x40000, 0x10000);
-		prx.add_kernel_info( "lbc", "kernel.ll", "../../build/" + kname + "/obj/");
+        // Keep the log / trace-and-monitor tail (0x7F800..) and the
+        // unaddressable region above 0x80000 out of the linker's hands.
+        bcf.addlogandtmreserved();
+        prx.add_kernel_info( "lbc", "kernel.ll", "../../build/" + kname + "/obj/");
 		// prx.add_kernel_info( "lbc", "kernel.ll", "../../build/obj");
 		
 		prx.kernel_name = kname;

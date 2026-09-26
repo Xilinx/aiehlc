@@ -214,6 +214,23 @@ static std::string userKernelFuncName; // kernel function name from __global__ (
 static std::unordered_map<std::string, std::string> globalKernelBodies; // per-kernel: name -> cleaned body text
 static std::vector<std::string> userMacroDefines; // #define lines from user source
 
+// File-scope code the user wants carried verbatim into the generated kernel,
+// delimited in the source by:
+//
+//     // AIEHLC_KERNEL_PROLOGUE_BEGIN
+//     ... declarations ...
+//     // AIEHLC_KERNEL_PROLOGUE_END
+//
+// The kernel is regenerated from the compute function's BODY plus the user's
+// #define lines, so a file-scope declaration would otherwise be dropped. Some
+// constructs cannot be expressed as a macro and cannot live in a function body
+// -- notably the chess_storage(TM:...) anchor that gives an object Tile-Memory
+// linkage: chess_storage is rejected on pointer/reference types, so the anchor
+// must be a file-scope OBJECT whose address is then indexed. Without this
+// passthrough the only way to reach TM from an aiehlc kernel is to hardcode the
+// undocumented address_space number the frontend happens to use.
+static std::string userKernelPrologue;
+
 using namespace clang;
 using namespace clang::tooling;
 
@@ -527,7 +544,18 @@ public:
                  }
                  macroBlock += "\n";
              }
-             str = header + macroBlock + str;
+             // File-scope prologue (AIEHLC_KERNEL_PROLOGUE_BEGIN/END). Emitted
+             // after the macros so it may use them, and before the kernel body so
+             // its declarations are in scope. Must be at FILE scope: its whole
+             // purpose is constructs that cannot live in a function body, e.g. a
+             // chess_storage(TM:...) anchor object.
+             std::string prologueBlock;
+             if (!userKernelPrologue.empty()) {
+                 prologueBlock = "\n// User kernel prologue from source file "
+                                 "(AIEHLC_KERNEL_PROLOGUE_BEGIN/END)\n" +
+                                 userKernelPrologue + "\n";
+             }
+             str = header + macroBlock + prologueBlock + str;
              fd << str << std::endl;
     }
 
@@ -3208,9 +3236,17 @@ class AieDebugLevelPragmaHandler : public clang::PragmaHandler {
     void HandlePragma(clang::Preprocessor &PP, clang::PragmaIntroducer Introducer, clang::Token &FirstToken) override {
         // Known flag macros (must match aie_runtime.h definitions)
         static const std::unordered_map<std::string, int> knownFlags = {
-            {"AIE_DEBUG_FLAG_DISABLE_MULTID_DIM_DMA", 1 << 4}, {"AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN", 1 << 5},
-            {"AIE_DEBUG_FLAG_MM2SBDFINISH_COUNTER", 1 << 6},   {"AIE_DMA_ISSUE_COUNT", 1 << 7},
-            {"AIE_DEBUG_FLAG_CORE_PERF_COUNTER", 1 << 8},      {"AIE_DEBUG_LOG", 1 << 9},
+            {"AIE_DEBUG_FLAG_DISABLE_MULTID_DIM_DMA", 1 << 4},
+            {"AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN", 1 << 5},
+            {"AIE_DEBUG_FLAG_MM2SBDFINISH_COUNTER", 1 << 6},
+            {"AIE_DMA_ISSUE_COUNT", 1 << 7},
+            {"AIE_DEBUG_FLAG_CORE_PERF_COUNTER", 1 << 8},
+            {"AIE_DEBUG_LOG", 1 << 9},
+            // Kernel-side logging. Unlike the flags above (which only steer HOST
+            // runtime behaviour) this one reaches the KERNEL compile: kc.sh turns it
+            // into -DKERNEL_LOG_ENABLED -DKERNELCONFIGOFFLOAD_TRACE, which switches on
+            // klog() itself plus the KERNELCONFIGOFFLOAD per-register trace.
+            {"AIE_KERNEL_CONFIG_TRACE", 1 << 10},
         };
 
         clang::Token Tok;
@@ -3268,6 +3304,35 @@ class AieDebugLevelPragmaHandler : public clang::PragmaHandler {
         if (valid) {
             parsedDebugLevel = result;
             llvm::outs() << "[aiehlc] Detected #pragma aie_debug_level " << parsedDebugLevel << "\n";
+
+            // Publish kernel-side build flags for script/kc.sh.
+            //
+            // The kernel is compiled by a SEPARATE process (aiehlc.sh ->
+            // hostcompile.sh -> kc.sh), so a pragma parsed here cannot reach
+            // xchesscc through memory. Write a tiny shell fragment kc.sh sources.
+            //
+            // Emitted HERE, in the pragma handler, because this runs for every
+            // flow. The host.cc writer further down is split into tiling and
+            // single-tile branches, and writing from one of them silently skips
+            // the other — which is exactly the bug this replaces.
+            //
+            // AIE_KERNEL_CONFIG_TRACE (bit 10) switches on klog() itself plus the
+            // KERNELCONFIGOFFLOAD per-register trace.
+            constexpr int kKernelConfigTraceBit = 1 << 10;
+            bool trace = (parsedDebugLevel & kKernelConfigTraceBit) != 0;
+            // AOUT already exists here (kernel_list is written into it earlier in
+            // the same run), so no directory creation is needed.
+            std::string flagsPath = std::string(AOUT) + "kernel_build_flags.sh";
+            std::ofstream kf(flagsPath, std::ios::out);
+            if (kf) {
+                kf << "# Generated by aiehlc from #pragma aie_debug_level. Sourced by script/kc.sh.\n";
+                kf << "AIEHLC_KERNEL_LOG=" << (trace ? 1 : 0) << "\n";
+                kf.close();
+                llvm::outs() << "[aiehlc] wrote " << flagsPath << " (AIEHLC_KERNEL_LOG=" << (trace ? 1 : 0) << ")\n";
+            } else {
+                llvm::errs() << "[aiehlc] Warning: could not write " << flagsPath
+                             << "; kernel logging will stay disabled\n";
+            }
         }
 
         // Consume remaining tokens on the pragma line (if any)
@@ -3645,6 +3710,32 @@ public:
                 // both branches are flattened into the kernel file).
                 {
                     userMacroDefines.clear();
+                    // Capture an optional AIEHLC_KERNEL_PROLOGUE_BEGIN/END block
+                    // for verbatim emission at file scope in the kernel. Scanned
+                    // here, in the same pass as the #defines, so both travel by
+                    // the same route.
+                    userKernelPrologue.clear();
+                    {
+                        std::istringstream piss(SourceCodeString);
+                        std::string pline;
+                        bool inPrologue = false;
+                        while (std::getline(piss, pline)) {
+                            if (pline.find("AIEHLC_KERNEL_PROLOGUE_BEGIN") != std::string::npos) {
+                                inPrologue = true;
+                                continue;
+                            }
+                            if (pline.find("AIEHLC_KERNEL_PROLOGUE_END") != std::string::npos) {
+                                inPrologue = false;
+                                continue;
+                            }
+                            if (inPrologue)
+                                userKernelPrologue += pline + "\n";
+                        }
+                        if (!userKernelPrologue.empty())
+                            llvm::outs() << "[aiehlc] captured kernel prologue ("
+                                         << std::count(userKernelPrologue.begin(), userKernelPrologue.end(), '\n')
+                                         << " lines)\n";
+                    }
                     std::istringstream iss(SourceCodeString);
                     std::string line;
                     std::string currentDefine;

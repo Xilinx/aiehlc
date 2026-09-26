@@ -6,8 +6,8 @@
 // DEBUG IO backend; writes are captured structurally via the XAie transaction
 // export (Write32 / BlockWrite32 ops), NOT by parsing printf output.
 //
-// Later phases diff a standalone encoder (include/aie_kernel_config.h) against
-// these golden words.
+// Later phases diff a standalone encoder (aie_kernel_runtime.h, same directory
+// as this test's parent) against these golden words.
 
 #include <cstdint>
 #include <cstdio>
@@ -20,7 +20,7 @@ extern "C" {
 }
 
 // The standalone encoder under test.
-#include "aie_kernel_config.h"
+#include "aie_kernel_runtime.h"
 
 // ---- AIE2PS (gen5) device geometry (matches include/aie_device_map.h) ----
 #define KC_BASE_ADDR 0x20000000000ULL

@@ -27,6 +27,7 @@ import queue
 import argparse
 import glob
 import logging
+import shlex
 
 # Configure logging with timestamps so we can see where things get stuck
 logging.basicConfig(
@@ -93,6 +94,10 @@ PALBOARD_BIN = f"/home/{username}/palboard/BOOT.BIN"
 #XSDB_ALT_PATH = "/everest/set_vnc_bkup/vnc/t50/es1/tools/Labtools/9999.0/bin/xsdb"
 XSDB_ALT_PATH = "/proj/xbuilds/2025.2_daily_latest/installs/lin64/HEAD/Vitis/bin/xsdb"
 VITIS_SETTINGS = "/proj/xbuilds/2025.2_daily_latest/installs/lin64/HEAD/Vitis/settings64.sh"
+
+# Seconds to wait for "dow -force" to finish downloading the ELF over JTAG.
+# Override with AIEHLC_DOWNLOAD_TIMEOUT for an unusually slow link or large ELF.
+DOWNLOAD_TIMEOUT_S = int(os.environ.get("AIEHLC_DOWNLOAD_TIMEOUT", "240"))
 
 # Queue to collect console output from second connection
 console_output_queue = queue.Queue()
@@ -536,8 +541,14 @@ def download_elf_and_continue(child, elf_path):
     # check the script would retry after rst -proc, the download succeeds but
     # UART/PS peripherals are never initialized so we get zero console output
     # and waste 120 seconds waiting.
+    # Timeout sized for a slow JTAG link, not a fast one. Observed ~0.1MB/s on a
+    # loaded farm board: a ~10MB ELF then needs ~130s and the old 120s budget
+    # expired at ~65% with a pexpect.TIMEOUT, after already having spent two
+    # minutes. Downloading is I/O bound and monotonic — a generous ceiling costs
+    # nothing on a fast link (the expect returns as soon as the match arrives)
+    # and only matters when the alternative is a spurious failure.
     log.debug("download_elf_and_continue: waiting for download result...")
-    index = child.expect([r'Successfully downloaded', r'PLM stalled'], timeout=120)
+    index = child.expect([r'Successfully downloaded', r'PLM stalled'], timeout=DOWNLOAD_TIMEOUT_S)
     if index == 1:
         # Consume remaining output up to the prompt
         child.expect(r'xsdb%', timeout=60)
@@ -558,6 +569,52 @@ def download_elf_and_continue(child, elf_path):
     log.debug("download_elf_and_continue: 'con' completed, execution started")
     print("[Connection 1] Execution started!")
     return True
+
+
+# The build produces the same binary under two names -- `build/host` (the linker
+# output) and `aout/main.elf` (the copy) -- and the debug UI's ELF search may pick
+# either one, so the board only ever received whichever name won. A `dow -force`
+# typed against the other name then hit a stale leftover, or nothing at all.
+# Whichever of the pair is staged, publish it under both.
+ELF_ALIAS_NAMES = ("host", "main.elf")
+
+
+def elf_alias_names(elf_filename):
+    """The other remote names this ELF should also be published under.
+
+    Only the host/main.elf pair, and only when the staged file IS one of them:
+    aliasing an unrelated ELF (perf.elf) would silently clobber a main.elf that
+    has nothing to do with it.
+    """
+    if elf_filename not in ELF_ALIAS_NAMES:
+        return []
+    return [n for n in ELF_ALIAS_NAMES if n != elf_filename]
+
+
+def publish_elf_aliases(dest_dir, dest_elf):
+    """Copy the just-staged ELF to its alias names on the board.
+
+    A remote `cp` rather than a second SCP: the ELF is ~17 MB, and copying from
+    the file we just landed is what guarantees the alias holds the bits `dow`
+    will load -- re-uploading the local file leaves room for the two to differ.
+    Alias failure is a warning, not an error: the primary path is already
+    staged and the run can proceed.
+    """
+    published = []
+    for alias in elf_alias_names(os.path.basename(dest_elf)):
+        alias_path = os.path.join(dest_dir, alias)
+        try:
+            subprocess.run(
+                ["ssh", host,
+                 f"cp -f {shlex.quote(dest_elf)} {shlex.quote(alias_path)}"],
+                check=True, capture_output=True, text=True, timeout=60
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            print(f"Warning: could not publish alias {alias_path}: {e}")
+            continue
+        print(f"    Also staged as: {host}:{alias_path}")
+        published.append(alias_path)
+    return published
 
 
 def copy_elf_to_remote(local_elf):
@@ -586,6 +643,9 @@ def copy_elf_to_remote(local_elf):
             check=True, capture_output=True, text=True, timeout=120
         )
         print(">>> ELF file copied successfully via SCP")
+        publish_elf_aliases(dest_dir, dest_elf)
+        # The primary path is what gets downloaded; the alias exists so a
+        # hand-typed dow against the other name loads the same build.
         return True, dest_elf
     except subprocess.CalledProcessError as e:
         print(f"Error copying ELF file via SCP: {e}")

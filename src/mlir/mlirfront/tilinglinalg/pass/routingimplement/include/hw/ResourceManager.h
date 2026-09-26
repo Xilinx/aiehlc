@@ -515,6 +515,18 @@ struct CoreOffloadTileConfig {
     int bdLenBytes = 0;
     int ppDepth = 1;
     int flowIndex = -1;
+    // --- BD chain detail, so the debug provenance map can describe the DMA the
+    // core programs for itself exactly as it describes a host-programmed one.
+    // Without these the aiedbg device map shows a core tile with no channels.
+    int pingBdId = -1;
+    int pongBdId = -1;    // -1 when single-buffer
+    int pingL1Offset = 0; // core DMA view (0x08000+), matches host bd buffer_offset
+    int pongL1Offset = 0;
+    int bdAcquireLockId = 0; // as programmed into the BD (already direction-swapped)
+    int bdReleaseLockId = 0;
+    int acquireLockVal = -1;
+    int releaseLockVal = 1;
+    int repeatCount = 1;
 };
 
 class ResourceMgr {

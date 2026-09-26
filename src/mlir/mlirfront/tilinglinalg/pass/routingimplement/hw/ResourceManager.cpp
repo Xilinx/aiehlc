@@ -750,11 +750,18 @@ std::optional<int> ResourceMgr::allocateTileBd(int row, int col, int ownerId) {
 // KERNELCONFIGOFFLOAD per-tile plan (host path -> kernel path)
 // ──────────────────────────────────────────────────────────────
 void ResourceMgr::addCoreOffloadTile(const CoreOffloadTileConfig &cfg) {
-    // Upsert on (col,row,direction). The host walks a tile once per flow, but a
-    // re-walk must refresh rather than append — a duplicated tile would emit a
-    // second, contradictory arm of the kernel-side dispatch.
+    // Upsert on (col, row, direction, FLOW). The flow must be part of the key: a
+    // core tile legitimately participates in more than one flow on the SAME
+    // direction — e.g. a column-grouped input flow and a row-grouped input flow
+    // both feed the same tile's S2MM. Keying on (col,row,direction) alone made
+    // the later flow overwrite the earlier one, which silently emptied the
+    // earlier flow's membership in the debug provenance map (its shim MM2S badge
+    // then highlighted no destination tiles).
+    //
+    // Re-visiting the same (tile, direction, flow) still refreshes in place, so a
+    // re-walk cannot duplicate an arm of the kernel-side dispatch.
     for (auto &e : coreOffloadPlan_) {
-        if (e.col == cfg.col && e.row == cfg.row && e.isOutput == cfg.isOutput) {
+        if (e.col == cfg.col && e.row == cfg.row && e.isOutput == cfg.isOutput && e.flowIndex == cfg.flowIndex) {
             e = cfg;
             return;
         }

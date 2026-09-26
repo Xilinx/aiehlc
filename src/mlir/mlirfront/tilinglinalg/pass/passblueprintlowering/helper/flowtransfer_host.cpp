@@ -428,23 +428,27 @@ void FlowTransferConversion::emitShimBdOoo(FlowLoweringCtx &c) const {
 
         auto ddrOffsetConst = rewriter.create<arith::ConstantOp>(
             loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(static_cast<int32_t>(ddrOffset)));
+        auto shimPktConst = rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(),
+                                                               rewriter.getI32IntegerAttr(c.basePacketId + (int32_t)t));
+        auto shimOooConst =
+            rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(-1));
         auto shimBd = rewriter.create<dfschedule::ConfigDmaBdOp>(
             loc, dfschedule::BdHandleType::get(rewriter.getContext()),
-            c.ddrBuffer,                                             // DDR buffer
-            c.shimTileOp.getTile(),                                  // tile
-            shimBdIdC.getResult(),                                   // bd_id
-            ddrOffsetConst.getResult(),                              // offset
-            rewriter.getI32IntegerAttr(c.perRoundBytes),             // len
-            rewriter.getBoolAttr(false),                             // enable_packet = false
-            rewriter.getI32IntegerAttr(c.basePacketId + (int32_t)t), // packet_id
-            rewriter.getI32IntegerAttr(nextBdId),                    // next_bd = -1
-            rewriter.getI32IntegerAttr(-1),                          // acquire_lock_id = -1
-            rewriter.getI32IntegerAttr(0),                           // acquire_lock_val
-            rewriter.getI32IntegerAttr(-1),                          // release_lock_id = -1
-            rewriter.getI32IntegerAttr(0),                           // release_lock_val
-            rewriter.getI32IntegerAttr(dataId),                      // data_id
-            linkedBd,                                                // linked_bd
-            rewriter.getI32IntegerAttr(-1),                          // out_of_order_bd_id
+            c.ddrBuffer,                                 // DDR buffer
+            c.shimTileOp.getTile(),                      // tile
+            shimBdIdC.getResult(),                       // bd_id
+            ddrOffsetConst.getResult(),                  // offset
+            shimPktConst.getResult(),                    // packet_id
+            shimOooConst.getResult(),                    // out_of_order_bd_id (shim never uses OOO target)
+            rewriter.getI32IntegerAttr(c.perRoundBytes), // len
+            rewriter.getBoolAttr(false),                 // enable_packet = false
+            rewriter.getI32IntegerAttr(nextBdId),        // next_bd = -1
+            rewriter.getI32IntegerAttr(-1),              // acquire_lock_id = -1
+            rewriter.getI32IntegerAttr(0),               // acquire_lock_val
+            rewriter.getI32IntegerAttr(-1),              // release_lock_id = -1
+            rewriter.getI32IntegerAttr(0),               // release_lock_val
+            rewriter.getI32IntegerAttr(dataId),          // data_id
+            linkedBd,                                    // linked_bd
             /*dim_strides=*/c.perTileDimStrides, /*dim_wraps=*/c.perTileDimWraps,
             rewriter.getI32IntegerAttr(c.oooIterStepSize), // iter_step_size
             rewriter.getI32IntegerAttr(c.oooIterWrap));    // iter_wrap
@@ -577,15 +581,18 @@ void FlowTransferConversion::emitShimBdNonOoo(FlowLoweringCtx &c) const {
 
     auto shimOffsetConst =
         rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
+    auto shimPktConst2 = rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
+    auto shimOooConst2 = rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(-1));
     auto shimBdOp = rewriter.create<dfschedule::ConfigDmaBdOp>(
         loc, dfschedule::BdHandleType::get(rewriter.getContext()),
         c.ddrBuffer,                                  // DDR receive buffer
         c.shimTileOp.getTile(),                       // tile
         c.shimBdIdConst.getResult(),                  // bd_id
         shimOffsetConst.getResult(),                  // offset
+        shimPktConst2.getResult(),                    // packet_id (unused)
+        shimOooConst2.getResult(),                    // out_of_order_bd_id
         rewriter.getI32IntegerAttr(c.perTileShimLen), // len (per-tile portion)
         rewriter.getBoolAttr(false),                  // enable_packet = false
-        rewriter.getI32IntegerAttr(0),                // packet_id (unused)
         rewriter.getI32IntegerAttr(4294967295),       // next_bd = none
         rewriter.getI32IntegerAttr(0),                // acquire_lock_id
         rewriter.getI32IntegerAttr(0),                // acquire_lock_val
@@ -593,7 +600,6 @@ void FlowTransferConversion::emitShimBdNonOoo(FlowLoweringCtx &c) const {
         rewriter.getI32IntegerAttr(0),                // release_lock_val
         rewriter.getI32IntegerAttr(dataId),           // data_id
         Value(),                                      // linked_bd = none
-        rewriter.getI32IntegerAttr(-1),               // out_of_order_bd_id
         /*dim_strides=*/c.shimDimStrides, /*dim_wraps=*/c.shimDimWraps,
         rewriter.getI32IntegerAttr(c.shimIterStepSize), // iter_step_size
         rewriter.getI32IntegerAttr(c.shimIterWrap));    // iter_wrap
@@ -906,15 +912,20 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
             offset = rewriter.create<arith::MulIOp>(loc, ivI32, strideConst);
         }
 
+        auto loopPktConst =
+            rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
+        auto loopOooConst =
+            rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(-1));
         auto loopBd = rewriter.create<dfschedule::ConfigDmaBdOp>(
             loc, dfschedule::BdHandleType::get(rewriter.getContext()),
             c.ddrBuffer,                                  // buffer
             c.shimTileOp.getTile(),                       // tile
             c.shimBdIdConst.getResult(),                  // bd_id
             offset,                                       // offset (dynamic)
+            loopPktConst.getResult(),                     // packet_id
+            loopOooConst.getResult(),                     // out_of_order_bd_id
             rewriter.getI32IntegerAttr(c.perTileShimLen), // len
             rewriter.getBoolAttr(false),                  // enable_packet
-            rewriter.getI32IntegerAttr(0),                // packet_id
             rewriter.getI32IntegerAttr(4294967295),       // next_bd = none
             rewriter.getI32IntegerAttr(0),                // acquire_lock_id
             rewriter.getI32IntegerAttr(0),                // acquire_lock_val
@@ -922,7 +933,6 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
             rewriter.getI32IntegerAttr(0),                // release_lock_val
             rewriter.getI32IntegerAttr(dataId),           // data_id
             Value(),                                      // linked_bd = none
-            rewriter.getI32IntegerAttr(-1),               // out_of_order_bd_id
             c.shimDimStrides, c.shimDimWraps,
             rewriter.getI32IntegerAttr(c.shimIterStepSize), // iter_step_size (K-round)
             rewriter.getI32IntegerAttr(c.shimIterWrap));    // iter_wrap (kRounds)
@@ -1064,23 +1074,27 @@ void FlowTransferConversion::emitScheduleOooOutput(FlowLoweringCtx &c) const {
 
             Value linkedBd = (t < numCoreTiles - 1) ? loopBdHandles[t + 1] : Value();
 
+            auto perTilePktConst = rewriter.create<arith::ConstantOp>(
+                loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(c.basePacketId + (int32_t)t));
+            auto perTileOooConst =
+                rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(-1));
             auto loopBd = rewriter.create<dfschedule::ConfigDmaBdOp>(
                 loc, dfschedule::BdHandleType::get(rewriter.getContext()),
-                c.ddrBuffer,                                             // DDR buffer
-                c.shimTileOp.getTile(),                                  // tile
-                bdIdConst.getResult(),                                   // bd_id (reused)
-                totalOffset.getResult(),                                 // offset (dynamic)
-                rewriter.getI32IntegerAttr(c.perRoundBytes),             // len (one d0×d1 block)
-                rewriter.getBoolAttr(false),                             // enable_packet = false
-                rewriter.getI32IntegerAttr(c.basePacketId + (int32_t)t), // packet_id (debug)
-                rewriter.getI32IntegerAttr(-1),                          // next_bd = -1
-                rewriter.getI32IntegerAttr(-1),                          // acquire_lock_id = -1
-                rewriter.getI32IntegerAttr(0),                           // acquire_lock_val
-                rewriter.getI32IntegerAttr(-1),                          // release_lock_id = -1
-                rewriter.getI32IntegerAttr(0),                           // release_lock_val
-                rewriter.getI32IntegerAttr(dataId),                      // data_id
-                linkedBd,                                                // linked_bd
-                rewriter.getI32IntegerAttr(-1),                          // out_of_order_bd_id
+                c.ddrBuffer,                                 // DDR buffer
+                c.shimTileOp.getTile(),                      // tile
+                bdIdConst.getResult(),                       // bd_id (reused)
+                totalOffset.getResult(),                     // offset (dynamic)
+                perTilePktConst.getResult(),                 // packet_id (debug)
+                perTileOooConst.getResult(),                 // out_of_order_bd_id
+                rewriter.getI32IntegerAttr(c.perRoundBytes), // len (one d0×d1 block)
+                rewriter.getBoolAttr(false),                 // enable_packet = false
+                rewriter.getI32IntegerAttr(-1),              // next_bd = -1
+                rewriter.getI32IntegerAttr(-1),              // acquire_lock_id = -1
+                rewriter.getI32IntegerAttr(0),               // acquire_lock_val
+                rewriter.getI32IntegerAttr(-1),              // release_lock_id = -1
+                rewriter.getI32IntegerAttr(0),               // release_lock_val
+                rewriter.getI32IntegerAttr(dataId),          // data_id
+                linkedBd,                                    // linked_bd
                 /*dim_strides=*/c.perTileDimStrides, /*dim_wraps=*/c.perTileDimWraps,
                 rewriter.getI32IntegerAttr(c.oooIterStepSize), // iter_step_size
                 rewriter.getI32IntegerAttr(c.oooIterWrap));    // iter_wrap

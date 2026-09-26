@@ -4,6 +4,9 @@
  ******************************************************************************/
 
 #include "passdfscheduleprovenancemap.h"
+// KERNELCONFIGOFFLOAD: the core-tile DMA plan the host path publishes when it
+// stops emitting core create_io (ResourceMgr::coreOffloadPlan).
+#include "hw/ResourceManager.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -220,13 +223,16 @@ static std::vector<BdConfig> collectBdChain(Value bdHandleVal) {
         bd.bufferOffset = resolveBufferOffset(bdOp.getBuffer());
         bd.len = bdOp.getLen();
         bd.enablePacket = bdOp.getEnablePacket();
-        bd.packetId = bdOp.getPacketId();
+        // packet_id / out_of_order_bd_id are operands; getConstI32 returns -1
+        // when the value is computed at runtime, matching how bd_id above
+        // degrades (the JSON writer emits "runtime" for a negative bd_id).
+        bd.packetId = getConstI32(bdOp.getPacketId());
         bd.nextBd = bdOp.getNextBd();
         bd.acquireLockId = bdOp.getAcquireLockId();
         bd.acquireLockVal = bdOp.getAcquireLockVal();
         bd.releaseLockId = bdOp.getReleaseLockId();
         bd.releaseLockVal = bdOp.getReleaseLockVal();
-        bd.outOfOrderBdId = bdOp.getOutOfOrderBdId();
+        bd.outOfOrderBdId = getConstI32(bdOp.getOutOfOrderBdId());
 
         if (auto strides = bdOp.getDimStrides()) {
             for (auto s : strides->getAsRange<IntegerAttr>())
@@ -488,6 +494,99 @@ void DfscheduleProvenanceMapPass::runOnOperation() {
         tileDataMap[key].dmaChannels.push_back(io);
     }
 
+    // KERNELCONFIGOFFLOAD: add the core-tile channels the HOST no longer programs.
+    //
+    // Under the offload pragma the core self-programs its own S2MM/MM2S from
+    // kernel.cc, so there is no host create_io to walk and these tiles would show
+    // up in the debug UI with zero DMA channels. The BD chain still exists on
+    // hardware — it is just described by the kernel path instead of the host path.
+    //
+    // We cannot read the kernel IR here: this pass runs on hostModule and, in the
+    // pipeline order, BEFORE BlueprintToScheduleKernelPass has even run on the
+    // kernel clone. The host walk that decided to skip emission already recorded
+    // everything needed in the ResourceMgr singleton (coreOffloadPlan), so read it
+    // from there — the same cross-module channel coreMemAllocator uses.
+    {
+        std::vector<CoreOffloadTileConfig> offloadPlan;
+        try {
+            offloadPlan = ResourceMgr::instance()->coreOffloadPlan();
+        } catch (...) {
+            // ResourceMgr::init() never called (standalone unit tests). No plan,
+            // nothing to add — the non-offload path is unaffected either way.
+        }
+        for (const auto &e : offloadPlan) {
+            auto key = std::make_pair(e.col, e.row);
+            if (tileDataMap.find(key) == tileDataMap.end()) {
+                TileData td;
+                td.col = e.col;
+                td.row = e.row;
+                td.type = (td.row == 0) ? "shim" : "core";
+                tileDataMap[key] = td;
+            }
+            // A tile+direction can appear once per FLOW (a core tile is fed by both
+            // a column-grouped and a row-grouped flow, say). Those share one
+            // physical DMA channel, so the channel is added once — but EVERY flow
+            // still needs its start_io entry below, because flow_summary is what
+            // drives the UI's "highlight this flow's peers" on a badge click.
+            // Skipping the whole entry here left the earlier flow with only its
+            // shim endpoint, so clicking that shim's MM2S badge highlighted nothing.
+            bool haveChannel = false;
+            for (const auto &have : tileDataMap[key].dmaChannels)
+                if (have.channel == e.channel && have.direction == (e.isOutput ? "MM2S" : "S2MM"))
+                    haveChannel = true;
+
+            IoConfig io;
+            io.channel = e.channel;
+            io.direction = e.isOutput ? "MM2S" : "S2MM";
+            io.ioOperation = e.isOutput ? "SEND" : "RECV";
+            io.enableOutOfOrder = false; // core tiles never enable OOO
+            io.tileCol = e.col;
+            io.tileRow = e.row;
+
+            // Rebuild the ping/pong chain the core programs. Mirrors
+            // emitCorePingPongBd: pong first (next -> ping), then ping (next ->
+            // pong); single-buffer emits one BD with next_bd = -1.
+            auto makeBd = [&](int bdId, int64_t offset, int nextBd) {
+                BdConfig bd;
+                bd.bdIdConst = bdId;
+                bd.bufferOffset = offset;
+                bd.len = e.bdLenBytes;
+                bd.enablePacket = e.enablePacket;
+                bd.packetId = e.packetId;
+                bd.nextBd = nextBd;
+                bd.acquireLockId = e.bdAcquireLockId;
+                bd.acquireLockVal = e.acquireLockVal;
+                bd.releaseLockId = e.bdReleaseLockId;
+                bd.releaseLockVal = e.releaseLockVal;
+                bd.outOfOrderBdId = e.oooBdId;
+                bd.tileCol = e.col;
+                bd.tileRow = e.row;
+                return bd;
+            };
+            if (e.pongBdId < 0) {
+                io.bdChain.push_back(makeBd(e.pingBdId, e.pingL1Offset, -1));
+            } else {
+                io.bdChain.push_back(makeBd(e.pongBdId, e.pongL1Offset, e.pingBdId));
+                io.bdChain.push_back(makeBd(e.pingBdId, e.pingL1Offset, e.pongBdId));
+            }
+
+            // Channel once per physical (tile, direction, channel) ...
+            if (!haveChannel)
+                tileDataMap[key].dmaChannels.push_back(io);
+
+            // ... but a start_io entry for EVERY flow, so flow_summary carries this
+            // tile in each flow it belongs to and the UI can highlight it.
+            StartIoEntry se;
+            se.flowIndex = e.flowIndex;
+            se.repeatCount = e.repeatCount;
+            se.tileCol = e.col;
+            se.tileRow = e.row;
+            se.ioConfig = io;
+            se.hasIoConfig = true;
+            startIoEntries.push_back(se);
+        }
+    }
+
     // === Kernel configs (kept empty: DeclareKernelConfigOp removed from pipeline) ===
     std::vector<KernelConfigEntry> kernelConfigs;
 
@@ -559,7 +658,19 @@ void DfscheduleProvenanceMapPass::runOnOperation() {
 
         for (auto &key : sortedKeys) {
             auto &td = tileDataMap[key];
-            if (td.dmaChannels.empty())
+            // A tile with no host-programmed DMA channel is still a real tile.
+            //
+            // Under #pragma KERNELCONFIGOFFLOAD the core programs its own DMA from
+            // kernel.cc, so the host emits no core-tile create_io and every core
+            // tile arrives here with an empty dmaChannels. Skipping those dropped
+            // all 16 core tiles from the map (only the 4 shims survived), which in
+            // turn emptied schedule_view.json and left the debug UI with no core
+            // tiles to draw — even though load_kernel_group still listed them.
+            //
+            // Keep any tile we saw a declaretile for; it just renders with an empty
+            // dma_channels array. Only skip genuinely empty SHIM entries, which are
+            // the synthesized/placeholder ones that carry no information.
+            if (td.dmaChannels.empty() && td.type == "shim")
                 continue;
 
             jw.beginObject();
@@ -741,10 +852,24 @@ void DfscheduleProvenanceMapPass::runOnOperation() {
             jw.beginObject();
             jw.keyValue("flow_index", fi);
 
+            // A flow's direction is named from the CORE's point of view: a flow the
+            // cores receive on (S2MM) is an "input" flow, even though the shim end
+            // of it is an MM2S sender. Scan for the first core-side (row != 0)
+            // entry rather than taking entries[0] — entry order depends on walk
+            // order, and under KERNELCONFIGOFFLOAD the core entries are appended
+            // after the shim's, which would otherwise flip an input flow to
+            // "output". Fall back to entries[0] when only shim entries exist.
             std::string dir = "unknown";
-            if (!entries.empty() && entries[0]->hasIoConfig) {
-                dir = (entries[0]->ioConfig.direction == "S2MM") ? "input" : "output";
-            }
+            const StartIoEntry *dirEntry = nullptr;
+            for (auto *e : entries)
+                if (e->hasIoConfig && e->tileRow != 0) {
+                    dirEntry = e;
+                    break;
+                }
+            if (!dirEntry && !entries.empty() && entries[0]->hasIoConfig)
+                dirEntry = entries[0];
+            if (dirEntry)
+                dir = (dirEntry->ioConfig.direction == "S2MM") ? "input" : "output";
             jw.keyValue("direction", StringRef(dir));
 
             jw.beginArray("entries");

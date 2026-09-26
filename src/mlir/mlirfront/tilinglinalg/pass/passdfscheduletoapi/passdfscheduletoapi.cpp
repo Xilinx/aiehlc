@@ -1198,10 +1198,21 @@ struct ConfigDmaBdInnerPattern : public OpConversionPattern<dfschedule::ConfigDm
                                   ConversionPatternRewriter &rewriter) const override {
         auto loc = op.getLoc();
 
-        // Get attributes (offset is now an SSA Value operand, not an attribute)
+        // Get attributes (offset, packet_id and out_of_order_bd_id are SSA Value
+        // operands, not attributes)
         int32_t len = op.getLen();
         bool enablePacket = op.getEnablePacket();
-        int32_t packetId = op.getPacketId();
+        // Constant behind an i32 operand, or -1 when it is computed at runtime.
+        // Only used for the human-readable provenance comment below -- the value
+        // actually passed to the runtime is the SSA operand itself, so a dynamic
+        // packet id still lowers correctly, it just prints as -1.
+        auto constOrMinusOne = [](Value v) -> int32_t {
+            if (auto c = v.getDefiningOp<arith::ConstantOp>())
+                if (auto i = mlir::dyn_cast<IntegerAttr>(c.getValue()))
+                    return static_cast<int32_t>(i.getInt());
+            return -1;
+        };
+        int32_t packetId = constOrMinusOne(op.getPacketId());
         int32_t nextBd = static_cast<int32_t>(op.getNextBd()); // signed cast: sentinel 0xFFFFFFFF (-1) means no next BD
 
         llvm::errs() << "[Pattern] ConfigDmaBd called (len=" << len << ", enable_packet=" << enablePacket
@@ -1276,7 +1287,7 @@ struct ConfigDmaBdInnerPattern : public OpConversionPattern<dfschedule::ConfigDm
         int32_t acquireLockVal = static_cast<int32_t>(op.getAcquireLockVal());
         int32_t releaseLockId = static_cast<int32_t>(op.getReleaseLockId());
         int32_t releaseLockVal = static_cast<int32_t>(op.getReleaseLockVal());
-        int32_t outOfOrderBdId = static_cast<int32_t>(op.getOutOfOrderBdId());
+        int32_t outOfOrderBdId = constOrMinusOne(op.getOutOfOrderBdId());
 
         // Multi-dimensional addressing attributes (read here, before the provenance
         // comment, so the comment can describe the dims/iteration actually emitted).
@@ -1332,8 +1343,11 @@ struct ConfigDmaBdInnerPattern : public OpConversionPattern<dfschedule::ConfigDm
             loc, i32Type, rewriter.getI32IntegerAttr(len));
         auto nextBdConst = rewriter.create<emitc::ConstantOp>(
             loc, i32Type, rewriter.getI32IntegerAttr(nextBd));
-        auto packetIdConst = rewriter.create<emitc::ConstantOp>(
-            loc, i32Type, rewriter.getI32IntegerAttr(packetId));
+        // packet_id is an operand: pass the already-converted SSA value straight
+        // through instead of re-materializing a constant from it. This is what
+        // bd_id (also an operand) does, and it is what lets a non-constant packet
+        // id lower correctly rather than being frozen at conversion time.
+        Value packetIdVal = adaptor.getPacketId();
 
         // Dispatch buffer -> void* based on the converted buffer type:
         // - void* (from BufferViewOp, BindCoreBufferOp, AllocDeviceMemOp): pass directly
@@ -1379,7 +1393,7 @@ struct ConfigDmaBdInnerPattern : public OpConversionPattern<dfschedule::ConfigDm
             rewriter.create<emitc::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(releaseLockId));
         auto releaseLockValConst =
             rewriter.create<emitc::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(releaseLockVal));
-        auto oooIdConst = rewriter.create<emitc::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(outOfOrderBdId));
+        Value oooIdVal = adaptor.getOutOfOrderBdId(); // operand: pass through (see packetIdVal)
 
         // dimStrides, dimWraps, useMultiDim, iterStepSize, iterWrap and useOooIter
         // were read above (before the provenance comment) and are reused here.
@@ -1423,12 +1437,12 @@ struct ConfigDmaBdInnerPattern : public OpConversionPattern<dfschedule::ConfigDm
                 rewriter.create<emitc::ConstantOp>(loc, i32Type,
                                                    rewriter.getI32IntegerAttr(enablePacket ? 1 : 0))
                     .getResult(),                // enable_packet
-                packetIdConst.getResult(),       // packet_id
+                packetIdVal,                     // packet_id
                 acquireLockIdConst.getResult(),  // acquire_lock_id
                 acquireLockValConst.getResult(), // acquire_lock_val
                 releaseLockIdConst.getResult(),  // release_lock_id
                 releaseLockValConst.getResult(), // release_lock_val
-                oooIdConst.getResult(),          // out_of_order_bd_id
+                oooIdVal,                        // out_of_order_bd_id
                 numDimsConst.getResult(),        // num_dims
             };
             allArgs.append(dimArgs.begin(), dimArgs.end()); // stride0,wrap0,...,stride2,wrap2
@@ -1467,12 +1481,12 @@ struct ConfigDmaBdInnerPattern : public OpConversionPattern<dfschedule::ConfigDm
                 rewriter.create<emitc::ConstantOp>(loc, i32Type,
                                                    rewriter.getI32IntegerAttr(enablePacket ? 1 : 0))
                     .getResult(),                // enable_packet
-                packetIdConst.getResult(),       // packet_id
+                packetIdVal,                     // packet_id
                 acquireLockIdConst.getResult(),  // acquire_lock_id
                 acquireLockValConst.getResult(), // acquire_lock_val
                 releaseLockIdConst.getResult(),  // release_lock_id
                 releaseLockValConst.getResult(), // release_lock_val
-                oooIdConst.getResult(),          // out_of_order_bd_id
+                oooIdVal,                        // out_of_order_bd_id
                 numDimsConst.getResult(),        // num_dims
             };
             allArgs.append(dimArgs.begin(), dimArgs.end()); // stride0,wrap0,...,stride3,wrap3
@@ -1492,12 +1506,12 @@ struct ConfigDmaBdInnerPattern : public OpConversionPattern<dfschedule::ConfigDm
                     rewriter.create<emitc::ConstantOp>(loc, i32Type,
                                                        rewriter.getI32IntegerAttr(enablePacket ? 1 : 0))
                         .getResult(),                // enable_packet
-                    packetIdConst.getResult(),       // packet_id
+                    packetIdVal,                     // packet_id
                     acquireLockIdConst.getResult(),  // acquire_lock_id
                     acquireLockValConst.getResult(), // acquire_lock_val
                     releaseLockIdConst.getResult(),  // release_lock_id
                     releaseLockValConst.getResult(), // release_lock_val
-                    oooIdConst.getResult()           // out_of_order_bd_id
+                    oooIdVal                         // out_of_order_bd_id
                 });
             llvm::errs() << "  ✓ Created DMA BD config with full AIE API parameters\n";
         }
@@ -3103,7 +3117,26 @@ void DfscheduleToApiPass::runOnOperation() {
     
     ModuleOp moduleOp = getOperation();
     MLIRContext *ctx = moduleOp.getContext();
-    
+
+    // dfschedule.declaretile.self is KERNEL-PATH ONLY. The host programs specific
+    // tiles over the config bus and lowers a tile handle to XAie_TileLoc(col,row),
+    // which a self-tile cannot supply -- it denotes "whichever core is running
+    // this kernel", resolved on-core via get_coreid(). Reaching here means a
+    // kernel-side construct leaked onto the host clone; fail with a real message
+    // instead of letting it become a bogus tile address.
+    {
+        bool sawSelfTile = false;
+        moduleOp.walk([&](dfschedule::DeclareTileSelfOp selfOp) {
+            selfOp.emitError("dfschedule.declaretile.self reached host lowering: the host must address a "
+                             "specific tile (XAie_TileLoc), but a self-tile has no coordinates. This op is "
+                             "only valid on the kernel path, where the core resolves its own location at "
+                             "runtime via get_coreid()");
+            sawSelfTile = true;
+        });
+        if (sawSelfTile)
+            return signalPassFailure();
+    }
+
     // Shared conversion state
     ConversionState state;
     state.enableDebug = enableDebug_;

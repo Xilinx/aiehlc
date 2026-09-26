@@ -22,7 +22,7 @@ using namespace dfschedule;
 // emitCoreTileConfigs — core-tile loop scaffold + per-tile params/BD dispatch
 // (orig 1546-2210) + coreTiles.empty() early handling is left to the caller.
 // ---------------------------------------------------------------------------
-LogicalResult FlowTransferConversion::emitCoreTileConfigs(FlowLoweringCtx &c) const {
+LogicalResult emitCoreTileConfigs(FlowLoweringCtx &c, const CoreTileEmitDeps &d) {
     ConversionPatternRewriter &rewriter = c.rewriter;
     Location loc = c.loc;
     dfscheblueprint::FlowTransferOp op = c.op;
@@ -53,21 +53,21 @@ LogicalResult FlowTransferConversion::emitCoreTileConfigs(FlowLoweringCtx &c) co
     c.isInput = c.shimIsSender;
     c.funcArgIdx = traceFlowConfigToFuncArgIndex(c.shimFlowConfig);
     if (c.isInput) {
-        auto it = dataIdToInputIdx.find(c.dataId);
-        if (it != dataIdToInputIdx.end()) {
+        auto it = (*d.dataIdToInputIdx).find(c.dataId);
+        if (it != (*d.dataIdToInputIdx).end()) {
             c.dirIdx = it->second;
         } else {
-            c.dirIdx = (c.funcArgIdx >= 0) ? c.funcArgIdx : nextInputIdx;
-            dataIdToInputIdx[c.dataId] = c.dirIdx;
-            nextInputIdx = std::max(nextInputIdx, c.dirIdx + 1);
+            c.dirIdx = (c.funcArgIdx >= 0) ? c.funcArgIdx : (*d.nextInputIdx);
+            (*d.dataIdToInputIdx)[c.dataId] = c.dirIdx;
+            (*d.nextInputIdx) = std::max((*d.nextInputIdx), c.dirIdx + 1);
         }
     } else {
-        auto it = dataIdToOutputIdx.find(c.dataId);
-        if (it != dataIdToOutputIdx.end()) {
+        auto it = (*d.dataIdToOutputIdx).find(c.dataId);
+        if (it != (*d.dataIdToOutputIdx).end()) {
             c.dirIdx = it->second;
         } else {
-            c.dirIdx = nextOutputIdx++;
-            dataIdToOutputIdx[c.dataId] = c.dirIdx;
+            c.dirIdx = (*d.nextOutputIdx)++;
+            (*d.dataIdToOutputIdx)[c.dataId] = c.dirIdx;
         }
     }
 
@@ -93,10 +93,10 @@ LogicalResult FlowTransferConversion::emitCoreTileConfigs(FlowLoweringCtx &c) co
                                                                   rewriter.getI32IntegerAttr(t.row));
         c.coreTiles.push_back(t.coreTileOp.getTile());
 
-        if (failed(emitCoreTileParams(c, t)))
+        if (failed(emitCoreTileParams(c, t, d)))
             return failure();
 
-        if (failed(emitCoreBufferDma(c, t)))
+        if (failed(emitCoreBufferDma(c, t, d)))
             return failure();
 
         c.tileIndex++;
@@ -109,7 +109,7 @@ LogicalResult FlowTransferConversion::emitCoreTileConfigs(FlowLoweringCtx &c) co
 // emitCoreTileParams — per-tile size/round/lock computation + config dict
 // (orig 1622-1866).
 // ---------------------------------------------------------------------------
-LogicalResult FlowTransferConversion::emitCoreTileParams(FlowLoweringCtx &c, CoreTileCtx &t) const {
+LogicalResult emitCoreTileParams(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d) {
     ConversionPatternRewriter &rewriter = c.rewriter;
     dfscheblueprint::FlowTransferOp op = c.op;
 
@@ -156,14 +156,14 @@ LogicalResult FlowTransferConversion::emitCoreTileParams(FlowLoweringCtx &c, Cor
     // total number of DMA rounds across all k-rounds.
     t.perCorePerKRound = t.perCoreElements;
     if (c.isInput) {
-        int64_t kRounds = passState->kRounds;
+        int64_t kRounds = d.passState->kRounds;
         if (kRounds > 1) {
             t.perCorePerKRound = t.perCoreElements / kRounds;
             // When tile_m < tileRows, each k-round only needs
             // tile_m rows (not partRows). Divide by mRounds
             // so pingPongBufferSize = tile_m * effectiveK.
-            int64_t tileM = passState->tileM;
-            int64_t tileRows = passState->tileRows;
+            int64_t tileM = d.passState->tileM;
+            int64_t tileRows = d.passState->tileRows;
             if (tileM > 0 && tileM < tileRows) {
                 int64_t mRounds = tileRows / tileM;
                 t.perCorePerKRound = t.perCorePerKRound / mRounds;
@@ -175,17 +175,17 @@ LogicalResult FlowTransferConversion::emitCoreTileParams(FlowLoweringCtx &c, Cor
         // mRounds * nRounds so BD len matches one kernel output window.
         auto moduleOp = op->getParentOfType<ModuleOp>();
         if (moduleOp) {
-            int64_t tileM = passState->tileM;
-            int64_t tileRows = passState->tileRows;
-            int64_t tileN = passState->tileN;
-            int64_t tileCols = passState->tileCols;
+            int64_t tileM = d.passState->tileM;
+            int64_t tileRows = d.passState->tileRows;
+            int64_t tileN = d.passState->tileN;
+            int64_t tileCols = d.passState->tileCols;
             int64_t mRounds = (tileM > 0 && tileM < tileRows) ? (tileRows / tileM) : 1;
             int64_t nRounds = (tileN > 0 && tileN < tileCols) ? (tileCols / tileN) : 1;
             int64_t outDivisor = mRounds * nRounds;
             // Spatial-halo conv: the tile_m/tile_rows/n-round attrs are DROPPED
             // when fullconnect_auto=0 (that policy only governs INPUT re-send), so
             // the divisor above collapses to 1 and the output BD would stay at the
-            // full per-core partition and get clamped to maxPingPongBytes (=4096)
+            // full per-core partition and get clamped to d.maxPingPongBytes (=4096)
             // — wrong. The kernel still emits one [oh_per_row*ow_t, tile_n] slab
             // per on-core round, so honor the authoritative per-slab round count
             // carried in "routing.spatial_out_rounds" (= spatialMRounds*spatialNRounds).
@@ -203,8 +203,8 @@ LogicalResult FlowTransferConversion::emitCoreTileParams(FlowLoweringCtx &c, Cor
     // Read pp_depth from FlowConfigOp attribute (set by dmaphop→blueprint pass).
     // pp_depth controls physical ping-pong buffer count (for DMA/compute
     // overlap), NOT data splitting.  Buffer size = full per-k-round data,
-    // clamped only by maxPingPongBytes when the data exceeds tile memory.
-    t.ppDepth = static_cast<int>(1.0 / bufferRatio + 0.5); // e.g. bufferRatio=0.5 → ppDepth=2
+    // clamped only by d.maxPingPongBytes when the data exceeds tile memory.
+    t.ppDepth = static_cast<int>(1.0 / d.bufferRatio + 0.5); // e.g. d.bufferRatio=0.5 → ppDepth=2
     if (c.coreFlowConfig.getPpDepth())
         t.ppDepth = static_cast<int>(*c.coreFlowConfig.getPpDepth());
     if (t.ppDepth <= 0)
@@ -257,22 +257,22 @@ LogicalResult FlowTransferConversion::emitCoreTileParams(FlowLoweringCtx &c, Cor
         }
     }
 
-    if (failed(computeCoreIterations(c, t)))
+    if (failed(computeCoreIterations(c, t, d)))
         return failure();
 
     // Compute lock IDs from dirIdx to match the kernel's window ordering.
     // The kernel allocates locks sequentially per sorted window:
     //   input0 → lock 0/1, input1 → lock 2/3, output0 → lock 4/5, ...
     // (kernel adds LOCK_BASE=48 offset internally).
-    // For outputs, offset by numInputs * 2 (we use nextInputIdx as
+    // For outputs, offset by numInputs * 2 (we use (*d.nextInputIdx) as
     // an estimate of numInputs since inputs are processed first).
     if (c.isInput) {
         t.acquireLockId = c.dirIdx * 2;
         t.releaseLockId = c.dirIdx * 2 + 1;
     } else {
         // Output locks start after all input locks.
-        // nextInputIdx tracks the highest input dirIdx+1 seen so far.
-        int outputLockBase = nextInputIdx * 2;
+        // (*d.nextInputIdx) tracks the highest input dirIdx+1 seen so far.
+        int outputLockBase = (*d.nextInputIdx) * 2;
         t.acquireLockId = outputLockBase + c.dirIdx * 2;
         t.releaseLockId = outputLockBase + c.dirIdx * 2 + 1;
     }
@@ -282,14 +282,14 @@ LogicalResult FlowTransferConversion::emitCoreTileParams(FlowLoweringCtx &c, Cor
 
 // Sub-helper of emitCoreTileParams: buffer clamp + numIterations (halo /
 // K-round / K-split) + pp_depth=1 validation. Pure computation into CoreTileCtx.
-LogicalResult FlowTransferConversion::computeCoreIterations(FlowLoweringCtx &c, CoreTileCtx &t) const {
+LogicalResult computeCoreIterations(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d) {
     dfscheblueprint::FlowTransferOp op = c.op;
 
-    // Clamp to maxPingPongBytes to prevent exceeding core tile memory.
+    // Clamp to d.maxPingPongBytes to prevent exceeding core tile memory.
     // Skip the clamp for the spatial-halo IFM slab (must stay contiguous) and
     // for the K-split per-round slab (must match the shim per-round len exactly).
-    if (!t.hostSpatialHaloPort && !t.kSplitSlabPort && maxPingPongBytes > 0 && t.elementSizeBytes > 0) {
-        int64_t maxElements = maxPingPongBytes / t.elementSizeBytes;
+    if (!t.hostSpatialHaloPort && !t.kSplitSlabPort && d.maxPingPongBytes > 0 && t.elementSizeBytes > 0) {
+        int64_t maxElements = d.maxPingPongBytes / t.elementSizeBytes;
         if (maxElements > 0 && t.pingPongBufferSize > maxElements)
             t.pingPongBufferSize = maxElements;
     }
@@ -319,7 +319,7 @@ LogicalResult FlowTransferConversion::computeCoreIterations(FlowLoweringCtx &c, 
     // The host must send numIterations * kRounds total BD iterations
     // for input flows to match the kernel's acquire/release pattern.
     if (c.isInput) {
-        int64_t kRounds = passState->kRounds;
+        int64_t kRounds = d.passState->kRounds;
         if (kRounds > 1) {
             llvm::errs() << "[BlueprintToSchedule] K-round: input numIterations " << t.numIterations << " * kRounds "
                          << kRounds << " = " << t.numIterations * kRounds << "\n";
@@ -353,7 +353,7 @@ LogicalResult FlowTransferConversion::computeCoreIterations(FlowLoweringCtx &c, 
 // ---------------------------------------------------------------------------
 // emitCoreBufferDma — per-tile subview/mapping + BD dispatch (orig 1868-2205).
 // ---------------------------------------------------------------------------
-LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, CoreTileCtx &t) const {
+LogicalResult emitCoreBufferDma(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d) {
     ConversionPatternRewriter &rewriter = c.rewriter;
     Location loc = c.loc;
     dfscheblueprint::FlowTransferOp op = c.op;
@@ -380,7 +380,20 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
             int64_t perTileTotalSize = t.perTileSize / t.elementSizeBytes;
             (void)perTileTotalSize;
 
-            if (c.flowRootMemref && tileExtractSlice) {
+            // Shape-first: the per-tile SHAPE is what this block actually needs, and
+            // it comes from tileExtractSlice alone. The DDR memref chain
+            // (flowRootMemref -> partitionSubview -> per-tile subview) is OPTIONAL —
+            // it produces a value that is discarded at codegen, because
+            // BindCoreBufferOp lowers to `(void*)<l1Offset>` and memref_mapping to a
+            // no-op. The emitted BD address is t.pingL1Offset from CoreMemAllocator.
+            //
+            // So: the HOST supplies the DDR chain and keeps byte-identical output;
+            // the KERNEL path (KERNELCONFIGOFFLOAD, where the core programs its own
+            // DMA and has no business reconstructing DDR geometry) supplies no
+            // memref and still gets the same BD ids, L1 offsets, locks and shapes.
+            // Gating on flowRootMemref instead would skip the whole block on the
+            // kernel path and emit a bare declaretile per tile.
+            if (tileExtractSlice) {
                 // Get slice info from tileExtractSlice
                 auto sliceOffsets = tileExtractSlice.getStaticOffsets();
                 auto sliceSizes = tileExtractSlice.getStaticSizes();
@@ -396,14 +409,16 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
                     // to partition subview (output flow has distinct extract_slices per tile)
                     perTileSizes.assign(sliceSizes.begin(), sliceSizes.end());
                     perTileOffsets.assign(sliceOffsets.begin(), sliceOffsets.end());
-                    partSubview = c.partitionSubview;
+                    partSubview = c.partitionSubview; // null on the kernel path
                 } else {
                     // Path 2: tileExtractSlice gives partition-level offsets from root.
                     // Create partition subview first, then compute per-tile split.
-                    auto partSubviewOp = rewriter.create<memref::SubViewOp>(
-                        loc, c.flowRootMemref, toOpFoldResult(sliceOffsets, rewriter),
-                        toOpFoldResult(sliceSizes, rewriter), toOpFoldResult(sliceStrides, rewriter));
-                    partSubview = partSubviewOp.getResult();
+                    if (c.flowRootMemref) {
+                        auto partSubviewOp = rewriter.create<memref::SubViewOp>(
+                            loc, c.flowRootMemref, toOpFoldResult(sliceOffsets, rewriter),
+                            toOpFoldResult(sliceSizes, rewriter), toOpFoldResult(sliceStrides, rewriter));
+                        partSubview = partSubviewOp.getResult();
+                    }
 
                     // Split first dimension evenly among core tiles
                     int64_t numCoreTiles = c.coreTilesAttr.size();
@@ -425,19 +440,24 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
                 if (!tilingAttr && c.partExtractSlice)
                     tilingAttr = c.partExtractSlice->getAttr("tiling");
 
-                // Create per-tile subview
-                auto tileSubviewOp = rewriter.create<memref::SubViewOp>(
-                    loc, partSubview, toOpFoldResult(perTileOffsets, rewriter), toOpFoldResult(perTileSizes, rewriter),
-                    toOpFoldResult(perTileStrides, rewriter));
-                if (tilingAttr)
-                    tileSubviewOp->setAttr("tiling", tilingAttr);
+                // Create per-tile subview — only when a DDR source exists. On the
+                // kernel path partSubview is null and this is skipped; the shape
+                // below is taken from perTileSizes either way.
+                memref::SubViewOp tileSubviewOp = nullptr;
+                if (partSubview) {
+                    tileSubviewOp = rewriter.create<memref::SubViewOp>(
+                        loc, partSubview, toOpFoldResult(perTileOffsets, rewriter),
+                        toOpFoldResult(perTileSizes, rewriter), toOpFoldResult(perTileStrides, rewriter));
+                    if (tilingAttr)
+                        tileSubviewOp->setAttr("tiling", tilingAttr);
+                }
 
                 // Annotate the per-tile subview with the DMA accumulation descriptor so the
                 // subview shape (e.g. 64x256) self-explains the per-round dma_bd len
                 // (tileM*effectiveK, e.g. 16x64). Additive/informational only; gated so
                 // non-accumulating subviews stay byte-identical.
-                int64_t accRoundRows = passState->tileM;
-                int64_t accRoundCols = passState->effectiveK;
+                int64_t accRoundRows = d.passState->tileM;
+                int64_t accRoundCols = d.passState->effectiveK;
                 dfschedule::AccumAttr accumAttr; // null unless this is an accumulating tile
                 if (accRoundRows > 0 && accRoundCols > 0 && perTileSizes.size() == 2 &&
                     perTileSizes[0] % accRoundRows == 0 && perTileSizes[1] % accRoundCols == 0) {
@@ -446,18 +466,30 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
                     if (d1 > 1 || d2 > 1) {
                         accumAttr =
                             dfschedule::AccumAttr::get(rewriter.getContext(), accRoundRows, accRoundCols, d1, d2);
-                        tileSubviewOp->setAttr("accumulate", accumAttr);
+                        if (tileSubviewOp)
+                            tileSubviewOp->setAttr("accumulate", accumAttr);
                     }
                 }
 
                 // memref_mapping: strip strides, produce clean shaped type
-                t.shapedPerTileType = MemRefType::get(perTileSizes, passState->elementType);
+                t.shapedPerTileType = MemRefType::get(perTileSizes, d.passState->elementType);
                 perTileTotalSize = 1;
                 for (int64_t d : perTileSizes)
                     perTileTotalSize *= d;
 
+                // memref_mapping needs a source operand. With no DDR subview (kernel
+                // path) synthesize a local memref of the SAME shaped type: it is a
+                // pure token — memref_mapping lowers to a no-op and BindCoreBufferOp
+                // discards the value entirely in favour of its L1 offset — so the
+                // only thing that must be right is the type, which it is.
+                Value mappingSource;
+                if (tileSubviewOp)
+                    mappingSource = tileSubviewOp.getResult();
+                else
+                    mappingSource = rewriter.create<memref::AllocOp>(loc, t.shapedPerTileType).getResult();
+
                 auto coreMappingOp =
-                    rewriter.create<dfschedule::MemRefMappingOp>(loc, t.shapedPerTileType, tileSubviewOp.getResult());
+                    rewriter.create<dfschedule::MemRefMappingOp>(loc, t.shapedPerTileType, mappingSource);
                 // Propagate the accumulation descriptor onto the consumer mapping op so
                 // the info survives even if the subview is later folded/elided.
                 if (accumAttr)
@@ -471,7 +503,7 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
                 // bind_core_buffer with shaped memref type
                 // Use pre-allocated buffer addresses from CoreMemAllocator
                 // (allocated once for first tile, reused for all tiles in this flow)
-                emitCoreBufferAlloc(c, t);
+                emitCoreBufferAlloc(c, t, d);
                 // Core BD len in bytes: runtime passes len directly to
                 // XAie_DmaSetAddrLen, so compute the total byte count here.
                 t.coreBdLen = t.pingPongBufferSize * t.elementSizeBytes;
@@ -499,24 +531,85 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
 
                 // Compute out_of_order_bd_id for output (MM2S) core BDs.
                 // This tells the shim S2MM DMA which BD to use for this tile's data.
+                //
+                // Two sources, because this helper runs on BOTH module clones:
+                //
+                //   host clone   — shimPerTileBdIds was just filled by the shim-side
+                //                  BD allocation in this same walk (flowtransfer_host.cpp),
+                //                  so it is authoritative here.
+                //   kernel clone — the host ran on a DIFFERENT clone and its ctx is
+                //                  long gone, so shimPerTileBdIds is EMPTY. Falling
+                //                  through would leave -1 on every MM2S core BD and
+                //                  the IR would misdescribe the hardware: the emitted
+                //                  kernel.cc carries real ooo ids (taken from the
+                //                  offload plan), so a reader comparing the two would
+                //                  be told the core targets "no particular shim BD".
+                //
+                // The host already published the real value per (col,row,MM2S,flow)
+                // into the ResourceMgr SINGLETON — the one channel that survives the
+                // clone — so read it back rather than leaving the op wrong.
                 t.coreOooBdId = -1;
-                if (t.isOutputFlow && !c.shimPerTileBdIds.empty()) {
-                    size_t idx = static_cast<size_t>(c.tileIndex);
-                    if (idx < c.shimPerTileBdIds.size())
-                        t.coreOooBdId = c.shimPerTileBdIds[idx];
+                if (t.isOutputFlow) {
+                    if (!c.shimPerTileBdIds.empty()) {
+                        size_t idx = static_cast<size_t>(c.tileIndex);
+                        if (idx < c.shimPerTileBdIds.size())
+                            t.coreOooBdId = c.shimPerTileBdIds[idx];
+                    } else if (d.resourceMgr) {
+                        for (const auto &e : d.resourceMgr->coreOffloadPlan()) {
+                            if (e.col == t.col && e.row == t.row && e.isOutput && e.flowIndex == c.flowIndex) {
+                                t.coreOooBdId = e.oooBdId;
+                                break;
+                            }
+                        }
+                    }
                 }
 
-                // KERNELCONFIGOFFLOAD: publish this tile's config so the kernel path
-                // can emit the core's self-programming block. Everything above is
-                // per-tile and, for MM2S, NOT uniform across tiles: packetId is
-                // basePacketId+tileIndex and oooBdId comes from shim-side allocation,
-                // neither of which the kernel module clone can recompute. Recorded
-                // here, at the one point where all of it is known.
+                // (KERNELCONFIGOFFLOAD plan is published below, after
+                // reserveOffloadedCoreBds has claimed this tile's BD ids — the plan
+                // carries them, so it cannot be built before they exist.)
+
+                // KERNELCONFIGOFFLOAD: the core-tile DMA config belongs to whoever is
+                // going to program it. This function is shared by both blueprint
+                // passes, so `d.emitCoreDma` says which caller we are:
                 //
-                // Written through ResourceMgr::instance(), NOT the pass-local
-                // `resourceMgr` — only the singleton crosses the host/kernel clone
-                // boundary (same channel coreMemAllocator uses).
-                if (passState && passState->kernelConfigOffload && t.row >= kOffloadCoreRowMin) {
+                //   host, offload OFF -> emits (the classic path)
+                //   host, offload ON  -> accounting only: reserve the BD ids and
+                //                        publish coreOffloadPlan. Both are needed
+                //                        here and not on the kernel side: the BD bank
+                //                        is shared hardware, and the provenance map
+                //                        runs on hostModule BEFORE the kernel pass.
+                //   kernel, offload ON -> emits, into the kernel module body.
+                //
+                // The per-tile row test stays here, where the row is known: rows below
+                // kOffloadCoreRowMin are shim/memtiles with no core to run the block.
+                bool offloadTile = c.offloadCoreDmaConfig && t.row >= kOffloadCoreRowMin;
+                // This caller owns accounting-not-emission for an offloaded tile.
+                bool accountingOnly = offloadTile && !d.emitCoreDma;
+                if (accountingOnly) {
+                    // Skipping emission must NOT skip accounting. The BD ids the core
+                    // self-programs come from KernelResourceManager on the kernel module
+                    // clone, but the hardware BD bank is shared per tile, and the host
+                    // allocates out of this per-tile pool starting at the first free id.
+                    // Claim the ids the kernel will use here — allocate and discard — so
+                    // the host cannot hand the same BD to two owners.
+                    reserveOffloadedCoreBds(c, t, d);
+                    llvm::errs() << "[KernelConfigOffload] skip host core DMA config dir="
+                                 << (t.isOutputFlow ? "MM2S" : "S2MM") << " flowIdx=" << c.flowIndex << " tile=("
+                                 << t.col << "," << t.row << ")\n";
+
+                    // Publish this tile's config for two consumers:
+                    //  - the kernel path, to emit the core's self-programming block
+                    //    (packetId = basePacketId+tileIndex and oooBdId come from
+                    //    shim-side allocation; the kernel clone cannot recompute them);
+                    //  - DfscheduleProvenanceMapPass, so the debug UI can still show
+                    //    this tile's DMA channel even though no host create_io exists.
+                    //
+                    // Must run AFTER reserveOffloadedCoreBds: the record carries the
+                    // BD ids that call claims.
+                    //
+                    // Written through ResourceMgr::instance(), NOT the pass-local
+                    // `d.resourceMgr` — only the singleton crosses the host/kernel clone
+                    // boundary (same channel coreMemAllocator uses).
                     CoreOffloadTileConfig cfg;
                     cfg.col = (int)t.col;
                     cfg.row = (int)t.row;
@@ -528,6 +621,15 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
                     cfg.bdLenBytes = (int)t.coreBdLen;
                     cfg.ppDepth = (int)t.ppDepth;
                     cfg.flowIndex = c.flowIndex;
+                    cfg.pingBdId = t.offloadPingBdId;
+                    cfg.pongBdId = (t.ppDepth == 1) ? -1 : t.offloadPongBdId;
+                    cfg.pingL1Offset = (int)t.pingL1Offset;
+                    cfg.pongL1Offset = (int)t.pongL1Offset;
+                    cfg.bdAcquireLockId = t.bdAcquireLockId;
+                    cfg.bdReleaseLockId = t.bdReleaseLockId;
+                    cfg.acquireLockVal = -1; // matches emitCorePingPongBd / kernel.cc
+                    cfg.releaseLockVal = 1;
+                    cfg.repeatCount = 1; // core BD chain re-arms itself
                     try {
                         ResourceMgr::instance()->addCoreOffloadTile(cfg);
                     } catch (...) {
@@ -538,38 +640,14 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
                     llvm::errs() << "[KernelConfigOffload] plan tile=(" << cfg.col << "," << cfg.row << ")"
                                  << " dir=" << (cfg.isOutput ? "MM2S" : "S2MM") << " ch=" << cfg.channel
                                  << " pktId=" << cfg.packetId << " oooBd=" << cfg.oooBdId << " len=" << cfg.bdLenBytes
-                                 << " ppDepth=" << cfg.ppDepth << "\n";
+                                 << " ppDepth=" << cfg.ppDepth << " bd=" << cfg.pingBdId << "/" << cfg.pongBdId
+                                 << " lock=" << cfg.bdAcquireLockId << "/" << cfg.bdReleaseLockId << "\n";
                 }
-
-                // KERNELCONFIGOFFLOAD: when on, the AIE core self-programs its own
-                // DMA — BD chain, lock inits, channel start — from kernel.cc via raw
-                // MMIO (passdfscheduletokernelapi emitCoreDmaConfigBlocks), in BOTH
-                // directions. So the host must NOT emit the core-tile DMA chain. Skip
-                // the BD + create_io + deferred start_io. Lock inits ride on the
-                // ConfigDmaBdOp, so skipping the BD also drops them.
-                //
-                // The flow-level policy is decided by the orchestrator as
-                // c.offloadCoreDmaConfig; only the per-tile row test is applied here,
-                // where the row is known: rows below kOffloadCoreRowMin are
-                // shim/memtiles with no core to run the offloaded block.
-                bool offloadSkipCoreDma = c.offloadCoreDmaConfig && t.row >= kOffloadCoreRowMin;
-                if (offloadSkipCoreDma) {
-                    // Skipping emission must NOT skip accounting. The BD ids the core
-                    // self-programs come from KernelResourceManager on the kernel module
-                    // clone, but the hardware BD bank is shared per tile, and the host
-                    // allocates out of this per-tile pool starting at the first free id.
-                    // Claim the ids the kernel will use here — allocate and discard — so
-                    // the host cannot hand the same BD to two owners.
-                    reserveOffloadedCoreBds(c, t);
-                    llvm::errs() << "[KernelConfigOffload] skip host core DMA config dir="
-                                 << (t.isOutputFlow ? "MM2S" : "S2MM")
-                                 << " flowIdx=" << c.flowIndex << " tile=(" << t.col << "," << t.row << ")\n";
-                }
-                if (!offloadSkipCoreDma) {
+                if (!accountingOnly) {
                     if (t.ppDepth == 1) {
-                        emitCoreSingleBufferBd(c, t);
+                        emitCoreSingleBufferBd(c, t, d);
                     } else {
-                        emitCorePingPongBd(c, t);
+                        emitCorePingPongBd(c, t, d);
                     }
 
                     // Create IO handle for core tile
@@ -592,7 +670,7 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
                     c.deferredCoreStartIos.push_back(
                         {coreCreateIoOp.getIoHandle(), coreBdIdOp.getBdId(), c.flowIndex, coreRepeat});
                 }
-            } // end if (passState && ...)
+            } // end if (d.passState && ...)
         }
     }
 
@@ -602,7 +680,7 @@ LogicalResult FlowTransferConversion::emitCoreBufferDma(FlowLoweringCtx &c, Core
 // Sub-helper of emitCoreBufferDma: allocate ping/pong buffers via
 // CoreMemAllocator on the first tile of a flow, then assign per-tile L1
 // offsets. Pure bookkeeping into FlowLoweringCtx/CoreTileCtx (no op emission).
-void FlowTransferConversion::emitCoreBufferAlloc(FlowLoweringCtx &c, CoreTileCtx &t) const {
+void emitCoreBufferAlloc(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d) {
     t.pingL1Offset = 0;
     // Pong offset must be int32-aligned for DMA transfers
     int64_t pingBufBytes = t.pingPongBufferSize * t.elementSizeBytes;
@@ -628,9 +706,9 @@ void FlowTransferConversion::emitCoreBufferAlloc(FlowLoweringCtx &c, CoreTileCtx
         // Output buffers (many_to_one) need the same allocation size
         // even though they transfer fewer elements per core.
         int64_t kernelBufElements = t.perCorePerKRound;
-        // Clamp kernelBufElements to maxPingPongBytes (same as pingPongBufferSize clamping)
-        if (maxPingPongBytes > 0 && t.elementSizeBytes > 0) {
-            int64_t maxElements = maxPingPongBytes / t.elementSizeBytes;
+        // Clamp kernelBufElements to d.maxPingPongBytes (same as pingPongBufferSize clamping)
+        if (d.maxPingPongBytes > 0 && t.elementSizeBytes > 0) {
+            int64_t maxElements = d.maxPingPongBytes / t.elementSizeBytes;
             if (maxElements > 0 && kernelBufElements > maxElements)
                 kernelBufElements = maxElements;
         }
@@ -693,13 +771,25 @@ void FlowTransferConversion::emitCoreBufferAlloc(FlowLoweringCtx &c, CoreTileCtx
 // the kernel still burns 2, which wastes pool capacity and eventually trips the loud
 // warning below. That direction is safe; the dangerous direction (under-reserving,
 // which would silently alias a BD) cannot arise from that shape.
-void FlowTransferConversion::reserveOffloadedCoreBds(FlowLoweringCtx &c, CoreTileCtx &t) const {
-    if (!resourceMgr)
+void reserveOffloadedCoreBds(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d) {
+    if (!d.resourceMgr)
         return;
 
     constexpr int kKernelBdsPerWindow = 2;
+    t.offloadPingBdId = -1;
+    t.offloadPongBdId = -1;
     for (int i = 0; i < kKernelBdsPerWindow; ++i) {
-        auto bd = resourceMgr->allocateTileBd(t.row, t.col, /*ownerId=*/c.flowIndex);
+        auto bd = d.resourceMgr->allocateTileBd(t.row, t.col, /*ownerId=*/c.flowIndex);
+        if (bd) {
+            // Record which ids this tile+flow claimed, so the provenance map can
+            // describe the core's self-programmed BD chain. These are the HOST
+            // pool's reservations; the kernel derives its own ids from
+            // KernelResourceManager. Both start at 0 and advance two per window,
+            // so they coincide in the normal (disjoint tile-group) case — see the
+            // invariant note above. Treat them as indicative for debug display,
+            // not as the authority on what the core programmed.
+            (i == 0 ? t.offloadPingBdId : t.offloadPongBdId) = *bd;
+        }
         if (!bd) {
             // Pool exhausted. Emission would have hit the same wall and silently
             // fallen back to bd 0/1, so say so rather than leaving a quiet alias.
@@ -716,7 +806,7 @@ void FlowTransferConversion::reserveOffloadedCoreBds(FlowLoweringCtx &c, CoreTil
 // ---------------------------------------------------------------------------
 // emitCoreSingleBufferBd — single-buffer path (orig 2073-2111).
 // ---------------------------------------------------------------------------
-void FlowTransferConversion::emitCoreSingleBufferBd(FlowLoweringCtx &c, CoreTileCtx &t) const {
+void emitCoreSingleBufferBd(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d) {
     ConversionPatternRewriter &rewriter = c.rewriter;
     Location loc = c.loc;
 
@@ -726,8 +816,8 @@ void FlowTransferConversion::emitCoreSingleBufferBd(FlowLoweringCtx &c, CoreTile
         loc, t.shapedPerTileType, t.perTileToken, t.coreTileOp.getTile(), rewriter.getI64IntegerAttr(t.pingL1Offset));
 
     int32_t singleBdId = -1;
-    if (resourceMgr) {
-        auto bd0 = resourceMgr->allocateTileBd(t.row, t.col, /*ownerId=*/c.flowIndex);
+    if (d.resourceMgr) {
+        auto bd0 = d.resourceMgr->allocateTileBd(t.row, t.col, /*ownerId=*/c.flowIndex);
         if (bd0)
             singleBdId = *bd0;
     }
@@ -738,13 +828,18 @@ void FlowTransferConversion::emitCoreSingleBufferBd(FlowLoweringCtx &c, CoreTile
         rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(singleBdId));
     auto singleOffsetConst =
         rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
+    auto singlePktConst =
+        rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(t.coreBdPacketId));
+    auto singleOooConst =
+        rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(t.coreOooBdId));
     auto singleBdOp = rewriter.create<dfschedule::ConfigDmaBdOp>(
         loc, dfschedule::BdHandleType::get(rewriter.getContext()), singleL1.getBuffer(), t.coreTileOp.getTile(),
         singleBdIdConst.getResult(),
         singleOffsetConst.getResult(),                 // offset
+        singlePktConst.getResult(),                    // packet_id
+        singleOooConst.getResult(),                    // out_of_order_bd_id
         rewriter.getI32IntegerAttr(t.coreBdLen),       // len (bytes)
         rewriter.getBoolAttr(t.coreBdEnablePacket),    // enable_packet
-        rewriter.getI32IntegerAttr(t.coreBdPacketId),  // packet_id
         rewriter.getI32IntegerAttr(-1),                // next_bd = -1 (no chaining)
         rewriter.getI32IntegerAttr(t.bdAcquireLockId), // acquire_lock_id
         rewriter.getI32IntegerAttr(-1),                // acquire_lock_val
@@ -752,7 +847,6 @@ void FlowTransferConversion::emitCoreSingleBufferBd(FlowLoweringCtx &c, CoreTile
         rewriter.getI32IntegerAttr(1),                 // release_lock_val
         rewriter.getI32IntegerAttr(-1),                // data_id
         Value(),                                       // linked_bd = none
-        rewriter.getI32IntegerAttr(t.coreOooBdId),     // out_of_order_bd_id
         /*dim_strides=*/nullptr, /*dim_wraps=*/nullptr,
         rewriter.getI32IntegerAttr(0),  // iter_step_size (no iteration)
         rewriter.getI32IntegerAttr(0)); // iter_wrap (no iteration)
@@ -763,7 +857,7 @@ void FlowTransferConversion::emitCoreSingleBufferBd(FlowLoweringCtx &c, CoreTile
 // ---------------------------------------------------------------------------
 // emitCorePingPongBd — ping-pong path (orig 2113-2187).
 // ---------------------------------------------------------------------------
-void FlowTransferConversion::emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx &t) const {
+void emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitDeps &d) {
     ConversionPatternRewriter &rewriter = c.rewriter;
     Location loc = c.loc;
 
@@ -775,9 +869,9 @@ void FlowTransferConversion::emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx 
 
     // Allocate BD IDs from ResourceMgr per-tile pool
     int32_t pingBdId = -1, pongBdId = -1;
-    if (resourceMgr) {
-        auto bd0 = resourceMgr->allocateTileBd(t.row, t.col, /*ownerId=*/c.flowIndex);
-        auto bd1 = resourceMgr->allocateTileBd(t.row, t.col, /*ownerId=*/c.flowIndex);
+    if (d.resourceMgr) {
+        auto bd0 = d.resourceMgr->allocateTileBd(t.row, t.col, /*ownerId=*/c.flowIndex);
+        auto bd1 = d.resourceMgr->allocateTileBd(t.row, t.col, /*ownerId=*/c.flowIndex);
         if (bd0 && bd1) {
             pingBdId = *bd0;
             pongBdId = *bd1;
@@ -795,13 +889,20 @@ void FlowTransferConversion::emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx 
         rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(pongBdId));
     auto pongOffsetConst =
         rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
+    // packet_id / out_of_order_bd_id are per-tile, and identical for this tile's
+    // ping and pong BDs; one constant each per BD keeps the operand wiring local.
+    auto pongPktConst =
+        rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(t.coreBdPacketId));
+    auto pongOooConst =
+        rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(t.coreOooBdId));
     auto pongBdOp = rewriter.create<dfschedule::ConfigDmaBdOp>(
         loc, dfschedule::BdHandleType::get(rewriter.getContext()), pongL1.getBuffer(), t.coreTileOp.getTile(),
         pongBdIdConst.getResult(),
         pongOffsetConst.getResult(),                   // offset
+        pongPktConst.getResult(),                      // packet_id
+        pongOooConst.getResult(),                      // out_of_order_bd_id
         rewriter.getI32IntegerAttr(t.coreBdLen),       // len (bytes)
         rewriter.getBoolAttr(t.coreBdEnablePacket),    // enable_packet
-        rewriter.getI32IntegerAttr(t.coreBdPacketId),  // packet_id
         rewriter.getI32IntegerAttr(pingBdId),          // next_bd -> ping
         rewriter.getI32IntegerAttr(t.bdAcquireLockId), // acquire_lock_id
         rewriter.getI32IntegerAttr(-1),                // acquire_lock_val
@@ -809,7 +910,6 @@ void FlowTransferConversion::emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx 
         rewriter.getI32IntegerAttr(1),                 // release_lock_val
         rewriter.getI32IntegerAttr(-1),                // data_id
         Value(),                                       // linked_bd = none
-        rewriter.getI32IntegerAttr(t.coreOooBdId),     // out_of_order_bd_id
         /*dim_strides=*/nullptr, /*dim_wraps=*/nullptr,
         rewriter.getI32IntegerAttr(0),  // iter_step_size (no iteration)
         rewriter.getI32IntegerAttr(0)); // iter_wrap (no iteration)
@@ -819,13 +919,18 @@ void FlowTransferConversion::emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx 
         rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(pingBdId));
     auto pingOffsetConst =
         rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
+    auto pingPktConst =
+        rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(t.coreBdPacketId));
+    auto pingOooConst =
+        rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(t.coreOooBdId));
     auto pingBdOp = rewriter.create<dfschedule::ConfigDmaBdOp>(
         loc, dfschedule::BdHandleType::get(rewriter.getContext()), pingL1.getBuffer(), t.coreTileOp.getTile(),
         pingBdIdConst.getResult(),
         pingOffsetConst.getResult(),                   // offset
+        pingPktConst.getResult(),                      // packet_id
+        pingOooConst.getResult(),                      // out_of_order_bd_id
         rewriter.getI32IntegerAttr(t.coreBdLen),       // len (bytes)
         rewriter.getBoolAttr(t.coreBdEnablePacket),    // enable_packet
-        rewriter.getI32IntegerAttr(t.coreBdPacketId),  // packet_id
         rewriter.getI32IntegerAttr(pongBdId),          // next_bd -> pong
         rewriter.getI32IntegerAttr(t.bdAcquireLockId), // acquire_lock_id
         rewriter.getI32IntegerAttr(-1),                // acquire_lock_val
@@ -833,7 +938,6 @@ void FlowTransferConversion::emitCorePingPongBd(FlowLoweringCtx &c, CoreTileCtx 
         rewriter.getI32IntegerAttr(1),                 // release_lock_val
         rewriter.getI32IntegerAttr(-1),                // data_id
         pongBdOp.getBdHandle(),                        // linked_bd = pong BD
-        rewriter.getI32IntegerAttr(t.coreOooBdId),     // out_of_order_bd_id
         /*dim_strides=*/nullptr, /*dim_wraps=*/nullptr,
         rewriter.getI32IntegerAttr(0),  // iter_step_size (no iteration)
         rewriter.getI32IntegerAttr(0)); // iter_wrap (no iteration)

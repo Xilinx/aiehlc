@@ -66,8 +66,13 @@ private:
 	std::string entrypoint = "_main_init";
   	std::string symbolmain = "_main _after ";
 	uint32_t entrypointoffset = 0;
-	std::vector<std::pair<uint32_t, uint32_t>>  reservedDMB;
-	std::vector<std::pair<std::string, uint32_t>> symbols;
+    struct ReservedDMB {
+        uint32_t addr;
+        uint32_t len;
+        std::string comment; // emitted as a trailing "// ..." when non-empty
+    };
+    std::vector<ReservedDMB> reservedDMB;
+    std::vector<std::pair<std::string, uint32_t>> symbols;
 	std::vector<uint32_t> stack;
 public:
 	Bcf() {
@@ -77,12 +82,22 @@ public:
 	std::string getfilename() {
 		return name;
 	}
-	
-	void addreservedDMB(uint32_t dmb, uint32_t len) {
-		reservedDMB.push_back({dmb, len});
-	}
-	
-	void addsymbols(std::string name, uint32_t addr) {
+
+    void addreservedDMB(uint32_t dmb, uint32_t len, const std::string &comment = "") {
+        reservedDMB.push_back({dmb, len, comment});
+    }
+
+    // Carve out the tail of the core's data memory that the kernel must not be
+    // given: 0x7F800..0x7FFFF backs the kernel log / trace-and-monitor buffers
+    // written by the runtime, and everything from 0x80000 up is outside what
+    // the core can address at all. Without these the xchesscc linker is free to
+    // place a buffer or spill slot there and silently corrupt the log.
+    void addlogandtmreserved() {
+        addreservedDMB(0x7F800, 0x800);
+        addreservedDMB(0x80000, 0x80000, "And everything else the core can't see");
+    }
+
+    void addsymbols(std::string name, uint32_t addr) {
 		symbols.push_back({name, addr});
 	}
 	
@@ -108,8 +123,11 @@ public:
 		}
 		ostr << "\n";
 		for (auto x:reservedDMB) {
-			ostr << "_reserved DMb 0x" << std::hex << x.first << " 0x" << std::hex << x.second  << "\n";
-		}
+            ostr << "_reserved DMb 0x" << std::hex << x.addr << " 0x" << std::hex << x.len;
+            if (!x.comment.empty())
+                ostr << " // " << x.comment;
+            ostr << "\n";
+        }
 		return ostr.str();
 	}
 };

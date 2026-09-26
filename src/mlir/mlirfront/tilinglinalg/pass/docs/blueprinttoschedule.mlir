@@ -21,18 +21,19 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"]} {
         %3 = dfschedule.declaretile {col = 2 : i32, row = 0 : i32} : !dfschedule.tile
         %c0_i32_0 = arith.constant 0 : i32
         %4 = dfschedule.buffer_view %subview {len = 128 : i64, offset = 0 : i64} : memref<8x16xi8, strided<[16, 1]>> -> memref<8x16xi8, strided<[16, 1]>>
-        %5 = dfschedule.config.dma_bd(%4, %3, %c0_i32_0) {
-          offset = 0,
-          len = 128,
+        %off0 = arith.constant 0 : i32
+        %pkt0 = arith.constant 1 : i32
+        %ooo0 = arith.constant -1 : i32
+        %5 = dfschedule.config.dma_bd(%4, %3, %c0_i32_0, %off0, %pkt0, %ooo0) {
+          len = 128 : i32,
           enable_packet = true,
-          packet_id = 1,
-          next_bd = 4294967295,
-          acquire_lock_id = 0,
-          acquire_lock_val = 0,
-          release_lock_id = 0,
-          release_lock_val = 0,
-          data_id = 0
-        } : (memref<8x16xi8, strided<[16, 1]>>, !dfschedule.tile, i32) -> !dfschedule.bd_handle
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = 0 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = 0 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 0 : i32
+        } : (memref<8x16xi8, strided<[16, 1]>>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
         %6 = dfschedule.config.create_io(%5, %3) {
           channel = 0,
           direction = "S2MM",
@@ -44,31 +45,35 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"]} {
         %9 = dfschedule.bind_core_buffer(%8, %7) {offset = 0 : i64} : (memref<4x16xi8>, !dfschedule.tile) -> memref<4x16xi8>
         %10 = dfschedule.bind_core_buffer(%8, %7) {offset = 64 : i64} : (memref<4x16xi8>, !dfschedule.tile) -> memref<4x16xi8>
         %c1_i32_2 = arith.constant 1 : i32
-        %11 = dfschedule.config.dma_bd(%10, %7, %c1_i32_2) {
-          offset = 0,
-          len = 64,
+        %off1 = arith.constant 0 : i32
+        %pkt1 = arith.constant 1 : i32
+        %ooo1 = arith.constant -1 : i32
+        %11 = dfschedule.config.dma_bd(%10, %7, %c1_i32_2, %off1, %pkt1, %ooo1) {
+          len = 64 : i32,
           enable_packet = true,
-          packet_id = 1,
-          next_bd = 0,
-          acquire_lock_id = 0,
-          acquire_lock_val = -1,
-          release_lock_id = 1,
-          release_lock_val = 1,
-          data_id = -1
-        } : (memref<4x16xi8>, !dfschedule.tile, i32) -> !dfschedule.bd_handle
+          next_bd = 0 : i32,
+          acquire_lock_id = 0 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 1 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<4x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
         %c0_i32_3 = arith.constant 0 : i32
-        %12 = dfschedule.config.dma_bd(%9, %7, %c0_i32_3, %11) {
-          offset = 0,
-          len = 64,
+        %off2 = arith.constant 0 : i32
+        %pkt2 = arith.constant 1 : i32
+        %ooo2 = arith.constant -1 : i32
+        // linked_bd (%11) is the OPTIONAL operand and therefore comes LAST,
+        // after packet_id and out_of_order_bd_id.
+        %12 = dfschedule.config.dma_bd(%9, %7, %c0_i32_3, %off2, %pkt2, %ooo2, %11) {
+          len = 64 : i32,
           enable_packet = true,
-          packet_id = 1,
-          next_bd = 1,
-          acquire_lock_id = 0,
-          acquire_lock_val = -1,
-          release_lock_id = 1,
-          release_lock_val = 1,
-          data_id = -1
-        } : (memref<4x16xi8>, !dfschedule.tile, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+          next_bd = 1 : i32,
+          acquire_lock_id = 0 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 1 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<4x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
         %13 = dfschedule.config.create_io(%12, %7) {
           channel = 0,
           direction = "MM2S",
@@ -82,31 +87,33 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"]} {
         %18 = dfschedule.bind_core_buffer(%17, %16) {offset = 0 : i64} : (memref<4x16xi8>, !dfschedule.tile) -> memref<4x16xi8>
         %19 = dfschedule.bind_core_buffer(%17, %16) {offset = 64 : i64} : (memref<4x16xi8>, !dfschedule.tile) -> memref<4x16xi8>
         %c1_i32_5 = arith.constant 1 : i32
-        %20 = dfschedule.config.dma_bd(%19, %16, %c1_i32_5) {
-          offset = 0,
-          len = 64,
+        %doff1 = arith.constant 0 : i32
+        %dpkt1 = arith.constant 2 : i32
+        %dooo1 = arith.constant -1 : i32
+        %20 = dfschedule.config.dma_bd(%19, %16, %c1_i32_5, %doff1, %dpkt1, %dooo1) {
+          len = 64 : i32,
           enable_packet = true,
-          packet_id = 2,
-          next_bd = 0,
-          acquire_lock_id = 0,
-          acquire_lock_val = -1,
-          release_lock_id = 1,
-          release_lock_val = 1,
-          data_id = -1
-        } : (memref<4x16xi8>, !dfschedule.tile, i32) -> !dfschedule.bd_handle
+          next_bd = 0 : i32,
+          acquire_lock_id = 0 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 1 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<4x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
         %c0_i32_6 = arith.constant 0 : i32
-        %21 = dfschedule.config.dma_bd(%18, %16, %c0_i32_6, %20) {
-          offset = 0,
-          len = 64,
+        %doff2 = arith.constant 0 : i32
+        %dpkt2 = arith.constant 2 : i32
+        %dooo2 = arith.constant -1 : i32
+        %21 = dfschedule.config.dma_bd(%18, %16, %c0_i32_6, %doff2, %dpkt2, %dooo2, %20) {
+          len = 64 : i32,
           enable_packet = true,
-          packet_id = 2,
-          next_bd = 1,
-          acquire_lock_id = 0,
-          acquire_lock_val = -1,
-          release_lock_id = 1,
-          release_lock_val = 1,
-          data_id = -1
-        } : (memref<4x16xi8>, !dfschedule.tile, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+          next_bd = 1 : i32,
+          acquire_lock_id = 0 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 1 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<4x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
         %22 = dfschedule.config.create_io(%21, %16) {
           channel = 0,
           direction = "MM2S",
@@ -130,18 +137,19 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"]} {
         %3 = dfschedule.declaretile {col = 2 : i32, row = 0 : i32} : !dfschedule.tile
         %c1_i32_0 = arith.constant 1 : i32
         %4 = dfschedule.buffer_view %subview {len = 128 : i64, offset = 0 : i64} : memref<8x16xi8, strided<[16, 1], offset: 128>> -> memref<8x16xi8, strided<[16, 1], offset: 128>>
-        %5 = dfschedule.config.dma_bd(%4, %3, %c1_i32_0) {
-          offset = 0,
-          len = 128,
+        %doff3 = arith.constant 0 : i32
+        %dpkt3 = arith.constant 3 : i32
+        %dooo3 = arith.constant -1 : i32
+        %5 = dfschedule.config.dma_bd(%4, %3, %c1_i32_0, %doff3, %dpkt3, %dooo3) {
+          len = 128 : i32,
           enable_packet = true,
-          packet_id = 3,
-          next_bd = 4294967295,
-          acquire_lock_id = 0,
-          acquire_lock_val = 0,
-          release_lock_id = 0,
-          release_lock_val = 0,
-          data_id = 0
-        } : (memref<8x16xi8, strided<[16, 1], offset: 128>>, !dfschedule.tile, i32) -> !dfschedule.bd_handle
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = 0 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = 0 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 0 : i32
+        } : (memref<8x16xi8, strided<[16, 1], offset: 128>>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
         %6 = dfschedule.config.create_io(%5, %3) {
           channel = 1,
           direction = "S2MM",
@@ -153,31 +161,33 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"]} {
         %9 = dfschedule.bind_core_buffer(%8, %7) {offset = 0 : i64} : (memref<4x16xi8>, !dfschedule.tile) -> memref<4x16xi8>
         %10 = dfschedule.bind_core_buffer(%8, %7) {offset = 64 : i64} : (memref<4x16xi8>, !dfschedule.tile) -> memref<4x16xi8>
         %c1_i32_2 = arith.constant 1 : i32
-        %11 = dfschedule.config.dma_bd(%10, %7, %c1_i32_2) {
-          offset = 0,
-          len = 64,
+        %doff4 = arith.constant 0 : i32
+        %dpkt4 = arith.constant 3 : i32
+        %dooo4 = arith.constant -1 : i32
+        %11 = dfschedule.config.dma_bd(%10, %7, %c1_i32_2, %doff4, %dpkt4, %dooo4) {
+          len = 64 : i32,
           enable_packet = true,
-          packet_id = 3,
-          next_bd = 0,
-          acquire_lock_id = 0,
-          acquire_lock_val = -1,
-          release_lock_id = 1,
-          release_lock_val = 1,
-          data_id = -1
-        } : (memref<4x16xi8>, !dfschedule.tile, i32) -> !dfschedule.bd_handle
+          next_bd = 0 : i32,
+          acquire_lock_id = 0 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 1 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<4x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
         %c0_i32_3 = arith.constant 0 : i32
-        %12 = dfschedule.config.dma_bd(%9, %7, %c0_i32_3, %11) {
-          offset = 0,
-          len = 64,
+        %doff5 = arith.constant 0 : i32
+        %dpkt5 = arith.constant 3 : i32
+        %dooo5 = arith.constant -1 : i32
+        %12 = dfschedule.config.dma_bd(%9, %7, %c0_i32_3, %doff5, %dpkt5, %dooo5, %11) {
+          len = 64 : i32,
           enable_packet = true,
-          packet_id = 3,
-          next_bd = 1,
-          acquire_lock_id = 0,
-          acquire_lock_val = -1,
-          release_lock_id = 1,
-          release_lock_val = 1,
-          data_id = -1
-        } : (memref<4x16xi8>, !dfschedule.tile, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+          next_bd = 1 : i32,
+          acquire_lock_id = 0 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 1 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<4x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
         %13 = dfschedule.config.create_io(%12, %7) {
           channel = 0,
           direction = "MM2S",
@@ -191,31 +201,33 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"]} {
         %18 = dfschedule.bind_core_buffer(%17, %16) {offset = 0 : i64} : (memref<4x16xi8>, !dfschedule.tile) -> memref<4x16xi8>
         %19 = dfschedule.bind_core_buffer(%17, %16) {offset = 64 : i64} : (memref<4x16xi8>, !dfschedule.tile) -> memref<4x16xi8>
         %c1_i32_5 = arith.constant 1 : i32
-        %20 = dfschedule.config.dma_bd(%19, %16, %c1_i32_5) {
-          offset = 0,
-          len = 64,
+        %doff6 = arith.constant 0 : i32
+        %dpkt6 = arith.constant 4 : i32
+        %dooo6 = arith.constant -1 : i32
+        %20 = dfschedule.config.dma_bd(%19, %16, %c1_i32_5, %doff6, %dpkt6, %dooo6) {
+          len = 64 : i32,
           enable_packet = true,
-          packet_id = 4,
-          next_bd = 0,
-          acquire_lock_id = 0,
-          acquire_lock_val = -1,
-          release_lock_id = 1,
-          release_lock_val = 1,
-          data_id = -1
-        } : (memref<4x16xi8>, !dfschedule.tile, i32) -> !dfschedule.bd_handle
+          next_bd = 0 : i32,
+          acquire_lock_id = 0 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 1 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<4x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
         %c0_i32_6 = arith.constant 0 : i32
-        %21 = dfschedule.config.dma_bd(%18, %16, %c0_i32_6, %20) {
-          offset = 0,
-          len = 64,
+        %doff7 = arith.constant 0 : i32
+        %dpkt7 = arith.constant 4 : i32
+        %dooo7 = arith.constant -1 : i32
+        %21 = dfschedule.config.dma_bd(%18, %16, %c0_i32_6, %doff7, %dpkt7, %dooo7, %20) {
+          len = 64 : i32,
           enable_packet = true,
-          packet_id = 4,
-          next_bd = 1,
-          acquire_lock_id = 0,
-          acquire_lock_val = -1,
-          release_lock_id = 1,
-          release_lock_val = 1,
-          data_id = -1
-        } : (memref<4x16xi8>, !dfschedule.tile, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+          next_bd = 1 : i32,
+          acquire_lock_id = 0 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 1 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<4x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
         %22 = dfschedule.config.create_io(%21, %16) {
           channel = 0,
           direction = "MM2S",

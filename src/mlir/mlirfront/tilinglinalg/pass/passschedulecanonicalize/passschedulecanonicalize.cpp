@@ -82,7 +82,13 @@ struct FoldDuplicateShimBdPattern : public OpRewritePattern<dfschedule::ConfigDm
         // Also skip BDs with out_of_order_bd_id set (core MM2S OOO BDs).
         if (op.getEnablePacket())
             return failure();
-        if (static_cast<int32_t>(op.getOutOfOrderBdId()) >= 0)
+        // out_of_order_bd_id is an SSA operand. Only a constant < 0 ("unused")
+        // permits folding; a runtime-computed value could be anything, so be
+        // conservative and never fold -- same treatment bd_id/offset get below.
+        APInt oooVal;
+        if (!matchPattern(op.getOutOfOrderBdId(), m_ConstantInt(&oooVal)))
+            return failure();
+        if (static_cast<int32_t>(oooVal.getSExtValue()) >= 0)
             return failure();
 
         int32_t dataId = static_cast<int32_t>(op.getDataId());

@@ -227,6 +227,7 @@ def parse_timesync(text):
     cps = None
     anchors = {0: {"host": None, "tiles": {}}, 1: {"host": None, "tiles": {}}}
     hostevts = []
+    malformed = []  # [TIMESYNC] lines that failed to parse (see loop below)
     aiehz = {}
     traces = {}
     evt_ports = {}
@@ -261,31 +262,49 @@ def parse_timesync(text):
         tok = body.split()
         kind = re.split(r"[=\s]", body, 1)[0]  # "cps=1000000" -> "cps"
 
-        if kind == "cps":
-            cps = int(body.split("=", 1)[1])
-        elif kind in ("anchor0", "anchor1"):
-            idx = 0 if kind == "anchor0" else 1
-            fields = dict(t.split("=", 1) for t in tok[1:])
-            if "host" in fields and "tile" not in fields:
-                anchors[idx]["host"] = int(fields["host"])
-            elif "tile" in fields:
-                anchors[idx]["tiles"][_tile_key(fields["tile"])] = int(fields["aie"])
-        elif kind == "hostevt":
-            fields = dict(t.split("=", 1) for t in tok[1:])
-            hostevts.append((int(fields["iter"]), fields["phase"], int(fields["host"])))
-        elif kind == "aiehz":
-            fields = dict(t.split("=", 1) for t in tok[1:])
-            aiehz[_tile_key(fields["tile"])] = float(fields["hz"])
-        elif kind == "trace":
-            iv = _TRACE_IV.match(body)
-            if iv:
-                tile = (int(iv.group(1)), int(iv.group(2)))
-                stream = iv.group(3) or "core"  # "mem" for the DMA stream, else core
-                s_cyc = int(iv.group(4))
-                e_cyc = int(iv.group(5)) if iv.group(5) else s_cyc
-                names = iv.group(6).split("|")
-                traces.setdefault(tile, []).append((s_cyc, e_cyc, names, stream))
-            # else: "trace tile=4,4 words=N" header -- count only, ignored.
+        # A [TIMESYNC] line can arrive truncated or spliced with other output:
+        # the applog is a SERIAL CONSOLE capture, so a line may be cut mid-number
+        # and run into whatever the board printed next, e.g.
+        #     [TIMESYNC] hostevt iter=0 phase=iter_start host=ALL
+        # (the counts were clipped and the tail of a TRACESTREAMCONFIG line
+        # landed in their place). Parse each line defensively and SKIP the bad
+        # ones: a run typically dumps TIMESYNC more than once, so a later intact
+        # block still carries the data. Letting one malformed line raise would
+        # abort the whole parse and silently blank the entire host lane -- the
+        # plot then renders with an empty "host" row and no indication why.
+        try:
+            if kind == "cps":
+                cps = int(body.split("=", 1)[1])
+            elif kind in ("anchor0", "anchor1"):
+                idx = 0 if kind == "anchor0" else 1
+                fields = dict(t.split("=", 1) for t in tok[1:])
+                if "host" in fields and "tile" not in fields:
+                    anchors[idx]["host"] = int(fields["host"])
+                elif "tile" in fields:
+                    anchors[idx]["tiles"][_tile_key(fields["tile"])] = int(fields["aie"])
+            elif kind == "hostevt":
+                fields = dict(t.split("=", 1) for t in tok[1:])
+                hostevts.append((int(fields["iter"]), fields["phase"], int(fields["host"])))
+            elif kind == "aiehz":
+                fields = dict(t.split("=", 1) for t in tok[1:])
+                aiehz[_tile_key(fields["tile"])] = float(fields["hz"])
+            elif kind == "trace":
+                iv = _TRACE_IV.match(body)
+                if iv:
+                    tile = (int(iv.group(1)), int(iv.group(2)))
+                    stream = iv.group(3) or "core"  # "mem" for the DMA stream, else core
+                    s_cyc = int(iv.group(4))
+                    e_cyc = int(iv.group(5)) if iv.group(5) else s_cyc
+                    names = iv.group(6).split("|")
+                    traces.setdefault(tile, []).append((s_cyc, e_cyc, names, stream))
+                # else: "trace tile=4,4 words=N" header -- count only, ignored.
+        except (ValueError, KeyError, IndexError):
+            malformed.append(line.strip())
+
+    if malformed:
+        sys.stderr.write(
+            "[host_aie_timeline] skipped %d malformed [TIMESYNC] line(s); "
+            "first: %s\n" % (len(malformed), malformed[0][:120]))
 
     return {"cps": cps, "anchors": anchors, "hostevts": hostevts,
             "aiehz": aiehz, "traces": traces, "evt_ports": evt_ports,

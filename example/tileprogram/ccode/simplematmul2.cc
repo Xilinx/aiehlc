@@ -6,7 +6,7 @@
  */
 #include "simplematmul.h"
 // #pragma aie_debug_level(2 | AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN)
-#pragma aie_debug_level(0 | AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN)
+#pragma aie_debug_level(0 | AIE_KERNEL_CONFIG_TRACE | AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN)
 // Declarative per-tile core trace: mesh/partition-relative (col,row) of the
 // compute tile to trace. Repeatable; supports ranges e.g. #pragma aie_trace(1:2, 3).
 // #pragma aie_trace((0, 3), (PARAMETER, "win_a"))
@@ -40,7 +40,7 @@ constexpr aie::GemmSpace LtoR_Merge = {
                .sched = {.pp_depth = 2, .l1_budget = aie::Bytes{4096}}},
     .d1 = {.fullsize = M, .tile_size = 16, .stride = 16},  // C: M-tile
     .d2 = {.fullsize = N, .tile_size = 16, .stride = 16}}; // C: N-tile
-// #define DEBUG_OUTPUT_ORDER 1
+#define DEBUG_OUTPUT_ORDER 1
 #define DEBUG_NOCOMPUTE 1
 //  Per-kernel GLOBAL policy, bound explicitly at the declaration site via
 //  __global__(matmul_policy). The <kernel>_policy naming convention still works
@@ -89,7 +89,7 @@ __global__(matmul_policy) void matmul(aie::port<input_window_int8 *, RowBA> win_
     int col = coreid >> 16;
     int row = coreid & 0x1F;
     int8_t tag = (int8_t)((row & 0x7) | ((col & 0x7) << 3));
-    klog("DEBUG", 3);
+    klog("DEBUJ", 3);
     // IR-sourced per-round tiling (read from routing.partitiontensor TilingAttr)
     klog("PRA0", (int32_t)aie::get_arg_per_round_size_in_dim(0, win_a));
     klog("PRA1", (int32_t)aie::get_arg_per_round_size_in_dim(1, win_a));
