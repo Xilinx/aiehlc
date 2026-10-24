@@ -1512,21 +1512,28 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
                 stream << "#include \"kernel_" << computeKernelName << "_ctrlpkt.h\"\n"
                        << "#include \"host_ctrlpkt.h\"\n\n";
 
-            // Helper: emit __Runtime_sync_for_dev calls for ALL buffers before DMA.
-            // On ARM (baremetal), SyncForDev flushes+invalidates cache lines, which is
-            // needed for outputs too: dirty cache lines (e.g. zeroed output buffer) must
-            // be flushed and invalidated BEFORE DMA writes results to DDR, otherwise a
-            // post-DMA invalidate (clean+invalidate) would flush stale zeros over the
-            // DMA results. No post-launch sync is needed.
+            // Helper: emit the launch-argument cache maintenance.
+            // Before the launch every argument is QUEUED (__Runtime_sync_for_dev_deferred):
+            // on ARM baremetal a CPU-written argument must still be cleaned+invalidated
+            // BEFORE any DMA touches it -- for outputs too, since a dirty line (e.g. a
+            // zeroed output buffer) written back after the DMA would overwrite its
+            // results -- and the runtime guarantees that: it completes every queued
+            // CPU-written range before any data-plane DMA can start, doing the work
+            // inside its own ack/DMA poll loops where it would otherwise spin. A range
+            // registered with __Runtime_buffer_device_written() is invalidate-only and may
+            // overlap the launch's DMA. After the launch: __Runtime_dsync_drain() finishes
+            // whatever is still queued before control returns to the caller.
             auto emitSyncCalls = [&](llvm::raw_fd_ostream &os, unsigned nDdrArgs, const std::string &indent,
                                      bool beforeLaunch) {
-                if (!beforeLaunch)
-                    return; // no post-launch sync needed on ARM
+                if (!beforeLaunch) {
+                    os << indent << "__Runtime_dsync_drain();\n";
+                    return;
+                }
                 unsigned limit = nDdrArgs;
                 if (limit > tensors.size())
                     limit = tensors.size();
                 for (unsigned i = 0; i < limit; ++i) {
-                    os << indent << "__Runtime_sync_for_dev(dev, _t" << i << ", _s" << i << ");\n";
+                    os << indent << "__Runtime_sync_for_dev_deferred(dev, _t" << i << ", _s" << i << ");\n";
                 }
             };
 
@@ -1874,9 +1881,22 @@ after_host_emit:
             TilingBcf bcf;
             constexpr uint32_t kStackBase = 0x70000;
             bcf.setStack(kStackBase, allocator.getBaseAddr() - kStackBase);
+            // Keep the linker's own .data/.bss (libme's control_rnd/control_sat,
+            // main()'s sync_buffer, any kernel global) inside THIS tile's memory,
+            // after the buffers. Unreserved, bridge placed them at DMb 0x0, which
+            // is not this tile's data memory -- aie_api restores crRnd from
+            // control_rnd after every window acquire, so a vector kernel's SRS
+            // rounding mode became whatever byte lived there (conv2dstem_vec:
+            // 726,699/802,816 outputs off by +1). Skill: bcfglobalplacement.
+            bcf.addReservedDMB(0x00000, 0x40000);
             bcf.addReservedDMB(0x40000, 0x10000);
+            bcf.addReservedDMB(0x50000, 0x20000); // remaining neighbour windows below own 0x70000
+            bcf.addReservedDMB(0x80000, 0x80000); // TM register window, not memory
             // This crashes the simulator, commenting out for now
             // bcf.addReservedDMB(0x7F800, 0x800);
+            // Buffer ranges are NOT reserved: bridge rejects a pinned _symbol inside a
+            // _reserved range. They are covered instead by declaring every buffer at its
+            // full allocated size (DfscheduleToKernelApiPass, CoreMemAllocator::getSize).
             for (const auto &slot : allocations) {
                 bcf.addSymbol(slot.symbolName, slot.address);
             }

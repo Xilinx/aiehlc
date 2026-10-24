@@ -124,10 +124,20 @@ void *__Runtime_Alloc(size_t bytes);
 // perf report. They are always LINKED -- the accessors exist unconditionally in
 // aie_runtime.c -- but they only COUNT when the host was built with
 // `script/aiehlc.sh --profiling` (-DAIEHLC_PROFILING=1). Without it every
-// counter reads 0, which the report states rather than printing as data.
+// counter reads 0, which the report states rather than printing as data. They
+// read pmccntr_el0, which the runtime's __Runtime_init constructor starts under
+// that flag -- this file deliberately avoids aie_timer.h, so it cannot call
+// __ps_pmccntr_enable() itself the way simplematmul2_prof.cc does.
 // Same C++-linkage note as above: declare plainly, not extern "C".
 void __Runtime_phase_cycles(unsigned long long *cyc, unsigned int *calls);
 void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls);
+// Sub-splits of the above, same counters/flag: the kernel-ELF control-packet
+// encode inside kload (aot = the ELF was precomputed at build time), and the
+// per-launch setup outside the phase counters -- ctrl_plan_init and the
+// sync_for_dev cache maintenance of every launch argument.
+void __Runtime_kload_fill_cycles(unsigned long long *fill_cyc, unsigned int *fill_n, int *aot);
+void __Runtime_setup_split_cycles(unsigned long long *plan_cyc, unsigned int *plan_n, unsigned long long *sync_cyc,
+                                  unsigned int *sync_n);
 
 // The generated arrays are uint8_t — a hex initializer for int8_t would lean on
 // an implementation-defined out-of-range conversion — so they are cast at the
@@ -212,6 +222,31 @@ static int check_against_golden(const uint8_t *ofm) {
             mismatches++;
         }
     }
+    // Where the mismatches are, in AIE terms: output channel block oc/16 is the
+    // mesh column, oh/28 the mesh row, and each core's 16 rounds are 4 height
+    // slabs ((oh%28)/7) x 4 width slabs (ow/28). One line per (col,row) core
+    // with its 16 per-round counts, so a data-path fault reads as a pattern
+    // (one core, one round, one slab row) rather than as a flat total.
+    if (mismatches > 0) {
+        static int per_round[4][4][16];
+        memset(per_round, 0, sizeof(per_round));
+        for (int i = 0; i < OFM_ELEMS; i++) {
+            if (ofm[i] == TVM_GOLDEN[i])
+                continue;
+            const int ocb = i % CONV2DSTEM_OC_BLOCK;
+            const int ow = (i / CONV2DSTEM_OC_BLOCK) % OUTPUT_W;
+            const int oh = (i / (CONV2DSTEM_OC_BLOCK * OUTPUT_W)) % OUTPUT_H;
+            const int oc = (i / (CONV2DSTEM_OC_BLOCK * OUTPUT_W * OUTPUT_H)) * CONV2DSTEM_OC_BLOCK + ocb;
+            per_round[oc / 16][oh / 28][((oh % 28) / 7) * 4 + ow / 28]++;
+        }
+        for (int c = 0; c < 4; c++)
+            for (int r = 0; r < 4; r++) {
+                printf("[conv2dstem] MISMAP col %d row %d:", c, r);
+                for (int k = 0; k < 16; k++)
+                    printf(" %d", per_round[c][r][k]);
+                printf("\n");
+            }
+    }
     // One machine-readable line, matched by groundtruth.py's
     // r"GOLDEN (PASS|FAIL)\s+(\d+)\s*/\s*(\d+)".
     printf("[conv2dstem] GOLDEN %s %d/%d\n", mismatches == 0 ? "PASS" : "FAIL", OFM_ELEMS - mismatches, OFM_ELEMS);
@@ -274,7 +309,8 @@ static double perf_ms(XTime t0, XTime t1) {
 // this prints per-iteration deltas. Percentages are of the accounted total, not
 // of wall time: these are PMU cycles and the wall clock above is the generic
 // timer, so the two run at different rates and must not be mixed into one ratio.
-static void perf_report_phases(const unsigned long long *ph0, unsigned long long wio0, int iters) {
+static void perf_report_phases(const unsigned long long *ph0, unsigned long long wio0, const unsigned long long *sub0,
+                               int iters) {
     unsigned long long ph1[4] = {0, 0, 0, 0}, wio1 = 0ULL;
     unsigned int phc[4] = {0, 0, 0, 0}, wioc = 0U;
     __Runtime_phase_cycles(ph1, phc);
@@ -289,9 +325,18 @@ static void perf_report_phases(const unsigned long long *ph0, unsigned long long
     for (int i = 0; i < 5; i++)
         total += d[i];
     if (total == 0ULL) {
+#if defined(AIEHLC_PROFILING) && AIEHLC_PROFILING
+        // Built in, yet nothing counted: pmccntr_el0 is not running. The runtime
+        // starts it in its __Runtime_init constructor; zeros here mean that did
+        // not happen (a runtime object older than that fix, or a Linux build,
+        // where the enable is skipped because EL0 cannot write PMCR_EL0).
+        printf("[conv2dstem] PERF runtime phase counters built in (-DAIEHLC_PROFILING=1) but\n"
+               "             all read 0 -- the PMU cycle counter (pmccntr_el0) is not running.\n");
+#else
         printf("[conv2dstem] PERF runtime phase counters not built in -- rebuild with\n"
                "             `source script/aiehlc.sh --profiling ...` for the kload/bdcfg/\n"
                "             coreen/startio/wait_io split of each launch.\n");
+#endif
         return;
     }
 
@@ -301,6 +346,18 @@ static void perf_report_phases(const unsigned long long *ph0, unsigned long long
         printf("             %s %12.0f  (%5.1f%%)\n", name[i], (double)d[i] / (double)iters,
                100.0 * (double)d[i] / (double)total);
     printf("             %s %12.0f  (100.0%%)\n", "TOTAL  ", (double)total / (double)iters);
+
+    unsigned long long fill = 0ULL, plan = 0ULL, sync = 0ULL;
+    unsigned int n0 = 0U;
+    int aot = 0;
+    __Runtime_kload_fill_cycles(&fill, &n0, &aot);
+    __Runtime_setup_split_cycles(&plan, &n0, &sync, &n0);
+    printf("[conv2dstem] PERF outside/inside the phases (PMU cycles per call):\n"
+           "             kload ELF encode %10.0f  (%s)\n"
+           "             ctrl_plan_init   %10.0f\n"
+           "             sync_for_dev     %10.0f\n",
+           (double)(fill - sub0[0]) / (double)iters, aot ? "AOT" : "JIT", (double)(plan - sub0[1]) / (double)iters,
+           (double)(sync - sub0[2]) / (double)iters);
 }
 
 /*
@@ -323,12 +380,16 @@ static int run_perf(const conv2dstem_qparam *qp, uint8_t *ofm, double first_ms) 
         return CONV2DSTEM_OK;
     }
 
-    unsigned long long ph0[4] = {0, 0, 0, 0}, wio0 = 0ULL;
-    unsigned int phc0[4] = {0, 0, 0, 0}, wioc0 = 0U;
+    unsigned long long ph0[4] = {0, 0, 0, 0}, wio0 = 0ULL, sub0[3] = {0, 0, 0};
+    unsigned int phc0[4] = {0, 0, 0, 0}, wioc0 = 0U, subn = 0U;
+    int aot0 = 0;
     __Runtime_phase_cycles(ph0, phc0);
     __Runtime_wait_io_cycles(&wio0, &wioc0);
+    __Runtime_kload_fill_cycles(&sub0[0], &subn, &aot0);
+    __Runtime_setup_split_cycles(&sub0[1], &subn, &sub0[2], &subn);
 
     double sum_ms = 0.0, min_ms = 0.0, max_ms = 0.0;
+    double launch_sum_ms = 0.0, launch_min_ms = 0.0;
     for (int it = 0; it < CONV2DSTEM_PERF_ITERS; it++) {
         XTime t0, t1;
         XTime_GetTime(&t0);
@@ -341,7 +402,16 @@ static int run_perf(const conv2dstem_qparam *qp, uint8_t *ofm, double first_ms) 
             return rc;
         }
         const double ms = perf_ms(t0, t1);
-        printf("[conv2dstem] PERF iter %d/%d: %.3f ms\n", it + 1, CONV2DSTEM_PERF_ITERS, ms);
+        // conv2d_stem_nchwc() stamps its own phases (g_conv2dstem_stamp):
+        // staging, the conv2d_spatial launch alone (config + AIE + wait), repack.
+        const double pre_ms = perf_ms(g_conv2dstem_stamp[0], g_conv2dstem_stamp[1]);
+        const double launch_ms = perf_ms(g_conv2dstem_stamp[1], g_conv2dstem_stamp[2]);
+        const double post_ms = perf_ms(g_conv2dstem_stamp[2], g_conv2dstem_stamp[3]);
+        printf("[conv2dstem] PERF iter %d/%d: %.3f ms  (stage %.3f + conv2d launch %.3f + collect %.3f)\n", it + 1,
+               CONV2DSTEM_PERF_ITERS, ms, pre_ms, launch_ms, post_ms);
+        launch_sum_ms += launch_ms;
+        if (it == 0 || launch_ms < launch_min_ms)
+            launch_min_ms = launch_ms;
         sum_ms += ms;
         if (it == 0 || ms < min_ms)
             min_ms = ms;
@@ -350,7 +420,7 @@ static int run_perf(const conv2dstem_qparam *qp, uint8_t *ofm, double first_ms) 
     }
     const double mean_ms = sum_ms / (double)CONV2DSTEM_PERF_ITERS;
 
-    perf_report_phases(ph0, wio0, CONV2DSTEM_PERF_ITERS);
+    perf_report_phases(ph0, wio0, sub0, CONV2DSTEM_PERF_ITERS);
 
     // Host-side share, measured the same way the loop was. Timed AFTER the loop
     // so neither measurement perturbs the other, and in the same order the real
@@ -384,6 +454,9 @@ static int run_perf(const conv2dstem_qparam *qp, uint8_t *ofm, double first_ms) 
                2.0 * PERF_USEFUL_MACS / sec / 1e9, 1.0 / sec);
     }
 
+    printf("[conv2dstem] PERF conv2d launch (conv2d_spatial on the mesh): min %.1f us  mean %.1f us\n",
+           1000.0 * launch_min_ms, 1000.0 * launch_sum_ms / (double)CONV2DSTEM_PERF_ITERS);
+
     // One machine-readable line, mirroring the GOLDEN verdict line so a console
     // log is enough to recover the measurement without the surrounding prose.
     printf("[conv2dstem] PERF SUMMARY iters %d  first %.3f  min %.3f  mean %.3f  max %.3f  host %.3f  (ms)\n",
@@ -392,7 +465,7 @@ static int run_perf(const conv2dstem_qparam *qp, uint8_t *ofm, double first_ms) 
 }
 
 int main() {
-    printf("=== ResNet-18 stem conv2d on AIE (TVM layer 01) ===\n");
+    printf("1014=== ResNet-18 stem conv2d on AIE (TVM layer 01) ===\n");
     printf("    Op:     01_contrib_conv2d_NCHWc_subtract_add_subtract_fixed_point_multiply_per_axi\n");
     printf("    Input:  int8  [%d, %d, %d]  (zero-point padded, %d-channel)\n", INPUT_H_PAD, INPUT_W_PAD,
            CONV2DSTEM_INPUT_C, CONV2DSTEM_INPUT_C);
@@ -401,6 +474,8 @@ int main() {
     printf("    Output: uint8 [%d, %d, %d, %d]  NCHW4c  (stride %d, pad %d)\n", CONV2DSTEM_OC_CHUNK,
            CONV2DSTEM_OUTPUT_H, CONV2DSTEM_OUTPUT_W, CONV2DSTEM_OC_BLOCK, CONV2DSTEM_STRIDE, CONV2DSTEM_PAD);
     printf("    Data:   the deployed int8 ResNet-18 graph's own layer-01 tensors\n");
+
+    // while(1);
 
     // The headers are const .rodata and need no DMA alignment: the weights and
     // params are only ever read on the host (stage_weights_nchwc packs them
@@ -448,6 +523,20 @@ int main() {
             rc = perf_rc;
     }
 
+#if CONV2DSTEM_KCYC
+    // conv2dstem.cc's CONV2DSTEM_KCYC build: each core left its cycle split in
+    // the first 32 bytes of its last output tile (staging buffer, tile-major).
+    for (int i = 0; i + 16 <= OFM_ELEMS; i += 16) {
+        uint32_t w[8];
+        // g_ofm is tile-major, so the core's 32 stamp bytes are contiguous.
+        if (i + 32 > OFM_ELEMS)
+            break;
+        memcpy(w, &g_ofm[i], sizeof(w));
+        if (w[0] == 0xC0DE0001u && w[4] == 0xC0DE0002u)
+            printf("[conv2dstem] KCYC core %d: total %u compute %u out-wait %u B-prep %u in-wait %u copy %u\n",
+                   i / (OFM_ELEMS / 16), w[1], w[2], w[3], w[5], w[6], w[7]);
+    }
+#endif
 #if CONV2DSTEM_HAVE_GOLDEN
     if (rc == CONV2DSTEM_OK)
         rc = check_against_golden(ofm);

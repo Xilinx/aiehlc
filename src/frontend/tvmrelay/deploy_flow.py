@@ -809,7 +809,7 @@ def _stage_aie_offload(mod, params, out_dir: Path, aie_layers, aie_ops, *,
 
 def _stage_quantize(raw_path, model_path, out_dir: Path, *,
                     skip_quantize: bool, relay_ptq: bool,
-                    global_scale: float, image, verbose: bool):
+                    global_scale: float, image, verbose: bool, calib=None):
     """Stage 3. Returns ``(mod, params, quantized, quantizer, accuracy)``.
 
     Four mutually exclusive paths, in precedence order: ``skip_quantize``
@@ -861,8 +861,10 @@ def _stage_quantize(raw_path, model_path, out_dir: Path, *,
         # which relay.quantize cannot reach. See onnx_ptq.py.
         from frontend.tvmrelay import onnx_ptq as _ptq
 
+        # `calib` (a list) wins over the single ELF `image`: calibration wants
+        # several representative inputs, the ELF classifies exactly one.
         qdq_path = _ptq.quantize_onnx_int8(raw_path, out_dir, images=(
-            [image] if image else None), verbose=verbose)
+            list(calib) if calib else [image] if image else None), verbose=verbose)
         accuracy = _ptq.compare_topk(model_path, qdq_path, image=image,
                                      verbose=verbose)
         mod, params = import_relay(qdq_path, verbose=verbose)
@@ -883,7 +885,8 @@ def run(out_dir: Path = DEFAULT_OUT, *, skip_quantize: bool = False,
         aie_ops=("conv_bn_relu", "conv_bn"), mesh=(2, 2),
         aiegraph: bool = False, aiegraph_ops=AIE_OP_KINDS,
         relay_ptq: bool = False, local: bool = False, local_run: bool = True,
-        pe_int8=None, fold_qnn_zp: bool = True, verbose: bool = True) -> dict:
+        pe_int8=None, fold_qnn_zp: bool = True, aie_kernels=(),
+        calib=None, verbose: bool = True) -> dict:
     """Run all seven stages. Returns a dict of what happened.
 
     ``aie_offload`` offloads ``aie_layers`` (stage-5 layer indices; ``None``
@@ -921,6 +924,20 @@ def run(out_dir: Path = DEFAULT_OUT, *, skip_quantize: bool = False,
     for *this* host and runs it, so stage 6's output can be checked against
     stage 7's reference without a board. It needs no Vitis toolchain, so it
     composes with ``arm=False``; it cannot link an AIE-offloaded build.
+
+    ``calib`` is a list of calibration images (paths/URLs) for the ONNX PTQ
+    quantizer; default is ``[image]``. ``image`` stays the one the ELF
+    classifies. Used by the ``aiegraph`` facade; the CLI does not expose it.
+
+    ``aie_kernels`` (``--aie-kernel SRC[@layers]``) offloads layers with USER
+    kernels (``include/aie_user_kernel.h``, ``frontend.tvmrelay.aiekernel``):
+    after the split (and after ``aie_offload``/``aiegraph``, so it gets the last
+    word in ``partition.json``) each source is linted, matched against every
+    layer, calibrated against TVM's own kernel and emulated across the whole
+    network on x86, then built by aiehlc. Stage 6 then swaps the call exactly
+    as it does for the stem. One aiehlc library per ELF: a user kernel that
+    builds displaces an ``--aie-offload`` stem library (the runtime has one
+    ``routing()``). See ``doc/tutorial_userkernel.md``.
     """
     if not stage_env(verbose=verbose):
         return {"ok": False, "stage": "env"}
@@ -977,7 +994,7 @@ def run(out_dir: Path = DEFAULT_OUT, *, skip_quantize: bool = False,
                                  skip_quantize=skip_quantize,
                                  relay_ptq=relay_ptq,
                                  global_scale=global_scale,
-                                 image=image, verbose=verbose)
+                                 image=image, verbose=verbose, calib=calib)
 
     # Before build_c, and before _stage_aie_offload's partition_for_aie: both
     # run qnn.CanonicalizeOps internally, and once that has expanded the four
@@ -1046,6 +1063,24 @@ def run(out_dir: Path = DEFAULT_OUT, *, skip_quantize: bool = False,
             if verbose and not graph_part.get("ok"):
                 print(f"[6/7]          {graph_part.get('reason', 'partition failed')}")
 
+    # User kernels (--aie-kernel). After the two paths above so its verdicts
+    # are the last write to partition.json, and before stage 6 so the driver
+    # stage 6 generates already swaps what it built. regenerate=False: stage 6
+    # below is the regeneration.
+    user_kernels = None
+    if aie_kernels:
+        if layers is None:
+            if verbose:
+                print("[6/7] aiek   : skipped -- needs stage 5's layers/")
+        else:
+            from frontend.tvmrelay import aiekernel
+
+            if verbose:
+                print(f"[6/7] aiek   : {len(aie_kernels)} user kernel(s): "
+                      f"{', '.join(str(k) for k in aie_kernels)}")
+            user_kernels = aiekernel.offload(out_dir, list(aie_kernels),
+                                             regenerate=False, verbose=verbose)
+
     # Written after every graph-changing stage above (offload and aiegraph
     # both rebuild the C), so it always describes the graph that was finally
     # compiled rather than the first one.
@@ -1103,6 +1138,7 @@ def run(out_dir: Path = DEFAULT_OUT, *, skip_quantize: bool = False,
             "layer_count": layers["layer_count"] if layers else None,
             "elf": elf, "cpu_top1": (cpu[0][1] if cpu else None),
             "cpu_top": cpu, "aie": aie, "aiegraph": graph_part,
+            "user_kernels": user_kernels,
             "local": local_res, "network_md": str(network_md) if network_md
             else None,
             "quantizer": quantizer, "accuracy": accuracy}
@@ -1219,6 +1255,12 @@ def main(argv=None) -> int:
                     help=f"aiegraph op kinds to offload to AIE; a layer goes "
                          f"to AIE only if all of its ops are listed "
                          f"(default: {','.join(AIE_OP_KINDS)})")
+    ap.add_argument("--aie-kernel", action="append", default=[], metavar="SRC[@L,..]",
+                    help="offload layers with YOUR kernel (include/aie_user_kernel.h): "
+                         "an aiehlc source with AIEK_ENTRY + AIEK_SPEC. @1,4 picks "
+                         "layers, default every layer the spec matches. Gated by lint, "
+                         "detect, x86 calibration and whole-network emulation before "
+                         "the aiehlc build; repeatable. See doc/tutorial_userkernel.md")
     args = ap.parse_args(argv)
 
     from frontend.tvmrelay.aie_offload import parse_selection
@@ -1258,6 +1300,7 @@ def main(argv=None) -> int:
                  relay_ptq=args.relay_ptq, local=args.local,
                  local_run=not args.no_local_run,
                  fold_qnn_zp=not args.no_fold_qnn_zp,
+                 aie_kernels=tuple(args.aie_kernel),
                  # None = default: on, AIE stages included.
                  pe_int8=(False if args.no_pe_int8
                           else True if args.pe_int8 else None))

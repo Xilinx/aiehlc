@@ -49,6 +49,14 @@ uint32_t CoreMemAllocator::getAddress(const std::string &name) const {
     return 0;
 }
 
+uint32_t CoreMemAllocator::getSize(const std::string &name) const {
+    for (const auto &slot : allocations_) {
+        if (slot.symbolName == name)
+            return slot.size;
+    }
+    return 0;
+}
+
 void CoreMemAllocator::reset() {
     nextFree_ = baseAddr_;
     allocations_.clear();

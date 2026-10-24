@@ -446,6 +446,51 @@ def _devices_for_ui(st):
     return out
 
 
+_NETBOOT_DIR = os.path.join(_REPO_ROOT, "src", "tool", "netboot")
+_netload_mod = []
+
+
+def _netboot_probe(user, palip, ip="10.10.70.50"):
+    """Does a netboot supervisor answer on the pal board? (ok, one-line reason)
+
+    Talks the netboot protocol (STATUS) from here through netboot_proxy.py on the
+    lab host, over the same multiplexed ssh connection apppaltest.py --netload
+    uses (same ControlPath), so a positive probe also leaves that connection warm
+    for the run. Stages the proxy once if the lab host lacks it. Never raises.
+    """
+    import importlib.util
+    host = f"{user}@{palip}"
+    mux = ["-o", "ControlMaster=auto", "-o", "ControlPersist=4h", "-o", f"ControlPath=/tmp/apppal-{user}-%C"]
+    remote_dir = f"/home/{user}/aiehlc/netboot"
+    proxy = os.path.join(_NETBOOT_DIR, "netboot_proxy.py")
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", *mux, host,
+                            f"test -f {remote_dir}/netboot_proxy.py"], capture_output=True, timeout=15)
+        if r.returncode == 255:
+            return False, f"ssh {host} failed"
+        if r.returncode != 0:
+            subprocess.run(["ssh", *mux, host, f"mkdir -p {remote_dir}"], capture_output=True, timeout=15,
+                           check=True)
+            subprocess.run(["scp", "-q", *mux, proxy, f"{host}:{remote_dir}/"], capture_output=True,
+                           timeout=30, check=True)
+        if not _netload_mod:
+            spec = importlib.util.spec_from_file_location("netload", os.path.join(_NETBOOT_DIR, "netload.py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _netload_mod.append(mod)
+        rep = _netload_mod[0].request(ip, "status", connect_timeout=3.0, reply_timeout=5.0, via=host,
+                                      proxy=f"{remote_dir}/netboot_proxy.py", ssh_opts=mux)
+    except (OSError, ConnectionError, subprocess.SubprocessError) as e:
+        return False, f"no netboot supervisor at {ip} ({str(e).strip().splitlines()[-1] if str(e).strip() else e})"
+    return True, f"netboot supervisor at {ip}: state={rep['state']}, {rep['msg']}"
+
+
+# "[Program completed after": apppaltest prints it only once completion was
+# detected -- the app's teardown line, or (--netload) the supervisor reporting the
+# app returned from main, for apps that print no teardown line at all.
+_PASS_MARKERS = ("device_teardown done", "Not tearing down partition", "[Program completed after")
+
+
 def _expected_board_host(workdir, env=None):
     """The board this checkout points at: $VEK385IP, else its hwlocal.sh."""
     host = (env if env is not None else os.environ).get("VEK385IP", "").strip()
@@ -1575,6 +1620,7 @@ class DebugState:
         self._run_proc = None         # subprocess.Popen or None
         self._run_fh = None           # open applog file handle (subprocess stdout)
         self._run_id = 0
+        self._force_reset_next = False  # set by Stop [force reset], consumed by the next run
 
         # applog tail bookkeeping. Deriving the run status no longer decodes the
         # whole file each poll; instead we remember which status markers have
@@ -2021,6 +2067,7 @@ class DebugState:
             "run_id": run_id if running else last.get("run_id", 0),
             "pid": pid if running else None,
             "device": last.get("device", ""),
+            "deploy": last.get("deploy", ""),
             "started_iso": last.get("started_iso", ""),
             "age_s": (int(time.time() - started)
                       if running and started else None),
@@ -2054,6 +2101,32 @@ class DebugState:
         status = self._derive_status(text, True, last_ts)
         return not self._is_debuggable(text, status)
 
+    def _choose_netload(self, device):
+        """Deploy through the netboot supervisor.
+
+        Only for the pal board run by apppaltest.py. AIEHLC_NETLOAD: `auto`
+        (default) and `on` pass --netload. `auto` probes first so the applog says
+        whether a resident supervisor answered (fast path) or apppaltest must
+        bootstrap one (one slow run). `off` keeps the JTAG `dow -force` flow, which
+        power-cycles the board on every run. Runs before start_run takes the lock:
+        a cold probe can take a few seconds and must not stall the heartbeat."""
+        if device not in ("pal", "palmyra", ""):
+            return False, ""
+        mode = os.environ.get("AIEHLC_NETLOAD", "auto").strip().lower()
+        if mode == "off":
+            return False, "AIEHLC_NETLOAD=off"
+        if mode == "on":
+            return True, "AIEHLC_NETLOAD=on"
+        user = os.environ.get("USERNAME") or getpass.getuser()
+        ok, note = _netboot_probe(user, _pal_ip())
+        if ok:
+            return True, note
+        # Still netload: a JTAG run power-cycles the board and kills any
+        # supervisor, so "use netboot only if one already answers" could never
+        # leave the JTAG path. apppaltest --netload bootstraps the supervisor once
+        # (~50 s, like a JTAG run); every later run takes the fast path.
+        return True, note + "; apppaltest will bootstrap the supervisor (one-time)"
+
     def start_run(self, device=None, board_host=None):
         """Spawn the board test script -y -nonreboot [elf], output → applog.
 
@@ -2071,6 +2144,7 @@ class DebugState:
         `<script>.py -y -nonreboot` invocation.
         """
         device = (device or "pal").strip().lower()
+        netload, netload_note = self._choose_netload(device)
         with self._lock:
             if self._run_proc and self._run_proc.poll() is None:
                 return {"error": "a run is already in progress",
@@ -2119,6 +2193,13 @@ class DebugState:
             run_id = self._run_id
             # -u: unbuffered stdout for realtime tail; -y: auto-confirm ELF pick.
             cmd = [sys.executable, "-u", script, "-y", "-nonreboot"]
+            netload = netload and device == "pal" and not cfg_dev
+            force_reset = self._force_reset_next
+            self._force_reset_next = False   # consumed by this run either way
+            if netload:
+                cmd.append("--netload")
+                if force_reset:
+                    cmd.append("--netload-bootstrap")
             if not cfg_dev:
                 # The ELF is resolved once at app-select time, so a later
                 # clean/rebuild (build/host removed, aout/main.elf produced)
@@ -2138,6 +2219,10 @@ class DebugState:
             except OSError as e:
                 return {"error": f"cannot open applog {self.applog}: {e}"}
             fh.write(f"$ {' '.join(cmd)}\n")
+            if force_reset:
+                fh.write("# force reset requested at Stop: this run starts from a clean board\n")
+            if netload_note and device == "pal" and not cfg_dev:
+                fh.write(f"# deploy: {'netboot (--netload)' if netload else 'JTAG dow'} -- {netload_note}\n")
             if env and "VEK385IP" in env:
                 # The board is a per-run choice, so the log must name it.
                 fh.write(f"# env: USERNAME={env.get('USERNAME', '')} "
@@ -2158,17 +2243,29 @@ class DebugState:
             # This session now owns the applog, so its contents describe the
             # current run rather than whatever was on disk beforehand.
             self._last_run = {"run_id": run_id, "device": device,
+                              "deploy": "netboot" if netload else "jtag",
                               "started_at": time.time(),
                               "started_iso": time.strftime("%Y-%m-%d %H:%M:%S")}
         self.mark_hw_session("ran", f"run #{run_id} on {device}")
         return {"run_id": run_id, "applog": self.applog, "device": device}
 
-    def stop_run(self):
-        """Force-kill the running apppaltest (and its ssh/pexpect children)."""
+    def stop_run(self, force_reset=False):
+        """Kill the running apppaltest (and its ssh/pexpect children).
+
+        Soft by default: the board is not touched, so a resident netboot
+        supervisor survives and the next Run takes the fast path. force_reset
+        (the UI's [force reset] box) makes the NEXT run start from a clean board:
+        power cycle, BOOT.BIN, supervisor reload (--netload-bootstrap). Use it when
+        the app hangs, since a hung app core cannot be reclaimed otherwise."""
+        if force_reset:
+            self._force_reset_next = True
         with self._lock:
             proc = self._run_proc
             if proc is None or proc.poll() is not None:
                 self._run_proc = None
+                if force_reset:
+                    return {"stopped": False, "running": False, "force_reset_next": True,
+                            "note": "no run in progress; the next run will reset the board"}
                 return {"stopped": False, "error": "no run in progress",
                         "running": False}
             pid = proc.pid
@@ -2213,10 +2310,14 @@ class DebugState:
                             f"may still be alive and holding the JTAG link]\n")
                 else:
                     f.write(f"\n[force-stop: killed run {run_id} (pid {pid})]\n")
+                f.write("[stop: next run resets the board (power cycle + BOOT.BIN + supervisor reload)]\n"
+                        if force_reset else
+                        "[stop: board left as is (soft stop); the next run reuses the netboot supervisor]\n")
         except OSError:
             pass
         return {"stopped": True, "run_id": run_id, "pid": pid,
-                "abandoned": abandoned, "running": False}
+                "abandoned": abandoned, "running": False,
+                "force_reset_next": bool(self._force_reset_next)}
 
     def timeline_png_path(self):
         """Where `timeline.py` writes the rendered PNG — next to the applog so it
@@ -2362,6 +2463,10 @@ class DebugState:
                 # it, so `less <example>/ipc_sim.log` still works.
                 env["AEG_SIM_LOG"] = self.sim_engine_log
             fh.write(f"$ {' '.join(cmd)}\n")
+            if force_reset:
+                fh.write("# force reset requested at Stop: this run starts from a clean board\n")
+            if netload_note and device == "pal" and not cfg_dev:
+                fh.write(f"# deploy: {'netboot (--netload)' if netload else 'JTAG dow'} -- {netload_note}\n")
             if self.sim_engine_log:
                 fh.write(f"[simulator engine log: {self.sim_engine_log}]\n")
             fh.flush()
@@ -2700,7 +2805,7 @@ class DebugState:
     @staticmethod
     def _derive_status_markers(seen, running, last_ts, has_content):
         """Marker-set equivalent of _derive_status (no whole-file decode)."""
-        if "device_teardown done" in seen or "Not tearing down partition" in seen:
+        if any(m in seen for m in _PASS_MARKERS):
             return "pass"
         if "AIE ERROR" in seen:
             return "fail"
@@ -2733,7 +2838,7 @@ class DebugState:
 
     @staticmethod
     def _derive_status(text, running, last_ts):
-        if "device_teardown done" in text or "Not tearing down partition" in text:
+        if any(m in text for m in _PASS_MARKERS):
             return "pass"
         if "AIE ERROR" in text:
             return "fail"
@@ -5331,7 +5436,7 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/uistate":
             self._send_json(st.set_uistate(body))
         elif u.path == "/stop":
-            res = st.stop_run()
+            res = st.stop_run(force_reset=bool(body.get("force_reset")))
             res["run"] = st.run_state()
             self._send_json(res)
         elif u.path == "/timeline":

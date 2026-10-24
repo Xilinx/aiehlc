@@ -90,6 +90,11 @@ struct BlueprintPassState {
     // host must NOT emit the S2MM core-tile DMA chain. emitCoreBufferDma reads this
     // to skip the S2MM BD + create_io + start_io for core tiles.
     bool kernelConfigOffload = false;
+    // #pragma output_tile_major (routing.output_tile_major): the gathered conv
+    // output is laid out tile-major in DDR, one linear run per core, so the
+    // shim S2MM needs one BD per core and no per-round host loop. See
+    // buildOutputTileDescriptor.
+    bool outputTileMajor = false;
 };
 
 // KERNELCONFIGOFFLOAD: lowest tile row that is a compute core able to run

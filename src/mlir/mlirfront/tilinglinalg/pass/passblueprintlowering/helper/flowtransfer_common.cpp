@@ -498,6 +498,40 @@ OutputTileDescriptor buildOutputTileDescriptor(const BlueprintPassState &passSta
             desc.totalRounds = rounds[rowDim];
             desc.roundDims.push_back({rounds[rowDim], blk[rowDim] * rmStride[rowDim] * elemBytes});
             desc.perTileStrideBytes = blk[colDim] * rmStride[colDim] * elemBytes;
+
+            // #pragma output_tile_major: lay each core's rounds out back to back
+            // instead of scattering them into the image. The dense layout needs
+            // a 2-D round walk per core (iter dim x row-dim rounds) and a BD has
+            // ONE iteration dimension, so the row-dim rounds became an scf.for
+            // that re-programs the shim S2MM BDs between rounds -- while fast
+            // cores may already be emitting the next round into them. Tile-major
+            // makes the walk 1-D: per core, rounds r = 0..R-1 land at
+            // r*roundBytes, the per-tile (mesh col) base advances by
+            // R*roundBytes, and the mesh-row (channel) base is unchanged (a
+            // mesh row owns the same byte count either way). One BD per core,
+            // configured once, totalRounds = 1 -> straight-line schedule.
+            // DDR layout: [mesh row][mesh col][round][on-core tile, row-major].
+            if (passState.outputTileMajor) {
+                const int64_t roundBytes = desc.bdLenBytes;
+                const int64_t outRounds = rounds[rowDim] * static_cast<int64_t>(desc.iterWrap);
+                desc.bdDims.clear();
+                // 2-D contiguous walk (64-byte rows) keeps each wrap small; a
+                // round that is not a multiple of 64 bytes uses one word dim.
+                if (roundBytes % 64 == 0) {
+                    desc.bdDims.push_back({wordBytes, 64 / wordBytes});
+                    desc.bdDims.push_back({64, roundBytes / 64});
+                } else {
+                    desc.bdDims.push_back({wordBytes, roundBytes / wordBytes});
+                }
+                desc.iterStep = static_cast<int32_t>(roundBytes);
+                desc.iterWrap = static_cast<int32_t>(outRounds);
+                desc.totalRounds = 1;
+                desc.roundDims.clear();
+                desc.roundDims.push_back({1, 0});
+                desc.perTileStrideBytes = outRounds * roundBytes;
+                llvm::errs() << "[OutputTileDescriptor] output_tile_major: roundBytes=" << roundBytes
+                             << " rounds/core=" << outRounds << " perTileStride=" << desc.perTileStrideBytes << "\n";
+            }
             return desc;
         }
 

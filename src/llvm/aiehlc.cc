@@ -192,6 +192,13 @@ static bool parsedControlPlanGroupRegWrite = false;
 // raw MMIO register writes. Absent (default) => byte-identical to today (host
 // programs every core tile's DMA over the config bus).
 static bool parsedKernelConfigOffload = false;
+// Set by #pragma output_tile_major. When true, a spatial-halo conv's gathered
+// output is laid out TILE-MAJOR in DDR -- [mesh row][mesh col][round][one
+// on-core output tile] -- instead of scattered into the dense image, so each
+// core's rounds are one linear run: one shim S2MM BD per core (iteration over
+// all rounds), no per-round host loop re-programming BDs mid-launch. The host
+// owns the layout conversion. Absent (default) => dense image, byte-identical.
+static bool parsedOutputTileMajor = false;
 static bool parsedControlPlanDedicatedShim = false;
 static bool parsedControlPlanShimBdCtrl = false;
 static int parsedControlPacketMode = 0;
@@ -3595,6 +3602,19 @@ class AieControlPlanGroupRegWritePragmaHandler : public clang::PragmaHandler {
     }
 };
 
+// Bare marker pragma: #pragma output_tile_major (no arguments). See
+// parsedOutputTileMajor; published as routing.output_tile_major.
+class AieOutputTileMajorPragmaHandler : public clang::PragmaHandler {
+  public:
+    AieOutputTileMajorPragmaHandler() : PragmaHandler("output_tile_major") {}
+    void HandlePragma(clang::Preprocessor &PP, clang::PragmaIntroducer, clang::Token &Tok) override {
+        parsedOutputTileMajor = true;
+        llvm::outs() << "[aiehlc] Detected #pragma output_tile_major\n";
+        if (Tok.isNot(clang::tok::eod))
+            PP.DiscardUntilEndOfDirective();
+    }
+};
+
 // Bare marker pragma: #pragma KERNELCONFIGOFFLOAD (no arguments). Its presence
 // opts the pipeline into offloading core-tile DMA configuration (S2MM/MM2S BDs,
 // lock inits, channel start) from the HOST into the AIE CORE kernel, which
@@ -3703,6 +3723,7 @@ public:
             PP.AddPragmaHandler(new AieControlPlanPragmaHandler());
             PP.AddPragmaHandler(new AieControlPlanGroupRegWritePragmaHandler());
             PP.AddPragmaHandler(new AieKernelConfigOffloadPragmaHandler());
+            PP.AddPragmaHandler(new AieOutputTileMajorPragmaHandler());
             PP.AddPragmaHandler(new AieControlPlanDedicatedShimPragmaHandler());
             PP.AddPragmaHandler(new AieControlPlanShimBdCtrlPragmaHandler());
             PP.AddPragmaHandler(new AieControlPacketModePragmaHandler());
@@ -4837,6 +4858,9 @@ public:
                         // gates the offload codegen on it.
                         module->setAttr("routing.kernel_config_offload",
                                         fcAttrBuilder.getI64IntegerAttr(parsedKernelConfigOffload ? 1 : 0));
+                        // Opt-in tile-major conv output (see #pragma output_tile_major).
+                        module->setAttr("routing.output_tile_major",
+                                        fcAttrBuilder.getI64IntegerAttr(parsedOutputTileMajor ? 1 : 0));
                         module->setAttr("routing.control_plan_dedicated_shim",
                                         fcAttrBuilder.getI64IntegerAttr(parsedControlPlanDedicatedShim ? 1 : 0));
                         module->setAttr("routing.control_plan_shim_bd_ctrl",
@@ -5257,21 +5281,28 @@ public:
                             maxDdrArgs = mkd.numHostDdrArgs;
                     }
 
-                    // Helper: emit __Runtime_sync_for_dev calls for ALL buffers before DMA.
-                    // On ARM (baremetal), SyncForDev flushes+invalidates cache lines, which is
-                    // needed for outputs too: dirty cache lines (e.g. zeroed output buffer) must
-                    // be flushed and invalidated BEFORE DMA writes results to DDR, otherwise a
-                    // post-DMA invalidate (clean+invalidate) would flush stale zeros over the
-                    // DMA results. No post-launch sync is needed.
+                    // Helper: emit the launch-argument cache maintenance.
+                    // Before the launch every argument is QUEUED (__Runtime_sync_for_dev_deferred):
+                    // on ARM baremetal a CPU-written argument must still be cleaned+invalidated
+                    // BEFORE any DMA touches it -- for outputs too, since a dirty line (e.g. a
+                    // zeroed output buffer) written back after the DMA would overwrite its
+                    // results -- and the runtime guarantees that: it completes every queued
+                    // CPU-written range before any data-plane DMA can start, doing the work
+                    // inside its own ack/DMA poll loops where it would otherwise spin. A range
+                    // registered with __Runtime_buffer_device_written() is invalidate-only and may
+                    // overlap the launch's DMA. After the launch: __Runtime_dsync_drain() finishes
+                    // whatever is still queued before control returns to the caller.
                     auto emitSyncCalls = [](llvm::raw_fd_ostream &os, const MeshKernelDesc &mkd,
                                             const std::string &indent, bool beforeLaunch) {
-                        if (!beforeLaunch)
-                            return; // no post-launch sync needed on ARM
+                        if (!beforeLaunch) {
+                            os << indent << "__Runtime_dsync_drain();\n";
+                            return;
+                        }
                         unsigned limit = mkd.numHostDdrArgs;
                         if (limit > mkd.tensors.size())
                             limit = mkd.tensors.size();
                         for (unsigned i = 0; i < limit; ++i) {
-                            os << indent << "__Runtime_sync_for_dev(dev, _t" << i << ", _s" << i << ");\n";
+                            os << indent << "__Runtime_sync_for_dev_deferred(dev, _t" << i << ", _s" << i << ");\n";
                         }
                     };
 
@@ -5528,6 +5559,9 @@ public:
                     // Publish the flag so the pipeline gates the offload codegen on it.
                     module->setAttr("routing.kernel_config_offload",
                                     fcAttrBuilder.getI64IntegerAttr(parsedKernelConfigOffload ? 1 : 0));
+                    // Opt-in tile-major conv output (see #pragma output_tile_major).
+                    module->setAttr("routing.output_tile_major",
+                                    fcAttrBuilder.getI64IntegerAttr(parsedOutputTileMajor ? 1 : 0));
                     module->setAttr("routing.control_plan_dedicated_shim",
                                     fcAttrBuilder.getI64IntegerAttr(parsedControlPlanDedicatedShim ? 1 : 0));
                     module->setAttr("routing.control_plan_shim_bd_ctrl",

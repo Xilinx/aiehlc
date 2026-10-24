@@ -138,6 +138,16 @@ Not enabled here: `#pragma control_packet_mode(aot)`, which precomputes the
 compile-time part of every control packet at build time (skill:
 **ctrlpkt-aot-elf**).
 
+### `conv2dstem_vec.cc` — the vectorized kernel
+
+Same file as `conv2dstem.cc` outside the kernel section. The kernel uses
+`aie::mmul<4,8,8,int8,int8>` and a bit-exact vector requantize; 1.77 ms per call
+against 31.47 ms for the scalar kernel, golden-exact on the board. Build with
+`./buildtest.sh --vec`, which generates `test_conv2d_vec.cc` (gitignored) from
+`test_conv2d.cc` with the one kernel `#include` swapped — a macro cannot choose,
+because aiehlc splices `.cc` includes before the preprocessor runs. See
+`doc/performance/conv2dstem_perf_review.md` §6.
+
 ### `conv2dstem.h` — the library contract
 
 Geometry macros, the `conv2dstem_qparam` struct, the entry declarations and the
@@ -191,7 +201,11 @@ A second block — per-launch `kload` / `bdcfg` / `coreen` / `startio` / `wait_i
 PMU cycles — prints only when the host was built with
 `source script/aiehlc.sh --profiling ...` (`-DAIEHLC_PROFILING=1`). The
 accessors always link; without the flag every counter reads 0, which the report
-says in words instead of printing as a row of zeros. Those are PMU cycles and
+says in words instead of printing as a row of zeros. The counters read
+`pmccntr_el0`, which the standalone BSP boot never starts; the runtime's
+`__Runtime_init` constructor enables it under the flag (this file cannot call
+`aie_timer.h`'s `__ps_pmccntr_enable()` itself). Built with the flag but still all
+zero is reported separately as "built in but ... not running". Those are PMU cycles and
 the wall clock is the generic timer, so they are shown as a share of the
 accounted total and never mixed into one ratio.
 

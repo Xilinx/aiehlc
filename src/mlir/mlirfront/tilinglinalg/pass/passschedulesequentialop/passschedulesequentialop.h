@@ -20,7 +20,7 @@ namespace mlir {
 /// optimal execution sequencing:
 ///   1. Kernel load + launch at the beginning
 ///   2. DMA config + IO create after kernel
-///   3. All start_io after DMA config
+///   3. All start_io after DMA config; S2MM (sink) start_io before MM2S (source)
 ///   4. Wait ops after start_io group; for-loop waits before non-for-loop waits
 class ScheduleSequentialOpPass : public PassWrapper<ScheduleSequentialOpPass, OperationPass<ModuleOp>> {
   public:

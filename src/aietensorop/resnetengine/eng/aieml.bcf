@@ -1,0 +1,9 @@
+_entry_point _main_init
+_symbol _main _after  _main_init
+_symbol _main_init 0
+_symbol eng_arena 0x71c00
+_stack DM_stack 0x70000 0x1400
+_reserved DMb 0x0 0x40000
+_reserved DMb 0x40000 0x10000
+_reserved DMb 0x50000 0x20000
+_reserved DMb 0x80000 0x80000

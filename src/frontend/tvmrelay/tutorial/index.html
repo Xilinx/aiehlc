@@ -578,6 +578,12 @@ opened partition; worth fixing before timing small effects.</li>
 <h2 id="handwrite">16. Hand-write a layer yourself</h2>
 <p>Everything the flow automates, as manual steps — for bring-up of a new kernel or when you
 need to bisect the flow.</p>
+<div class="box"><b>Automated version:</b> steps 2–6 below are what the user-kernel interface does for
+you — write <code>AIEK_ENTRY</code> + <code>AIEK_SPEC</code> (<code>include/aie_user_kernel.h</code>) and an x86
+<code>AIEK_REFERENCE</code>, then <code>python3 -m frontend.tvmrelay.aiekernel check|offload</code> or
+<code>deploy_flow.py --aie-kernel SRC[@layers]</code>: lint, layer detection, calibration against TVM's kernel,
+whole-network x86 emulation, aiehlc build, generated packed-call adapter and driver swap.
+See <code>doc/tutorial_userkernel.md</code>.</div>
 <ol>
 <li><b>Get the layer's real data.</b>
 <code>make -C worklocal/tvmrelay_deploy/arm_build clean-local &amp;&amp; make … local TRACE=1</code>, run

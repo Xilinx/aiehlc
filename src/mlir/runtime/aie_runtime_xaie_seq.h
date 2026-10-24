@@ -19,6 +19,20 @@ typedef struct {
     int ooo;
 } rt_seq_bd_args;
 
+/* AXI burst length (beats) for every shim BD built by rt_seq_bd_desc.
+ * AIE2PS also accepts 32; override with -DRT_SEQ_SHIM_AXI_BURST=... */
+#ifndef RT_SEQ_SHIM_AXI_BURST
+#define RT_SEQ_SHIM_AXI_BURST 16U
+#endif
+/* AxCACHE / AxQOS for the same BDs (XAie_DmaSetAxi). 0 = device
+ * non-bufferable, the driver default; override with -DRT_SEQ_SHIM_AXI_CACHE=... */
+#ifndef RT_SEQ_SHIM_AXI_CACHE
+#define RT_SEQ_SHIM_AXI_CACHE 0U
+#endif
+#ifndef RT_SEQ_SHIM_AXI_QOS
+#define RT_SEQ_SHIM_AXI_QOS 0U
+#endif
+
 AieRC rt_seq_bd_desc(XAie_DevInst *dev, XAie_LocType tile, uint64_t dma_addr, const rt_seq_bd_args *a,
                      XAie_DmaDesc *desc);
 

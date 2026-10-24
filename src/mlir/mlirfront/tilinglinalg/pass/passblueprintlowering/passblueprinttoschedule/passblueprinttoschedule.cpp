@@ -313,6 +313,7 @@ void BlueprintToSchedulePass::runOnOperation() {
             // DMA from kernel.cc, emitCoreBufferDma must skip the host S2MM core
             // DMA chain (see BlueprintPassState::kernelConfigOffload).
             passState->kernelConfigOffload = getI64("routing.kernel_config_offload") != 0;
+            passState->outputTileMajor = getI64("routing.output_tile_major") != 0;
 
             // Flat module attrs are the fallback source.
             passState->tileM = getI64("routing.tile_m");

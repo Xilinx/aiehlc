@@ -74,6 +74,27 @@ static inline unsigned long long __rt_pmccntr(void) {
 static inline unsigned long long __rt_pmccntr(void) { return 0ULL; }
 #endif
 
+// Start the cycle counter the RT_PROF_* phases read. Nothing else does: the
+// standalone BSP boot.S never touches PMCR_EL0, whose E bit resets to 0, so
+// without this pmccntr_el0 stays frozen and every phase delta is 0 -- a
+// --profiling build that reports "not built in". Apps used to call aie_timer.h's
+// __ps_pmccntr_enable() themselves; one that did not (conv2dstem test_conv2d.cc)
+// silently got zeros. Same bits as that helper (E=1, D=0 so it counts every
+// cycle, PMCNTENSET.C) minus the C reset: only deltas are used, and resetting
+// would invalidate a snapshot the app already took. Baremetal only -- under
+// Linux PMCR_EL0 is EL1-owned and an EL0 write traps.
+static inline void __rt_pmccntr_enable(void) {
+#if AIEHLC_PROFILING && defined(__aarch64__) && !defined(__AIESIM__) && !defined(__linux__)
+    unsigned long long v;
+    __asm__ volatile("mrs %0, pmcr_el0" : "=r"(v));
+    v |= (1ULL << 0);
+    v &= ~(1ULL << 3);
+    __asm__ volatile("msr pmcr_el0, %0" : : "r"(v));
+    __asm__ volatile("msr pmcntenset_el0, %0" : : "r"(1ULL << 31));
+    __asm__ volatile("isb");
+#endif
+}
+
 static unsigned long long g_prof_excl_cyc = 0ULL;
 static inline unsigned long long __rt_prof_now(void) { return __rt_pmccntr() - g_prof_excl_cyc; }
 
@@ -126,6 +147,10 @@ static unsigned long long g_kl_elf_fill_cyc = 0ULL;
 static unsigned int g_kl_elf_fill_n = 0U;
 static int g_kl_ctrlpkt_aot = 0;
 static unsigned long long g_ctrl_plan_cyc = 0ULL, g_sync_dev_cyc = 0ULL;
+/* Bumped by every partition init and teardown. Anything cached against the
+ * array's register state (rt_plan_cache below) is valid only within one
+ * generation: a re-init resets the stream switches it describes. */
+static unsigned g_partition_gen = 1U;
 static unsigned int g_ctrl_plan_n = 0U, g_sync_dev_n = 0U;
 static unsigned long long g_pmap_print_cyc = 0ULL;
 static unsigned int g_pmap_print_n = 0U;
@@ -2339,6 +2364,85 @@ void *__Runtime_Alloc(size_t bytes) {
     return ptr;
 }
 
+/* ---------------------------------------------------------------------------
+ * Non-cacheable allocations for CPU-written DMA inputs.
+ *
+ * A launch argument the CPU rewrites before every launch (an input staging
+ * buffer) has to be cleaned out of the cache before the DMA reads it: on
+ * conv2dstem that is 213 KB of dirty lines written back, ~25 us on the launch's
+ * critical path. Mapped Normal Non-cacheable instead, the CPU's staging stores
+ * go to DDR as they are made (through the write buffer), and the launch has
+ * nothing to clean -- only a dsb to drain the write buffer.
+ *
+ * The baremetal ARMv8 BSP maps the low 4 GB in 2 MB blocks and
+ * Xil_SetTlbAttributes() rewrites one block in place, so a buffer gets a whole
+ * 2 MB-aligned block of its own (<= 2 MB per allocation). Above 4 GB the BSP
+ * uses 1 GB blocks -- rewriting one of those would change the heap around the
+ * buffer -- so that, the simulator and Linux fall back to a normal cached
+ * allocation with the normal cache maintenance. __Runtime_free_uncached
+ * restores the block's original attributes.
+ * ------------------------------------------------------------------------- */
+#if !defined(__AIESIM__) && !defined(__linux__)
+#include "xil_mmu.h"
+#ifdef __cplusplus
+extern "C" INTPTR MMUTableL2; /* BSP translation table, level 2 (2 MB blocks) */
+#else
+extern INTPTR MMUTableL2;
+#endif
+#define RT_NC_SUPPORTED 1
+#endif
+#define RT_NC_BLOCK 0x200000UL
+#define RT_NC_MAX 4
+static struct {
+    void *base;
+    size_t bytes;
+    uint64_t old_attr;
+} g_nc[RT_NC_MAX];
+static int g_nc_n;
+
+static int rt_nc_covers(uintptr_t lo, uintptr_t hi) {
+    for (int i = 0; i < g_nc_n; i++)
+        if (lo >= (uintptr_t)g_nc[i].base && hi <= (uintptr_t)g_nc[i].base + g_nc[i].bytes)
+            return 1;
+    return 0;
+}
+
+void *__Runtime_alloc_uncached(size_t bytes) {
+#ifdef RT_NC_SUPPORTED
+    if (bytes > 0 && bytes <= RT_NC_BLOCK && g_nc_n < RT_NC_MAX) {
+        void *p = aligned_alloc(RT_NC_BLOCK, RT_NC_BLOCK);
+        if (p && (uint64_t)(uintptr_t)p + RT_NC_BLOCK <= 0x100000000ULL) {
+            INTPTR *entry = &MMUTableL2 + ((uintptr_t)p / RT_NC_BLOCK);
+            /* Keep every attribute bit of the block descriptor, drop its address. */
+            const uint64_t old_attr = (uint64_t)*entry & ~(uint64_t)0x0000FFFFFFE00000ULL;
+            Xil_DCacheFlushRange((INTPTR)p, (INTPTR)RT_NC_BLOCK); /* no line may outlive the remap */
+            Xil_SetTlbAttributes((UINTPTR)p, NORM_NONCACHE);
+            g_nc[g_nc_n].base = p;
+            g_nc[g_nc_n].bytes = RT_NC_BLOCK;
+            g_nc[g_nc_n].old_attr = old_attr;
+            g_nc_n++;
+            AIEHLC_LOG(printf("[aie_runtime] alloc_uncached(%zu) = %p (2 MB block, Normal NC)\n", bytes, p););
+            return p;
+        }
+        free(p);
+    }
+#endif
+    return __Runtime_Alloc(bytes);
+}
+
+void __Runtime_free_uncached(void *ptr) {
+    for (int i = 0; i < g_nc_n; i++) {
+        if (g_nc[i].base != ptr)
+            continue;
+#ifdef RT_NC_SUPPORTED
+        Xil_SetTlbAttributes((UINTPTR)ptr, g_nc[i].old_attr);
+#endif
+        g_nc[i] = g_nc[--g_nc_n];
+        break;
+    }
+    free(ptr);
+}
+
 void __Runtime_free(void *ptr) {
     if (AIEHLC_LOG_ENABLED()) {
         printf("[aie_runtime] free(%p)\n", ptr);
@@ -2639,6 +2743,10 @@ void __Runtime_perfcnt_read_mm2s_bd_finished_partition(XAie_DevInst *dev, uint8_
 }
 
 void __Runtime_sync_for_dev(XAie_DevInst *dev, void *ptr, size_t size) {
+    if (rt_nc_covers((uintptr_t)ptr, (uintptr_t)ptr + size)) {
+        __asm__ volatile("dsb sy" ::: "memory"); /* drain the write buffer; nothing is cached */
+        return;
+    }
     unsigned long long __sd_t0 = RT_PROF_TIC();
     if (dev) {
         AieRC rc = XAie_MemSyncForDevVAddr(dev, ptr, (uint64_t)size);
@@ -2651,6 +2759,10 @@ void __Runtime_sync_for_dev(XAie_DevInst *dev, void *ptr, size_t size) {
 }
 
 void __Runtime_sync_for_cpu(XAie_DevInst *dev, void *ptr, size_t size) {
+    /* No __Runtime_dsync_drain() here: the runtime itself calls this for every
+     * control-packet ack token, so draining here ran the whole deferred queue
+     * inside the kernel-ELF load (measured: kload 28 -> 84 us). The emitted
+     * __aie_launch drains after host_canonicalized instead. */
     if (dev) {
         AieRC rc = XAie_MemSyncForCPUVAddr(dev, ptr, (uint64_t)size);
         AIEHLC_LOG(printf("[aie_runtime] sync_for_cpu(%p, %zu) via VAddr rc=%d\n", ptr, size, rc););
@@ -2658,6 +2770,157 @@ void __Runtime_sync_for_cpu(XAie_DevInst *dev, void *ptr, size_t size) {
         Xil_DCacheInvalidateRange((UINTPTR)ptr, size);
         AIEHLC_LOG(printf("[aie_runtime] sync_for_cpu(%p, %zu) via DCacheInvalidateRange\n", ptr, size));
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Deferred cache maintenance for launch arguments.
+ *
+ * A launch used to clean+invalidate every argument by VA before anything else
+ * ran: on conv2dstem that is ~55 us of DC CIVAC (211 KB in, 802 KB out) with
+ * the array idle, while the host then spends tens of microseconds spinning on
+ * ack/DMA polls. The emitted __aie_launch now QUEUES each argument
+ * (__Runtime_sync_for_dev_deferred) and the work runs in two kinds of places:
+ *
+ *   - opportunistically, a chunk per poll iteration: CPU-written ranges in the
+ *     kernel-ELF ack poll, everything else in wait_io's poll;
+ *   - completely, at hard points: every CPU-written range before ANY data-plane
+ *     DMA can start (rt_sb_kick, __Runtime_ctrl_aot_window, __Runtime_startio),
+ *     and everything before the launch returns (__Runtime_dsync_drain, emitted
+ *     right after host_canonicalized).
+ *
+ * So a CPU-written input is still clean in DDR before the DMA that reads it
+ * starts -- same guarantee as before. CPU-written inputs are stepped inside the
+ * kernel-ELF ack poll (the ELF is in flight; the CPU would spin) and whatever
+ * is left is finished at the data-plane start.
+ *
+ * A range the caller registered with __Runtime_buffer_device_written() -- the
+ * array writes it, the CPU only reads it after the launch -- has no dirty lines
+ * by contract, so it needs only an invalidate and may run AFTER the output DMA
+ * has started (an invalidate of a clean line cannot write anything back). That
+ * is what lets conv2dstem's 802 KB output buffer be invalidated while the array
+ * computes. Unregistered outputs keep the conservative clean+invalidate before
+ * any DMA starts, exactly the old semantics (see emitSyncCalls' comment).
+ * ------------------------------------------------------------------------- */
+#define RT_DSYNC_MAX 16
+#define RT_DSYNC_CHUNK 16384U /* bytes of maintenance per wait_io poll step */
+#define RT_DEVWR_MAX 8
+typedef struct {
+    XAie_DevInst *dev;
+    uintptr_t cur, end;
+    int inval_only;
+} rt_dsync_rng;
+static rt_dsync_rng g_dsync[RT_DSYNC_MAX];
+static int g_dsync_n;
+static struct {
+    uintptr_t lo, hi;
+} g_devwr[RT_DEVWR_MAX];
+static int g_devwr_n;
+
+void __Runtime_buffer_device_written(void *ptr, size_t size) {
+    if (!ptr || !size)
+        return;
+    uintptr_t lo = (uintptr_t)ptr, hi = lo + size;
+    for (int i = 0; i < g_devwr_n; i++)
+        if (g_devwr[i].lo == lo && g_devwr[i].hi == hi)
+            return;
+    if (g_devwr_n == RT_DEVWR_MAX) {
+        printf("[aie_runtime] buffer_device_written: table full; %p keeps clean+invalidate\n", ptr);
+        return;
+    }
+    /* Make the contract true from here on: no dirty line may survive. */
+    Xil_DCacheFlushRange((UINTPTR)ptr, size);
+    g_devwr[g_devwr_n].lo = lo;
+    g_devwr[g_devwr_n].hi = hi;
+    g_devwr_n++;
+}
+
+void __Runtime_buffer_forget(void *ptr) {
+    int k = 0;
+    for (int i = 0; i < g_devwr_n; i++)
+        if (g_devwr[i].lo != (uintptr_t)ptr)
+            g_devwr[k++] = g_devwr[i];
+    g_devwr_n = k;
+}
+
+static int rt_devwr_covers(uintptr_t lo, uintptr_t hi) {
+    for (int i = 0; i < g_devwr_n; i++)
+        if (lo >= g_devwr[i].lo && hi <= g_devwr[i].hi)
+            return 1;
+    return 0;
+}
+
+/* Run maintenance on queue entries, CPU-written (clean) ranges first; stop after
+ * @budget bytes. @inputs_only: leave invalidate-only ranges queued. */
+static void rt_dsync_run(int inputs_only, size_t budget) {
+    for (int pass = 0; pass < 2 && budget; pass++) {
+        if (pass == 1 && inputs_only)
+            break;
+        for (int i = 0; i < g_dsync_n && budget; i++) {
+            rt_dsync_rng *r = &g_dsync[i];
+            if (r->inval_only != pass || r->cur >= r->end)
+                continue;
+            unsigned long long t0 = RT_PROF_TIC();
+            size_t n = (size_t)(r->end - r->cur) < budget ? (size_t)(r->end - r->cur) : budget;
+            if (r->inval_only)
+                (void)XAie_MemSyncForCPUVAddr(r->dev, (void *)r->cur, (uint64_t)n);
+            else
+                (void)XAie_MemSyncForDevVAddr(r->dev, (void *)r->cur, (uint64_t)n);
+            r->cur += n;
+            budget -= n;
+            RT_PROF_ADD(g_sync_dev_cyc, g_sync_dev_n, t0);
+        }
+    }
+    int k = 0;
+    for (int i = 0; i < g_dsync_n; i++)
+        if (g_dsync[i].cur < g_dsync[i].end)
+            g_dsync[k++] = g_dsync[i];
+    g_dsync_n = k;
+}
+
+static inline void rt_dsync_step(void) {
+    if (g_dsync_n)
+        rt_dsync_run(0, RT_DSYNC_CHUNK);
+}
+
+/* Step for the polls that run BEFORE the data plane starts (kernel-ELF and
+ * shim-BD window acks): CPU-written ranges only -- they are due by the commit
+ * anyway. Invalidate-only ranges stay for wait_io, where the array computes. */
+static inline void rt_dsync_step_inputs(void) {
+    if (g_dsync_n)
+        rt_dsync_run(1, RT_DSYNC_CHUNK);
+}
+
+static inline void rt_dsync_drain_inputs(void) {
+    if (g_dsync_n)
+        rt_dsync_run(1, (size_t)-1);
+}
+
+void __Runtime_dsync_drain(void) {
+    if (g_dsync_n)
+        rt_dsync_run(0, (size_t)-1);
+}
+
+void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size) {
+#ifdef __AIESIM__
+    __Runtime_sync_for_dev(dev, ptr, size);
+    return;
+#endif
+    if (!ptr || !size)
+        return;
+    if (!dev || g_dsync_n == RT_DSYNC_MAX) {
+        __Runtime_sync_for_dev(dev, ptr, size);
+        return;
+    }
+    uintptr_t lo = (uintptr_t)ptr, hi = lo + size;
+    if (rt_nc_covers(lo, hi)) {
+        __asm__ volatile("dsb sy" ::: "memory"); /* drain the write buffer; nothing is cached */
+        return;
+    }
+    g_dsync[g_dsync_n].dev = dev;
+    g_dsync[g_dsync_n].cur = lo;
+    g_dsync[g_dsync_n].end = hi;
+    g_dsync[g_dsync_n].inval_only = rt_devwr_covers(lo, hi);
+    g_dsync_n++;
 }
 
 /* Active kernel ELF pointer — set by __Runtime_set_kernel_elf() before load_kernel_group.
@@ -2726,6 +2989,7 @@ void __Runtime_platform_init(void) {
 void __Runtime_init(void) {
     AIEHLC_LOG(printf("[aie_runtime] __Runtime_init--\n"););
     __Runtime_platform_init();
+    __rt_pmccntr_enable();
 
     AIEHLC_LOG(printf("[aie_runtime] _init OK\n"));
 }
@@ -2827,6 +3091,7 @@ AieRC __Runtime_device_teardown(XAie_DevInst *dev) {
  * ----------------------------------------------------------------------- */
 
 XAie_DevInst *__Runtime_explicit_init(void) {
+    g_partition_gen++;
     __Runtime_platform_init();
     XAie_DevInst *dev = (XAie_DevInst *)calloc(1, sizeof(XAie_DevInst));
     if (!dev) {
@@ -2889,6 +3154,7 @@ XAie_DevInst *__Runtime_explicit_init(void) {
 }
 
 XAie_DevInst *__Runtime_explicit_init_partition(int startCol, int numCols) {
+    g_partition_gen++;
     __Runtime_platform_init();
     // calloc zero-initializes the struct so IsReady == 0, which
     // XAie_SetupPartitionConfig requires (it rejects IsReady != 0).
@@ -2989,6 +3255,7 @@ XAie_DevInst *__Runtime_explicit_init_partition(int startCol, int numCols) {
 void __Runtime_explicit_teardown(XAie_DevInst *dev) {
     if (dev == NULL)
         return;
+    g_partition_gen++;
     AIEHLC_LOG(printf("[aie_runtime] explicit_teardown dev=%p\n", (void *)dev););
 
     if (AIEHLC_LOG_ENABLED()) {
@@ -3118,10 +3385,30 @@ void __Runtime_teardown_all(void) {
  * Configure DMA buffer descriptor.
  * @param len  Transfer length in bytes.
  */
+/* Eligibility of a plain shim BD for the 1-D multidim encoding (see
+ * __Runtime_dma_bd_config). D0 wrap is a 10-bit field. */
+#define RT_PLAIN_BD_MAX_WORDS 1023
+static int rt_plain_shim_bd_is_1d(XAie_DevInst *dev, XAie_LocType tile, int32_t len) {
+    return tile.Row == 0U && dev && len > 0 && (len % 4) == 0 && len / 4 <= RT_PLAIN_BD_MAX_WORDS;
+}
+
 XAie_DmaDesc __Runtime_dma_bd_config(XAie_DevInst *dev, XAie_LocType tile, void *buffer, int32_t bd_id, int32_t len,
                                      int32_t next_bd, int32_t enable_packet, int32_t packet_id, int32_t acquire_lock_id,
                                      int32_t acquire_lock_val, int32_t release_lock_id, int32_t release_lock_val,
                                      int32_t out_of_order_bd_id) {
+    /* A plain SHIM BD is the 1-D multidim BD (one 32-bit word step, len/4
+     * wraps): identical DMA, but that path goes through the control-packet
+     * shim-BD window and its AOT table, while this one wrote the BD over MMIO
+     * (~8 serial non-posted writes) in the middle of the window -- and, as an
+     * unrecognized call, kept APIToControlPacketPass from batching the window at
+     * all. The pass records exactly these calls as the same 1-D "bd" site
+     * (passapitocontrolpacket.cpp, plainShimBdAsSite), so both sides must agree
+     * on the eligibility test below. */
+    if (rt_plain_shim_bd_is_1d(dev, tile, len))
+        return __Runtime_dma_bd_config_multidim(dev, tile, buffer, bd_id, len, next_bd, enable_packet, packet_id,
+                                                acquire_lock_id, acquire_lock_val, release_lock_id, release_lock_val,
+                                                out_of_order_bd_id, 1, 4, len / 4, 0, 0, 0, 0, 0, 0);
+
     unsigned long long __bd_t0 = RT_PROF_TIC();
     XAie_DmaDesc DmaInst;
     XAie_DmaDescInit(dev, &DmaInst, tile);
@@ -4601,10 +4888,74 @@ static AieRC rt_ctrl_plan_init(__Runtime_CtrlRowFabric *f, XAie_DevInst *dev, ui
     return rc != XAIE_OK ? rc : drc;
 }
 
+/* One-entry cache of the last successful plan.
+ *
+ * The emitted host code re-runs ctrl_plan_init on EVERY launch, and on a
+ * persistent partition (init-once per meshId) that re-plans and re-writes the
+ * very same stream-switch registers each time -- ~51 us of serial MMIO per
+ * launch on conv2dstem. The planner is deterministic in its arguments, so a
+ * repeat call with identical arguments on the same device, within one partition
+ * generation, restores the post-plan software state from a snapshot instead.
+ *
+ * Only for a DEDICATED control shim: there nothing else touches the fabric's
+ * switches between launches (ctrl_plan_release is a no-op and no data master is
+ * parked). On a shared shim ctrl_plan_release re-runs routing(), which rewrites
+ * those switches, so the plan must be re-emitted and the cache is not used. */
+static struct {
+    int valid;
+    unsigned gen;
+    __Runtime_CtrlRowFabric *f;
+    XAie_DevInst *dev;
+    uint8_t shim_col, ctrl_id, nrows;
+    int32_t resp_s2mm_ch;
+    int ht_ready;
+    __Runtime_CtrlRowChain rows[ACR_MAX_ROWS];
+    __Runtime_CtrlRowFabric snap;
+    acr_oplist ret_defer;
+    uint32_t ret_nwr;
+    int ret_defer_on, ret_aot;
+} g_plan_cache;
+
+static int rt_plan_cache_hit(const __Runtime_CtrlRowFabric *f, const XAie_DevInst *dev, uint8_t shim_col,
+                             int32_t resp_s2mm_ch, uint8_t ctrl_id, const __Runtime_CtrlRowChain *rows, uint8_t nrows) {
+    return g_plan_cache.valid && g_plan_cache.gen == g_partition_gen && g_plan_cache.f == f &&
+           g_plan_cache.dev == dev && g_plan_cache.shim_col == shim_col && g_plan_cache.ctrl_id == ctrl_id &&
+           g_plan_cache.resp_s2mm_ch == resp_s2mm_ch && g_plan_cache.nrows == nrows &&
+           g_plan_cache.ht_ready == g_ctrl_high_throughput_ready &&
+           memcmp(g_plan_cache.rows, rows, (size_t)nrows * sizeof(*rows)) == 0;
+}
+
 AieRC __Runtime_ctrl_plan_init(__Runtime_CtrlRowFabric *f, XAie_DevInst *dev, uint8_t shim_col, int32_t resp_s2mm_ch,
                                uint8_t ctrl_id, const __Runtime_CtrlRowChain *rows, uint8_t nrows) {
     unsigned long long __cp_t0 = RT_PROF_TIC();
+    if (rows && rt_plan_cache_hit(f, dev, shim_col, resp_s2mm_ch, ctrl_id, rows, nrows)) {
+        memcpy(f, &g_plan_cache.snap, sizeof(*f));
+        g_ctrl_ret_defer = g_plan_cache.ret_defer;
+        g_ctrl_ret_nwr = g_plan_cache.ret_nwr;
+        g_ctrl_ret_defer_on = g_plan_cache.ret_defer_on;
+        g_ctrl_ret_aot = g_plan_cache.ret_aot;
+        RT_PROF_ADD(g_ctrl_plan_cyc, g_ctrl_plan_n, __cp_t0);
+        return XAIE_OK;
+    }
+    g_plan_cache.valid = 0;
     AieRC rc = rt_ctrl_plan_init(f, dev, shim_col, resp_s2mm_ch, ctrl_id, rows, nrows);
+    if (rc == XAIE_OK && f->dedicated_shim && rows && nrows <= sizeof(g_plan_cache.rows) / sizeof(*rows)) {
+        g_plan_cache.gen = g_partition_gen;
+        g_plan_cache.f = f;
+        g_plan_cache.dev = dev;
+        g_plan_cache.shim_col = shim_col;
+        g_plan_cache.ctrl_id = ctrl_id;
+        g_plan_cache.resp_s2mm_ch = resp_s2mm_ch;
+        g_plan_cache.nrows = nrows;
+        g_plan_cache.ht_ready = g_ctrl_high_throughput_ready;
+        memcpy(g_plan_cache.rows, rows, (size_t)nrows * sizeof(*rows));
+        memcpy(&g_plan_cache.snap, f, sizeof(*f));
+        g_plan_cache.ret_defer = g_ctrl_ret_defer;
+        g_plan_cache.ret_nwr = g_ctrl_ret_nwr;
+        g_plan_cache.ret_defer_on = g_ctrl_ret_defer_on;
+        g_plan_cache.ret_aot = g_ctrl_ret_aot;
+        g_plan_cache.valid = 1;
+    }
     RT_PROF_ADD(g_ctrl_plan_cyc, g_ctrl_plan_n, __cp_t0);
     return rc;
 }
@@ -5224,6 +5575,7 @@ static uint8_t rt_ctrl_row_return_poll(const __Runtime_CtrlRowFabric *f, int32_t
     XAie_LocType shim = XAie_TileLoc(f->shim_col, 0U);
     uint8_t pending = (uint8_t)npkt;
     for (uint32_t spin = 0U; spin < 200000U; spin++) {
+        rt_dsync_step_inputs();
         AieRC rc = XAie_DmaGetPendingBdCount(f->dev, shim, (uint8_t)s2mm_ch, DMA_S2MM, &pending);
         if (rc != XAIE_OK) {
             printf("[aie_runtime] ctrl_row_return poll ERROR ch=%d rc=%d expected=%d\n", s2mm_ch, (int)rc, npkt);
@@ -5417,6 +5769,12 @@ AieRC __Runtime_ctrl_row_write_ack(__Runtime_CtrlRowFabric *f, uint8_t row, uint
 }
 
 #define RT_SB_PKT_WORDS 4096U
+#if AIE_GEN == 5 && !defined(RT_SB_NO_KEEP_ARMED)
+#define RT_SB_PAD_OFF 0x0007FF30U /* XAIE2PSGBL_PL_MODULE_SPARE_REG: harmless scratch write */
+#define RT_SB_KEEP_ARMED 1
+#else
+#define RT_SB_KEEP_ARMED 0
+#endif
 #define RT_SB_SEG_WORDS ((RT_SB_PKT_WORDS / RT_RES_SHIMROW_MAX_COLS) & ~3U)
 #define RT_SB_NONE RT_CPE_NONE
 
@@ -5428,6 +5786,7 @@ typedef struct {
     __Runtime_CtrlRowFabric *f, *routed;
     uint8_t lo, hi;
     uint32_t ack_nseg;
+    uint32_t last_len[RT_RES_SHIMROW_MAX_COLS]; /* words per column segment of the last kick (diagnostics) */
     rt_sb_seg seg[RT_RES_SHIMROW_MAX_COLS];
     XAie_Backend be;
     const XAie_Backend *real;
@@ -5593,6 +5952,22 @@ static AieRC rt_sb_ack_wait(void) {
         __Runtime_sync_for_cpu(dev, g_sb.resp, g_sb.ack_nseg * sizeof(uint32_t));
         printf("[aie_runtime] shim_bd_ctrl TIMEOUT segs=%u s2mm_pending=%u mm2s_pending=%u resp0=0x%x\n",
                g_sb.ack_nseg, (unsigned)pending, (unsigned)mm2s, g_sb.resp[0]);
+        printf("[aie_runtime] shim_bd_ctrl TIMEOUT detail: resp");
+        for (uint32_t k = 0U; k < g_sb.ack_nseg; k++)
+            printf(" %08x", (unsigned)g_sb.resp[k]);
+        printf(" | seg len");
+        for (uint32_t k = 0U; k < RT_RES_SHIMROW_MAX_COLS; k++)
+            printf(" %u", (unsigned)g_sb.last_len[k]);
+        for (uint8_t c = g_sb.lo; c <= g_sb.hi; c++) {
+            u32 st[4] = {0};
+            for (uint8_t ch = 0U; ch < 2U; ch++) {
+                XAie_DmaGetChannelStatus(dev, XAie_TileLoc(c, 0U), ch, DMA_MM2S, &st[ch]);
+                XAie_DmaGetChannelStatus(dev, XAie_TileLoc(c, 0U), ch, DMA_S2MM, &st[2U + ch]);
+            }
+            printf(" | col%u mm2s %08x %08x s2mm %08x %08x", (unsigned)c, (unsigned)st[0], (unsigned)st[1],
+                   (unsigned)st[2], (unsigned)st[3]);
+        }
+        printf("\n");
         rc = XAIE_ERR;
     }
     RT_PROF_PHASE(PH_BDCFG, t0);
@@ -5629,12 +6004,25 @@ static AieRC rt_sb_write_compact(const uint32_t *len, uint32_t nseg) {
 }
 
 static AieRC rt_sb_kick(void) {
+    rt_dsync_drain_inputs(); /* CPU-written launch args clean before any DMA starts */
     (void)rt_sb_ack_wait();
     unsigned long long t0 = RT_PROF_TIC();
     XAie_DevInst *dev = g_sb.f->dev;
     XAie_LocType spine = XAie_TileLoc(g_sb.f->shim_col, 0U);
     uint32_t ncols = (uint32_t)(g_sb.hi - g_sb.lo) + 1U;
     uint32_t len[RT_RES_SHIMROW_MAX_COLS] = {0}, nseg = 0U, words = 0U;
+#ifdef RT_SB_PAD_OFF
+    /* An empty column segment would break the armed BD chain (one BD per
+     * column, lengths updated in place) and force a full MMIO re-write of
+     * every BD. Pad it with one write to the shim's spare register. */
+    if (g_sb.armed) {
+        const uint32_t zero = 0U;
+        for (uint32_t k = 0U; k < ncols; k++)
+            if (g_sb.seg[k].pw == 0U)
+                (void)rt_cpe_seg_write(&g_sb.seg[k], rt_sb_seg_base(k), RT_SB_SEG_WORDS, acr_shim_row_id((uint8_t)k),
+                                       RT_SB_PAD_OFF, &zero, 1U);
+    }
+#endif
     for (uint32_t k = 0U; k < ncols; k++) {
         len[k] = rt_sb_seg_finish(k);
         nseg += len[k] != 0U;
@@ -5643,6 +6031,7 @@ static AieRC rt_sb_kick(void) {
     rt_sb_reset_segs();
     if (nseg == 0U)
         return XAIE_OK;
+    memcpy(g_sb.last_len, len, sizeof(g_sb.last_len));
     unsigned long long t_sync = RT_PROF_TIC();
     for (uint32_t k = 0U; k < ncols; k++) {
         if (!len[k])
@@ -5655,13 +6044,16 @@ static AieRC rt_sb_kick(void) {
     }
     unsigned long long t_kick = RT_PROF_TIC();
     AieRC rc = XAIE_OK;
+    int keep_armed = 0;
     if (g_sb.armed && nseg == ncols) {
         for (uint32_t k = 0U; rc == XAIE_OK && k < ncols; k++)
             rc = XAie_DmaUpdateBdLen(dev, spine, len[k] * 4U, (u16)(RT_RES_SHIMROW_BD_LO + k));
+        /* addresses and chain untouched: the next commit only updates lengths again */
+        keep_armed = RT_SB_KEEP_ARMED && rc == XAIE_OK;
     } else {
         rc = rt_sb_write_compact(len, nseg);
     }
-    g_sb.armed = 0;
+    g_sb.armed = keep_armed;
     if (rc == XAIE_OK)
         rc = XAie_DmaChannelPushBdToQueue(dev, spine, RT_RES_SHIMROW_CH, DMA_S2MM, RT_RES_SHIMROW_ACK_BD);
     if (rc == XAIE_OK)
@@ -5999,6 +6391,11 @@ void __Runtime_ctrl_shim_bd_begin(__Runtime_CtrlRowFabric *f) { rt_sb_begin(f); 
 
 void __Runtime_ctrl_shim_bd_commit(void) { rt_sb_commit(); }
 
+/* Block until the last committed shim-BD batch has been applied (its
+ * write-with-return acks are back) -- for callers that must order a later
+ * action after the BDs are live. */
+int __Runtime_ctrl_shim_bd_sync(void) { return rt_sb_ack_wait() == XAIE_OK ? 0 : -1; }
+
 /**
  * Configure DMA buffer descriptor with multi-dimensional addressing.
  * Uses XAie_DmaSetMultiDimAddr with stride/wrap descriptors to enable
@@ -6281,6 +6678,7 @@ void __Runtime_dma_channel_enable_ooo(XAie_DevInst *dev, XAie_LocType tile, int3
  *         pass it to __Runtime_wait_io/__Runtime_wait to block until completion.
  */
 struct_ioevent __Runtime_startio(XAie_DevInst *dev, struct_io io, int32_t bd_id, int32_t repeat) {
+    rt_dsync_drain_inputs(); /* CPU-written launch args clean before any DMA starts */
     unsigned long long __sio_t0 = RT_PROF_TIC();
     struct_ioevent evt;
     evt.io = io;
@@ -6398,6 +6796,7 @@ static int rt_aot_window_fast(XAie_DevInst *dev, const rt_aot_window *w, void *c
 }
 
 void __Runtime_ctrl_aot_window(XAie_DevInst *dev, __Runtime_CtrlRowFabric *f, int nbuf, ...) {
+    rt_dsync_drain_inputs(); /* CPU-written launch args clean before any DMA starts */
     const rt_aot_window *w = g_aot ? g_aot->window : NULL;
     if (!w || nbuf < 0 || (uint32_t)nbuf != w->nbufs || nbuf > (int)RT_SB_AOT_MAX_CALLS) {
         printf("[aie_runtime] ctrl_pkt AOT window: no matching table (nbuf=%d); window skipped\n", nbuf);
@@ -6452,8 +6851,17 @@ struct_ioevent _Runtime_startio_ooo(XAie_DevInst *dev, struct_io io, int32_t bd_
  * Load kernel ELF into tiles
  * Reference: aieml_perf.cc lines 123-125
  */
+/* Bumped by every kernel-ELF load that is NOT the AOT control-packet path
+ * (MMIO loaders, JIT control-packet load). The AOT path's warm reload
+ * (rt_elf_warm_*) is valid only while nothing else has written program memory
+ * since its own last load, i.e. while this has not moved. Defined for every
+ * build: __Runtime_load_kernel_elf and the warm-reload check use it in the
+ * simulator build (__AIESIM__) too, only the skip-bss loader below is HW-only. */
+static unsigned g_elf_load_seq;
+
 #if !defined(__AIESIM__)
 static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc, const unsigned char *elfmem) {
+    g_elf_load_seq++;
     const Elf32_Ehdr *ehdr = (const Elf32_Ehdr *)elfmem;
     u32 skipped = 0, loaded = 0;
     for (u32 ph = 0; ph < ehdr->e_phnum; ph++) {
@@ -6490,6 +6898,7 @@ static int __Runtime_skip_bss_enabled(void) {
 #endif
 
 static void __Runtime_load_kernel_elf(XAie_DevInst *dev, XAie_LocType loc, unsigned char *elfmem) {
+    g_elf_load_seq++;
 #if !defined(__AIESIM__)
     if (__Runtime_skip_bss_enabled()) {
         __Runtime_load_elf_mem_skip_bss(dev, loc, elfmem);
@@ -7096,6 +7505,74 @@ static AieRC rt_ctrl_load_elf_packed(__Runtime_CtrlRowFabric *fab, const uint8_t
     return rc;
 }
 
+/* Warm kernel-ELF reload.
+ *
+ * Every launch re-sends the whole AOT body: core + core-DMA resets, the
+ * data-memory segments, ~13.7 KB of program memory, and a final
+ * write-with-return the 16 tiles acknowledge. On a persistent partition the
+ * program memory is the one thing a relaunch of the SAME ELF cannot have
+ * changed, so a warm load sends everything except the program-memory writes --
+ * the resets (the cores restart from reset), the data segments (.data is
+ * re-initialized), and the final write-with-return (it rewrites one program
+ * word with its own value, so every tile still acknowledges).
+ *
+ * Warm only when the previous successful load was this blob, through this
+ * fabric, on this device, in this partition generation, and no other ELF load
+ * (g_elf_load_seq) has happened since. Anything else: full body. */
+static struct {
+    const unsigned char *blob;
+    const __Runtime_CtrlRowFabric *fab;
+    XAie_DevInst *dev;
+    unsigned gen, seq;
+    int ok;
+    uint32_t *body;
+    uint32_t words;
+} s_elf_warm;
+
+static int s_elf_warm_enabled = 1;
+
+/* Warm reload on/off. Off: every ctrl-plane load resends the whole body,
+ * program memory included (resnetengine eager mode: a real per-layer reload). */
+void __Runtime_ctrl_elf_warm_enable(int on) { s_elf_warm_enabled = on != 0; }
+
+static int rt_elf_warm_usable(const __Runtime_CtrlRowFabric *fab, const unsigned char *blob) {
+    return s_elf_warm_enabled && s_elf_warm.ok && s_elf_warm.body && s_elf_warm.blob == blob && s_elf_warm.fab == fab &&
+           s_elf_warm.dev == fab->dev && s_elf_warm.gen == g_partition_gen && s_elf_warm.seq == g_elf_load_seq;
+}
+
+/* Build the warm body from the full one. Each access is [stream hdr][ctrl][1-4
+ * data words], words-1 in ctrl[21:20]. Returns 0 if the body does not walk
+ * cleanly (then no warm reload is ever attempted for it). */
+static int rt_elf_warm_build(const rt_cpe_dev *cpe, const uint32_t *body, uint32_t words) {
+    free(s_elf_warm.body);
+    s_elf_warm.body = (uint32_t *)malloc((size_t)words * sizeof(uint32_t));
+    s_elf_warm.words = 0U;
+    if (!s_elf_warm.body)
+        return 0;
+    const uint32_t pm_lo = cpe->prog_mem_host_off, pm_hi = cpe->prog_mem_host_off + cpe->prog_mem_size;
+    uint32_t i = 0U, w = 0U;
+    while (i + 2U < words) {
+        const uint32_t ctrl = body[i + 1U];
+        const uint32_t len = 2U + ((ctrl >> 20U) & 0x3U) + 1U;
+        if (i + len > words)
+            break;
+        const uint32_t addr = ctrl & 0xFFFFFU;
+        const int last = i + len == words;
+        if (last || addr < pm_lo || addr >= pm_hi) {
+            memcpy(s_elf_warm.body + w, body + i, (size_t)len * sizeof(uint32_t));
+            w += len;
+        }
+        i += len;
+    }
+    if (i != words) {
+        free(s_elf_warm.body);
+        s_elf_warm.body = NULL;
+        return 0;
+    }
+    s_elf_warm.words = w;
+    return 1;
+}
+
 static AieRC rt_ctrl_load_elf_aot(__Runtime_CtrlRowFabric *fab, const uint8_t *elf, XAie_LocType loc, int32_t bd_id,
                                   int32_t mm2s_ch) {
     (void)elf;
@@ -7126,6 +7603,13 @@ static AieRC rt_ctrl_load_elf_aot(__Runtime_CtrlRowFabric *fab, const uint8_t *e
     const uint32_t *body = (const uint32_t *)(blob + sizeof(rt_cpe_blob_hdr));
     if (sizeof(rt_cpe_blob_hdr) + (size_t)body_words * sizeof(uint32_t) > s_active_kernel_pkt_bytes)
         return XAIE_INVALID_ARGS;
+    const uint32_t *full_body = body;
+    const uint32_t full_words = body_words;
+    if (rt_elf_warm_usable(fab, blob)) {
+        body = s_elf_warm.body;
+        body_words = s_elf_warm.words;
+    }
+    s_elf_warm.ok = 0; /* re-armed below only if this load succeeds */
     uint32_t ret_cap = fab->ret_bcast_pending ? fab->ret_bcast_n : 0U;
     uint32_t data_cap = ret_cap * RT_CTRL_ELF_PKT_STRIDE + body_words + 3U;
     uint32_t token_off = (data_cap + 3U) & ~3U;
@@ -7158,7 +7642,49 @@ static AieRC rt_ctrl_load_elf_aot(__Runtime_CtrlRowFabric *fab, const uint8_t *e
         rc = rt_ctrl_elf_dma_packed(fab, pkt, payload_words, token, nresp, bd_id, mm2s_ch);
     }
     __Runtime_free_buffer(fab->dev, pkt);
+    if (rc == XAIE_OK && (s_elf_warm.blob == blob || rt_elf_warm_build(&cpe, full_body, full_words))) {
+        s_elf_warm.blob = blob;
+        s_elf_warm.fab = fab;
+        s_elf_warm.dev = fab->dev;
+        s_elf_warm.gen = g_partition_gen;
+        s_elf_warm.seq = g_elf_load_seq;
+        s_elf_warm.ok = 1;
+    }
     return rc;
+}
+
+/* Encode @elf ONCE into the AOT control-packet blob rt_ctrl_load_elf_aot
+ * replays (header + resets + segments + final write-with-return), so a caller
+ * that reloads the same kernel many times (resnetengine eager mode) pays the
+ * encode once instead of per load. Pair with __Runtime_ctrl_kernel_pkt_set.
+ * Returns NULL if the ELF does not encode for this fabric. */
+void *__Runtime_ctrl_kernel_pkt_build(__Runtime_CtrlRowFabric *fab, const unsigned char *elf, unsigned int *bytes) {
+    if (!fab || !fab->dev || !elf || fab->nrows == 0U || !bytes)
+        return NULL;
+    rt_cpe_dev cpe;
+    rt_ctrl_cpe_dev(fab->dev, &cpe);
+    const int col = fab->rows[0].col_lo, row = fab->rows[0].row;
+    const uint32_t cap =
+        (rt_cpe_count_pkts(&cpe, elf, col, row) + rt_cpe_reset_accesses(&cpe) + 1U) * (2U + RT_CPE_CHUNK_WORDS);
+    rt_cpe_blob_hdr *hdr = (rt_cpe_blob_hdr *)malloc(sizeof(rt_cpe_blob_hdr) + (size_t)cap * sizeof(uint32_t));
+    if (!hdr)
+        return NULL;
+    uint32_t words = 0U, nacc = 0U;
+    if (rt_cpe_encode_body(&cpe, elf, col, row, (uint32_t)ACR_ID_BCAST, 1, (uint32_t *)(hdr + 1), cap, &words, &nacc) !=
+        0) {
+        free(hdr);
+        return NULL;
+    }
+    hdr->magic = RT_CPE_MAGIC;
+    hdr->version = RT_CPE_VERSION;
+    hdr->aie_gen = (uint32_t)AIE_GEN;
+    hdr->fingerprint = rt_cpe_fingerprint(&cpe, (uint32_t)ACR_ID_BCAST);
+    hdr->stream_id = (uint32_t)ACR_ID_BCAST;
+    hdr->nresp = rt_ctrl_fabric_tiles(fab);
+    hdr->body_words = words;
+    hdr->enc_tile = ((uint32_t)col << 16) | (uint32_t)row;
+    *bytes = (unsigned int)(sizeof(rt_cpe_blob_hdr) + (size_t)words * sizeof(uint32_t));
+    return hdr;
 }
 
 static AieRC rt_ctrl_load_elf(__Runtime_CtrlRowFabric *fab, const uint8_t *elf, int32_t bd_id, int32_t mm2s_ch) {
@@ -7171,6 +7697,7 @@ static AieRC rt_ctrl_load_elf(__Runtime_CtrlRowFabric *fab, const uint8_t *elf, 
             return arc;
         printf("[aie_runtime] ctrl_pkt AOT unavailable; JIT fallback\n");
     }
+    g_elf_load_seq++;
     uint32_t npkt_cap = rt_ctrl_elf_count_pkts(fab->dev, elf, loc);
     if (npkt_cap == 0U)
         return XAIE_OK;
@@ -7246,6 +7773,12 @@ static struct_kernel_group rt_ctrl_load_kernel_group_nt(XAie_DevInst *dev, __Run
     }
     for (int i = 0; i < n; i++)
         s_kernel_tiles[i] = tiles[i];
+    /* The load's write-with-return responses come back on the spine's S2MM
+     * channel the shim-BD batch (rt_sb) collects its acks on. A batch whose
+     * acks are still outstanding would have this load's responses land in its
+     * ack BD, and every later ack wait would be off by one (shim_bd_ctrl
+     * TIMEOUT cascade). Drain it first. */
+    (void)rt_sb_ack_wait();
     unsigned long long __ke0 = RT_PROF_TIC();
     AieRC rc = rt_ctrl_load_elf(fab, s_active_kernel_elf, bd_id, mm2s_ch);
     RT_PROF_ADD(g_kl_elf_cyc, g_kl_elf_n, __ke0);
@@ -7521,6 +8054,7 @@ void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
     uint32_t iter = 0;
     while (numPendingBDs > 0) {
         RT_PROF_INC(g_wait_io_iters);
+        rt_dsync_step();
         AieRC rc = XAie_DmaGetPendingBdCount(dev, tile, channel, dir, &numPendingBDs);
         if (rc != XAIE_OK) {
             printf("[aie_runtime] wait_io ERROR: XAie_DmaGetPendingBdCount "

@@ -479,6 +479,10 @@ class CoreMemAllocator {
     // Get the address for a symbol name (returns 0 if not found)
     uint32_t getAddress(const std::string &name) const;
 
+    // Get the allocated size in bytes for a symbol name (returns 0 if not found).
+    // This is the DMA window extent, which can exceed the C declaration.
+    uint32_t getSize(const std::string &name) const;
+
     // Reset allocator
     void reset();
 

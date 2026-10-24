@@ -135,7 +135,8 @@ if [ ${#MULTI_KERNEL_FILES[@]} -gt 0 ]; then
 
         # compile_one_kernel builds kernel.cc — for multi-kernel, temporarily symlink
         ln -sf "${kfname}" "${WORKLOCAL_DIR}/kernel.cc"
-        if [ -n "$KPRX" ]; then
+        # (no per-kernel PRX: aieml.prx is used as is -- linking it onto itself fails)
+        if [ -n "$KPRX" ] && [ "$KPRX" != "${WORKLOCAL_DIR}/aieml.prx" ]; then
             ln -sf "$(basename "$KPRX")" "${WORKLOCAL_DIR}/aieml.prx"
         fi
 

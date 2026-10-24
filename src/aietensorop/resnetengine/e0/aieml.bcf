@@ -1,0 +1,13 @@
+_entry_point _main_init
+_symbol _main _after  _main_init
+_symbol _main_init 0
+_symbol e0_in_ping 0x78000
+_symbol e0_in_pong 0x79000
+_symbol e0_w 0x7a000
+_symbol e0_out_ping 0x7b000
+_symbol e0_out_pong 0x7c000
+_stack DM_stack 0x70000 0x8000
+_reserved DMb 0x0 0x40000
+_reserved DMb 0x40000 0x10000
+_reserved DMb 0x50000 0x20000
+_reserved DMb 0x80000 0x80000

@@ -2382,6 +2382,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     filter:brightness(1.12);
   }
   #stopbtn { background:#2a1516; color:#f8b0b0; border-color:#5c2828; }
+  .force-reset { display:inline-flex; align-items:center; gap:3px; font-size:11px; color:#c9a0a0;
+                 cursor:pointer; user-select:none; }
+  .force-reset input { margin:0; cursor:pointer; }
   #stopbtn:hover { background:#3a1e1e; border-color:#7a3535; }
 
   /* ── unified input ───────────────────────────────────────────── */
@@ -3443,6 +3446,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <button id="attachbtn" disabled
           title="Attach to a run you started outside this UI (CLI / already-programmed board)">Attach existing run</button>
         <button id="stopbtn" disabled title="Terminate the run owned by this UI">Stop run</button>
+        <label id="forceresetlbl" class="force-reset"
+          title="Unchecked (default): Stop only ends the run here; the board and its netboot supervisor are left as they are, so the next Run is fast. Checked: the next Run starts from a clean board (power cycle, BOOT.BIN, supervisor reload). Use it when the app hangs."><input type="checkbox" id="forcereset"> force reset</label>
       </div>
       <span id="connstatus" data-state="idle">Not connected</span>
     </div>
@@ -10697,8 +10702,13 @@ document.getElementById('stopbtn').onclick = () => {
       .catch(() => { setStatus('daemon offline: cannot stop simulator.'); });
     return;
   }
-  api('/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})
+  const frBox = document.getElementById('forcereset');
+  const forceReset = !!(frBox && frBox.checked);
+  api('/stop', {method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({force_reset: forceReset})})
     .then(r => {
+      // One-shot: the reset is armed for the next run, so the box clears.
+      if (frBox && forceReset) frBox.checked = false;
       // Re-enable debug features immediately — don't wait for the next pollLog
       // tick, which may never fire if the run was in a bad state.
       if (LIVE.conTimer){ clearInterval(LIVE.conTimer); LIVE.conTimer = null; }
@@ -10716,14 +10726,16 @@ document.getElementById('stopbtn').onclick = () => {
       triggerTimeline(true);   // gated by tsSeen; forced fresh render on Stop.
       if (r.run) applyRunState(r.run);
       updateRunButtons();
-      if (r.error){ setStatus('stop: ' + r.error); }
+      if (r.note){ setStatus('stop: ' + r.note); }
+      else if (r.error){ setStatus('stop: ' + r.error); }
       else if (r.abandoned){
         // #livestatus is hidden in Device Map view, so use the banner too.
         const msg = 'run ' + r.run_id + ' (pid ' + r.pid + ') survived SIGKILL; '
                   + 'the daemon released it but it may still hold the board';
         setStatus(msg); setRunStatus(msg);
       } else {
-        setStatus('run: stopped (pid ' + r.pid + ')');
+        setStatus('run: stopped (pid ' + r.pid + ')'
+                  + (r.force_reset_next ? '; next Run resets the board' : '; board left as is (soft stop)'));
       }
     })
     .catch(() => { setStatus('daemon offline: cannot stop a run.'); setDebugEnabled(true); });

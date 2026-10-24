@@ -187,6 +187,47 @@ static inline int aie_kc_encode_bd(AieKcReg *out, uint8_t bd_id, uint64_t dma_ad
     return (int)AIE_KC_DMA_BD_NUM_WORDS;
 }
 
+/* Multi-dimensional / iteration addressing for aie_kc_encode_bd_nd. All steps
+ * and wraps are in 32-bit WORDS, as the hardware counts them. A zero wrap
+ * leaves that dimension off (d0_wrap == 0 is the 1D contiguous case);
+ * iter_wrap <= 1 disables the iteration dimension. Iteration advances the
+ * base address by iter_step words each time the BD is used (one task
+ * repetition), wrapping after iter_wrap uses -- one BD then walks a ring of
+ * slots or a set of rows with no re-programming. */
+typedef struct {
+    uint32_t d0_step, d0_wrap, d1_step, d1_wrap, d2_step, iter_step, iter_wrap;
+} AieKcDims;
+
+/* aie_kc_encode_bd plus BD words 2..4 (AIE2PS MEMORY_MODULE_DMA_BD0_2..4):
+ *   w2: D1_STEPSIZE[25:13] | D0_STEPSIZE[12:0]        (step - 1)
+ *   w3: D1_WRAP[28:21] | D0_WRAP[20:13] | D2_STEPSIZE[12:0]
+ *   w4: ITERATION_CURRENT[24:19]=0 | ITERATION_WRAP[18:13] (wrap - 1)
+ *       | ITERATION_STEPSIZE[12:0] (step - 1)
+ * Mirrors _XAieMl_TileDmaWriteBdPrep's multi-dim branch (padding not encoded).
+ * Unlike aie_kc_encode_bd, acq_id < 0 with rel_id >= 0 encodes a release-only BD. */
+static inline int aie_kc_encode_bd_nd(AieKcReg *out, uint8_t bd_id, uint64_t dma_addr, uint32_t len, int next_bd,
+                                      int acq_id, int acq_val, int rel_id, int rel_val, int en_packet, int pkt_id,
+                                      int pkt_type, int ooo_bd_id, const AieKcDims *d) {
+    int n = aie_kc_encode_bd(out, bd_id, dma_addr, len, next_bd, acq_id, acq_val, rel_id, rel_val, en_packet, pkt_id,
+                             pkt_type, ooo_bd_id);
+    if (d->d0_wrap) {
+        out[2].val = aie_kc_field(d->d0_step - 1u, 0u, 0x00001FFFu) |
+                     aie_kc_field((d->d1_step ? d->d1_step : 1u) - 1u, 13u, 0x03FFE000u);
+        out[3].val = aie_kc_field((d->d2_step ? d->d2_step : 1u) - 1u, 0u, 0x00001FFFu) |
+                     aie_kc_field(d->d0_wrap, 13u, 0x001FE000u) | aie_kc_field(d->d1_wrap, 21u, 0x1FE00000u);
+    }
+    if (acq_id < 0 && rel_id >= 0) {
+        /* release-only (LckAcqEn = 0): a producer BD writing slots the consumer
+         * never hands back within the task (resnetengine resident input) */
+        out[5].val |=
+            aie_kc_field((uint32_t)rel_val, 18u, 0x01FC0000u) | aie_kc_field((uint32_t)rel_id, 13u, 0x0001E000u);
+    }
+    if (d->iter_wrap > 1u)
+        out[4].val =
+            aie_kc_field(d->iter_step - 1u, 0u, 0x00001FFFu) | aie_kc_field(d->iter_wrap - 1u, 13u, 0x0007E000u);
+    return n;
+}
+
 /* Encode a lock initial-value write (LOCK0_VALUE + id*0x10). Mirrors
  * _XAieMl_LockSetValue: 6-bit signed lock value field. Returns 1. */
 static inline int aie_kc_encode_lock(AieKcReg *out, uint8_t lock_id, int value) {

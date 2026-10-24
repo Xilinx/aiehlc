@@ -4,6 +4,7 @@
  ******************************************************************************/
 
 #include "passdfscheduletokernelapi.h"
+#include "hw/ResourceManager.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -340,6 +341,7 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                 Type t = bufferOp.getBufferTypeAttr().getValue();
                 std::string vecType = "v4int32";
                 int64_t bufSize = bufferSize; // fallback to global
+                int64_t elemBytes = 16;       // bytes per v4int32
                 if (auto memref = dyn_cast<MemRefType>(t)) {
                     // Use the memref dimension as the per-buffer size
                     if (!memref.getShape().empty())
@@ -347,6 +349,7 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                     Type elem = memref.getElementType();
                     if (auto vec = dyn_cast<VectorType>(elem)) {
                         int w = vec.getShape().empty() ? 4 : vec.getShape()[0];
+                        elemBytes = (int64_t)w * std::max<int64_t>(1, vec.getElementTypeBitWidth() / 8);
                         if (vec.getElementType().isInteger(32))
                             vecType = "v" + std::to_string(w) + "int32";
                         else if (vec.getElementType().isInteger(16))
@@ -356,6 +359,18 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                         else if (vec.getElementType().isF32())
                             vecType = "v" + std::to_string(w) + "float";
                     }
+                }
+                // Declare at least the ALLOCATED extent. The memref can be smaller
+                // than the DMA window (an output window was declared v4int8[196] =
+                // 784 B for a 3136 B slot); the linker then saw the tail as free and
+                // could place .data/.bss where the DMA writes. Skill: bcfglobalplacement.
+                try {
+                    const int64_t slotBytes =
+                        ResourceMgr::instance()->coreMemAllocator().getSize(bufferOp.getSymName().str());
+                    if (slotBytes > bufSize * elemBytes)
+                        bufSize = (slotBytes + elemBytes - 1) / elemBytes;
+                } catch (const std::runtime_error &) {
+                    // No ResourceMgr (standalone pass run): keep the memref size.
                 }
                 std::string line = vecType + " " + bufferOp.getSymName().str() + "[" + std::to_string(bufSize) + "];";
                 rewriter.create<emitc::VerbatimOp>(loc, line);

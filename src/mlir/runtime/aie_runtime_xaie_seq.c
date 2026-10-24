@@ -38,6 +38,18 @@ AieRC rt_seq_bd_desc(XAie_DevInst *dev, XAie_LocType tile, uint64_t dma_addr, co
         XAie_DmaSetPkt(desc, XAie_PacketInit(a->packet_id, 0));
     if (a->out_of_order_bd_id >= 0)
         XAie_DmaSetOutofOrderBdId(desc, (uint8_t)a->out_of_order_bd_id);
+    /* Shim BDs move DDR data over the NoC: request long AXI bursts. Left at the
+     * zero-initialized default the BD issues 4-beat (64-byte) transactions; on
+     * conv2dstem's output gather (4 cores per shim S2MM channel) that made the
+     * shim drain the bottleneck the cores stalled on. Only the shim DMA has AXI
+     * fields -- core-tile BDs keep none (XAie_DmaSetAxi would reject them). The
+     * offline AOT tool links this same function, so precomputed shim-BD packets
+     * carry the same words. */
+    {
+        uint8_t tt = dev->DevOps->GetTTypefromLoc(dev, tile);
+        if (tt == XAIEGBL_TILE_TYPE_SHIMNOC)
+            (void)XAie_DmaSetAxi(desc, 0U, RT_SEQ_SHIM_AXI_BURST, RT_SEQ_SHIM_AXI_QOS, RT_SEQ_SHIM_AXI_CACHE, 0U);
+    }
     XAie_DmaEnableBd(desc);
     return XAIE_OK;
 }

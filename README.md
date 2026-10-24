@@ -2,6 +2,26 @@
 
 App Writing and Deployment Tutorial: [tutorial.md](tutorial/tutorial.md)
 
+## Quick start: a model from Python (`aiegraph`)
+
+```bash
+pip install -e .          # from this checkout, in a venv -- installs aiegraph + the `aiegraph`/`aiehlc` commands
+aiegraph doctor           # what works here; Vitis is the one thing pip cannot install
+```
+
+```python
+import aiegraph as ag
+module = ag.convert(ag.load("resnet18"), target="a78")             # int8, one C file per layer
+module.register_kernel(name="conv2dstem", op="conv2d",
+                       source="src/aietensorop/conv2dstem/conv2dstem_uk.cc")
+print(module.check_offload(region="conv1", kernel="conv2dstem").summary())
+module.assign(region="conv1", backend="aie:conv2dstem")
+print(module.partition(fallback="cpu").report())
+module.build(target="a78", output="resnet18_a78")                  # main.elf
+```
+
+Guide: [doc/tutorial_aiegraph.md](doc/tutorial_aiegraph.md). Your own AIE kernel: [doc/tutorial_userkernel.md](doc/tutorial_userkernel.md).
+
 ## What is the aiehlc?
 
 AIEHLC (AIE High‑Level Compiler) is an LLVM & MLIR-based, lightweight, and efficient high-level

@@ -179,6 +179,13 @@ struct WindowOps {
     bool ok = true;
 };
 
+// Mirror of the runtime's rt_plain_shim_bd_is_1d(): a plain __Runtime_dma_bd_config
+// on a shim tile with a word-aligned length of at most 1023 words is sent as the
+// 1-D multidim BD, so it can be an AOT "bd" site. Keep the two tests identical.
+bool plainShimBdAsSite(int row, const Arg &len) {
+    return row == 0 && len.kind == Arg::Int && len.i > 0 && len.i % 4 == 0 && len.i / 4 <= 1023;
+}
+
 bool isWindowHelper(StringRef callee) {
     return callee == "XAie_TileLoc" || callee == "__runtime_buffer_arg" || callee == "__runtime_buffer_offset" ||
            callee.starts_with("__Runtime_core_trace_");
@@ -325,6 +332,29 @@ void APIToControlPacketPass::runEmit(ModuleOp mod) {
                 win.ok &= a[i].kind == Arg::Int;
             }
             os << "\n";
+            ncalls++;
+            win.bds.push_back(op);
+            win.bufs.push_back(a[2].v);
+            win.ok &= inRange(col, row) && a[0].kind == Arg::Val && a[2].kind == Arg::Val;
+            if (a[0].kind == Arg::Val)
+                win.dev = a[0].v;
+        } else if (callee == "__Runtime_dma_bd_config" && a.size() == 13 && a[1].kind == Arg::Val &&
+                   tileOf(a[1].v, col, row) && plainShimBdAsSite(row, a[4])) {
+            // A plain shim BD: the runtime sends it as the 1-D multidim BD
+            // (aie_runtime.c, rt_plain_shim_bd_is_1d), so record it as that "bd"
+            // site -- 10 plain args, then num_dims 1, stride 4, wrap len/4, zeros.
+            // Without this the call fell into the else below, which unbatched the
+            // whole window.
+            int argIdx = -1;
+            int64_t off = 0;
+            if (a[2].kind == Arg::Val)
+                bufferOf(a[2].v, argIdx, off);
+            os << "call bd " << col << " " << row << " " << argIdx << " " << off;
+            for (unsigned i = 3; i < 13; i++) {
+                os << " " << (a[i].kind == Arg::Int ? a[i].i : -999999);
+                win.ok &= a[i].kind == Arg::Int;
+            }
+            os << " 1 4 " << a[4].i / 4 << " 0 0 0 0 0 0\n";
             ncalls++;
             win.bds.push_back(op);
             win.bufs.push_back(a[2].v);

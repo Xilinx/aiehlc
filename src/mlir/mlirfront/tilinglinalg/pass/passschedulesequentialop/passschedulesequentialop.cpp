@@ -37,18 +37,36 @@ enum class OpCategory {
     /// DMA config ops: config.dma_bd, config.create_io (outside scf.for)
     DmaConfig = 2,
 
-    /// Start IO ops: schedule.start_io (outside scf.for)
-    StartIo = 3,
+    /// Start IO ops that RECEIVE (S2MM create_io): the sinks. Armed before any
+    /// source starts -- see startIoIsSink().
+    StartIoSink = 3,
+
+    /// Start IO ops that SEND (MM2S create_io, or direction unknown).
+    StartIo = 4,
 
     /// SCF for loops (contain their own internal ordering)
-    ScfFor = 4,
+    ScfFor = 5,
 
     /// Wait ops: schedule.wait (outside scf.for)
-    Wait = 5,
+    Wait = 6,
 
     /// Cleanup ops: free_device_mem, routing.yield
-    Cleanup = 6,
+    Cleanup = 7,
 };
+
+/// Arm sinks before sources. A start_io whose create_io is S2MM receives data;
+/// starting it after the MM2S that (transitively) feeds it lets the array
+/// produce into a channel that is not armed yet. With out-of-order shim S2MM
+/// that is not a stall but a corruption: conv2dstem's 4x4 mesh, once its kernel
+/// got fast enough to emit its first output tile before the host had armed the
+/// output channels, landed whole tiles at the previous launch's addresses
+/// (GOLDEN FAIL, timing-dependent). Starting every S2MM first costs nothing --
+/// an armed sink with no data just waits -- and makes the order a guarantee
+/// instead of a race the host usually wins.
+static bool startIoIsSink(dfschedule::StartIoOp startIo) {
+    auto io = startIo.getIoHandle().getDefiningOp<dfschedule::ConfigCreateIoOp>();
+    return io && io.getDirection() == "S2MM";
+}
 
 /// Classify a single operation into its scheduling category.
 static OpCategory classifyOp(Operation *op) {
@@ -64,9 +82,9 @@ static OpCategory classifyOp(Operation *op) {
     if (isa<dfschedule::ConfigCreateIoOp>(op))
         return OpCategory::DmaConfig;
 
-    // Start IO ops
-    if (isa<dfschedule::StartIoOp>(op))
-        return OpCategory::StartIo;
+    // Start IO ops: sinks (S2MM) before sources (MM2S)
+    if (auto startIo = dyn_cast<dfschedule::StartIoOp>(op))
+        return startIoIsSink(startIo) ? OpCategory::StartIoSink : OpCategory::StartIo;
 
     // Wait ops
     if (isa<dfschedule::ScheduleWaitOp>(op))

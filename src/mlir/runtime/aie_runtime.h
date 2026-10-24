@@ -370,6 +370,11 @@ struct_event __Runtime_launch_kernel_group_ctrl(XAie_DevInst *dev, __Runtime_Ctr
 void __Runtime_phase_cycles(unsigned long long *cyc, unsigned int *calls);
 void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls);
 void __Runtime_ctrl_kernel_pkt_set(const void *blob, unsigned int bytes);
+// Encode a kernel ELF once into the blob __Runtime_ctrl_kernel_pkt_set takes
+// (malloc'd; NULL on failure) -- for callers that reload one kernel often.
+void *__Runtime_ctrl_kernel_pkt_build(__Runtime_CtrlRowFabric *fab, const unsigned char *elf, unsigned int *bytes);
+// Warm ctrl-plane ELF reload (program memory not resent when unchanged); default on.
+void __Runtime_ctrl_elf_warm_enable(int on);
 void __Runtime_ctrl_aot_register(const void *table);
 void __Runtime_ctrl_aot_window(XAie_DevInst *dev, __Runtime_CtrlRowFabric *f, int nbuf, ...);
 struct_ioevent __Runtime_ioevent_make(XAie_LocType tile, int32_t channel, int32_t bd_id, XAie_DmaDirection dir);
@@ -917,6 +922,7 @@ void __Runtime_ctrl_high_throughput_enable(int on);
 
 void __Runtime_ctrl_shim_bd_begin(__Runtime_CtrlRowFabric *f);
 void __Runtime_ctrl_shim_bd_commit(void);
+int __Runtime_ctrl_shim_bd_sync(void);
 void __Runtime_ctrl_shim_bd_ctrl_stats_print(void);
 
 // Poll the shim S2MM drain until the response lands, sync it for the CPU, and
@@ -961,6 +967,26 @@ void __Runtime_sync_for_dev(XAie_DevInst *dev, void *ptr, size_t size);
 
 // Invalidate cache lines for the buffer from DDR (after DMA wrote it).
 void __Runtime_sync_for_cpu(XAie_DevInst *dev, void *ptr, size_t size);
+
+// Deferred variant used by the emitted __aie_launch for kernel arguments: queues
+// the range; the runtime performs it inside its poll loops and completes every
+// CPU-written range before any data-plane DMA starts (see aie_runtime.c).
+void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size);
+// Complete all deferred maintenance (emitted after host_canonicalized).
+void __Runtime_dsync_drain(void);
+// Contract: the array writes [ptr, ptr+size) and the CPU does not write it
+// between launches (it only reads it after a launch returns). Flushes it once;
+// afterwards its deferred maintenance is invalidate-only and may overlap the
+// launch's own DMA.
+void __Runtime_buffer_device_written(void *ptr, size_t size);
+// Drop a __Runtime_buffer_device_written registration (call before freeing it).
+void __Runtime_buffer_forget(void *ptr);
+// Allocate a CPU-written DMA buffer (<= 2 MB) mapped Normal Non-cacheable: the
+// CPU's stores reach DDR directly and launches skip its cache maintenance. Falls
+// back to a normal cached __Runtime_Alloc where that is not possible (Linux,
+// simulator, above 4 GB). Free with __Runtime_free_uncached.
+void *__Runtime_alloc_uncached(size_t bytes);
+void __Runtime_free_uncached(void *ptr);
 
 // Data movement wrappers (wraps XAie routing APIs)
 void __Runtime_move_data_to_tile(XAie_RoutingInstance *routing, XAie_LocType shim_tile, XAie_LocType dest_tile,

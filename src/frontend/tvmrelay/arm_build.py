@@ -304,6 +304,10 @@ void  graph_init(const uint8_t *params_blob);
 float *graph_input(void);
 float *graph_run(void);
 int    graph_output_len(void);
+#ifdef GRAPH_PROFILE
+void graph_prof_print(void);       /* make PROFILE=1: per-call time table */
+void graph_prof_count_run(void);
+#endif
 
 /* `ld -r -b binary` names: weights.bin -> _binary_weights_bin_start. */
 extern const uint8_t _binary_weights_bin_start[];
@@ -334,6 +338,9 @@ int main(void) {
     printf("resnet18: run\\n");
     XTime_GetTime(&t_run0);
     float *out = graph_run();
+#ifdef GRAPH_PROFILE
+    graph_prof_count_run();
+#endif
     XTime_GetTime(&t_run1);
     int n = graph_output_len();
 
@@ -375,6 +382,9 @@ int main(void) {
                1e9 / (double)COUNTS_PER_SECOND);
         printf("  init       %10.3f ms\\n", init_ms);
         printf("  inference  %10.3f ms   <- graph_run()\\n", run_ms);
+#ifdef GRAPH_PROFILE
+        graph_prof_print();
+#endif
         printf("  top%d       %10.3f ms\\n", TOPK, top_ms);
         printf("  total      %10.3f ms\\n", init_ms + run_ms + top_ms);
         if (run_ms > 0.0)
@@ -590,7 +600,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         "",
         "void tvm_shim_workspace_init(void *buf, uint64_t bytes);",
         "",
-    ]
+    ] + _PROFILE_C.splitlines()
 
     # Kernel forward declarations, deduplicated but in first-use order.
     seen = []
@@ -707,6 +717,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         tl = dict(param_of=param_of, roles=roles.get(fn, {}), nodes=nodes,
                   flow=flow)
         lines += _trace_lines(n_calls, fn, in_eids, out_eids, "in", **tl)
+        lines.append(f"    GRAPH_PROF_BEGIN({n_calls});")
         if fn in offload:
             lines += ["#ifdef GRAPH_AIE_OFFLOAD",
                       f"    {offload[fn]}(args, codes, {len(arg_eids)}, 0, 0, 0);",
@@ -715,6 +726,8 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                       "#endif"]
         else:
             lines.append(f"    {fn}(args, codes, {len(arg_eids)}, 0, 0, 0);")
+        tag = ("aie " if fn in offload else "cpu ") + fn.replace("tvmgen_default_fused_", "")
+        lines.append(f'    GRAPH_PROF_END({n_calls}, "{tag[:72]}");')
         lines += _trace_lines(n_calls, fn, in_eids, out_eids, "out", **tl)
         lines.append("")
         n_calls += 1
@@ -738,6 +751,39 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         print(f"  [arm] driver: {n_calls} kernel calls, {len(sizes)} buffers "
               f"({total / 1e6:.1f} MB), {n_params} params")
     return summary
+
+
+# Per-call wall time, compiled in only with `make PROFILE=1` (-DGRAPH_PROFILE).
+# Same clock main.c uses for "inference", so the per-call rows add up to it.
+# The tag says where the call ran ("aie" only when this build offloads it).
+_PROFILE_C = """\
+#ifdef GRAPH_PROFILE
+#include "aie_timer.h"
+#define GRAPH_PROF_MAX 512
+static unsigned long long graph_prof_ticks[GRAPH_PROF_MAX];
+static const char *graph_prof_tag[GRAPH_PROF_MAX];
+static unsigned graph_prof_runs, graph_prof_n;
+#define GRAPH_PROF_BEGIN(i) XTime graph_prof_t0_##i; XTime_GetTime(&graph_prof_t0_##i)
+#define GRAPH_PROF_END(i, tag) do { XTime t1_; XTime_GetTime(&t1_);                      \\
+        graph_prof_ticks[i] += t1_ - graph_prof_t0_##i; graph_prof_tag[i] = (tag);        \\
+        if ((unsigned)(i) + 1U > graph_prof_n) graph_prof_n = (unsigned)(i) + 1U; } while (0)
+/* Mean per-call time over every graph_run() so far, then the sum. */
+void graph_prof_print(void) {
+    double tot = 0.0;
+    unsigned runs = graph_prof_runs ? graph_prof_runs : 1U;
+    for (unsigned i = 0; i < graph_prof_n; i++) {
+        double ms = 1000.0 * (double)graph_prof_ticks[i] / (double)COUNTS_PER_SECOND / runs;
+        tot += ms;
+        printf("PROF %3u %10.3f ms  %s\\n", i, ms, graph_prof_tag[i] ? graph_prof_tag[i] : "?");
+    }
+    printf("PROF sum %10.3f ms over %u run(s)\\n", tot, runs);
+}
+void graph_prof_count_run(void) { graph_prof_runs++; }
+#else
+#define GRAPH_PROF_BEGIN(i) ((void)0)
+#define GRAPH_PROF_END(i, tag) ((void)0)
+#endif
+"""
 
 
 _DEBUG_HELPERS_C = """\
@@ -1585,6 +1631,13 @@ LOCAL_LDLIBS ?= -lm
 # `arm_build.split_layeriohex()` cuts a captured log back into files. Linking
 # fopen/mkdir into the BSP build instead would compile and then fail at run
 # time, which is the worse failure.
+# make PROFILE=1: per-call wall time table after "inference" (graph_driver.c
+# GRAPH_PROF_*). Off by default -- two timer reads per call are cheap but not free.
+ifdef PROFILE
+CFLAGS       += -DGRAPH_PROFILE
+LOCAL_CFLAGS += -DGRAPH_PROFILE
+endif
+
 ifdef TRACE
 TRACE_DEFS := -DGRAPH_TRACE $(if $(TRACE_ELEMS),-DGRAPH_TRACE_ELEMS=$(TRACE_ELEMS),)
 ifneq ($(TRACE_HEX),0)

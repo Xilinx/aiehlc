@@ -15,30 +15,30 @@ For a 256x256 int8 GEMM on a 4x4 AIE mesh with K-tiling (`effectiveK=64`, `kRoun
 
 ```
 Matrix A (256x256)    Matrix B (256x256)    Matrix C (256x256)
-    input                 input                 output
-   broadcast             broadcast              gather
-    on row               on col                per row
+input                 input                 output
+broadcast             broadcast              gather
+on row               on col                per row
 
-  ┌─────────┐          ┌─────────┐          ┌─────────┐
-  │ 256×256 │          │ 256×256 │          │ 256×256 │
-  └────┬────┘          └────┬────┘          └────┬────┘
-       │                    │                    │
-  partition by row     partition by col     partition by row
-  (4 groups of 64)     (4 groups of 64)    (4 groups of 64)
-       │                    │                    │
-  ┌────▼────┐          ┌────▼────┐          ┌────▼────┐
-  │ 64×256  │ ×4       │ 64×256  │ ×4       │ 64×256  │ ×4
-  │per group│          │per group│          │per group│
-  └────┬────┘          └────┬────┘          └────┬────┘
-       │                    │                    │
-  broadcast to          broadcast to         gather from
-  4 tiles in row       4 tiles in col       4 tiles in row
-       │                    │                    │
-  ┌────▼────┐          ┌────▼────┐          ┌────▼────┐
-  │ 64×256  │          │ 64×256  │          │ 64×64   │
-  │per tile │          │per tile │          │per tile │ (C-stationary)
-  │(full K) │          │(full K) │          │         │
-  └─────────┘          └─────────┘          └─────────┘
+┌─────────┐          ┌─────────┐          ┌─────────┐
+│ 256×256 │          │ 256×256 │          │ 256×256 │
+└────┬────┘          └────┬────┘          └────┬────┘
+    │                    │                    │
+partition by row     partition by col     partition by row
+(4 groups of 64)     (4 groups of 64)    (4 groups of 64)
+    │                    │                    │
+┌────▼────┐          ┌────▼────┐          ┌────▼────┐
+│ 64×256  │ ×4       │ 64×256  │ ×4       │ 64×256  │ ×4
+│per group│          │per group│          │per group│
+└────┬────┘          └────┬────┘          └────┬────┘
+    │                    │                    │
+broadcast to          broadcast to         gather from
+4 tiles in row       4 tiles in col       4 tiles in row
+    │                    │                    │
+┌────▼────┐          ┌────▼────┐          ┌────▼────┐
+│ 64×256  │          │ 64×256  │          │ 64×64   │
+│per tile │          │per tile │          │per tile │ (C-stationary)
+│(full K) │          │(full K) │          │         │
+└─────────┘          └─────────┘          └─────────┘
 ```
 
 ### 1.2 C-Stationary with K-Accumulation
@@ -62,24 +62,24 @@ The kernel code runs this loop:
 
 ```cpp
 for (int kr = 0; kr < k_rounds; kr++) {
-    // Phase 1: Receive A chunk (num_a_rounds acquires)
-    for (int ra = 0; ra < num_a_rounds; ra++) {
-        A_ptr = acquire_input_window(win_a);  // lock acquire
-        copy A_ptr → local buffer
-        release_input_window(win_a);          // lock release
-    }
-    // Phase 2: Stream B chunk (num_b_rounds acquires)
-    for (int rb = 0; rb < num_b_rounds; rb++) {
-        B_ptr = acquire_input_window(win_b);  // lock acquire
-        compute partial product, accumulate
-        release_input_window(win_b);          // lock release
-    }
+// Phase 1: Receive A chunk (num_a_rounds acquires)
+for (int ra = 0; ra < num_a_rounds; ra++) {
+    A_ptr = acquire_input_window(win_a);  // lock acquire
+    copy A_ptr → local buffer
+    release_input_window(win_a);          // lock release
+}
+// Phase 2: Stream B chunk (num_b_rounds acquires)
+for (int rb = 0; rb < num_b_rounds; rb++) {
+    B_ptr = acquire_input_window(win_b);  // lock acquire
+    compute partial product, accumulate
+    release_input_window(win_b);          // lock release
+}
 }
 // Phase 3: Output (after all k-rounds)
 for (int rc = 0; rc < num_c_rounds; rc++) {
-    out = acquire_output_window(win_c);       // lock acquire
-    copy local → out
-    release_output_window(win_c);             // lock release
+out = acquire_output_window(win_c);       // lock acquire
+copy local → out
+release_output_window(win_c);             // lock release
 }
 ```
 
@@ -100,11 +100,11 @@ Total DMA transactions per core:
 per_k_round_data = tile_m × effectiveK = 64 × 64 = 4096 bytes
 
 if per_k_round_data ≤ max_buffer_bytes:
-    bufferSize = per_k_round_data      → 4096 (fits, no splitting)
-    numRounds  = 1                      → 1 acquire per k-round
+bufferSize = per_k_round_data      → 4096 (fits, no splitting)
+numRounds  = 1                      → 1 acquire per k-round
 else:
-    bufferSize = max_buffer_bytes
-    numRounds  = ceil(per_k_round_data / max_buffer_bytes)
+bufferSize = max_buffer_bytes
+numRounds  = ceil(per_k_round_data / max_buffer_bytes)
 
 Physical memory = pp_depth × bufferSize per port (for ping-pong overlap)
 ```
@@ -115,10 +115,10 @@ All three computation paths divided buffer size by `pp_depth`:
 
 ```
 WRONG:  bufferSize = per_k_round_data / pp_depth = 4096 / 2 = 2048
-        numRounds  = per_k_round_data / bufferSize = 4096 / 2048 = 2
+    numRounds  = per_k_round_data / bufferSize = 4096 / 2048 = 2
 
 RIGHT:  bufferSize = per_k_round_data = 4096
-        numRounds  = 1
+    numRounds  = 1
 ```
 
 ### 2.3 The Cascade of Mismatches
@@ -126,29 +126,29 @@ RIGHT:  bufferSize = per_k_round_data = 4096
 The wrong buffer size propagated through the entire pipeline:
 
 ```
-                    WRONG (pp_depth=2)          CORRECT
-                    ──────────────────          ───────
+                WRONG (pp_depth=2)          CORRECT
+                ──────────────────          ───────
 Frontend (aiehlc.cc):
-  bufferSize        2048                        4096
-  numRounds         2                           1
+bufferSize        2048                        4096
+numRounds         2                           1
 
 Host pass (passblueprinttoschedule.cpp):
-  Core BD:
-    pingPongBufSize 2048 elements               4096 elements
-    numIterations   2                           1
-    BD len          2048 bytes                  4096 bytes
-  SHIM BD (input):
-    iter_wrap       kRounds×numIter = 4×2 = 8   kRounds×1 = 4
-    iter_step_size  64 bytes                    64 bytes
-  SHIM BD (OOO output):
-    iter_wrap       2                           1
-    iter_step_size  16384                       0
-    repeat_count    numTiles×2 = 8              numTiles×1 = 4
+Core BD:
+pingPongBufSize 2048 elements               4096 elements
+numIterations   2                           1
+BD len          2048 bytes                  4096 bytes
+SHIM BD (input):
+iter_wrap       kRounds×numIter = 4×2 = 8   kRounds×1 = 4
+iter_step_size  64 bytes                    64 bytes
+SHIM BD (OOO output):
+iter_wrap       2                           1
+iter_step_size  16384                       0
+repeat_count    numTiles×2 = 8              numTiles×1 = 4
 
 Kernel pass (passblueprinttoschedulekernel.cpp):
-  BUF_SZ_IN_0      512 vectors (2048 bytes)     1024 vectors (4096 bytes)
-  window_init size  512                         1024
-  numRounds         2×4 = 8                     1×4 = 4
+BUF_SZ_IN_0      512 vectors (2048 bytes)     1024 vectors (4096 bytes)
+window_init size  512                         1024
+numRounds         2×4 = 8                     1×4 = 4
 ```
 
 ---
@@ -165,14 +165,14 @@ Core expects: BD len=2048, numIterations=2 per k-round, 4 k-rounds = 8 total
 
 In this case, SHIM and core agree on 2048 per transfer, 8 total.
 But the kernel has window_init(size=512, numRounds=8):
-  512 vectors × 4 bytes/vector = 2048 bytes ← matches core BD ✓
-  numRounds = 8 ← matches total iterations ✓
+512 vectors × 4 bytes/vector = 2048 bytes ← matches core BD ✓
+numRounds = 8 ← matches total iterations ✓
 
 So with pp_depth=2 the pipeline is internally consistent but WRONG:
-  - Each acquire gets only half the data the kernel computation expects
-  - rows_per_round = 2048/64 = 32 (should be 64)
-  - The kernel computes on 32 rows per round instead of 64
-  - Result: incorrect output data
+- Each acquire gets only half the data the kernel computation expects
+- rows_per_round = 2048/64 = 32 (should be 64)
+- The kernel computes on 32 rows per round instead of 64
+- Result: incorrect output data
 ```
 
 ### 3.2 Output OOO repeat_count Mismatch (SHIM Hang)
@@ -181,16 +181,16 @@ The output gather path is where the system **hangs**:
 
 ```
 Core tile sends:
-  1 BD × 1 fire = 1 transaction per core
-  (output = tile_m × tile_n = 4096 bytes, pp_depth=1, so no splitting)
+1 BD × 1 fire = 1 transaction per core
+(output = tile_m × tile_n = 4096 bytes, pp_depth=1, so no splitting)
 
 SHIM expects (WRONG):
-  repeat_count = numCoreTiles × 2 = 8
-  (hardcoded ×2, assuming pp_depth always splits)
+repeat_count = numCoreTiles × 2 = 8
+(hardcoded ×2, assuming pp_depth always splits)
 
 Result:
-  4 cores send 4 transactions total
-  SHIM waits for 8 → waits forever → TIMEOUT
+4 cores send 4 transactions total
+SHIM waits for 8 → waits forever → TIMEOUT
 ```
 
 ### 3.3 iter_step_size with iter_wrap=1 (Benign but Confusing)
@@ -305,12 +305,12 @@ For each port, the kernel and host must agree on lock protocol:
 
 ```
 Input S2MM (host writes to core buffer):
-  Host BD:   acquire lock_id=N (val=-1), release lock_id=N+1 (val=1)
-  Kernel:    acquire lock_id=N+1 (data ready), release lock_id=N (buffer free)
+Host BD:   acquire lock_id=N (val=-1), release lock_id=N+1 (val=1)
+Kernel:    acquire lock_id=N+1 (data ready), release lock_id=N (buffer free)
 
 Output MM2S (core reads from core buffer):
-  Kernel:    acquire lock_id=N (buffer free), fill data, release lock_id=N+1 (data ready)
-  Host BD:   acquire lock_id=N+1 (val=-1), release lock_id=N (val=1)
+Kernel:    acquire lock_id=N (buffer free), fill data, release lock_id=N+1 (data ready)
+Host BD:   acquire lock_id=N+1 (val=-1), release lock_id=N (val=1)
 ```
 
 Lock mismatch → deadlock (kernel waits for lock that host never releases).
@@ -321,16 +321,16 @@ Verify end-to-end data volume:
 
 ```
 Input A per SHIM:   partition_rows × fullK × elem_bytes = 64 × 256 × 1 = 16384 bytes
-  = numIterations × pingPongBufSize × elem_bytes
-  = (1 × kRounds) × 4096 × 1 = 4 × 4096 = 16384 ✓
+= numIterations × pingPongBufSize × elem_bytes
+= (1 × kRounds) × 4096 × 1 = 4 × 4096 = 16384 ✓
 
 Input B per SHIM:   partition_cols × fullK × elem_bytes = 64 × 256 × 1 = 16384 bytes
-  = same calculation ✓
+= same calculation ✓
 
 Output C per SHIM:  partition_rows × tile_n × elem_bytes × numCoreTiles
-  = 64 × 64 × 1 × 4 = 16384 bytes
-  = numCoreTiles × pingPongBufSize × ooNumIterations × elem_bytes
-  = 4 × 4096 × 1 × 1 = 16384 ✓
+= 64 × 64 × 1 × 4 = 16384 bytes
+= numCoreTiles × pingPongBufSize × ooNumIterations × elem_bytes
+= 4 × 4096 × 1 × 1 = 16384 ✓
 ```
 
 ---
@@ -382,31 +382,31 @@ Output C per SHIM:  partition_rows × tile_n × elem_bytes × numCoreTiles
 
 ```
 SHIM MM2S (Input A, broadcast on row):
-  DDR partition = 64 × 256 = 16384 bytes
-  3D addressing: D0=[4,16], D1=[256,64] → reads 64 rows × 64 cols = 4096 bytes per fire
-  iter_wrap = 4 (kRounds), iter_step_size = 64 (advance to next K chunk)
-  Total: 4 fires × 4096 bytes = 16384 bytes ✓
+DDR partition = 64 × 256 = 16384 bytes
+3D addressing: D0=[4,16], D1=[256,64] → reads 64 rows × 64 cols = 4096 bytes per fire
+iter_wrap = 4 (kRounds), iter_step_size = 64 (advance to next K chunk)
+Total: 4 fires × 4096 bytes = 16384 bytes ✓
 
 Core S2MM (receives input A):
-  BD len = 4096 bytes, ping-pong = 2 buffers
-  numIterations = 4 (1 per k-round × 4 k-rounds)
-  Lock: acquire(free), write 4096, release(ready)
+BD len = 4096 bytes, ping-pong = 2 buffers
+numIterations = 4 (1 per k-round × 4 k-rounds)
+Lock: acquire(free), write 4096, release(ready)
 
 Kernel:
-  window_init(size=1024, numRounds=4)
-  for kr in 0..3:
-    acquire → read 4096 bytes (1024 vectors × 4 bytes) → release
-  Total: 4 acquires × 4096 bytes = 16384 bytes ✓
+window_init(size=1024, numRounds=4)
+for kr in 0..3:
+acquire → read 4096 bytes (1024 vectors × 4 bytes) → release
+Total: 4 acquires × 4096 bytes = 16384 bytes ✓
 
 Core MM2S (sends output C):
-  BD len = 4096 bytes, single buffer (pp_depth=1)
-  numIterations = 1 (output written once after all k-rounds)
-  Lock: acquire(data ready), send 4096, release(free)
+BD len = 4096 bytes, single buffer (pp_depth=1)
+numIterations = 1 (output written once after all k-rounds)
+Lock: acquire(data ready), send 4096, release(free)
 
 SHIM S2MM (OOO output gather):
-  4 BDs, each with fixed DDR offset, iter_wrap=1, iter_step_size=0
-  repeat_count = 4 (one BD completion per core tile)
-  Total: 4 × 4096 = 16384 bytes ✓
+4 BDs, each with fixed DDR offset, iter_wrap=1, iter_step_size=0
+repeat_count = 4 (one BD completion per core tile)
+Total: 4 × 4096 = 16384 bytes ✓
 ```
 
 ---

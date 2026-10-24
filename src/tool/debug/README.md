@@ -260,6 +260,38 @@ accepts either its root directory or an existing provenance bundle;
 `--app-root DIR` remains the multi-app discovery mode. Launched automatically by
 `script/aiehlc.sh --prettydebug`.
 
+### Run deploys through netboot; Stop is soft unless [force reset]
+
+For the pal board, `start_run` (the UI's **Run**, `POST /run`) launches
+`apppaltest.py -y -nonreboot --netload <elf>`. It first probes the netboot
+supervisor (`_netboot_probe`: a STATUS through `netboot_proxy.py` on PALIP, over
+the multiplexed ssh `apppaltest.py` also uses; stages the proxy once if missing).
+- **Supervisor answers:** fast path. The ELF streams through the proxy and the
+  parked app core is released. Measured UI Run to `status: pass`: **1.9-2.0 s**.
+- **No answer:** still `--netload`. apppaltest bootstraps the supervisor once
+  (power cycle, BOOT.BIN, `dow netboot.elf`, ~40-50 s) and later runs are fast.
+  "Use netboot only if one already answers" would never leave the JTAG path,
+  because every JTAG `-nonreboot` run power-cycles the board and kills the supervisor.
+
+The applog records the choice (`# deploy: netboot (--netload) -- …`) and
+`/runstate` returns it as `deploy`. `AIEHLC_NETLOAD=off` restores the JTAG flow.
+
+**Stop run** is **soft** by default: it kills the local apppaltest process group,
+writes `[stop: board left as is (soft stop) …]`, and re-enables Run and the
+profile timeline. The board and its netboot supervisor are untouched, so the
+next Run is fast (measured 2.0 s right after a mid-run Stop). The **[force reset]**
+checkbox next to Stop (`POST /stop {"force_reset": true}`) arms a one-shot reset:
+the next Run adds `--netload-bootstrap` and starts from a clean board (measured
+41.7 s, then back to 2.0 s). The box clears itself after use. Use it when the
+app hangs, because a hung app core cannot be reclaimed any other way. Force reset
+also works with no run in progress.
+
+`[Program completed after` counts as a pass marker, so netload runs of apps that
+print no teardown line (they end on the supervisor's exit report) show `pass`.
+
+**The daemon must be restarted to pick up these changes.** A daemon started
+before them keeps the old JTAG-every-run behaviour.
+
 ### Session provenance — a target is not a connection
 
 `AIEDBG_TARGET` is exported by `script/test/envlocal.sh`, so the daemon holds a
