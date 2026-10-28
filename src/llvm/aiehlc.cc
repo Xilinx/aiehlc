@@ -5375,28 +5375,14 @@ public:
                             maxDdrArgs = mkd.numHostDdrArgs;
                     }
 
-                    // Helper: emit the launch-argument cache maintenance.
-                    // Before the launch every argument is QUEUED (__Runtime_sync_for_dev_deferred):
-                    // on ARM baremetal a CPU-written argument must still be cleaned+invalidated
-                    // BEFORE any DMA touches it -- for outputs too, since a dirty line (e.g. a
-                    // zeroed output buffer) written back after the DMA would overwrite its
-                    // results -- and the runtime guarantees that: it completes every queued
-                    // CPU-written range before any data-plane DMA can start, doing the work
-                    // inside its own ack/DMA poll loops where it would otherwise spin. A range
-                    // registered with __Runtime_buffer_device_written() is invalidate-only and may
-                    // overlap the launch's DMA. After the launch: __Runtime_dsync_drain() finishes
-                    // whatever is still queued before control returns to the caller.
                     auto emitSyncCalls = [](llvm::raw_fd_ostream &os, const MeshKernelDesc &mkd,
                                             const std::string &indent, bool beforeLaunch) {
-                        if (!beforeLaunch) {
-                            os << indent << "__Runtime_dsync_drain();\n";
-                            return;
-                        }
                         unsigned limit = mkd.numHostDdrArgs;
                         if (limit > mkd.tensors.size())
                             limit = mkd.tensors.size();
                         for (unsigned i = 0; i < limit; ++i) {
-                            os << indent << "__Runtime_sync_for_dev_deferred(dev, _t" << i << ", _s" << i << ");\n";
+                            os << indent << (beforeLaunch ? "__Runtime_sync_for_dev" : "__Runtime_sync_for_cpu")
+                               << "(dev, _t" << i << ", _s" << i << ");\n";
                         }
                     };
 

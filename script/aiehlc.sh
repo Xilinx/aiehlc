@@ -460,6 +460,12 @@ AIEHLC_ARGS+=(
 if [ -n "$AIEHLC_SIM_DEFINE" ]; then
     AIEHLC_ARGS+=("$AIEHLC_SIM_DEFINE")
 fi
+# Gen2: workspace/xparameters.h lacks XPAR_CPU_CORTEXA72_0_TIMESTAMP_CLK_FREQ;
+# xil_cache.h pulls in the workspace copy (setting the guard) before xtime_l.h
+# can reach the secondary bsp/include/xparameters.h that defines it.
+if [[ "$aie_version" == "2" ]]; then
+    AIEHLC_ARGS+=(--extra-arg="-DXPAR_CPU_CORTEXA72_0_TIMESTAMP_CLK_FREQ=99999908")
+fi
 
 if [ "$GDB_MODE" -eq 1 ]; then
     # Debug aiehlc under gdb. aiehlc is passed directly as the *exec file* so gdb
