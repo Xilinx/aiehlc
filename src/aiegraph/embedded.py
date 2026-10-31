@@ -46,6 +46,7 @@ class Layer:
     label: str
     signature: str
     placement: str
+    source: str = ""       # the code this layer runs: its TVM C, or the user kernel source
 
     @property
     def name(self) -> str:
@@ -54,7 +55,15 @@ class Layer:
     def __repr__(self) -> str:
         return (f"Layer {self.name}: {self.label}  [{self.placement}]  calls "
                 f"{', '.join(f'[{c:02d}]' for c in self.calls)}\n  {self.signature}\n"
-                f"  TVM C: layers/{self.dir}/")
+                f"  TVM C: layers/{self.dir}/" +
+                (f"\n  runs:  {self.source}" if self.placement != "cpu" else ""))
+
+
+class _Text(str):
+    """A string that prints as itself at the prompt (no quotes)."""
+
+    def __repr__(self) -> str:
+        return str(self)
 
 
 def _label(call) -> str:
@@ -103,13 +112,15 @@ class EmbeddedModel:
         return load_network(self.workdir)
 
     def _placement(self) -> dict:
+        """{symbol: (placement, source)} for the layers partition.json puts on the AIE."""
         part = self.workdir / "layers" / "partition.json"
         if not part.is_file():
             return {}
         out = {}
         for row in json.loads(part.read_text()).get("layers", []):
             if row.get("target") == "aie" and row.get("replaces"):
-                out[row["symbol"]] = f"aie:{row.get('user_kernel') or row.get('backend')}"
+                src = row.get("source") or row.get("aie_dir") or ""
+                out[row["symbol"]] = (f"aie:{row.get('user_kernel') or row.get('backend')}", src)
         return out
 
     @property
@@ -118,9 +129,22 @@ class EmbeddedModel:
         out = []
         for idx, calls in sorted(net.layers().items()):
             c = calls[0]
+            where, src = place.get(c.symbol, ("cpu", ""))
+            if where == "cpu":
+                src = f"layers/{c.dir}/{c.dir}.c" if c.dir else "resnet18.c"
             out.append(Layer(idx, c.symbol, c.dir, [x.call for x in calls], _label(c),
-                             _sig(c), place.get(c.symbol, "cpu")))
+                             _sig(c), where, src))
         return out
+
+    def sources(self) -> str:
+        """Which code every layer runs: the TVM C file of a CPU layer, the user
+        kernel source of an AIE one (paths relative to the workdir / the repo,
+        as partition.json records them). Prints as a table."""
+        rows = [(l.name, l.placement, l.source) for l in self.layers]
+        w = max(len(p) for _, p, _ in rows)
+        text = "\n".join([f"  {'layer':<8} {'on':<{w}}  source"] +
+                         [f"  {n:<8} {p:<{w}}  {s}" for n, p, s in rows])
+        return _Text(f"layer sources ({self.workdir}):\n" + text)
 
     def resolve(self, ref) -> list:
         """Any layer reference -> sorted layer indices (see the design doc §4.4)."""
@@ -356,11 +380,13 @@ class EmbeddedModel:
         lines.append(f"  {'layer':<8} {'calls':<6} {'op':<{w}}  {'in -> out':<58} on")
         for l in layers:
             sig = l.signature if len(l.signature) <= 58 else l.signature[:55] + "..."
-            lines.append(f"  {l.name:<8} {len(l.calls):<6} {l.label:<{w}}  {sig:<58} {l.placement}")
+            src = f"  <- {l.source}" if l.placement != "cpu" else ""
+            lines.append(f"  {l.name:<8} {len(l.calls):<6} {l.label:<{w}}  {sig:<58} {l.placement}{src}")
         n_calls = sum(len(l.calls) for l in layers)
         aie = [l.name for l in layers if l.placement != "cpu"]
         lines.append(f"  {len(layers)} layers, {n_calls} calls" +
                      (f"; on AIE: {', '.join(aie)}" if aie else ""))
+        lines.append("  every layer's code: print(module.sources())")
         lines.append("  next: " + ("module.build(target='a78', output=...)" if aie else
                                    "print(module.regions)  /  module.register_kernel(name=..., "
                                    "source=..., op=...)"))

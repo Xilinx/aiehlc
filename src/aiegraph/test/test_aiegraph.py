@@ -357,3 +357,12 @@ def test_offload_prototype_layer_is_proven(tmp_path):
 def test_offload_prototype_multi_call_layer():
     itf = ag.open(DEPLOY).offload_prototype(4)
     assert len(itf.calls) == 2 and "matches 2/2 call(s)" in itf.verified
+
+
+@deployed
+def test_sources_names_each_layers_code():
+    emod = ag.open(DEPLOY)
+    text = str(emod.sources())
+    l0 = emod.layers[0]
+    assert l0.placement == "cpu" and l0.source == f"layers/{l0.dir}/{l0.dir}.c"
+    assert l0.source in text

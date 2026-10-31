@@ -276,6 +276,7 @@ any kernel; it does not prove that aiehlc compiles it for AIE2PS -- `offload()`
 | `ag.embedded_convert(m, target="a78", calib=None, image=None, workdir=None)` | int8 + per-layer C + A78 driver; cached by model hash + options |
 | `ag.open(workdir)` | adopt an existing `deploy_flow.py` tree |
 | `emod.layers`, `emod.layer(ref)`, `emod.resolve(ref)` | layers; `ref` = `"layer1"`, `1`, `"layer4-9"`, `"conv3x3*"`, `"call[08]"`, a list |
+| `print(emod.sources())` | the code each layer runs: `layers/NN_*/NN_*.c` (TVM C) on the CPU, the user kernel source on the AIE; `print(emod)` also shows `aie:<kernel>  <- <source>` |
 | `ag.offload_prototype()` | the kernel-file format and rules (no model needed) |
 | `emod.offload_prototype(layer, region=None, entry=None)` | a kernel-file backbone for that layer: kernel frame + host run function + entry + proven `AIEK_SPEC`, reference frame; `.write(dir)` (section 4b) |
 | `emod.detect(kernel)` | which layers fit |
