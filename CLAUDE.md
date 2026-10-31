@@ -657,6 +657,11 @@ every argument, buffers and launch; entry; spec) + `<entry>_ref.c`; compute,
 staging and parameters are `TODO`s for the user. It builds as generated
 (`libaiek_layer04.a`). CLI `aiegraph prototype`.
 
+`ag.convert` starts FRESH: a reused (cached) conversion gets every earlier
+offload reset to the CPU (`emod.offload_reset(layers=None)`, driver
+regenerated); `keep_offloads=True` keeps them, `ag.open(workdir)` adopts a tree
+as it is, `force=True` re-converts.
+
 `emod.offload_AI_proto(layers, kernel, rounds=3)` (`src/aiegraph/aiproto.py`): when
 `offload_check` is NOT READY, `claude -p` ports a flat copy of the kernel dir in
 `<workdir>/aiproto/<layer>_<kernel>/` (prompt on **stdin** -- `--allowedTools`/`--add-dir`

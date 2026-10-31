@@ -51,7 +51,7 @@ __version__ = "0.1.0"
 __all__ = ["load", "from_onnx", "from_torch", "download_model", "ZOO", "Model",
            "convert", "embedded_convert", "EmbeddedModel", "Layer", "open", "current",
            "Region", "Regions", "KernelContract", "RegionCheck", "PartitionPlan",
-           "offload_check", "offload", "detect", "lint", "build", "run_local",
+           "offload_check", "offload", "offload_reset", "detect", "lint", "build", "run_local",
            "compile", "guide", "doctor", "setup", "AiegraphError", "CheckReport",
            "DetectReport", "BuildReport", "AIProtoResult", "offload_prototype",
            "OffloadPrototype", "Prototypes", "KernelFormat"]
@@ -81,6 +81,11 @@ def offload_prototype(layer=None, *, region=None, entry: str = None):
         from .prototype import kernel_format
         return kernel_format()
     return current().offload_prototype(layer, region=region, entry=entry)
+
+
+def offload_reset(layers=None):
+    """Put offloaded layers of the current model back on the CPU (all, or *layers*)."""
+    return current().offload_reset(layers)
 
 
 def detect(source) -> DetectReport:

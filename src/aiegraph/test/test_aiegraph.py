@@ -366,3 +366,18 @@ def test_sources_names_each_layers_code():
     l0 = emod.layers[0]
     assert l0.placement == "cpu" and l0.source == f"layers/{l0.dir}/{l0.dir}.c"
     assert l0.source in text
+
+
+def test_offload_reset_puts_layers_back_on_cpu(tmp_path):
+    from aiegraph.embedded import EmbeddedModel
+    (tmp_path / "layers").mkdir()
+    rows = [{"index": 1, "dir": "01_x", "symbol": "s1", "target": "aie", "entry": "aie_s1",
+             "replaces": "s1", "archive": "a.a", "user_kernel": "k1"},
+            {"index": 2, "dir": "02_y", "symbol": "s2", "target": "cpu"}]
+    (tmp_path / "layers" / "partition.json").write_text(json.dumps({"layers": rows}))
+    emod = EmbeddedModel(tmp_path)
+    assert emod.offload_reset() == ["layer1"]
+    doc = json.loads((tmp_path / "layers" / "partition.json").read_text())
+    assert [r["target"] for r in doc["layers"]] == ["cpu", "cpu"]
+    assert doc["layers"][0]["replaces"] is None and doc["aie_count"] == 0
+    assert emod.offload_reset() == []

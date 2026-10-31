@@ -214,6 +214,41 @@ class EmbeddedModel:
         from .prototype import prototype_for
         return prototype_for(self, layer, region, entry)
 
+    def offload_reset(self, layers=None, verbose: bool = False) -> list:
+        """Put offloaded layers back on the CPU: all of them, or *layers* (any
+        ``resolve`` reference). ``partition.json`` rows lose their AIE entry and
+        the driver is regenerated without the swap; the conversion and the built
+        libraries stay (an unreferenced archive links nothing). Returns the
+        layer names reset."""
+        part = self.workdir / "layers" / "partition.json"
+        if not part.is_file():
+            return []
+        want = None if layers is None else set(self.resolve(layers))
+        doc = json.loads(part.read_text())
+        reset = []
+        for row in doc.get("layers", []):
+            if row.get("target") != "aie" or (want is not None and row.get("index") not in want):
+                continue
+            row.update(target="cpu", entry=None, replaces=None, archive=None, aie_dir=None,
+                       backend=None, user_kernel=None, source=None,
+                       reason="offload reset (aiegraph): back on the APU")
+            if f"layer{row.get('index')}" not in reset:
+                reset.append(f"layer{row.get('index')}")
+        if not reset:
+            return []
+        targets = [r for r in doc["layers"] if r.get("target") == "aie"]
+        doc["aie_count"], doc["cpu_count"] = len(targets), len(doc["layers"]) - len(targets)
+        doc["aie_dirs"] = len({r["dir"] for r in targets})
+        doc["cpu_dirs"] = len({r["dir"] for r in doc["layers"] if r.get("target") != "aie"})
+        part.write_text(json.dumps(doc, indent=2) + "\n")
+        if (self.workdir / "arm_build").is_dir():
+            ab = _env.frontend("arm_build")
+            ab.build_arm_elf(self.workdir, c_name=f"{self._stem()}.c", run_make=False,
+                             image=self.image, verbose=verbose)
+        self.last_build = None
+        print(f"[aiegraph] offload reset: {', '.join(reset)} back on the CPU (driver regenerated)")
+        return reset
+
     def offload_check(self, spec, source=None, verbose: bool = False) -> CheckReport:
         """lint + detect + calibrate + whole-network emulate, all on x86.
         ``offload_check("layer1", "k.cc")`` or any spec ``offload`` takes."""
@@ -405,10 +440,15 @@ def _clean(workdir: Path) -> None:
 
 def embedded_convert(model, target: str = "a78", quantize: str = "int8", calib=None,
                      image=None, workdir=None, force: bool = False,
-                     verbose: bool = False, example_inputs=None) -> EmbeddedModel:
+                     verbose: bool = False, example_inputs=None,
+                     keep_offloads: bool = False) -> EmbeddedModel:
     """fp32 model -> int8 -> one C file per layer + A78 driver (no ``make``).
 
-    Cached: the same model + options into the same workdir returns at once.
+    Starts FRESH: every layer on the CPU. The conversion itself is cached -- the
+    same model + options into the same workdir reuses it at once -- but layers
+    offloaded by an earlier session are put back on the CPU unless
+    ``keep_offloads=True``. ``force=True`` redoes the conversion from scratch.
+    ``ag.open(workdir)`` adopts a tree as it is, offloads included.
     """
     if target not in TARGETS:
         raise AiegraphError("convert", f"unknown target {target!r}",
@@ -429,6 +469,8 @@ def embedded_convert(model, target: str = "a78", quantize: str = "int8", calib=N
         if {k: old.get(k) for k in state} == state:
             emod = EmbeddedModel(workdir, m, target, image, old)
             print(f"[aiegraph] reusing {workdir} (same model and options)")
+            if not keep_offloads:
+                emod.offload_reset(verbose=verbose)
             set_current(emod)
             return emod
     _clean(workdir)

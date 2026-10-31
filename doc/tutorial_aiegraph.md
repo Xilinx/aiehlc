@@ -273,8 +273,9 @@ any kernel; it does not prove that aiehlc compiles it for AIE2PS -- `offload()`
 | call | does |
 |---|---|
 | `ag.load(x)` / `ag.from_onnx(path)` / `ag.from_torch(module)` / `ag.download_model(name)` | get an fp32 `Model` (input must be `[1,3,224,224]`) |
-| `ag.embedded_convert(m, target="a78", calib=None, image=None, workdir=None)` | int8 + per-layer C + A78 driver; cached by model hash + options |
-| `ag.open(workdir)` | adopt an existing `deploy_flow.py` tree |
+| `ag.embedded_convert(m, target="a78", calib=None, image=None, workdir=None, force=False, keep_offloads=False)` | int8 + per-layer C + A78 driver; the conversion is cached by model hash + options, but it starts FRESH: earlier offloads go back to the CPU unless `keep_offloads=True`; `force=True` redoes the conversion |
+| `ag.open(workdir)` | adopt an existing `deploy_flow.py` tree as it is (earlier offloads included) |
+| `emod.offload_reset(layers=None)` / `ag.offload_reset(...)` | put offloaded layers (all, or `"layer4"` etc.) back on the CPU; driver regenerated |
 | `emod.layers`, `emod.layer(ref)`, `emod.resolve(ref)` | layers; `ref` = `"layer1"`, `1`, `"layer4-9"`, `"conv3x3*"`, `"call[08]"`, a list |
 | `print(emod.sources())` | the code each layer runs: `layers/NN_*/NN_*.c` (TVM C) on the CPU, the user kernel source on the AIE; `print(emod)` also shows `aie:<kernel>  <- <source>` |
 | `ag.offload_prototype()` | the kernel-file format and rules (no model needed) |
