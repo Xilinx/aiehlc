@@ -125,6 +125,8 @@ under `AIEHLC_PROFILING` (baremetal only); before that, a `--profiling` build of
 `test_conv2d.cc` still read all zeros (skill **pmccntrnotenabled**).
 Machine-readable line: `PERF SUMMARY ... (ms)`.
 
+**`conv2dstem_new.cc` / `conv2dstem_uk_new.cc` are the stem in the kernel-only block-load model** (no GemmSpaces / mirrored tiling macros: `aie::shape` ports, `aie::load_buffer`/`store_buffer` blocks, DMA derived by the kernel analysis); same API, host code, vector compute and pragmas; 61-px window (244-B rows, unaligned A-tiles, last K-block shifted 4 B). x86 emulation `emu/emu_conv2dstem_new.sh` 802,816/802,816; builds; `offload_check` READY. Board not yet run. README "conv2dstem_new.cc".
+
 **`conv2dstem_vec.cc` is the vectorized kernel** (`./buildtest.sh --vec`): same host/DMA/pragmas, kernel on `aie::mmul<4,8,8,int8,int8>` + a bit-exact two-stage vector requantize; 1.77 ms vs 31.47 ms, GOLDEN PASS on the board. Host transforms (1.09 ms) now dominate. `conv2dstem.cc` stays the `--aie-offload` source. Details: `doc/performance/conv2dstem_perf_review.md` §6.
 
 **conv2d launch is 185 µs** (`test_conv2d.cc`, GOLDEN PASS): vector kernel now in

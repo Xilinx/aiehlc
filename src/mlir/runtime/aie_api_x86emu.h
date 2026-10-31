@@ -14,7 +14,8 @@
 //   aie::accum<acc32|acc64, N> (global tags, as in the AIE API)  from_vector / to_vector (SRS) / extract / insert
 //   aie::mmul<M, K, N, int8_t|int16_t, int8_t|int16_t>  A M x K, B K x N, C M x N,
 //                          all row-major; mul / mac / to_accum / to_vector
-//   aie::load_v / load_unaligned_v / store_v, aie::zeros, aie::concat,
+//   aie::mul / aie::mac (vector x vector into acc32 / acc64), aie::tile::current()
+//   aie::load_v / load_unaligned_v / store_v / store_unaligned_v, aie::zeros, aie::concat,
 //   aie::shuffle_down_fill, aie::interleave_zip, aie::bit_and, aie::add
 //   aie::set_rounding / set_saturation (the SRS modes of to_vector)
 // Anything else is a compile error in the harness -- extend this file.
@@ -224,6 +225,15 @@ T *store_v(T *p, const vector<T, N> &x, const std::source_location at = std::sou
     return p + N;
 }
 
+template <class T, unsigned N>
+T *store_unaligned_v(T *p, const vector<T, N> &x, unsigned aligned_elems = 1,
+                     const std::source_location at = std::source_location::current()) {
+    emu::checkAlign(p, aligned_elems * sizeof(T), "aie::store_unaligned_v", at);
+    for (unsigned i = 0; i < N; i++)
+        p[i] = x.v[i];
+    return p + N;
+}
+
 template <class T, unsigned N> vector<T, 2 * N> concat(const vector<T, N> &a, const vector<T, N> &b) {
     vector<T, 2 * N> r;
     std::memcpy(r.v, a.v, N * sizeof(T));
@@ -267,6 +277,31 @@ template <class T, unsigned N> vector<T, N> add(const vector<T, N> &a, const vec
         r.v[i] = (T)(a.v[i] + b.v[i]);
     return r;
 }
+
+// Element-wise multiply into an accumulator (the AIE API's default precision:
+// 64-bit when either operand is 32-bit, else 32-bit), and multiply-accumulate.
+namespace emu {
+template <class A, class B> using mul_tag = std::conditional_t<(sizeof(A) > 2 || sizeof(B) > 2), acc64, acc32>;
+}
+template <class A, class B, unsigned N> accum<emu::mul_tag<A, B>, N> mul(const vector<A, N> &a, const vector<B, N> &b) {
+    accum<emu::mul_tag<A, B>, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = accum<emu::mul_tag<A, B>, N>::wrap((int64_t)a.v[i] * (int64_t)b.v[i]);
+    return r;
+}
+template <class Tag, class A, class B, unsigned N>
+accum<Tag, N> mac(const accum<Tag, N> &acc, const vector<A, N> &a, const vector<B, N> &b) {
+    accum<Tag, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = accum<Tag, N>::wrap(acc.v[i] + (int64_t)a.v[i] * (int64_t)b.v[i]);
+    return r;
+}
+
+// aie::tile::current().cycles(): no cycle counter on x86 -- 0.
+struct tile {
+    static tile current() { return tile(); }
+    uint64_t cycles() const { return 0; }
+};
 
 // C (M x N) += A (M x K) * B (K x N), row-major, 32-bit accumulation for
 // 8/16-bit operands (acc32 wraps like the hardware accumulator).
