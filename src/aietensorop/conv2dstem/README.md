@@ -170,6 +170,17 @@ the staging pitch is 230 px, not 232. Not yet measured on a board.
 `conv2dstem_uk_new.cc` (+ `conv2dstem_uk_new_ref.c`) is `conv2dstem_uk.cc` on
 top of it: `emod.offload("layer1", ".../conv2dstem_uk_new.cc")`.
 
+`test_conv2d_new.cc` is the standalone board app for it: `test_conv2d.cc` with
+the one kernel `#include` naming `conv2dstem_new.cc` (same data, qparam fold,
+golden check and PERF report). Committed, not generated like `--vec`'s entry.
+Build with `./buildtest.sh --new [--skip-trace]`; the log shows the kernel
+analysis (`[KernelAnalysis] conv2d_spatial: traced on the 4x4 mesh ... DMA
+derived and checked against every load/store`) and `[TilingLinalg]
+conv2d_spatial: derived tiling matches the kernel analysis (rounds 16, OFM
+3136 B, IFM 4636 B, WGT 3136 B)`. Builds (8 pragmas detected, `.TM` in
+`kernel.lst`, dedicated shim col 0); board run pending -- expect
+`GOLDEN PASS 802816/802816`.
+
 Checks (all on x86): `build/aiehlc-convtile trace conv2dstem_new.cc` (kernel
 analysis: vector kernel under ASan, every block vs the derived DMA);
 `emu/emu_conv2dstem_new.sh <aout/worklocal>` (the generated kernel + the

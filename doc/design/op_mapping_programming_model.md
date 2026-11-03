@@ -327,6 +327,21 @@ __global__ void conv2d_spatial(
    there. For `simpleconv2dkernel_port.cc` the result is byte-identical to the
    hand-written `simpleconv2d.cc` (28/28 IR dumps, `kernel.cc`, `routing.cc`,
    bcf, prx, host DMA program); x86 emulation 802,816/802,816.
+6. **Cross-check the pipeline.** The shim DMA is built from the derived
+   descriptors, but the **core** windows (`window_init` size, core MM2S/S2MM BD
+   length) and the output round count (`out_rounds`) are re-derived later by
+   the GEMM-model tiling in aiehlc.cc. `checkConvTilingAgainstAnalysis` holds
+   that result to the analysis -- rounds per core, OFM / IFM / WGT block bytes
+   -- and a mismatch is a build error (`[TilingLinalg] ERROR: <k>: output rounds
+   per core (out_rounds) = 98 ... the kernel's blocks give 14`), because on the
+   board it is a silent `wait_io` hang. Success prints `derived tiling matches
+   the kernel analysis (rounds N, OFM .. B, IFM .. B, WGT .. B)`. The bug it
+   was added for: the C port's `d2` is the output **width** tile, the GEMM
+   model reads it as N, and `spatialNRounds` (= width rounds, already inside
+   `spatialMRounds`) was reset to 1 only when `ow_t != oc per core`; a
+   14x16x16 tile (ResNet-18 layer 1 prototype) got `out_rounds = 14*7 = 98`
+   and a 512 B core output window. It is now reset for every spatial-halo conv.
+   Skill **convoutroundsdoublecount**.
 
 `__global__(conv, map)` kernels that use `load_buffer` get the same trace,
 compared against their declared mapping (`verifyKernelBlocks`, from

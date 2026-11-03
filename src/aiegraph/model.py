@@ -60,6 +60,9 @@ class Model:
     def sha(self) -> str:
         return hashlib.sha1(self.onnx_path.read_bytes()).hexdigest()[:16]
 
+    def __fspath__(self) -> str:
+        return str(self.onnx_path)
+
     def convert(self, target: str = "a78", **kw):
         """``model.convert(target="a78")`` == ``ag.convert(model, target="a78")``."""
         from .embedded import embedded_convert
@@ -123,7 +126,7 @@ def _normalize(path: Path, name: str, source: str) -> Model:
                  input_shape=INPUT_SHAPE, output_shape=out_shape, ops=ops)
 
 
-def download_model(name: str = "resnet18") -> Path:
+def _fetch(name: str) -> Path:
     """Fetch a zoo model into ``~/.cache/aiegraph/models`` (once). Returns its path."""
     if name not in ZOO:
         raise AiegraphError("load", f"unknown model {name!r}",
@@ -141,6 +144,19 @@ def download_model(name: str = "resnet18") -> Path:
                                 hint=f"fetch {url} by hand and pass the file to ag.load()")
         tmp.replace(path)
     return path
+
+
+def download_model(name: str = "resnet18") -> Model:
+    """Fetch a zoo model (once) and load it: ``ag.load(name)`` for zoo names.
+
+    Returns a :class:`Model`, so ``m = ag.download_model("resnet18");
+    m.convert("a78")`` works. A ``Model`` is path-like (``os.fspath(m)`` is the
+    ONNX file), for callers that used the file path this returned before. Named
+    by the file stem (``resnet18-v1-7``), as ``ag.convert(<that path>)`` named
+    it, so the default workdir ``worklocal/aiegraph/<name>`` stays the same.
+    """
+    path = _fetch(name)
+    return _normalize(path, path.name.split(".")[0], "onnx-zoo")
 
 
 def from_onnx(path, name: str = None) -> Model:
@@ -197,8 +213,7 @@ def load(model="resnet18", source: str = None, example_inputs=None, name: str = 
             raise AiegraphError("load", f"torchvision.models has no {text!r}")
         return from_torch(builder(weights="DEFAULT"), example_inputs, name or text)
     if text in ZOO and not Path(text).exists():
-        m = _normalize(download_model(text), name or text, "onnx-zoo")
-        return m
+        return _normalize(_fetch(text), name or text, "onnx-zoo")
     if text.endswith(".onnx") or Path(text).is_file():
         return from_onnx(text, name)
     raise AiegraphError("load", f"don't know how to load {text!r}",

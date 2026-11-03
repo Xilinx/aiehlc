@@ -83,6 +83,17 @@ def test_from_onnx_renames_input(tmp_path, monkeypatch):
     assert ag.convert is ag.embedded_convert and callable(m.convert)
 
 
+def test_download_model_returns_convertible_model(tmp_path, monkeypatch):
+    import os
+    from aiegraph import model as agm
+    monkeypatch.setenv("AIEGRAPH_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setattr(agm, "_fetch", lambda name: _onnx(tmp_path / "resnet18-v1-7.onnx", "data"))
+    m = ag.download_model("resnet18")
+    assert isinstance(m, ag.Model) and m.name == "resnet18-v1-7" and m.source == "onnx-zoo"
+    assert callable(m.convert) and ag.load(m) is m
+    assert os.fspath(m) == str(m.onnx_path) and Path(m) == m.onnx_path   # path-like, as before
+
+
 def test_load_rejects_wrong_input(tmp_path):
     with pytest.raises(ag.AiegraphError, match=r"supports image classifiers"):
         ag.from_onnx(_onnx(tmp_path / "x.onnx", "data", (1, 3, 32, 32)))
@@ -381,3 +392,387 @@ def test_offload_reset_puts_layers_back_on_cpu(tmp_path):
     assert [r["target"] for r in doc["layers"]] == ["cpu", "cpu"]
     assert doc["layers"][0]["replaces"] is None and doc["aie_count"] == 0
     assert emod.offload_reset() == []
+
+
+def test_offload_false_puts_one_layer_back_on_cpu(tmp_path, monkeypatch):
+    from aiegraph.embedded import EmbeddedModel
+    (tmp_path / "layers").mkdir()
+    rows = [{"index": 1, "dir": "01_x", "target": "aie", "entry": "aie_s1"},
+            {"index": 4, "dir": "04_y", "target": "aie", "entry": "aie_s4"}]
+    (tmp_path / "layers" / "partition.json").write_text(json.dumps({"layers": rows}))
+    emod = EmbeddedModel(tmp_path)
+    monkeypatch.setattr(emod, "resolve", lambda ref: [int(str(ref).replace("layer", ""))])
+    assert emod.offload("layer1", False) == ["layer1"]
+    doc = json.loads((tmp_path / "layers" / "partition.json").read_text())
+    assert [r["target"] for r in doc["layers"]] == ["cpu", "aie"]     # layer4 untouched
+    assert emod.offload("layer1", False) == []                        # already on the CPU
+
+
+# ── board run (offline: a fake board script) ───────────────────────────────
+
+_CONSOLE = """[aie-offload] layer 01 conv ENTER
+[aie-offload] layer 01 conv EXIT rc=0 hash=1234
+  1. class=258  Samoyed                        logit=12.0173
+  2. class=279  Arctic fox                     logit=8.5263
+resnet18: top1 class=258 logit=12.017338
+  inference    1271.003 ms   <- graph_run()
+device_teardown done
+Test complete!
+"""
+
+
+def _fake_board(tmp_path, monkeypatch, console=_CONSOLE, rc=0):
+    from aiegraph import board
+    fake = tmp_path / "fake_board.py"
+    fake.write_text("import os, sys\nsys.stdout.write(open(os.environ['FAKE_CONSOLE']).read())\n"
+                    f"sys.exit({rc})\n")
+    (tmp_path / "console.txt").write_text(console)
+    monkeypatch.setenv("FAKE_CONSOLE", str(tmp_path / "console.txt"))
+    seen = {}
+
+    def cmd(b, elf, netload, reboot, args=()):
+        seen.update(board=b.name, netload=netload, reboot=reboot,
+                    real=board.board_command.__wrapped__(b, elf, netload, reboot, args))
+        return [sys.executable, str(fake)]
+    cmd.__wrapped__ = board.board_command
+    monkeypatch.setattr(board, "board_command", cmd)
+    monkeypatch.setattr(board, "_busy", lambda script: [])
+    monkeypatch.setattr(board, "_envlocal", lambda d: {})
+    elf = tmp_path / "main.elf"
+    elf.write_bytes(b"\x7fELF")
+    return elf, seen
+
+
+def test_run_defaults_to_palmyra_netload(tmp_path, monkeypatch):
+    from aiegraph.board import run_on_board
+    monkeypatch.setenv("PALIP", "lab-host"), monkeypatch.setenv("BOARDNAME", "pal1")
+    elf, seen = _fake_board(tmp_path, monkeypatch)
+    rep = run_on_board(elf, verbose=False)
+    assert rep.ok and rep.board == "palmyra" and rep.host == "lab-host", rep
+    assert rep.top1 == (258, 12.017338) and rep.top5[1] == (279, "Arctic fox", 8.5263)
+    assert rep.inference_ms == 1271.003 and (rep.aie_enter, rep.aie_exit) == (1, 1)
+    assert seen["netload"] and "--netload" in seen["real"] and seen["real"][-1] == str(elf.resolve())
+    assert Path(rep.log).read_text() == _CONSOLE
+
+
+def test_run_vek385_by_host(tmp_path, monkeypatch):
+    from aiegraph.board import board_env, board_spec, run_on_board
+    monkeypatch.delenv("VEK385IP", raising=False)
+    elf, seen = _fake_board(tmp_path, monkeypatch)
+    rep = run_on_board(elf, ag.VEK385, "crimini2", verbose=False)
+    assert rep.ok and rep.board == "vek385" and rep.host == "crimini2"
+    assert not seen["netload"] and seen["reboot"]                      # powers off, no -nonreboot
+    assert "-nonreboot" not in seen["real"] and "appvek385.py" in seen["real"][1]
+    assert board_spec("VEK385").name == "vek385" and board_spec("pal").name == "palmyra"
+    with pytest.raises(ag.AiegraphError, match="VEK385IP not set"):
+        board_env(board_spec(ag.VEK385))
+    with pytest.raises(ag.AiegraphError, match="unknown board"):
+        board_spec("zcu102")
+    with pytest.raises(ag.AiegraphError, match="no netboot"):
+        run_on_board(elf, ag.VEK385, "crimini2", netload=True, verbose=False)
+
+
+def test_run_failures(tmp_path, monkeypatch):
+    from aiegraph import board
+    monkeypatch.setenv("PALIP", "lab-host"), monkeypatch.setenv("BOARDNAME", "pal1")
+    elf, _ = _fake_board(tmp_path, monkeypatch, console="[aie-offload] layer 01 ENTER\nwait_io TIMEOUT\n")
+    rep = board.run_on_board(elf, verbose=False)
+    assert not rep.ok and "TIMEOUT" in rep.reason
+    with pytest.raises(ag.AiegraphError, match="console log"):
+        rep.raise_for_status()
+    monkeypatch.setattr(board, "_busy", lambda script: [4242])
+    with pytest.raises(ag.AiegraphError, match="one board session at a time"):
+        board.run_on_board(elf, verbose=False)
+
+
+# ── per-layer profile (make PROFILE=1 rows) ────────────────────────────────
+
+_PROF_CONSOLE = _CONSOLE.replace("device_teardown done", """PROF   0      0.500 ms  cpu divide_round_add_clip_cast
+PROF   1      2.000 ms  aie nn_contrib_conv2d_NCHWc_subtract
+PROF   2      1.000 ms  cpu max_pool2d
+PROF   3      1.500 ms  cpu nn_contrib_conv2d_NCHWc_add
+PROF   4      1.000 ms  cpu nn_contrib_conv2d_NCHWc_add
+PROF sum      6.000 ms over 1 run(s)
+device_teardown done""")
+
+
+def _profiled_emod(tmp_path, monkeypatch):
+    from aiegraph.embedded import EmbeddedModel, Layer
+    emod = EmbeddedModel(tmp_path)
+    layers = [Layer(0, "s0", "00_q", [0], "quantize", "", "cpu"),
+              Layer(1, "s1", "01_c", [1], "conv7x7/2 ->uint8", "", "aie:k"),
+              Layer(2, "s2", "02_p", [2], "max pool2d", "", "cpu"),
+              Layer(3, "s3", "03_c", [3, 4], "conv3x3/1 ->int8", "", "cpu")]
+    monkeypatch.setattr(EmbeddedModel, "layers", property(lambda self: layers))
+    monkeypatch.setattr(emod, "resolve", lambda ref: [int(str(r).replace("layer", ""))
+                                                      for r in (ref if isinstance(ref, list) else [ref])])
+    return emod
+
+
+def test_parse_console_profile_rows():
+    from aiegraph.board import parse_console
+    got = parse_console(_PROF_CONSOLE)["profile"]
+    assert len(got) == 5 and got[1] == (1, 2.0, "aie", "nn_contrib_conv2d_NCHWc_subtract")
+
+
+def test_profile_per_call_and_per_layer(tmp_path, monkeypatch):
+    from aiegraph.board import parse_console
+    from aiegraph.report import RunReport
+    emod = _profiled_emod(tmp_path, monkeypatch)
+    got = parse_console(_PROF_CONSOLE)
+    emod.last_run = RunReport(ok=True, board="palmyra", host="h", elf="e", log="l",
+                              inference_ms=got["inference_ms"], profile=got["profile"])
+    p = emod.profile(ag.ALL)
+    assert [r["layer"] for r in p.rows] == ["layer0", "layer1", "layer2", "layer3", "layer3"]
+    assert p.total_ms == 6.0 and p.ms("aie") == 2.0 and round(p.rows[1]["pct"], 1) == 33.3
+    by = emod.profile(ag.ALL, by="layer")
+    l3 = [r for r in by.rows if r["layer"] == "layer3"][0]
+    assert l3["calls"] == [3, 4] and l3["ms"] == 2.5 and "layer3" in repr(by)
+    assert [r["call"] for r in emod.profile("layer3").rows] == [3, 4]
+    assert [r["layer"] for r in emod.profile(ag.ALL, by="layer", top=2).rows] == ["layer3", "layer1"]
+
+
+def test_profile_reads_log_and_needs_profile_build(tmp_path, monkeypatch, capsys):
+    emod = _profiled_emod(tmp_path, monkeypatch)
+    assert emod.profile(ag.ALL) is None
+    assert "profiling not enabled -- no board run yet" in capsys.readouterr().out
+    (tmp_path / "arm_build").mkdir()
+    (tmp_path / "arm_build" / "run_vek385.log").write_text(_CONSOLE)
+    assert emod.profile(ag.ALL) is None
+    out = capsys.readouterr().out
+    assert "profiling not enabled" in out and "emod.run(profile=True)" in out
+    (tmp_path / "arm_build" / "run_vek385.log").write_text(_PROF_CONSOLE)
+    p = emod.profile(ag.ALL)
+    assert p.board == "vek385" and len(p.rows) == 5
+
+
+def test_make_vars_change_forces_driver_rebuild(tmp_path):
+    from frontend.tvmrelay import arm_build as ab
+    for f in ("graph_driver.o", "main.o", "main.elf", "layer.o"):
+        (tmp_path / f).write_text("x")
+    assert ab.sync_make_vars(tmp_path, None) == [] and (tmp_path / "main.o").is_file()  # unchanged
+    assert ab.sync_make_vars(tmp_path, {"PROFILE": 1}) == ["PROFILE=1"]
+    assert not (tmp_path / "graph_driver.o").exists() and not (tmp_path / "main.elf").exists()
+    assert (tmp_path / "layer.o").is_file() and ab.built_make_vars(tmp_path) == {"PROFILE": "1"}
+    (tmp_path / "main.o").write_text("x")
+    ab.sync_make_vars(tmp_path, {"PROFILE": "1"})
+    assert (tmp_path / "main.o").is_file()                       # same vars: nothing deleted
+    ab.sync_make_vars(tmp_path, None)
+    assert not (tmp_path / "main.o").exists()                    # back to plain: rebuilt again
+
+
+# ── AI_perf_analysis / AI_kernel_accelerate (synthetic layer, fake claude) ─────────
+
+def _elf32(path, text=400, data=40, bss=4000):
+    import struct
+    ph = [(1, 0, 0, 0, text, text, 5, 1), (1, 0, 0x78000, 0, data, data + bss, 6, 1)]
+    hdr = b"\x7fELF" + bytes([1, 1, 1]) + bytes(9) + struct.pack("<HHIIIIIHHHHHH", 2, 0x108, 1, 0, 52, 0, 0,
+                                                                  52, 32, len(ph), 0, 0, 0)
+    path.write_bytes(hdr + b"".join(struct.pack("<8I", *p) for p in ph))
+
+
+_PERF_SRC = """#include <stdint.h>
+__global__ void k(aie::port<input_window_int8 *, aie::IFM, aie::shape<8>> x) { /* TODO(compute): */ }
+int run(void) { aieArray device; aieMesh mesh = device.partition({3, 6, 0, 6}, 4, 4); return -1; }
+AIEK_ENTRY(aiek_t) { return 0; }
+"""
+
+
+def _perf_workdir(tmp_path, monkeypatch, host_cc="__Runtime_load_kernel_group_16t(d);\n"
+                  "__Runtime_dma_bd_config(a);\n" * 1 + "__Runtime_teardown_all();\n"):
+    from aiegraph.embedded import EmbeddedModel, Layer
+    wd = tmp_path / "wd"
+    adir = wd / "layers" / "01_c" / "aie"
+    (adir / "build").mkdir(parents=True)
+    (adir / "host.cc").write_text(host_cc)
+    (adir / "routing.cc").write_text("XAie_StrmConnCctEnable(a);\n")
+    (adir / "build" / "kernel.lst").write_text("MAC r1\n")
+    _elf32(adir / "build" / "kernel")
+    (wd / "aiek" / "aiek_t").mkdir(parents=True)
+    (wd / "aiek" / "aiek_t" / "aiehlc.log").write_text("Set kernel_tiling out_rounds=14\n")
+    src = tmp_path / "k" / "aiek_t.cc"
+    src.parent.mkdir()
+    src.write_text(_PERF_SRC)
+    rows = [{"index": 1, "dir": "01_c", "target": "aie", "aie_dir": "layers/01_c/aie",
+             "source": str(src), "user_kernel": "aiek_t"}]
+    (wd / "layers" / "partition.json").write_text(json.dumps({"layers": rows}))
+    (wd / "arm_build").mkdir()
+    (wd / "arm_build" / "run_palmyra.log").write_text(
+        "[aie-offload] layer 01 conv: ENTER\n[aie-offload] layer 01: EXIT rc=-4, out\n"
+        "  inference    100.000 ms   <- graph_run()\n"
+        "PROF   0      2.000 ms  cpu q\nPROF   1     77.244 ms  aie conv\n")
+    emod = EmbeddedModel(wd)
+    lay = [Layer(0, "s0", "00_q", [0], "quantize", "", "cpu"),
+           Layer(1, "s1", "01_c", [1], "conv7x7/2 ->uint8", "", "aie:aiek_t", str(src))]
+    monkeypatch.setattr(EmbeddedModel, "layers", property(lambda self: lay))
+    monkeypatch.setattr(emod, "resolve", lambda ref: [int(str(ref).replace("layer", ""))])
+    return emod, src, adir
+
+
+def test_perf_facts_model_rules(tmp_path, monkeypatch):
+    from aiegraph import aiperf
+    emod, src, adir = _perf_workdir(tmp_path, monkeypatch)
+    rep = emod.AI_perf_analysis("layer1", ai=False)
+    f, m = rep.facts, rep.model
+    assert f["elf"] == {"text": 400, "data": 40, "bss": 4000} and f["src"]["mesh"] == [4, 4]
+    assert f["run"]["measured_ms"] == 77.244 and f["run"]["exit_rc"] == -4
+    assert m["elf_words_per_core"] == 1110 and abs(m["elf_load_ms"] - 16 * 1110 * 372e-6) < 1e-3
+    ids = [r["id"] for r in rep.rules]
+    assert ids[:3] == ["R0", "R1", "R2"], ids
+    assert (emod.workdir / "aiperf" / "layer1" / "report.md").is_file() and "AI_kernel_accelerate" in repr(rep)
+    assert emod.AI_perf_analaysis == emod.AI_perf_analysis            # the alias
+    with pytest.raises(ag.AiegraphError, match="runs on the CPU"):
+        emod.AI_perf_analysis("layer0", ai=False)
+    # control-packet ELF load prices at 2.9 ns/word, not 372
+    f2 = aiperf.layer_facts(emod, "layer1")
+    f2["host"]["ctrl_elf_load"] = True
+    assert aiperf.cost_model(f2)["elf_load_ms"] < m["elf_load_ms"] / 100
+
+
+_FAKE_PERF_CLAUDE = r'''#!{py}
+import json, os, pathlib, sys
+cwd = pathlib.Path.cwd()
+with open(cwd / "fake_calls.txt", "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+prompt = sys.stdin.read()
+if "--resume" in sys.argv:                       # a gate failure coming back
+    assert "Our gate rejected" in prompt
+    print(json.dumps({{"type": "result", "session_id": "p-1", "result": "fixed the build"}}))
+    sys.exit(0)
+assert "kernelperfcheck" in prompt
+if "Make one AIE-offloaded layer faster" in prompt:
+    (entry,) = [p for p in cwd.glob("*.cc")]
+    entry.write_text("#pragma control_plan_op_control_packet\n" + entry.read_text())
+    text = "S1: control-packet ELF load"
+else:
+    rep = {{"summary": "launch overhead, no compute", "computing": False,
+            "bottlenecks": [{{"what": "ELF over MMIO", "evidence": "host.cc", "est_ms": 37.0}}],
+            "suggestions": [{{"id": "S1", "change": "control packets", "where": "pragma",
+                              "expected_saving_ms": 36.0, "risk": "low", "effort": "low"}}],
+            "predicted_ms_after": 40.0}}
+    text = "analysis\n```json\n" + json.dumps(rep) + "\n```"
+print(json.dumps({{"type": "result", "session_id": "p-1", "result": text}}))
+'''
+
+
+@pytest.fixture
+def fake_perf_claude(tmp_path):
+    exe = tmp_path / "bin" / "claude"
+    exe.parent.mkdir()
+    exe.write_text(_FAKE_PERF_CLAUDE.format(py=sys.executable))
+    exe.chmod(0o755)
+    return str(exe)
+
+
+def test_ai_perf_analysis_parses_claude_report(tmp_path, monkeypatch, fake_perf_claude):
+    emod, _src, _ = _perf_workdir(tmp_path, monkeypatch)
+    rep = emod.AI_perf_analysis("layer1", claude=fake_perf_claude, quiet=True)
+    assert rep.ai["summary"] == "launch overhead, no compute" and rep.predicted_ms_after == 40.0
+    assert rep.suggestions[0]["id"] == "S1" and rep.session == "p-1"
+    argv = json.loads((emod.workdir / "aiperf" / "layer1" / "fake_calls.txt").read_text().splitlines()[0])
+    assert argv[argv.index("--allowedTools") + 1] == "Read,Grep,Glob"      # analysis is read-only
+    assert json.loads((emod.workdir / "aiperf" / "layer1" / "report.json").read_text())["ai"]["suggestions"]
+
+
+def test_ai_kernel_accelerate_gates_and_predicts(tmp_path, monkeypatch, fake_perf_claude):
+    from aiegraph import aiperf
+    emod, src, _adir = _perf_workdir(tmp_path, monkeypatch)
+    rep = emod.AI_perf_analysis("layer1", claude=fake_perf_claude, quiet=True)
+    before = src.read_text()
+    wl = tmp_path / "newbuild"                      # what aiehlc would emit for the edited copy
+    (wl / "build").mkdir(parents=True)
+    (wl / "host.cc").write_text("__Runtime_load_kernel_group_16t_ctrl(d);\n__Runtime_teardown_all();\n")
+    (wl / "routing.cc").write_text("")
+    _elf32(wl / "build" / "kernel")
+    (wl / "aiehlc.log").write_text("[aiehlc] Detected #pragma control_plan_op_control_packet\n")
+    verdicts = iter(["aiehlc build failed: boom", ""])
+
+    def gate(emod_, idx, entry, dest, verbose):
+        assert "control_plan_op_control_packet" in entry.read_text()
+        return None, {"ok": True, "worklocal": str(wl), "log": str(wl / "aiehlc.log")}, next(verdicts)
+    monkeypatch.setattr(aiperf, "_gate", gate)
+    res = emod.AI_kernel_accelerate("layer1", rep, claude=fake_perf_claude, quiet=True)
+    assert res.ok and res.rounds == 2 and src.read_text() == before            # original untouched
+    assert Path(res).parent == emod.workdir / "aiopt" / "layer1_aiek_t" and Path(res).name == "aiek_t.cc"
+    assert res.model_after["elf_load_ms"] < rep.model["elf_load_ms"] / 100
+    assert res.predicted_ms == round(77.244 - res.saved_ms, 3) and 6.5 < res.saved_ms < 6.7   # 16x1110 words x 372 ns
+    calls = (Path(res).parent / "fake_calls.txt").read_text().splitlines()
+    assert "--resume" not in calls[0] and '"--resume", "p-1"' in calls[1]      # gate failure went back
+    assert "predicted" in repr(res) and "measured before 77.244 ms" in repr(res)
+
+
+def test_host_facts_count_calls_not_declarations():
+    from aiegraph.aiperf import _call_sites
+    text = ('extern "C" void __Runtime_teardown_all();\n'
+            "void __Runtime_teardown_all(void);\nXAie_DmaDesc __Runtime_dma_bd_config(int a);\n"
+            "  XAie_DmaDesc v1 = __Runtime_dma_bd_config(d, 1);\n  __Runtime_startio(x);\n"
+            "  return __Runtime_wait(d);\n")
+    assert _call_sites(text) == {"__Runtime_dma_bd_config": 1, "__Runtime_startio": 1, "__Runtime_wait": 1}
+
+
+def test_perf_report_round_trips_from_disk(tmp_path, monkeypatch, fake_perf_claude):
+    emod, _src, _ = _perf_workdir(tmp_path, monkeypatch)
+    rep = emod.AI_perf_analysis("layer1", claude=fake_perf_claude, quiet=True)
+    back = ag.PerfReport.load(rep.dest)                       # a new session: from the saved dir
+    assert back.ai == rep.ai and back.facts == rep.facts and back.suggestions == rep.suggestions
+    assert "analysis" in back.text and back.measured_ms == 77.244
+    with pytest.raises(ag.AiegraphError, match="no saved report"):
+        ag.PerfReport.load(tmp_path / "nowhere")
+
+
+def test_sources_full_paths(tmp_path, monkeypatch):
+    from aiegraph import _env
+    from aiegraph.embedded import EmbeddedModel, Layer
+    emod = EmbeddedModel(tmp_path)
+    lay = [Layer(0, "s0", "00_q", [0], "q", "", "cpu", "layers/00_q/00_q.c"),
+           Layer(1, "s1", "01_c", [1], "c", "", "aie:k", "src/aietensorop/conv2dstem/conv2dstem_uk.cc"),
+           Layer(2, "s2", "02_c", [2], "c", "", "aie:k2", "aiopt/layer2_k/k.cc")]   # copy inside the workdir
+    (tmp_path / "aiopt" / "layer2_k").mkdir(parents=True)
+    (tmp_path / "aiopt" / "layer2_k" / "k.cc").write_text("")
+    monkeypatch.setattr(EmbeddedModel, "layers", property(lambda self: lay))
+    assert emod.source_path(lay[0]) == (tmp_path / "layers/00_q/00_q.c").resolve()
+    assert emod.source_path(lay[1]) == (_env.repo_root() / "src/aietensorop/conv2dstem/conv2dstem_uk.cc").resolve()
+    assert emod.source_path(lay[2]) == (tmp_path / "aiopt/layer2_k/k.cc").resolve()
+    text = emod.sources()
+    assert str(tmp_path / "layers/00_q/00_q.c") in text and str(_env.repo_root() / "src/aietensorop/conv2dstem/conv2dstem_uk.cc") in text
+    assert "  src/aietensorop/conv2dstem/conv2dstem_uk.cc" in emod.sources(full=False)
+
+
+def test_stage_never_deletes(tmp_path):
+    from aiegraph.aiproto import _stage
+    dest = tmp_path / "aiopt" / "layer1_k"
+    dest.mkdir(parents=True)
+    (dest / "k.cc").write_text("the kernel layer 1 runs")
+    with pytest.raises(ag.AiegraphError, match="does not exist"):          # stale path: nothing touched
+        _stage(tmp_path / "gone" / "k.cc", dest, "k.cc")
+    assert (dest / "k.cc").read_text() == "the kernel layer 1 runs"
+    with pytest.raises(ag.AiegraphError, match="contains the source"):     # restage over itself
+        _stage(dest / "k.cc", dest, "k.cc")
+    assert (dest / "k.cc").read_text() == "the kernel layer 1 runs"
+    other = tmp_path / "src" / "k.cc"
+    other.parent.mkdir()
+    other.write_text("new")
+    _stage(other, dest, "k.cc")                                             # earlier copy moved aside
+    (prev,) = (tmp_path / "aiopt").glob("layer1_k.prev-*")
+    assert (prev / "k.cc").read_text() == "the kernel layer 1 runs" and (dest / "k.cc").read_text() == "new"
+
+
+def test_accelerate_an_accelerated_kernel_with_a_stale_report(tmp_path, monkeypatch, fake_perf_claude):
+    """The 2026-11-02 loss: report made before an offload of the aiopt copy, its source
+    path stale; staging must use the layer's CURRENT kernel and leave it intact."""
+    from aiegraph import aiperf
+    from aiegraph.embedded import EmbeddedModel, Layer
+    emod, src, _ = _perf_workdir(tmp_path, monkeypatch)
+    rep = emod.AI_perf_analysis("layer1", claude=fake_perf_claude, quiet=True)
+    cur = emod.workdir / "aiopt" / "layer1_aiek_t" / "aiek_t.cc"           # layer 1 now runs a copy
+    cur.parent.mkdir(parents=True)
+    cur.write_text(_PERF_SRC + "// accelerated once\n")
+    lay = [Layer(0, "s0", "00_q", [0], "quantize", "", "cpu"),
+           Layer(1, "s1", "01_c", [1], "conv7x7/2 ->uint8", "", "aie:aiek_t", "aiopt/layer1_aiek_t/aiek_t.cc")]
+    monkeypatch.setattr(EmbeddedModel, "layers", property(lambda self: lay))
+    rep.facts["source"] = str(emod.workdir.parent / "aiopt" / "layer1_aiek_t" / "aiek_t.cc")   # stale, absent
+    monkeypatch.setattr(aiperf, "_gate", lambda *a: (None, None, "aiehlc build failed: stop here"))
+    res = emod.AI_kernel_accelerate("layer1", rep, claude=fake_perf_claude, quiet=True, rounds=1)
+    assert cur.read_text().endswith("// accelerated once\n")               # the running kernel survived
+    assert Path(res).parent.name == "layer1_aiek_t_r2" and res.original == cur
+    assert "// accelerated once" in Path(res).read_text()                   # staged from the CURRENT kernel

@@ -233,6 +233,47 @@ static std::vector<std::string> userMacroDefines; // #define lines from user sou
 // per-port block descriptors: convautotile::kernelTUDecls). Appended to
 // userMacroDefines after the #define scan, which rebuilds that list.
 static std::vector<std::string> convKernelDecls;
+// Per kernel: the conv auto-tiling result (for a kernel-only source, the one the
+// kernel analysis proved against the traced load_buffer / store_buffer blocks).
+// The authority for per-core rounds and per-round block bytes: the tiling
+// derivation below re-derives both through the GEMM model and must agree.
+static std::map<std::string, convautotile::Derived> convDerivedByKernel;
+
+// Spatial-halo conv: the core windows and round count the GEMM-model derivation
+// produced must be the blocks the kernel loads / stores, as the conv auto-tiling
+// (kernel analysis) derived them. A mismatch means the core DMA and the shim DMA
+// disagree on the transfer count -- on the board a silent wait_io hang -- so it
+// is a build error. No entry (hand-written GemmSpace source): nothing to check.
+static bool checkConvTilingAgainstAnalysis(const std::string &kernel, const DerivedTilingParams &dp, int64_t tileM,
+                                           int64_t tileN, int64_t elemBytes) {
+    auto it = convDerivedByKernel.find(kernel);
+    if (it == convDerivedByKernel.end())
+        return true;
+    const convautotile::Derived &d = it->second;
+    struct Item {
+        const char *what;
+        int64_t pipeline, analysis;
+    } items[] = {
+        {"output rounds per core (out_rounds)", dp.spatialMRounds * dp.spatialNRounds, d.rounds},
+        {"output block bytes per round", tileM * tileN * elemBytes, d.ofm_round_bytes},
+        {"input slab bytes per round", dp.convHaloBufSize * elemBytes, d.ifm_round_bytes},
+        {"weight block bytes", dp.effectiveK * tileN * elemBytes, d.wgt_bytes},
+    };
+    bool ok = true;
+    for (const auto &i : items) {
+        if (i.pipeline == i.analysis)
+            continue;
+        llvm::errs() << "[TilingLinalg] ERROR: " << kernel << ": " << i.what << " = " << i.pipeline
+                     << " in the derived tiling, but the kernel's blocks give " << i.analysis
+                     << " (conv auto-tiling / kernel analysis); the core and shim DMA would disagree\n";
+        ok = false;
+    }
+    if (ok)
+        llvm::outs() << "[TilingLinalg] " << kernel << ": derived tiling matches the kernel analysis (rounds "
+                     << d.rounds << ", OFM " << d.ofm_round_bytes << " B, IFM " << d.ifm_round_bytes << " B, WGT "
+                     << d.wgt_bytes << " B)\n";
+    return ok;
+}
 
 // File-scope code the user wants carried verbatim into the generated kernel,
 // delimited in the source by:
@@ -2621,9 +2662,19 @@ public:
                                 // core (tileCols=16), NOT the C-port d2 transfer width
                                 // (OW_T*OC_PER_G=128) that inflated bufferSize/numRounds.
                                 tileN_eff = derivedTilingParams.tileCols;
-                                // N is not sub-tiled within a core for conv (one matmul N pass).
-                                derivedTilingParams.spatialNRounds = 1;
                             }
+                            // N is not sub-tiled within a core for conv (one matmul N pass).
+                            // Unconditional: spatialNRounds came from the C port's d2 groups,
+                            // which for a conv are the output WIDTH rounds -- already folded
+                            // into spatialMRounds (= w_rounds * l2_rounds). Gating this on the
+                            // tileN override above left it at w_rounds whenever ow_t happened
+                            // to equal the per-core channel count (14x16x16 tile: out_rounds
+                            // 14*7=98, a 512 B core output window, wait_io hang).
+                            if (derivedTilingParams.spatialNRounds != 1)
+                                llvm::outs() << "[TilingLinalg] Conv spatial-halo: spatialNRounds="
+                                             << derivedTilingParams.spatialNRounds
+                                             << " -> 1 (width rounds are in spatialMRounds)\n";
+                            derivedTilingParams.spatialNRounds = 1;
                         }
 
                         // ---- Compute per-port DMA round/buffer parameters ----
@@ -2793,6 +2844,10 @@ public:
                                     derivedTilingParams.spatialMRounds * derivedTilingParams.spatialNRounds;
                             derivedTilingParams.portParams.push_back(pp);
                         }
+                        if (isSpatialHaloConv &&
+                            !checkConvTilingAgainstAnalysis(currentLaunchKernel, derivedTilingParams, tileM_eff,
+                                                            tileN_eff, elementBytes))
+                            std::exit(1);
                         // Mark invalid if the spatial-halo M-round derivation found an
                         // inconsistency (see convHaloDeriveError above) so downstream passes do
                         // not act on a malformed tiling.
@@ -3844,6 +3899,7 @@ public:
                     llvm::errs() << "[ConvAutoTile] WARNING: " << err << "\n";
             }
             convKernelDecls.clear();
+            convDerivedByKernel.clear();
             // Kernel-only sources (no aie::Conv2d / aie::Mapping; ports carry
             // aie::shape): derive the DMA layout from the kernel's own
             // load_buffer / store_buffer and rewrite into the (conv, map) form.
@@ -3895,6 +3951,7 @@ public:
                              << "x" << d.w_rounds << ", L1 " << d.l1_bytes << " B\n";
                 for (auto &n : d.notes)
                     llvm::outs() << "[ConvAutoTile]   note: " << n << "\n";
+                convDerivedByKernel[k.kernel] = d;
                 for (auto &decl : convautotile::kernelTUDecls(k))
                     if (std::find(convKernelDecls.begin(), convKernelDecls.end(), decl) == convKernelDecls.end())
                         convKernelDecls.push_back(decl);

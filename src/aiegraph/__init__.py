@@ -15,7 +15,11 @@
     print(module.check_offload(region="conv1", kernel="conv2dstem").summary())
     module.assign(region="conv1", backend="aie:conv2dstem")
     print(module.partition(fallback="cpu").report())
-    module.build(target="a78", output="resnet18_a78")  # main.elf (never runs it)
+    module.build(target="a78", output="resnet18_a78")  # main.elf
+    print(module.run(profile=True))                    # on palmyra; module.run(ag.VEK385, "host")
+    print(module.profile(ag.ALL))                      # each layer's time on the board
+    report = module.AI_perf_analysis("layer1")         # why it is slow (claude + skill kernelperfcheck)
+    result = module.AI_kernel_accelerate("layer1", report)  # claude optimizes a copy; gated
 
     print(ag.offload_prototype())                      # the kernel-file format
     proto = module.offload_prototype("layer1")         # one layer: args, AIEK_SPEC, kernel backbone
@@ -28,7 +32,8 @@ there ``layer1`` is TVM kernel 1, not torchvision's ``layer1``.
 
 Install: ``pip install -e <repo>`` (then ``aiegraph doctor``). Design:
 ``doc/design/aiegraph_python_api.md``. Kernels: ``doc/tutorial_userkernel.md``.
-Nothing in this package ever runs on a board.
+Only ``run()`` touches a board (through ``script/test/apppaltest.py`` /
+``appvek385.py``); everything else stays on this machine.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from pathlib import Path
 
 from ._env import doctor, setup
 from .contract import KernelContract
+from .board import PALMYRA, VEK385
 from .embedded import EmbeddedModel, Layer, convert, current, embedded_convert
 from .embedded import open_workdir as open  # noqa: A001  (ag.open(workdir))
 from .errors import AiegraphError
@@ -44,14 +50,19 @@ from .prototype import Prototypes, KernelFormat, OffloadPrototype
 from .model import ZOO, Model, download_model, from_onnx, from_torch, load
 from .region import Region, Regions
 from .report import (AIProtoResult, BuildReport, CheckReport, DetectReport, PartitionPlan,
-                     RegionCheck)
+                     KernelOptResult, PerfReport, ProfileReport, RegionCheck, RunReport)
 
 __version__ = "0.1.0"
+
+#: ``emod.profile(ag.ALL)``: every call / layer.
+ALL = "all"
 
 __all__ = ["load", "from_onnx", "from_torch", "download_model", "ZOO", "Model",
            "convert", "embedded_convert", "EmbeddedModel", "Layer", "open", "current",
            "Region", "Regions", "KernelContract", "RegionCheck", "PartitionPlan",
            "offload_check", "offload", "offload_reset", "detect", "lint", "build", "run_local",
+           "run", "profile", "ALL", "PALMYRA", "VEK385", "RunReport", "ProfileReport",
+           "PerfReport", "KernelOptResult",
            "compile", "guide", "doctor", "setup", "AiegraphError", "CheckReport",
            "DetectReport", "BuildReport", "AIProtoResult", "offload_prototype",
            "OffloadPrototype", "Prototypes", "KernelFormat"]
@@ -99,6 +110,17 @@ def build(**kw) -> BuildReport:
 
 def run_local(**kw) -> BuildReport:
     return current().run_local(**kw)
+
+
+def run(board: str = PALMYRA, host: str = None, **kw) -> RunReport:
+    """``ag.run()`` / ``ag.run(ag.VEK385, "hostname")``: the current model's
+    ``main.elf`` on a lab board (see ``EmbeddedModel.run``)."""
+    return current().run(board, host, **kw)
+
+
+def profile(which=ALL, **kw) -> ProfileReport:
+    """``ag.profile(ag.ALL)``: per-layer board time of the current model's last run."""
+    return current().profile(which, **kw)
 
 
 def lint(source):

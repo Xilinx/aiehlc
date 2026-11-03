@@ -3,7 +3,8 @@
 `aiegraph` turns an ONNX or PyTorch image classifier into int8 C for the
 Cortex-A78 (one C file per layer, plus a driver and Makefile), and moves the
 layers you choose onto your own AIE kernels after proving them on x86. It
-never runs anything on a board; it hands you `main.elf`.
+hands you `main.elf`, and `emod.run()` runs it on a lab board (palmyra by
+default, or `emod.run(ag.VEK385, "hostname")`) -- nothing else touches a board.
 
 Design and rationale: [doc/design/aiegraph_python_api.md](design/aiegraph_python_api.md).
 Writing an AIE kernel for it: [doc/tutorial_userkernel.md](tutorial_userkernel.md).
@@ -31,7 +32,7 @@ What pip cannot install, and how it is handled:
 |---|---|
 | TVM 0.16 (no wheel exists) | **automatic**: aiegraph attaches the build in `thirdparty/tvm-0.16`. If there is none, `aiegraph setup` builds it once (10–25 min) — or the first conversion does. |
 | Vitis (AIE compiler `xchesscc`, aarch64 cross gcc) | licensed, install it yourself and `source <Vitis>/settings64.sh`. Needed only for `offload` (the aiehlc build) and `build` (linking `main.elf`). Everything else works without it. |
-| a board | never used by aiegraph |
+| a board | only for `emod.run()`: `script/test/apppaltest.py` (palmyra: `USERNAME`/`PALIP`/`BOARDNAME`) or `appvek385.py` (VEK385: `USERNAME`/`VEK385IP`), from the env or `script/test/envlocal.sh`; `pexpect` |
 
 `aiegraph doctor` on a working machine:
 
@@ -276,8 +277,9 @@ any kernel; it does not prove that aiehlc compiles it for AIE2PS -- `offload()`
 | `ag.embedded_convert(m, target="a78", calib=None, image=None, workdir=None, force=False, keep_offloads=False)` | int8 + per-layer C + A78 driver; the conversion is cached by model hash + options, but it starts FRESH: earlier offloads go back to the CPU unless `keep_offloads=True`; `force=True` redoes the conversion |
 | `ag.open(workdir)` | adopt an existing `deploy_flow.py` tree as it is (earlier offloads included) |
 | `emod.offload_reset(layers=None)` / `ag.offload_reset(...)` | put offloaded layers (all, or `"layer4"` etc.) back on the CPU; driver regenerated |
+| `emod.offload("layer1", False)` | the same for one spec: undo `offload("layer1", k.cc)`, layer back on the CPU (returns the layers reset, `[]` if it was not on the AIE) |
 | `emod.layers`, `emod.layer(ref)`, `emod.resolve(ref)` | layers; `ref` = `"layer1"`, `1`, `"layer4-9"`, `"conv3x3*"`, `"call[08]"`, a list |
-| `print(emod.sources())` | the code each layer runs: `layers/NN_*/NN_*.c` (TVM C) on the CPU, the user kernel source on the AIE; `print(emod)` also shows `aie:<kernel>  <- <source>` |
+| `print(emod.sources())` / `emod.source_path("layer1")` | the code each layer runs, as **absolute** paths: `layers/NN_*/NN_*.c` (TVM C) on the CPU, the user kernel source on the AIE (`sources(full=False)`: as partition.json records them -- workdir-relative when the file is inside the workdir, e.g. an `aiopt/` copy, else repo-relative); `print(emod)` also shows `aie:<kernel>  <- <source>` |
 | `ag.offload_prototype()` | the kernel-file format and rules (no model needed) |
 | `emod.offload_prototype(layer, region=None, entry=None)` | a kernel-file backbone for that layer: kernel frame + host run function + entry + proven `AIEK_SPEC`, reference frame; `.write(dir)` (section 4b) |
 | `emod.detect(kernel)` | which layers fit |
@@ -285,6 +287,10 @@ any kernel; it does not prove that aiehlc compiles it for AIE2PS -- `offload()`
 | `emod.offload(spec, build=True, make=False, force=False)` | + aiehlc build + link gate + driver swap |
 | `emod.offload_AI_proto(layers, kernel, rounds=3, model=None)` | NOT READY → `claude -p` ports a copy until `offload_check` is READY (section 4a) |
 | `emod.run_local()` | build and run `main_local.elf` on x86 |
+| `emod.run(board="palmyra", host=None, *, elf=None, build=True, profile=False, netload=None, reboot=None, timeout=1800)` | run `main.elf` on a lab board, (re)building it if missing or older than the driver / `partition.json` / AIE archives; returns a `RunReport` (`.ok`, `.top1`, `.top5`, `.inference_ms`, AIE `ENTER`/`EXIT` counts, `.log`). `emod.run(ag.VEK385, "crimini2")` for a VEK385; `host` overrides `$PALIP` / `$VEK385IP`. Palmyra defaults to `--netload` (a 12–16 MB ELF fails JTAG `dow`); VEK385 powers off afterwards (its `-nonreboot` holds the board until killed). Refuses while another run of the same board script of yours is active. CLI: `aiegraph run [palmyra\|vek385] [HOST]` |
+| `emod.profile(ag.ALL, *, by="call", top=None)` | each layer's time on the board from the last `run()`: one row per call (`by="layer"`: per layer, its calls summed), layer name, op, `cpu`/`aie`, mean ms per `graph_run()`, % of the total; `emod.profile("layer1")` / `top=5` filter. Needs `emod.run(profile=True)` (a `make PROFILE=1` ELF, two timer reads per call; the default `profile=False` builds a plain one, switching rebuilds); otherwise it prints `profiling not enabled` and returns `None`. Reads `last_run`, else the newest `arm_build/run_*.log`. CLI: `aiegraph profile [LAYER ...] [--by-layer] [--top N]` |
+| `report = emod.AI_perf_analysis("layer1", ai=True)` | why an offloaded layer is slow (skill **kernelperfcheck**): deterministic facts (measured ms of the last `run(profile=True)`, EXIT rc, pragmas, generated host.cc call counts, kernel ELF text/data/BSS, kernel.lst vector ops, aiehlc.log), a cost model (372 ns per config-bus word, 2.9 ns over control packets), the skill's rules, then `claude -p` read-only returns bottlenecks + ranked suggestions with predicted savings. `ai=False`: no AI. Saved to `<workdir>/aiperf/<layer>/report.{md,json}` |
+| `result = emod.AI_kernel_accelerate("layer1", report, rounds=2, board=None)` | `claude -p` applies the suggestions to a COPY of the kernel the layer runs NOW (`<workdir>/aiopt/layer<N>_<kernel>/`, `..._r2` when that kernel is itself an aiopt copy; an earlier copy is moved to `<dir>.prev-<time>`, never deleted; the original is never edited); every round is gated by our own `offload_check` + an aiehlc build of the copy (failures go back via `--resume`); the result compares facts/model of the old and NEW build: `result.saved_ms`, `result.predicted_ms`. `board=` also offloads the copy and measures it (`measured_after`). Path-like: `emod.offload(("layer1", result))` |
 | `ag.convert(m, target)` / `m.convert(target)` | `embedded_convert` by its short name |
 | `module.regions`, `module.regions.find(ref)` | model ops by name; `ref` = `"conv1"`, `"layer1.0.conv1"`, `"layer1"` (all under it), `"layer2.*.conv1"`, `"call[08]"` |
 | `module.register_kernel(name, source, op, target="aie", constraints=None)` | a named kernel contract (`op`: `conv2d`/`dense`; constraints: `input_layout`, `weight_layout`, `dtype`, `quantization`) |

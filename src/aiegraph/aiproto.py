@@ -40,9 +40,24 @@ def _digest(path: Path) -> str:
 
 
 def _stage(src: Path, dest: Path, new_name: str) -> Path:
-    """Fresh flat copy of the kernel's directory; the entry renamed to *new_name*."""
+    """Fresh flat copy of the kernel's directory; the entry renamed to *new_name*.
+
+    Never deletes: the source is checked BEFORE anything is touched, a *dest*
+    that contains the source is refused, and an existing *dest* (an earlier
+    run's copy, possibly the kernel a layer is offloaded from) is moved aside
+    to ``<dest>.prev-<time>``. A stale source path once made this rmtree the
+    very kernel layer 1 ran, then fail."""
+    src, dest = Path(src).resolve(), Path(dest).resolve()
+    if not src.is_file():
+        raise AiegraphError("stage", f"kernel source {src} does not exist (nothing was touched)",
+                            hint="the layer's current source: emod.source_path('layerN')")
+    if dest == src.parent or dest in src.parents:
+        raise AiegraphError("stage", f"{dest} contains the source {src}; refusing to restage over it",
+                            hint="pass out_dir= a different directory")
     if dest.exists():
-        shutil.rmtree(dest)
+        keep = dest.with_name(f"{dest.name}.prev-{time.strftime('%Y%m%d-%H%M%S')}")
+        dest.rename(keep)
+        print(f"[aiegraph] kept the previous copy: {keep}")
     dest.mkdir(parents=True)
     for f in src.parent.iterdir():
         if f.is_file() and f.suffix in _COPY and f != src:

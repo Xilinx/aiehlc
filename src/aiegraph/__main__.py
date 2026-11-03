@@ -15,6 +15,10 @@
     aiegraph check    "layer1=KERNEL.cc" [--workdir D]
     aiegraph offload  "layer1=KERNEL.cc" [--workdir D] [--make]
     aiegraph build    [--workdir D] [--local]
+    aiegraph run      [palmyra|vek385] [HOST] [--profile] [--workdir D] [--no-netload] [--reboot|--no-reboot]
+                                                  main.elf on a lab board (builds it if stale)
+    aiegraph profile  [LAYER ...] [--by-layer] [--top N] [--workdir D]
+                                                  per-call / per-layer time of the last board run
     aiegraph compile  MODEL TARGET ["layer1=KERNEL.cc"]
 
 ``--workdir`` defaults to ``worklocal/aiegraph/resnet18``. Exit 0 = success /
@@ -58,6 +62,25 @@ def main(argv=None) -> int:
     sub.choices["offload"].add_argument("--no-build", action="store_true")
     sub.choices["build"].add_argument("--local", action="store_true",
                                       help="also build main_local.elf (x86)")
+    p = sub.add_parser("run")
+    p.add_argument("board", nargs="?", default="palmyra", help="palmyra (default) or vek385")
+    p.add_argument("host", nargs="?", default=None, help="lab host / board name (default: env)")
+    p.add_argument("--workdir", default=None)
+    p.add_argument("--elf", default=None, help="run this ELF instead of the model's main.elf")
+    p.add_argument("--no-build", action="store_true", help="do not (re)build a stale main.elf")
+    p.add_argument("--no-netload", dest="netload", action="store_false", default=None,
+                   help="palmyra: JTAG dow instead of the netboot supervisor")
+    p.add_argument("--reboot", dest="reboot", action="store_true", default=None)
+    p.add_argument("--no-reboot", dest="reboot", action="store_false")
+    p.add_argument("--timeout", type=float, default=1800)
+    p.add_argument("-q", "--quiet", action="store_true", help="do not echo the console")
+    p.add_argument("--profile", action="store_true",
+                   help="main.elf with PROFILE=1 per-call timing (then: aiegraph profile)")
+    p = sub.add_parser("profile")
+    p.add_argument("layers", nargs="*", help="layers (layer1 4 ...); default all")
+    p.add_argument("--by-layer", action="store_true", help="one row per layer, not per call")
+    p.add_argument("--top", type=int, default=None, help="only the N slowest rows")
+    p.add_argument("--workdir", default=None)
     p = sub.add_parser("prototype")
     p.add_argument("layer", nargs="?", default=None, help="TVM layer (layer1, 4, ...); omit for the format")
     p.add_argument("--region", default=None, help="an ONNX region name instead of a layer")
@@ -105,6 +128,18 @@ def main(argv=None) -> int:
                 for one in (itf if isinstance(itf, ag.Prototypes) else [itf]):
                     one.write(args.write)
             return 0
+        if args.cmd == "run":
+            rep = emod.run(args.board, args.host, elf=args.elf, build=not args.no_build,
+                           netload=args.netload, reboot=args.reboot, timeout=args.timeout,
+                           profile=args.profile, verbose=not args.quiet)
+            print(rep)
+            return 0 if rep.ok else 1
+        if args.cmd == "profile":
+            prof = emod.profile(args.layers or ag.ALL, by="layer" if args.by_layer else "call",
+                                top=args.top)
+            if prof is not None:
+                print(prof)
+            return 0 if prof is not None else 1
         if args.cmd == "layers":
             print(emod)
             return 0

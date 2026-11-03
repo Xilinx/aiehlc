@@ -1,12 +1,12 @@
-module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], routing.control_packet_mode = 0 : i64, routing.control_plan_dedicated_shim = 0 : i64, routing.control_plan_group_reg_write = 0 : i64, routing.control_plan_op_control_packet = 0 : i64, routing.control_plan_shim_bd_ctrl = 0 : i64, routing.fullconnect_auto = 0 : i64, routing.kernel_config_offload = 0 : i64, routing.output_tile_major = 0 : i64} {
-  func.func @main(%arg0: memref<230x230x4xi8>, %arg1: memref<64x7x7x4xi8>, %arg2: memref<112x112x64xi8>) attributes {routing.kernel_tiling = #routing.kernel_tiling<out_rounds = 98>} {
+module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], routing.control_packet_mode = 1 : i64, routing.control_plan_dedicated_shim = 1 : i64, routing.control_plan_exclusive = 1 : i64, routing.control_plan_group_reg_write = 1 : i64, routing.control_plan_mm2s_ch = 0 : i64, routing.control_plan_op_control_packet = 1 : i64, routing.control_plan_s2mm_ch = 0 : i64, routing.control_plan_shim_bd_ctrl = 1 : i64, routing.control_plan_shim_col = 0 : i64, routing.fullconnect_auto = 0 : i64, routing.kernel_config_offload = 1 : i64, routing.output_tile_major = 1 : i64} {
+  func.func @main(%arg0: memref<230x230x4xi8>, %arg1: memref<64x7x7x4xi8>, %arg2: memref<112x112x64xi8>) attributes {routing.kernel_tiling = #routing.kernel_tiling<out_rounds = 16>} {
     %c3_i32 = arith.constant 3 : i32
     %c2_i32 = arith.constant 2 : i32
     %c1_i32 = arith.constant 1 : i32
     %c0_i32 = arith.constant 0 : i32
-    %0 = routing.routingcreatehwmesh row = 4, col = 4 partition = 3, 6, 0, 6 -> i32
+    %0 = routing.routingcreatehwmesh row = 4, col = 4 partition = 2, 6, 0, 6 -> i32
     %1 = bufferization.to_tensor %arg0 : memref<230x230x4xi8>
-    %2 = routing.routingcreatescheduletensor %1 : tensor<230x230x4xi8> shape = [230, 230, 4], dim = 3 {halo = #routing.halo<slice = 61, step = 56, split_dim = 0, w_slice = 37, w_step = 32, w_rounds = 7, ow_t = 16, row_pitch = 920, l2_slice = 33, l2_step = 28, l2_rounds = 2, k_slice = 148, k_step = 128, k_rounds = 7, buf_size = 4884>, layout_transform = "dma_shuffle", pp_depth = 2 : i64} -> tensor<230x230x4xi8>
+    %2 = routing.routingcreatescheduletensor %1 : tensor<230x230x4xi8> shape = [230, 230, 4], dim = 3 {halo = #routing.halo<slice = 61, step = 56, split_dim = 0, w_slice = 61, w_step = 56, w_rounds = 4, ow_t = 28, row_pitch = 920, l2_slice = 19, l2_step = 14, l2_rounds = 4, k_slice = 244, k_step = 224, k_rounds = 4, buf_size = 4636>, layout_transform = "dma_shuffle", pp_depth = 2 : i64} -> tensor<230x230x4xi8>
     %3 = bufferization.to_tensor %arg1 : memref<64x7x7x4xi8>
     %4 = routing.routingcreatescheduletensor %3 : tensor<64x7x7x4xi8> shape = [64, 7, 7, 4], dim = 4 {layout_transform = "dma_shuffle", pp_depth = 2 : i64} -> tensor<64x7x7x4xi8>
     %5 = bufferization.to_tensor %arg2 : memref<112x112x64xi8>
@@ -54,11 +54,11 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
       %7 = routing.partitionmesh mesh = %0, splitnum = 4, splitaxis = "row" : i32 -> i32
       %8 = routing.partitiontensor %2 : tensor<230x230x4xi8> {
   partition = #routing.partition<splitnum = 4, splitdim = 0, hwAxisOwner = "row", replicateOn = "col", singleTileOwner = "">,
-  tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 230, total = 244, slice = 61, step = 56, rounds = 4, slice_tiling = #routing.level<base = 61, total = 66, slice = 33, step = 28, rounds = 2>>>, d1 = #routing.dim<outer = #routing.level<base = 230, total = 230, slice = 230, step = 230, rounds = 1>>, d2 = #routing.dim<outer = #routing.level<base = 4, total = 4, slice = 4, step = 4, rounds = 1>>>
+  tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 230, total = 244, slice = 61, step = 56, rounds = 4, slice_tiling = #routing.level<base = 61, total = 76, slice = 19, step = 14, rounds = 4>>>, d1 = #routing.dim<outer = #routing.level<base = 230, total = 230, slice = 230, step = 230, rounds = 1>>, d2 = #routing.dim<outer = #routing.level<base = 4, total = 4, slice = 4, step = 4, rounds = 1>>>
 } -> tensor<230x230x4xi8>
       %9 = routing.partitiontensor %6 : tensor<112x112x64xi8> {
   partition = #routing.partition<splitnum = 4, splitdim = 0, hwAxisOwner = "row", replicateOn = "col", singleTileOwner = "">,
-  tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 14, step = 14, rounds = 2>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 16, step = 16, rounds = 7>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>
+  tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>
 } -> tensor<112x112x64xi8>
       %10 = routing.RoutingCreate<Memo = "row"> ( scf_idx = %c0_i32 : i32) -> i32{
       ^bb0(%arg3: i32):

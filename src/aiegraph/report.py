@@ -10,13 +10,14 @@ the user never reads ``report.json`` or ``partition.json`` by hand.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import AiegraphError
 
-__all__ = ["CheckReport", "DetectReport", "BuildReport", "RegionCheck", "PartitionPlan",
-           "AIProtoResult"]
+__all__ = ["CheckReport", "DetectReport", "BuildReport", "RunReport", "ProfileReport",
+           "RegionCheck", "PartitionPlan", "AIProtoResult", "PerfReport", "KernelOptResult"]
 
 
 def _gates_line(k: dict, layer: str) -> str:
@@ -152,6 +153,87 @@ class BuildReport:
         return s
 
 
+@dataclass
+class RunReport:
+    """``emod.run(board, host)``: what ``main.elf`` printed on the board."""
+
+    ok: bool
+    board: str
+    host: str
+    elf: str
+    rc: int = None
+    log: str = None
+    reason: str = ""
+    top1: tuple = None              # (class, logit)
+    top5: list = field(default_factory=list)   # [(class, label, logit)]
+    inference_ms: float = None
+    aie_enter: int = 0              # "[aie-offload] ... ENTER" lines (AIE layers entered)
+    aie_exit: int = 0
+    seconds: float = 0.0            # wall clock of the whole board session
+    command: list = field(default_factory=list)
+    profile: list = field(default_factory=list)  # [(call, ms, "cpu"|"aie", op)] -- PROFILE=1 ELF
+
+    def raise_for_status(self) -> "RunReport":
+        if not self.ok:
+            raise AiegraphError("run", self.reason, hint=f"console log: {self.log}")
+        return self
+
+    def __repr__(self) -> str:
+        head = f"run on {self.board} @ {self.host}: {'OK' if self.ok else 'FAILED -- ' + self.reason}"
+        lines = [head, f"  elf: {self.elf}"]
+        if self.top1:
+            lines.append(f"  top1 class={self.top1[0]} logit={self.top1[1]:.6f}")
+        for i, (c, label, logit) in enumerate(self.top5, 1):
+            lines.append(f"    {i}. class={c:<4} {label:<28} logit={logit:.4f}")
+        if self.inference_ms is not None:
+            lines.append(f"  inference {self.inference_ms:.3f} ms on the board")
+        if self.aie_enter or self.aie_exit:
+            lines.append(f"  AIE layers: ENTER x{self.aie_enter}, EXIT x{self.aie_exit}")
+        if self.profile:
+            lines.append(f"  per-call times: {len(self.profile)} calls -- emod.profile(ag.ALL)")
+        lines.append(f"  log: {self.log}   ({self.seconds:.0f} s, rc={self.rc})")
+        return "\n".join(lines)
+
+
+@dataclass
+class ProfileReport:
+    """``emod.profile(ag.ALL)``: where the board spent ``graph_run()``, per call
+    (``by="call"``) or per layer (``by="layer"``). Times are the mean per
+    ``graph_run()``, measured on the board with the clock main.c times
+    "inference" with, so the rows add up to it (minus the driver's glue)."""
+
+    rows: list                      # [{"call"|"calls", "layer", "op", "where", "ms", "pct"}]
+    by: str = "call"
+    board: str = None
+    inference_ms: float = None
+    total_ms: float = 0.0           # sum over ALL calls (the % base), not just the shown rows
+    log: str = None
+
+    def ms(self, where: str) -> float:
+        """Total ms of the shown rows on ``"cpu"`` or ``"aie"``."""
+        return sum(r["ms"] for r in self.rows if r["where"] == where)
+
+    def __repr__(self) -> str:
+        head = "call" if self.by == "call" else "calls"
+        w = max([len(r["op"]) for r in self.rows] + [8])
+        lines = [f"profile ({self.by}) on {self.board or '?'}: mean ms per graph_run()",
+                 f"  {head:<10} {'layer':<8} {'op':<{w}}  on    {'ms':>10}  {'%':>6}"]
+        for r in self.rows:
+            key = (f"[{r['call']:02d}]" if self.by == "call"
+                   else ",".join(f"{c:02d}" for c in r["calls"]))
+            key = key if len(key) <= 10 else key[:9] + "+"
+            lines.append(f"  {key:<10} {r['layer']:<8} {r['op']:<{w}}  {r['where']:<4} "
+                         f"{r['ms']:>10.3f}  {r['pct']:>5.1f}%")
+        shown = sum(r["ms"] for r in self.rows)
+        lines.append(f"  shown {shown:.3f} ms of {self.total_ms:.3f} ms (all calls); "
+                     f"cpu {self.ms('cpu'):.3f} ms, aie {self.ms('aie'):.3f} ms")
+        if self.inference_ms is not None:
+            lines.append(f"  inference {self.inference_ms:.3f} ms (graph_run incl. driver glue)")
+        if self.log:
+            lines.append(f"  from {self.log}")
+        return "\n".join(lines)
+
+
 # ── region API (module.check_offload / module.partition) ──────────────────
 
 @dataclass
@@ -284,4 +366,168 @@ class AIProtoResult:
                                                    if self.session else ""))
         lines.append(f"  next: emod.offload(('{tag.split(',')[0]}', new_kernel))" if self.ok else
                      "  next: read the log, edit the kernel by hand, or run again with rounds=")
+        return "\n".join(lines)
+
+
+# ── AI performance analysis / optimization (aiperf.py) ─────────────────────
+
+def _ms(v) -> str:
+    return "?" if v is None else f"{v:.3f} ms"
+
+
+@dataclass
+class PerfReport:
+    """``emod.AI_perf_analysis("layerN")``: facts + cost model + rule findings,
+    and Claude's reading (``.ai``: summary / bottlenecks / suggestions /
+    predicted_ms_after, in skill kernelperfcheck's format)."""
+
+    layer: str
+    facts: dict
+    model: dict
+    rules: list
+    ai: dict = None
+    text: str = ""                  # Claude's full answer
+    dest: Path = None               # report.json / report.md live here
+    log: Path = None
+    session: str = None
+
+    @property
+    def measured_ms(self):
+        return self.facts["run"]["measured_ms"]
+
+    @property
+    def suggestions(self) -> list:
+        """Claude's suggestions, else the rules' fixes (same keys as far as they go)."""
+        if self.ai and self.ai.get("suggestions"):
+            return self.ai["suggestions"]
+        return [{"id": r["id"], "change": r["fix"], "where": r["evidence"],
+                 "expected_saving_ms": r["est_ms"]} for r in self.rules]
+
+    @property
+    def predicted_ms_after(self):
+        return (self.ai or {}).get("predicted_ms_after")
+
+    def to_dict(self) -> dict:
+        return {"layer": self.layer, "facts": self.facts, "model": self.model, "rules": self.rules,
+                "ai": self.ai, "session": self.session, "log": str(self.log) if self.log else None}
+
+    @classmethod
+    def load(cls, path) -> "PerfReport":
+        """A saved report back (``report.json``, or its ``aiperf/<layer>/`` dir) --
+        e.g. in a new Python session, to pass to ``AI_kernel_accelerate``."""
+        p = Path(path)
+        p = p / "report.json" if p.is_dir() else p
+        if not p.is_file():
+            raise AiegraphError("perf", f"no saved report at {p}", hint='emod.AI_perf_analysis("layer1")')
+        d = json.loads(p.read_text())
+        text = ""
+        md = p.parent / "report.md"
+        if md.is_file() and "\n\n## claude\n\n" in md.read_text():
+            text = md.read_text().split("\n\n## claude\n\n", 1)[1]
+        return cls(d["layer"], d["facts"], d["model"], d["rules"], d.get("ai"), text, p.parent,
+                   Path(d["log"]) if d.get("log") else None, d.get("session"))
+
+    def save(self) -> None:
+        if self.dest:
+            (self.dest / "report.json").write_text(json.dumps(self.to_dict(), indent=1, default=str) + "\n")
+            (self.dest / "report.md").write_text(repr(self) + ("\n\n## claude\n\n" + self.text if self.text else "") + "\n")
+
+    def __repr__(self) -> str:
+        f, m = self.facts, self.model
+        run = f["run"]
+        lines = [f"AI_perf_analysis {self.layer} ({f['op']})  kernel {Path(f['source']).name}",
+                 f"  measured {_ms(run['measured_ms'])} per call"
+                 + ("" if run["profiled"] else "  (no profiled run: emod.run(profile=True))")
+                 + (f", EXIT rc={run['exit_rc']}" if run["exit_rc"] is not None else ""),
+                 f"  model: kernel load {_ms(m['elf_load_ms'])} ({m['cores']} cores x "
+                 f"{m['elf_words_per_core']} words), config {_ms(m['config_ms'])} "
+                 f"(~{m['config_words']} words), teardown each call: {'yes' if m['teardown'] else 'no'}, "
+                 f"computing: {'yes' if m['computing'] else 'NO (backbone)'}",
+                 f"  explained {_ms(m['known_ms'])}; unexplained {_ms(m['unexplained_ms'])}"]
+        if self.ai:
+            if self.ai.get("summary"):
+                lines.append(f"  claude: {self.ai['summary']}")
+            for b in self.ai.get("bottlenecks", []):
+                lines.append(f"    - {b.get('what')}  [{_ms(b.get('est_ms'))}]  {b.get('evidence', '')}")
+        else:
+            for r in self.rules:
+                lines.append(f"    {r['id']} {r['what']}  [{_ms(r['est_ms'])}]  {r['evidence']}")
+        lines.append("  suggestions:")
+        for s in self.suggestions:
+            lines.append(f"    {s.get('id', '-')}: {s.get('change')}  -> saves {_ms(s.get('expected_saving_ms'))}"
+                         + (f"  (risk {s['risk']}, effort {s['effort']})" if s.get("risk") else ""))
+        if self.predicted_ms_after is not None:
+            lines.append(f"  predicted after: {_ms(self.predicted_ms_after)} (claude)")
+        if self.dest:
+            lines.append(f"  report: {self.dest / 'report.md'}")
+        lines.append(f"  next: emod.AI_kernel_accelerate(\"{self.layer}\", report)")
+        return "\n".join(lines)
+
+
+@dataclass
+class KernelOptResult:
+    """``emod.AI_kernel_accelerate("layerN", report)``: the optimized copy (path-like),
+    our gates' verdict, and the improvement -- predicted from the re-read facts
+    of the NEW build, measured when ``board=`` was given."""
+
+    source: Path
+    original: Path
+    layer: str
+    rounds: int
+    ok: bool                        # offload_check READY and aiehlc build OK
+    reason: str
+    changes: str                    # Claude's summary of what it changed
+    report: PerfReport
+    after: dict = None              # facts of the new build
+    model_after: dict = None
+    measured_after: float = None
+    session: str = None
+    log: Path = None
+
+    def __fspath__(self) -> str:
+        return str(self.source)
+
+    @property
+    def saved_ms(self):
+        """Model-predicted saving: the priced components, before minus after."""
+        if not self.model_after:
+            return None
+        return round(self.report.model["known_ms"] - self.model_after["known_ms"], 3)
+
+    @property
+    def predicted_ms(self):
+        before = self.report.measured_ms
+        if before is None or self.saved_ms is None:
+            return None
+        return round(before - self.saved_ms, 3)
+
+    def raise_for_status(self) -> "KernelOptResult":
+        if not self.ok:
+            raise AiegraphError("perf", self.reason.splitlines()[0] if self.reason else "not ok",
+                                hint=f"log: {self.log}")
+        return self
+
+    def __repr__(self) -> str:
+        lines = [f"AI_kernel_accelerate {self.layer}  {'OK' if self.ok else 'FAILED'} after {self.rounds} round(s)",
+                 f"  kernel: {self.source}", f"  from:   {self.original}"]
+        if not self.ok:
+            lines.append("  " + (self.reason.splitlines()[0] if self.reason else ""))
+        if self.changes:
+            lines += ["  changes (claude):"] + ["    " + l for l in self.changes.strip().splitlines()[:20]]
+        if self.model_after:
+            b, a = self.report.model, self.model_after
+            lines.append(f"  {'':<16}{'before':>14}{'after':>14}")
+            for k, name in (("elf_load_ms", "kernel load"), ("config_ms", "config"), ("known_ms", "priced total")):
+                lines.append(f"  {name:<16}{_ms(b[k]):>14}{_ms(a[k]):>14}")
+            lines.append(f"  {'teardown/call':<16}{str(b['teardown']):>14}{str(a['teardown']):>14}")
+            lines.append(f"  {'computing':<16}{str(b['computing']):>14}{str(a['computing']):>14}")
+            lines.append(f"  measured before {_ms(self.report.measured_ms)} -> predicted {_ms(self.predicted_ms)}"
+                         f" (model saves {_ms(self.saved_ms)}; teardown/compute not priced)")
+        if self.measured_after is not None:
+            lines.append(f"  measured after  {_ms(self.measured_after)} on the board")
+        if self.log:
+            lines.append(f"  log: {self.log}" + (f"  (claude --resume {self.session})" if self.session else ""))
+        if self.ok and self.measured_after is None:
+            lines.append(f"  next: emod.offload((\"{self.layer}\", result)); emod.run(profile=True); "
+                         f"emod.profile(\"{self.layer}\")")
         return "\n".join(lines)

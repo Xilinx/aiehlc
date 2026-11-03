@@ -125,7 +125,7 @@ under `AIEHLC_PROFILING` (baremetal only); before that, a `--profiling` build of
 `test_conv2d.cc` still read all zeros (skill **pmccntrnotenabled**).
 Machine-readable line: `PERF SUMMARY ... (ms)`.
 
-**`conv2dstem_new.cc` / `conv2dstem_uk_new.cc` are the stem in the kernel-only block-load model** (no GemmSpaces / mirrored tiling macros: `aie::shape` ports, `aie::load_buffer`/`store_buffer` blocks, DMA derived by the kernel analysis); same API, host code, vector compute and pragmas; 61-px window (244-B rows, unaligned A-tiles, last K-block shifted 4 B). x86 emulation `emu/emu_conv2dstem_new.sh` 802,816/802,816; builds; `offload_check` READY. Board not yet run. README "conv2dstem_new.cc".
+**`conv2dstem_new.cc` / `conv2dstem_uk_new.cc` are the stem in the kernel-only block-load model** (no GemmSpaces / mirrored tiling macros: `aie::shape` ports, `aie::load_buffer`/`store_buffer` blocks, DMA derived by the kernel analysis); same API, host code, vector compute and pragmas; 61-px window (244-B rows, unaligned A-tiles, last K-block shifted 4 B). x86 emulation `emu/emu_conv2dstem_new.sh` 802,816/802,816; builds; `offload_check` READY. Standalone app `test_conv2d_new.cc` (`./buildtest.sh --new`) builds the ELF with the DMA derived from the kernel blocks. Board not yet run. README "conv2dstem_new.cc".
 
 **`conv2dstem_vec.cc` is the vectorized kernel** (`./buildtest.sh --vec`): same host/DMA/pragmas, kernel on `aie::mmul<4,8,8,int8,int8>` + a bit-exact two-stage vector requantize; 1.77 ms vs 31.47 ms, GOLDEN PASS on the board. Host transforms (1.09 ms) now dominate. `conv2dstem.cc` stays the `--aie-offload` source. Details: `doc/performance/conv2dstem_perf_review.md` §6.
 
@@ -611,7 +611,7 @@ needs the BSP's `libxil.a` de-duplicated against `libxaienginea78.a`.
 `arm_build.build_arm_elf(run_make=False)` into `worklocal/aiegraph/<model>/`, cached by a
 model-hash stamp `aiegraph.json`) → `emod.detect / offload_check / offload / build /
 run_local` (all `aiekernel.flow` + `arm_build`), one-call `ag.compile(m, target, offload)`,
-`ag.open(workdir)` adopts any deploy tree, CLI `aiegraph …`, plus an `aiehlc` command
+`ag.open(workdir)` adopts any deploy tree, `emod.run()` / `emod.run(ag.VEK385, "host")` runs `main.elf` on a lab board (`board.py` over `script/test/apppaltest.py` / `appvek385.py`; palmyra defaults to `--netload`, VEK385 powers off after; refuses a second concurrent run; `emod.run(profile=True)` builds a `make PROFILE=1` ELF (default off; `emod.profile` otherwise prints `profiling not enabled`), so `emod.profile(ag.ALL)` then prints each call/layer's board time; `emod.AI_perf_analysis("layer1")` explains it (facts + cost model + rules + read-only `claude -p`, skill **kernelperfcheck**) and `emod.AI_kernel_accelerate("layer1", report)` lets Claude optimize a copy, gated by `offload_check` + aiehlc build, re-predicted from the new build (`aiperf.py`), `by="layer"`, `top=N` -- `arm_build.sync_make_vars` deletes `graph_driver.o`/`main.o`/`main.elf` when the make vars change, since objects don't depend on CFLAGS), CLI `aiegraph …`, plus an `aiehlc` command
 (`bash -c 'source script/aiehlc.sh "$@"'` in the caller's cwd). **One install command:**
 `pip install -e .` — verified in a fresh venv: no `PYTHONPATH`, no setup step, `doctor`
 green, quickstart converts/checks/offloads/links. Traps: **editable only** — the flow
@@ -661,7 +661,7 @@ staging and parameters are `TODO`s for the user. It builds as generated
 
 `ag.convert` starts FRESH: a reused (cached) conversion gets every earlier
 offload reset to the CPU (`emod.offload_reset(layers=None)`, driver
-regenerated); `keep_offloads=True` keeps them, `ag.open(workdir)` adopts a tree
+regenerated; `emod.offload("layer1", False)` resets just that spec); `keep_offloads=True` keeps them, `ag.open(workdir)` adopts a tree
 as it is, `force=True` re-converts.
 
 `emod.offload_AI_proto(layers, kernel, rounds=3)` (`src/aiegraph/aiproto.py`): when
@@ -873,6 +873,7 @@ Read the matching skill when the task fits:
 | Sim build (`pr_sim_test.sh`, `-D__AIESIM__`) fails in aie_runtime.c with "use of undeclared identifier" while the HW build is fine | aiesimguardedsymbol |
 | Build fails on missing snap cmake / libz.so / ZLIB::ZLIB; fast single-file compile check | mlirbuildsandbox |
 | Declarative conv2d (`aie::Conv2d`/`aie::Mapping`): `[ConvAutoTile] ERROR`, `MESH_ROW` unresolved, OFM chunked `numRounds=2 bufferSize=4096`, `M-tile mismatch` with `tile(OW, OW)`, tuning d1/d2/d3 (`AIEHLC_CONV_TUNE`, `frontend.convtune`) | convautotile |
+| Spatial-halo conv hangs (`wait_io TIMEOUT`) though kernel analysis passed: `out_rounds` ≠ kernel rounds (e.g. 98 for a 14x16x16 tile), tiny core output window; or `[TilingLinalg] ERROR: ... the kernel's blocks give ..` | convoutroundsdoublecount |
 | Triton-style block-load kernel (`aie::program_id`, `aie::load_buffer` / `store_buffer` in tensor coordinates, `aie::release` / `commit`): `no member named 'program_id' in namespace 'aie'`, klog `BLKE`, wrong offsets but correct output, emulating the generated kernel on x86 | blockloadkernel |
 | Adding/reading tiling or per-tensor DMA info in routing IR (halo, shim_dma, pp_depth, kernel rounds); "where did `tensor_N.halo` / `routing.spatial_out_rounds` go"; value reads 0 inside a conversion pattern | routingirtilingcarriers |
 | A `#pragma` you added is never `Detected` in the aiehlc log and its feature silently does nothing (build still rc=0) — stale `aiehlc` binary | stalepragmabinary |
@@ -900,6 +901,8 @@ Read the matching skill when the task fits:
 | Two user-kernel offloads and only the last stays on the AIE (`superseded ... one aiehlc library per ELF`), `routing` defined twice at link; several aiehlc libraries in one ELF | multiaiehlclibrary |
 | Kernel link fails `could not find free space for SpaceSymbol buf_in_ping_0 in memory DMb`; TilingLinalg `Memory budget exceeded! ... maxPingPongBytes` | dmbufferregion |
 | Plug a user-written kernel into a TVM layer (`AIEK_ENTRY`/`AIEK_SPEC`, `--aie-kernel`, `aiekernel check/offload`); an L0xx lint code, calibrate MISMATCH, emulate FAIL, or `rejected at link -- ... routing()` | aieuserkernel |
+| An offloaded layer is slow: attribute its measured ms (MMIO kernel+BSS load, config writes, teardown, console printf in the timed adapter, scalar compute) and rank fixes; `emod.AI_perf_analysis` / `AI_kernel_accelerate` | kernelperfcheck |
+| `AI_kernel_accelerate` / `offload_AI_proto` FileNotFoundError in `_stage` and an EMPTY `aiopt/` dir (kernel deleted); recovering it from Claude transcripts | aistagenodelete |
 | Run/extend the persistent ResNet-18 engine (`resnetengine`: gen_engine.py model mismatch, core memory overflow, ENG FAIL, new layer kind) | resnetengine |
 | resnetengine eager layer-major hangs ~1 run in 3 in a residual layer: `shim_bd_ctrl TIMEOUT ... owing an ack`, input shim with no task; or a few wrong logits | shimctrlpushloss |
 | AIE kernel: +1 errors / constant garbage right after ADDING a code path; statics above `DM_stack` overwritten | aiecorestackoverflow |
