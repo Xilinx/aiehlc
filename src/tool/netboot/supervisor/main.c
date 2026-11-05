@@ -14,6 +14,7 @@
 #include "netif/xemacpsif.h"
 #include "xil_cache.h"
 #include "xil_exception.h"
+#include "xil_mmu.h"
 #include "xil_printf.h"
 #include "xiltimer.h"
 #include "xparameters.h"
@@ -166,6 +167,21 @@ int nb_admit(uint32_t cmd, uint32_t flags, struct netboot_ack *ack, char *msg, s
  * them before IP4_ADDR counts its arguments. */
 #define NB_IP4(dst, ...) IP4_ADDR(dst, __VA_ARGS__)
 
+/* NETBOOT_DMA_BASE (build.sh, VEK385): the GEM sits in the LPD, and on the
+ * vek385 base platform LPD_AXI_NOC0 only reaches DDR_CH1 (0xA_0000_0000) and
+ * DDR_CH2, not DDR_LOW0, so every buffer the GEM DMAs (lwIP heap and pools,
+ * BD ring) is linked there. The BSP table has no entry for that 1 GB block,
+ * so map it before lwIP touches its memory. Attribute = the BSP's own normal
+ * write-back, outer-shareable DDR descriptor (0x605). The BD block one GB up
+ * is mapped non-cacheable by the lwIP port itself. */
+static void dma_map(void) {
+#ifdef NETBOOT_DMA_BASE
+    Xil_SetTlbAttributes((UINTPTR)NETBOOT_DMA_BASE, 0x605ULL);
+    xil_printf("[netboot] GEM DMA memory at 0x%llx (LPD-reachable DDR)\r\n",
+               (unsigned long long)NETBOOT_DMA_BASE);
+#endif
+}
+
 static int net_init(void) {
     ip4_addr_t ip, mask, gw;
     NB_IP4(&ip, NETBOOT_IP);
@@ -173,6 +189,7 @@ static int net_init(void) {
     NB_IP4(&gw, NETBOOT_GW);
     /* Xilinx OUI; one board per lab segment. */
     unsigned char mac[6] = {0x00, 0x0a, 0x35, 0x00, 0x1b, 0x55};
+    dma_map();
     lwip_init();
     if (!xemac_add(&s_netif, &ip, &mask, &gw, mac, XPAR_XEMACPS_0_BASEADDR)) {
         xil_printf("[netboot] xemac_add failed\r\n");

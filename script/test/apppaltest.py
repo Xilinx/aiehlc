@@ -91,7 +91,21 @@ host = f"{username}@{palip}"
 
 # Configuration
 PALBOARD_SCRIPTS_DIR = f"/proj/xsjsswstaff/{username}/palboard_scripts"
-PALBOARD_BIN = f"/home/{username}/palboard/BOOT.BIN"
+# Board profile. BOARDNAME=vek385-* selects the VEK385 farm board: PALIP is its farm
+# host (e.g. gomphus3), the boot image is aiebaremetal's vek385_boot.pdi +
+# vek385_pld.pdi packed by bootgen (vek385_netboot.BIN), the A78 console is com3
+# (as in appvek385.py), and after `device program` the APU cluster is reset with
+# `rst -cores` (as appvek385.py does). The netboot supervisor's IP 10.10.70.50 and
+# gateway 10.10.70.101 on the farm host's eth1 are shared with palmyra. One
+# difference: on the vek385 base platform the GEM (an LPD master, LPD_AXI_NOC0)
+# reaches only DDR_CH1/DDR_CH2, not DDR_LOW0, so its supervisor is a separate
+# build with the lwIP heap/pools and BD ring at NETBOOT_DMA_BASE (DDR_CH1).
+IS_VEK385 = boardname.lower().startswith("vek385")
+PALBOARD_BIN = os.environ.get("BOOT_IMAGE") or (
+    os.environ.get("VEK385PDI") or f"/home/{username}/aiehlc/netboot/vek385_netboot.BIN" if IS_VEK385
+    else f"/home/{username}/palboard/BOOT.BIN")
+CONSOLE_PORT = os.environ.get("PAL_CONSOLE") or (os.environ.get("VEK385_CONSOLE", "com3") if IS_VEK385 else "com0")
+PLM_SETTLE_S = 15 if IS_VEK385 else 5
 #XSDB_ALT_PATH = "/everest/set_vnc_bkup/vnc/t50/es1/tools/Labtools/9999.0/bin/xsdb"
 XSDB_ALT_PATH = "/proj/xbuilds/2025.2_daily_latest/installs/lin64/HEAD/Vitis/bin/xsdb"
 VITIS_SETTINGS = "/proj/xbuilds/2025.2_daily_latest/installs/lin64/HEAD/Vitis/settings64.sh"
@@ -408,6 +422,14 @@ def setup_first_connection(nonreboot=False):
         child.sendline("/bin/systest")
     child.expect(r'Systest[#>]', timeout=60)
     log.debug("setup_first_connection: systest prompt received")
+    if IS_VEK385:
+        # systest-client lands on the farm host's own board ("[vek385-3] Systest#");
+        # refuse to power-cycle anything else (no `become` off palmyra).
+        m = re.search(r'\[([^\]\s]+)\]\s*$', child.before or "")
+        if not m or m.group(1).lower() != boardname.lower():
+            child.close(force=True)
+            raise RuntimeError(f"systest-client on {palip} is on board {m.group(1) if m else '?'}, "
+                               f"not BOARDNAME={boardname}; not power-cycling it")
 
     # Step 3: Become palboard - wait for Systest# prompt after board info.
     # In nonreboot mode the board is already up and owned by an existing
@@ -448,7 +470,7 @@ def setup_first_connection(nonreboot=False):
     print("[Connection 1] In xsdb, connecting...")
     
     # Steps 7-11, each waited on by its own completion token (xsdb_run).
-    xsdb_run(child, "connect -url TCP:10.23.224.213:3121" if nonreboot else "conn", 60, "connect")
+    xsdb_run(child, f"connect -url TCP:{palip}:3121" if nonreboot else "conn", 60, "connect")
     print("[Connection 1] Connected, targeting device 1...")
     xsdb_run(child, "tar 1", 60)
     print("[Connection 1] Programming Palboard.BIN...")
@@ -458,11 +480,17 @@ def setup_first_connection(nonreboot=False):
         raise RuntimeError(f"BOOT.BIN programming failed ({e}). The board may need a power cycle; "
                            "run 'plm log' for details.") from e
     print("[Connection 1] Device programmed (100%), letting the PLM settle...")
-    time.sleep(5)  # now measured from the END of programming
-    print("[Connection 1] Targeting device 20...")
-    xsdb_run(child, "tar 20", 60)
-    print("[Connection 1] Resetting processor...")
-    xsdb_run(child, "rst -proc", 60)
+    time.sleep(PLM_SETTLE_S)  # now measured from the END of programming
+    if IS_VEK385:
+        # As appvek385.py: reset the APU cluster (target 18), then select A78 #0.0.
+        xsdb_run(child, 'targets -set -nocase -filter {name =~ "APU"}', 60, "select APU")
+        xsdb_run(child, "rst -cores", 60, "rst -cores")
+        xsdb_run(child, 'targets -set -nocase -filter {name =~ "*A78*#0.0*"}', 60, "select A78 #0.0")
+    else:
+        print("[Connection 1] Targeting device 20...")
+        xsdb_run(child, "tar 20", 60)
+        print("[Connection 1] Resetting processor...")
+        xsdb_run(child, "rst -proc", 60)
     print("[Connection 1] Setup complete!")
     
     return child
@@ -501,14 +529,14 @@ def setup_second_connection():
     child.sendline("/opt/systest/common/bin/systest-client")
     child.expect(r'Systest[#>]', timeout=60)
     log.debug("setup_second_connection: systest prompt received")
-    print("[Connection 2] In systest, connecting to com0...")
+    print(f"[Connection 2] In systest, connecting to {CONSOLE_PORT}...")
 
     # Step 3: Connect to com0 (no output until ELF runs on first connection)
-    log.debug("setup_second_connection: sending 'connect com0'")
-    child.sendline("connect com0")
-    child.expect(r'Connecting to device com0.*escape', timeout=60)
-    log.debug("setup_second_connection: com0 connected")
-    print("[Connection 2] Connected to com0, listening for output...")
+    log.debug("setup_second_connection: sending 'connect %s'", CONSOLE_PORT)
+    child.sendline(f"connect {CONSOLE_PORT}")
+    child.expect(rf'Connecting to device {CONSOLE_PORT}.*escape', timeout=60)
+    log.debug("setup_second_connection: %s connected", CONSOLE_PORT)
+    print(f"[Connection 2] Connected to {CONSOLE_PORT}, listening for output...")
 
     return child
 
@@ -664,6 +692,12 @@ def copy_elf_to_remote(local_elf):
 NETBOOT_LOCAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "tool", "netboot")
 NETBOOT_REMOTE_DIR = f"/home/{username}/aiehlc/netboot"
 NETBOOT_READY_TIMEOUT_S = 120
+# Supervisor variant per board: (build dir, NETBOOT_DMA_BASE, name staged on the lab
+# host). /home is shared between the farm hosts, so the variants get distinct names.
+NETBOOT_DMA_BASE = os.environ.get("NETBOOT_DMA_BASE", "0xA00000000") if IS_VEK385 else ""
+NETBOOT_BUILD_DIR = os.path.join(NETBOOT_LOCAL_DIR, "build", "vek385") if IS_VEK385 \
+    else os.path.join(NETBOOT_LOCAL_DIR, "build")
+NETBOOT_REMOTE_ELF = "netboot_vek385.elf" if IS_VEK385 else "netboot.elf"
 # One persistent ssh connection to the lab host, reused by every netload ssh/scp:
 # a fresh connection costs 0.55-0.85 s here, a multiplexed one a few tens of ms.
 SSH_MUX = ["-o", "ControlMaster=auto", "-o", "ControlPersist=4h", "-o", f"ControlPath=/tmp/apppal-{username}-%C"]
@@ -671,14 +705,14 @@ SSH_MUX = ["-o", "ControlMaster=auto", "-o", "ControlPersist=4h", "-o", f"Contro
 
 def ensure_netboot_built():
     """Netload needs two local artifacts: netboot_proxy.py (in the repo) and
-    build/netboot.elf (built by src/tool/netboot/build.sh). Build the ELF when it is
+    <NETBOOT_BUILD_DIR>/netboot.elf (built by src/tool/netboot/build.sh). Build the ELF when it is
     missing or older than any of its sources, so a fresh checkout or an edited
     supervisor never bootstraps a stale image. The mtime check is free when
     nothing changed."""
     proxy = os.path.join(NETBOOT_LOCAL_DIR, "netboot_proxy.py")
     if not os.path.isfile(proxy):
         raise RuntimeError(f"{proxy} missing (it is part of the repo; check the checkout)")
-    elf = os.path.join(NETBOOT_LOCAL_DIR, "build", "netboot.elf")
+    elf = os.path.join(NETBOOT_BUILD_DIR, "netboot.elf")
     srcs = [p for pat in ("supervisor/*.c", "supervisor/*.S", "supervisor/*.h", "lwip/*", "netboot_proto.h",
                           "build.sh") for p in glob.glob(os.path.join(NETBOOT_LOCAL_DIR, pat))]
     newest = max((os.path.getmtime(p) for p in srcs), default=0)
@@ -686,8 +720,9 @@ def ensure_netboot_built():
         return
     why = "missing" if not os.path.isfile(elf) else "older than its sources"
     print(f"[netload] netboot.elf {why}: building it (src/tool/netboot/build.sh)...")
+    env = dict(os.environ, NETBOOT_OUT=NETBOOT_BUILD_DIR, NETBOOT_DMA_BASE=NETBOOT_DMA_BASE)
     r = subprocess.run(["bash", os.path.join(NETBOOT_LOCAL_DIR, "build.sh")], capture_output=True, text=True,
-                       timeout=1800)
+                       timeout=1800, env=env)
     if r.returncode != 0 or not os.path.isfile(elf):
         tail = "\n".join((r.stdout + r.stderr).strip().splitlines()[-15:])
         raise RuntimeError(f"building netboot.elf failed (exit {r.returncode}):\n{tail}\n"
@@ -695,22 +730,23 @@ def ensure_netboot_built():
     print(f"[netload] built {elf}")
 
 
-def stage_if_changed(local_paths):
-    """Copy files to NETBOOT_REMOTE_DIR on the lab host, skipping any whose remote
-    copy already has the same SHA-256 (one ssh round trip to check)."""
+def stage_if_changed(local_paths, names=None):
+    """Copy files to NETBOOT_REMOTE_DIR on the lab host (as `names`, default their
+    basenames), skipping any whose remote copy already has the same SHA-256 (one
+    ssh round trip to check)."""
     import hashlib
-    names = [os.path.basename(p) for p in local_paths]
+    names = names or [os.path.basename(p) for p in local_paths]
     probe = (f"mkdir -p {NETBOOT_REMOTE_DIR} && cd {NETBOOT_REMOTE_DIR} && "
              f"(sha256sum {' '.join(shlex.quote(n) for n in names)} 2>/dev/null; true)")
     r = subprocess.run(["ssh", *SSH_MUX, host, f"bash -c {shlex.quote(probe)}"], capture_output=True, text=True,
                        timeout=30)
     remote = {ln.split()[1]: ln.split()[0] for ln in r.stdout.splitlines() if len(ln.split()) == 2}
-    stale = [p for p, n in zip(local_paths, names)
+    stale = [(p, n) for p, n in zip(local_paths, names)
              if remote.get(n) != hashlib.sha256(open(p, "rb").read()).hexdigest()]
-    if stale:
-        subprocess.run(["scp", "-q", *SSH_MUX, *stale, f"{host}:{NETBOOT_REMOTE_DIR}/"], check=True,
+    for p, n in stale:
+        subprocess.run(["scp", "-q", *SSH_MUX, p, f"{host}:{NETBOOT_REMOTE_DIR}/{n}"], check=True,
                        capture_output=True, timeout=120)
-    print(f"[netload] staged on {palip}: {', '.join(os.path.basename(p) for p in stale) or 'nothing (up to date)'}")
+    print(f"[netload] staged on {palip}: {', '.join(n for _, n in stale) or 'nothing (up to date)'}")
 
 
 def netboot_stage_proxy():
@@ -720,11 +756,11 @@ def netboot_stage_proxy():
 
 def netboot_stage_supervisor():
     """netboot.elf for a JTAG bootstrap (xsdb on the lab host `dow`s it from there)."""
-    local_elf = os.path.join(NETBOOT_LOCAL_DIR, "build", "netboot.elf")
+    local_elf = os.path.join(NETBOOT_BUILD_DIR, "netboot.elf")
     if not os.path.isfile(local_elf):
         raise RuntimeError(f"{local_elf} missing: run src/tool/netboot/build.sh first")
-    stage_if_changed([local_elf])
-    return f"{NETBOOT_REMOTE_DIR}/netboot.elf"
+    stage_if_changed([local_elf], [NETBOOT_REMOTE_ELF])
+    return f"{NETBOOT_REMOTE_DIR}/{NETBOOT_REMOTE_ELF}"
 
 
 _netload_mod = []
@@ -782,8 +818,8 @@ def open_console_fast():
     child = pexpect.spawn("ssh", [*SSH_MUX, "-tt", host, "/opt/systest/common/bin/systest-client"],
                           encoding='utf-8', codec_errors='replace', timeout=60)
     child.expect(r'Systest[#>]', timeout=60)
-    child.sendline("connect com0")
-    child.expect(r'Connecting to device com0.*escape', timeout=60)
+    child.sendline(f"connect {CONSOLE_PORT}")
+    child.expect(rf'Connecting to device {CONSOLE_PORT}.*escape', timeout=60)
     return child
 
 
