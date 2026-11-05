@@ -399,3 +399,29 @@ asks with `--wait 0 --force`; on `busy` it parks the app core over JTAG with the
 ack's `park_addr` -- the same path as `stuck` -- confirms `app core parked`
 with `status`, and resends; a failed park falls back to a re-bootstrap.
 `netload.py` prints `park_addr` for `busy` and `overtime` acks as well.
+
+## 14. VEK385 (2026-11-04)
+
+`apppaltest.py -board vek385 -host gomphus3 [--netload]` runs the same flow on a
+VEK385 farm board (README "VEK385"). Verified on vek385-3: full JTAG boot,
+netload bootstrap (power cycle, `vek385_netboot.BIN`, supervisor, 2.8 MB app in
+~0.1 s on core 1, `Kernel test passed!`), fast path with a parked core, and
+palmyra unchanged. Board facts, each of which silently breaks a run:
+
+1. **GEM DMA cannot reach DDR_LOW0.** The GEM is an LPD master; on the vek385 base
+   platform LPD_AXI_NOC0 decodes only DDR_CH1 (0xA_0000_0000) and DDR_CH2. With the
+   palmyra layout TX reports HRESP, RX resource errors, the PLM logs NOCTYPE1_NCR and
+   ARP never answers. `NETBOOT_DMA_BASE=0xA00000000` links lwIP's heap/pools there,
+   the BD ring 1 GB above, maps the block at boot (`dma_map`) and builds
+   `-mcmodel=large` (Jane).
+2. **The A78 system counter is off after the PDI boot** (SCNTRS 0xEC920000 CNTCR = 0,
+   frequency 0). The BSP's own enable in `XTime_GetTime` does not take effect from
+   the A78; a debugger write does (~100 MHz). apppaltest enables it after
+   `device program`.
+3. **`rst -cores` on the APU suspends both A78 cores** (xsdb's default for
+   `-cores`), leaving #0.1 in Reset Catch, which the PLM then refuses to wake (PM
+   error ending `7D2`) or wakes into a halted core. `rst -processor` on #0.0 alone is
+   accepted after `device program` and leaves #0.1 in Power On Reset for the PLM.
+4. **The PLM denies `rst -proc` on a running app core** ("APU core power request
+   denied"), so the JTAG park is stop + `pc = nb_park` + `con`.
+

@@ -44,10 +44,24 @@ except ImportError:
     print("Error: pexpect module not found. Install with: pip install pexpect")
     sys.exit(1)
 
-# Read username, IP, and board name from environment variables
-username = os.environ.get("USERNAME")
-palip = os.environ.get("PALIP")
-boardname = os.environ.get("BOARDNAME")
+def board_cli_overrides(argv):
+    """-board / -host / -board-rev from the command line, read before the
+    environment so `-board vek385 -host gomphus3` needs no BOARDNAME / PALIP.
+    main()'s parser declares the same options (for --help and validation)."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("-board", "--board")
+    pre.add_argument("-host", "--host")
+    pre.add_argument("-board-rev", "--board-rev")
+    return pre.parse_known_args(argv)[0]
+
+
+_cli = board_cli_overrides(sys.argv[1:])
+
+# Read username, IP, and board name from environment variables; -board / -host win.
+username = os.environ.get("USERNAME") or (os.environ.get("USER") if _cli.board and _cli.host else None)
+boardname = _cli.board or os.environ.get("BOARDNAME")
+palip = _cli.host or (os.environ.get("VEK385IP") if (boardname or "").lower().startswith("vek385") else None) \
+    or os.environ.get("PALIP")
 
 if not username or not palip or not boardname:
     # Try to find and source envlocal.sh
@@ -71,18 +85,19 @@ if not username or not palip or not boardname:
                         key, _, value = line.partition('=')
                         os.environ[key] = value
                 
-                # Recheck the environment variables
-                username = os.environ.get("USERNAME")
-                palip = os.environ.get("PALIP")
-                boardname = os.environ.get("BOARDNAME")
+                # Recheck the environment variables (the command line still wins)
+                username = username or os.environ.get("USERNAME")
+                palip = palip or os.environ.get("PALIP")
+                boardname = boardname or os.environ.get("BOARDNAME")
             else:
                 print(f"Warning: Failed to source envlocal.sh: {result.stderr}")
         except Exception as e:
             print(f"Warning: Error sourcing envlocal.sh: {e}")
 
 if not username or not palip or not boardname:
-    print("Error: Please set USERNAME, PALIP, and BOARDNAME environment variables")
+    print("Error: Please set USERNAME, PALIP, and BOARDNAME environment variables, or pass -board/-host")
     print("Example: export USERNAME=aaaaa && export PALIP=10.23.***.*** && export BOARDNAME=pal***")
+    print("Example: apppaltest.py -board vek385 -host gomphus3 -y main.elf")
     script_dir = os.path.dirname(os.path.abspath(__file__))
     print(f"Or create {os.path.join(script_dir, 'envlocal.sh')} with these exports")
     sys.exit(1)
@@ -100,10 +115,34 @@ PALBOARD_SCRIPTS_DIR = f"/proj/xsjsswstaff/{username}/palboard_scripts"
 # difference: on the vek385 base platform the GEM (an LPD master, LPD_AXI_NOC0)
 # reaches only DDR_CH1/DDR_CH2, not DDR_LOW0, so its supervisor is a separate
 # build with the lwIP heap/pools and BD ring at NETBOOT_DMA_BASE (DDR_CH1).
+#
+# `-board vek385 -host gomphus3` is the same profile from the command line. The
+# farm host's systest-client is bound to its one board ("[vek385-3] Systest#"), so
+# every VEK385 session uses it, never `become`; `-board vek385` accepts any
+# vek385-N there, `-board vek385-3` only that one. The farm host already serves
+# hw_server, so xsdb attaches with `connect -url` (HW_SERVER_URL) in both modes.
+# -board-rev b (or VEK385_REV=b) programs rev B's boot + PLD PDI pair, as appvek385.py.
 IS_VEK385 = boardname.lower().startswith("vek385")
-PALBOARD_BIN = os.environ.get("BOOT_IMAGE") or (
-    os.environ.get("VEK385PDI") or f"/home/{username}/aiehlc/netboot/vek385_netboot.BIN" if IS_VEK385
-    else f"/home/{username}/palboard/BOOT.BIN")
+BOARD_REV = (_cli.board_rev or os.environ.get("VEK385_REV") or "a").lower()
+if os.environ.get("BOOT_IMAGE"):
+    BOOT_IMAGES = [os.environ["BOOT_IMAGE"]]
+elif IS_VEK385 and BOARD_REV == "b":
+    BOOT_IMAGES = [os.environ.get("VEK385_BOOT_PDI") or f"/home/{username}/aiehlc/vek385revb_boot.pdi",
+                   os.environ.get("VEK385_PLD_PDI") or f"/home/{username}/aiehlc/vek385revb_pld.pdi"]
+elif IS_VEK385:
+    BOOT_IMAGES = [os.environ.get("VEK385PDI") or f"/home/{username}/aiehlc/netboot/vek385_netboot.BIN"]
+else:
+    BOOT_IMAGES = [f"/home/{username}/palboard/BOOT.BIN"]
+HW_SERVER_URL = os.environ.get("HW_SERVER_URL") or f"TCP:{palip}:3121"
+
+
+def board_matches(found):
+    """systest-client's board name ("vek385-3") against -board: the exact name, or
+    any board of that family when only the family ("vek385") was given."""
+    want, found = boardname.lower(), (found or "").lower()
+    return found == want or found.startswith(want + "-")
+
+
 CONSOLE_PORT = os.environ.get("PAL_CONSOLE") or (os.environ.get("VEK385_CONSOLE", "com3") if IS_VEK385 else "com0")
 PLM_SETTLE_S = 15 if IS_VEK385 else 5
 #XSDB_ALT_PATH = "/everest/set_vnc_bkup/vnc/t50/es1/tools/Labtools/9999.0/bin/xsdb"
@@ -392,6 +431,22 @@ def xsdb_run(child, cmd, timeout=60, what=None):
     raise RuntimeError(f"xsdb `{what or cmd}` failed: {detail}")
 
 
+# A78 system counter (SCNTRS, the BSP's XIOU_SCNTRS_BASEADDR): CNTCR at +0, base
+# frequency at +0x20. After a VEK385 PDI boot both read 0 and stay 0 -- the BSP's
+# own enable in XTime_GetTime does not take effect from the A78 -- so CNTPCT is
+# frozen and every XTime/usleep wait spins forever (nbspin never ends, an app
+# hangs silently). A debugger write starts it (measured: ~100 MHz right after).
+SCNTRS_BASE = 0xEC920000
+SCNTRS_FREQ_HZ = 99999001  # XPAR_CPU_TIMESTAMP_CLK_FREQ
+
+
+def vek385_start_system_counter(child):
+    xsdb_run(child, 'targets -set -nocase -filter {name =~ "Versal*"}', 60, "select device")
+    xsdb_run(child, f"mwr -force 0x{SCNTRS_BASE + 0x20:x} {SCNTRS_FREQ_HZ}", 30, "counter frequency")
+    xsdb_run(child, f"mwr -force 0x{SCNTRS_BASE:x} 1", 30, "counter enable")
+    print("[Connection 1] A78 system counter enabled (SCNTRS CNTCR=1)")
+
+
 def setup_first_connection(nonreboot=False):
     """
     First SSH connection: Setup xsdb and program device.
@@ -412,8 +467,9 @@ def setup_first_connection(nonreboot=False):
 
     # Use systest-client in nonreboot mode so the session doesn't hold the
     # systest server lock, allowing other users/tools to connect.
-    if nonreboot:
-        print("[Connection 1] Connected, starting systest-client (nonreboot mode)...")
+    if nonreboot or IS_VEK385:  # a VEK385 farm host: systest-client only
+        print("[Connection 1] Connected, starting systest-client"
+              f"{' (nonreboot mode)' if nonreboot else ''}...")
         log.debug("setup_first_connection: sending systest-client")
         child.sendline("/opt/systest/common/bin/systest-client")
     else:
@@ -426,15 +482,18 @@ def setup_first_connection(nonreboot=False):
         # systest-client lands on the farm host's own board ("[vek385-3] Systest#");
         # refuse to power-cycle anything else (no `become` off palmyra).
         m = re.search(r'\[([^\]\s]+)\]\s*$', child.before or "")
-        if not m or m.group(1).lower() != boardname.lower():
+        if not m or not board_matches(m.group(1)):
             child.close(force=True)
             raise RuntimeError(f"systest-client on {palip} is on board {m.group(1) if m else '?'}, "
-                               f"not BOARDNAME={boardname}; not power-cycling it")
+                               f"not -board/BOARDNAME {boardname}; not power-cycling it")
+        print(f"[Connection 1] systest-client is on board {m.group(1)}")
 
     # Step 3: Become palboard - wait for Systest# prompt after board info.
     # In nonreboot mode the board is already up and owned by an existing
     # session, so skip 'become' to avoid taking over/holding the board.
-    if not nonreboot:
+    if IS_VEK385:
+        print("[Connection 1] Farm board: no 'become', powering off first...")
+    elif not nonreboot:
         print("[Connection 1] In systest, becoming palboard...")
         child.sendline(f'become "{boardname}"')
         child.expect(r'Systest[#>]', timeout=60)  # Wait for prompt after become completes
@@ -470,22 +529,33 @@ def setup_first_connection(nonreboot=False):
     print("[Connection 1] In xsdb, connecting...")
     
     # Steps 7-11, each waited on by its own completion token (xsdb_run).
-    xsdb_run(child, f"connect -url TCP:{palip}:3121" if nonreboot else "conn", 60, "connect")
+    xsdb_run(child, f"connect -url {HW_SERVER_URL}" if nonreboot or IS_VEK385 else "conn", 60, "connect")
     print("[Connection 1] Connected, targeting device 1...")
     xsdb_run(child, "tar 1", 60)
-    print("[Connection 1] Programming Palboard.BIN...")
-    try:
-        xsdb_run(child, f"device program {PALBOARD_BIN}", 120, "device program")
-    except RuntimeError as e:
-        raise RuntimeError(f"BOOT.BIN programming failed ({e}). The board may need a power cycle; "
-                           "run 'plm log' for details.") from e
+    for image in BOOT_IMAGES:  # rev B VEK385: boot PDI, then PLD PDI, back to back
+        print(f"[Connection 1] Programming {image}...")
+        try:
+            xsdb_run(child, f"device program {image}", 300, "device program")
+        except RuntimeError as e:
+            raise RuntimeError(f"programming {image} failed ({e}). The board may need a power cycle; "
+                               "run 'plm log' for details.") from e
     print("[Connection 1] Device programmed (100%), letting the PLM settle...")
     time.sleep(PLM_SETTLE_S)  # now measured from the END of programming
     if IS_VEK385:
-        # As appvek385.py: reset the APU cluster (target 18), then select A78 #0.0.
-        xsdb_run(child, 'targets -set -nocase -filter {name =~ "APU"}', 60, "select APU")
-        xsdb_run(child, "rst -cores", 60, "rst -cores")
+        # Reset A78 #0.0 only, as palmyra does. Not appvek385.py's APU `rst -cores`:
+        # that suspends EVERY core of the group, so #0.1 sits in the debugger's Reset
+        # Catch and the netboot supervisor's RequestWakeUp of it fails (PM 0x7D2) or
+        # the woken core never runs. After `device program` both cores are in Power
+        # On Reset and `rst -processor` on #0.0 leaves #0.1 to the PLM (measured).
+        vek385_start_system_counter(child)
         xsdb_run(child, 'targets -set -nocase -filter {name =~ "*A78*#0.0*"}', 60, "select A78 #0.0")
+        try:
+            xsdb_run(child, "rst -processor", 60, "rst -processor (A78 #0.0)")
+        except RuntimeError as e:
+            print(f"[Connection 1] {e}; falling back to the APU cluster reset (A78 #0.1 stays in Reset Catch)")
+            xsdb_run(child, 'targets -set -nocase -filter {name =~ "APU"}', 60, "select APU")
+            xsdb_run(child, "rst -cores", 60, "rst -cores")
+            xsdb_run(child, 'targets -set -nocase -filter {name =~ "*A78*#0.0*"}', 60, "select A78 #0.0")
     else:
         print("[Connection 1] Targeting device 20...")
         xsdb_run(child, "tar 20", 60)
@@ -813,14 +883,25 @@ def netload_remote(argv, timeout=600, gate=None, live=False):
 
 
 def open_console_fast():
-    """com0 through `ssh -tt host systest-client` on the multiplexed connection:
+    """The console (CONSOLE_PORT) through `ssh -tt host systest-client` on the multiplexed connection:
     no login shell to wait for (that alone was ~0.8 s of setup_second_connection)."""
-    child = pexpect.spawn("ssh", [*SSH_MUX, "-tt", host, "/opt/systest/common/bin/systest-client"],
-                          encoding='utf-8', codec_errors='replace', timeout=60)
-    child.expect(r'Systest[#>]', timeout=60)
-    child.sendline(f"connect {CONSOLE_PORT}")
-    child.expect(rf'Connecting to device {CONSOLE_PORT}.*escape', timeout=60)
-    return child
+    # A farm host's long-lived systest session re-opening its com telnets kills a
+    # starting systest-client with SIGUSR1 ("User signal 1", EOF); it is transient.
+    for attempt in range(3):
+        child = pexpect.spawn("ssh", [*SSH_MUX, "-tt", host, "/opt/systest/common/bin/systest-client"],
+                              encoding='utf-8', codec_errors='replace', timeout=60)
+        try:
+            child.expect(r'Systest[#>]', timeout=60)
+            child.sendline(f"connect {CONSOLE_PORT}")
+            child.expect(rf'Connecting to device {CONSOLE_PORT}.*escape', timeout=60)
+            return child
+        except pexpect.EOF:
+            child.close(force=True)
+            if attempt == 2:
+                raise
+            print(f"[netload] systest-client closed while attaching {CONSOLE_PORT} "
+                  f"({' '.join((child.before or '').split())[-60:]}); retrying", flush=True)
+            time.sleep(2)
 
 
 def start_console(fast):
@@ -874,10 +955,12 @@ def netboot_park_app_core(park_addr):
         if child.expect([r'xsdb%', r'command not found', pexpect.TIMEOUT], timeout=30) != 0:
             child.sendline(XSDB_ALT_PATH)
             child.expect(r'xsdb%', timeout=60)
-        xsdb_run(child, f"connect -url TCP:{palip}:3121", 60, "connect")
+        xsdb_run(child, f"connect -url {HW_SERVER_URL}", 60, "connect")
         xsdb_run(child, 'targets -set -nocase -filter {name =~ "*A78*#0.1*"}', 30, "select app core #0.1")
         xsdb_run(child, "catch {stop}", 30)
-        xsdb_run(child, "rst -proc", 30, "rst -proc (app core)")
+        # VEK385: the PLM denies the core power request behind rst -proc; stop + pc +
+        # con alone parks the core (jane, 2026-11-05: park_core1.tcl -> exited).
+        xsdb_run(child, "catch {rst -proc}" if IS_VEK385 else "rst -proc", 30, "rst -proc (app core)")
         xsdb_run(child, f"rwr pc 0x{park_addr:x}", 30, "pc = nb_park")
         xsdb_run(child, "con", 30, "continue (app core)")
         xsdb_run(child, "disconnect", 30)
@@ -919,7 +1002,7 @@ def netload_start(args, local_elf, collected):
         def console_attached():
             opener.join(timeout=60)
             if "c" not in box:
-                raise ConnectionError("com0 console did not attach")
+                raise ConnectionError(f"{CONSOLE_PORT} console did not attach")
 
         t0 = time.time()
         print(f"[netload] asking the supervisor at {ip} to run {os.path.basename(local_elf)} " +
@@ -928,7 +1011,7 @@ def netload_start(args, local_elf, collected):
         rc, out = netload_remote(load_argv, gate=console_attached, live=True)
         opener.join(timeout=60)
         if "c" not in box:
-            print("\n[ERROR] com0 console did not attach")
+            print(f"\n[ERROR] {CONSOLE_PORT} console did not attach")
             return None, None, None, False
         conn2, th = box["c"]
         if rc == 0:
@@ -980,9 +1063,8 @@ def netload_start(args, local_elf, collected):
     return conn1, conn2, th, rc == 0
 
 
-def main():
-    """Main test function."""
-    # Parse command-line arguments
+def build_arg_parser():
+    """The command line (main() parses it; -board/-host are also pre-read at import)."""
     parser = argparse.ArgumentParser(
         description="Palboard ELF Test Script - Run ELF files on palboard",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -995,6 +1077,8 @@ Examples:
   %(prog)s -y                   # Use default aout/main.elf without prompting
   %(prog)s -y /path/to/main.elf # Use custom ELF without prompting
   %(prog)s -nonreboot test.elf  # Run ELF but keep board on for manual debug
+  %(prog)s -board vek385 -host gomphus3 -y main.elf            # VEK385 farm board: full JTAG boot
+  %(prog)s -board vek385 -host gomphus3 -y --netload main.elf  # VEK385 through the netboot supervisor
         """
     )
     parser.add_argument(
@@ -1065,7 +1149,32 @@ Examples:
         help="Do not terminate a previous app that ran past its max run time (default: force it off and run "
              "this ELF; on a PDI that cannot stop the app core that means a re-bootstrap)"
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "-board", "--board",
+        default=None,
+        help="Board: palmyra (from BOARDNAME) or vek385 / vek385-N (a VEK385 farm board: systest-client "
+             "on -host, its running hw_server, PDI boot, console com3, VEK385 netboot supervisor). "
+             "Overrides BOARDNAME"
+    )
+    parser.add_argument(
+        "-host", "--host",
+        default=None,
+        help="Lab host the board hangs off (palmyra's PALIP, or the VEK385 farm host, e.g. gomphus3). "
+             "Overrides PALIP / VEK385IP"
+    )
+    parser.add_argument(
+        "-board-rev", "--board-rev",
+        choices=("a", "b"),
+        default=None,
+        help="VEK385 revision (default a, or VEK385_REV): a programs VEK385PDI (default "
+             "~/aiehlc/netboot/vek385_netboot.BIN), b programs VEK385_BOOT_PDI then VEK385_PLD_PDI"
+    )
+    return parser
+
+
+def main():
+    """Main test function."""
+    args = build_arg_parser().parse_args()
 
     # Step 0: Find ELF file using smart selection
     local_elf = find_elf_file(args.elf_file, auto_yes=args.yes)
@@ -1074,6 +1183,7 @@ Examples:
     
     print("\n" + "=" * 60)
     print("Palboard ELF Test Script")
+    print(f"Board: {boardname}" + (f" (rev {BOARD_REV.upper()})" if IS_VEK385 else "") + f", console {CONSOLE_PORT}")
     print(f"Host: {host}")
     print(f"ELF File: {local_elf}")
     print("=" * 60)
