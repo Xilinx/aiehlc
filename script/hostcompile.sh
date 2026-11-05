@@ -308,12 +308,13 @@ XAIE_INCLUDE="${AIEHLC_ROOT}/thirdparty/alib/huaj-aie-rt/driver/include"
 
 if [[ "$aie_version" == "1" || "$aie_version" == "2" ]]; then
     ARCH_APU_ALIB="${ARCH_72_DIR}/lib"
+    SECONDARY_ARCH_APU_ALIB="${ARCH_DIR}/psv_cortexa72_0/bsp/lib"
     ARCH_APU_AINC="${ARCH_72_DIR}/include"
     SECONDARY_ARCH_APU_AINC="${ARCH_DIR}/psv_cortexa72_0/bsp/include"
     AIELIB_APU_NAME="libxaienginea72.a"
     ARCH_APU_LD="${ARCH_DIR}/psv_cortexa72_0/lscript.ld"
     compiler_cpu_flag="-mcpu=cortex-a72"
-    LINK_EXTRA="-lxil,-lxilstandalone,-lxiltimer"
+    LINK_EXTRA="-lxil"
 elif [[ "$aie_version" == "5" ]]; then
     ARCH_APU_ALIB="${ARCH_78_DIR}/lib"
     ARCH_APU_AINC="${ARCH_78_DIR}/include"
@@ -365,6 +366,11 @@ fi
 # User headers are copied to worklocal/ by aiehlc alongside host.cc
 INCLUDE_OPTS="${INCLUDE_OPTS} -I${WORKLOCAL_DIR}"
 DEFS="-DAIE_GEN=${aie_version} ${EXTRA_DEFS:-}"
+# Gen2: workspace/xparameters.h (included earlier in the chain) lacks this A72
+# timer constant; define it here so xtime_l.h's COUNTS_PER_SECOND resolves.
+if [[ "$aie_version" == "2" ]]; then
+    DEFS="${DEFS} -DXPAR_CPU_CORTEXA72_0_TIMESTAMP_CLK_FREQ=99999908"
+fi
 if [ "${AIEHLC_PROFILING:-0}" != "0" ]; then
     DEFS="${DEFS} -DAIEHLC_PROFILING=1"
     echo "[hostcompile] profiling runtime layer ENABLED (-DAIEHLC_PROFILING=1)"
@@ -617,6 +623,7 @@ if [ "${HOST_ENTRY_KIND}" = "library" ]; then
     echo "        -L\"${ALIB_LIB_DIR}\" \\"
     echo "        -L\"${AIENGINE_LIB_DIR}\" \\"
     echo "        -L\"${ARCH_APU_ALIB}\" \\"
+    [ -n "${SECONDARY_ARCH_APU_ALIB}" ] && echo "        -L\"${SECONDARY_ARCH_APU_ALIB}\" \\"
     echo "        -L\"${AIE_DRIVER_PARENT_DIR}/lib\" \\"
     echo "        -Wl,--start-group,-lm,-l${BAREMETAL_AIENGINE_LIB},-lxil,-lgcc,-lc,-lstdc++,${LINK_EXTRA},--end-group"
     echo ""
@@ -647,6 +654,7 @@ ${TOOL_PREFIX}g++ ${OPT_FLAGS} -o host host.o aie_runtime.o aie_runtime_debug.o 
     -Wl,-T -Wl,${ARCH_APU_LD} \
     -L"${ALIB_LIB_DIR}" \
     -L"${AIENGINE_LIB_DIR}" \
+    ${SECONDARY_ARCH_APU_ALIB:+-L"${SECONDARY_ARCH_APU_ALIB}"} \
     -L"${ARCH_APU_ALIB}" \
     -L"${AIE_DRIVER_PARENT_DIR}/lib" \
     -Wl,--start-group,-lm,-l${BAREMETAL_AIENGINE_LIB},-lxil,-lgcc,-lc,-lstdc++,${LINK_EXTRA},--end-group

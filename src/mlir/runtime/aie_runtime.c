@@ -2224,10 +2224,12 @@ __attribute__((weak)) int g_runtime_debug_level = 0;
 static inline int __Runtime_is_aie_core_tile(XAie_LocType tile) { return tile.Row >= XAIE_AIE_TILE_ROW_START; }
 
 #define MAX_ALLOC_BUFFERS 64
+#define RT_DMA_ALIGN 64u
 typedef struct {
     void *vaddr;
     XAie_MemInst *mem;
     size_t size;
+    uint64_t shift;
 } AllocEntry;
 static AllocEntry s_alloc_map[MAX_ALLOC_BUFFERS];
 static int s_alloc_count = 0;
@@ -2237,7 +2239,7 @@ static XAie_MemInst *__vaddr_to_mem_offset(void *vaddr, uint64_t *offset_out) {
     for (int i = 0; i < s_alloc_count; i++) {
         uintptr_t base = (uintptr_t)s_alloc_map[i].vaddr;
         if (addr >= base && addr < base + s_alloc_map[i].size) {
-            uint64_t off = addr - base;
+            uint64_t off = addr - base + s_alloc_map[i].shift;
             AIEHLC_LOG(printf("[aie_runtime] vaddr_lookup: %p → alloc[%d] base=%p size=%zu off=%lu DevAddr=0x%lx\n",
                               vaddr, i, s_alloc_map[i].vaddr, s_alloc_map[i].size, (unsigned long)off,
                               (unsigned long)(XAie_MemGetDevAddr(s_alloc_map[i].mem) + off)));
@@ -2542,19 +2544,23 @@ void *__Runtime_alloc_buffer(XAie_DevInst *dev, size_t size_bytes) {
                "Call partition() before alloc().\n");
         return NULL;
     }
-    XAie_MemInst *mem = XAie_MemAllocate(dev, size_bytes, XAIE_MEM_CACHEABLE);
+    size_t lines = (size_bytes + RT_DMA_ALIGN - 1) / RT_DMA_ALIGN;
+    XAie_MemInst *mem = XAie_MemAllocate(dev, (lines + 1) * RT_DMA_ALIGN, XAIE_MEM_CACHEABLE);
     if (!mem) {
         printf("[aie_runtime] alloc_buffer: XAie_MemAllocate(%zu) failed\n", size_bytes);
         return NULL;
     }
-    void *vaddr = XAie_MemGetVAddr(mem);
-    uint64_t devaddr = XAie_MemGetDevAddr(mem);
+    uintptr_t base = (uintptr_t)XAie_MemGetVAddr(mem);
+    uint64_t shift = ((base + RT_DMA_ALIGN - 1) & ~(uintptr_t)(RT_DMA_ALIGN - 1)) - base;
+    void *vaddr = (void *)(base + shift);
+    uint64_t devaddr = XAie_MemGetDevAddr(mem) + shift;
     AIEHLC_LOG(printf("[aie_runtime] alloc_buffer(%zu) = %p (mem=%p devaddr=0x%lx)\n", size_bytes, vaddr, (void *)mem,
                       (unsigned long)devaddr));
     if (s_alloc_count < MAX_ALLOC_BUFFERS) {
         s_alloc_map[s_alloc_count].vaddr = vaddr;
         s_alloc_map[s_alloc_count].mem = mem;
         s_alloc_map[s_alloc_count].size = size_bytes;
+        s_alloc_map[s_alloc_count].shift = shift;
         s_alloc_count++;
     } else {
         printf("[aie_runtime] alloc_buffer WARNING: %d live buffers, %p untracked (DMA address lookups fail)\n",
@@ -2563,13 +2569,15 @@ void *__Runtime_alloc_buffer(XAie_DevInst *dev, size_t size_bytes) {
     return vaddr;
 }
 
-static void rt_alloc_map_remove(void *vaddr) {
+static XAie_MemInst *rt_alloc_map_remove(void *vaddr) {
     for (int i = 0; i < s_alloc_count; i++) {
         if (s_alloc_map[i].vaddr == vaddr) {
+            XAie_MemInst *mem = s_alloc_map[i].mem;
             s_alloc_map[i] = s_alloc_map[--s_alloc_count];
-            return;
+            return mem;
         }
     }
+    return NULL;
 }
 
 void __Runtime_free_buffer(XAie_DevInst *dev, void *ptr) {
@@ -2579,9 +2587,9 @@ void __Runtime_free_buffer(XAie_DevInst *dev, void *ptr) {
         printf("[aie_runtime] ERROR: free_buffer called with dev=NULL\n");
         return;
     }
-    rt_alloc_map_remove(ptr);
-    AieRC rc = XAie_MemFreeVAddr(dev, ptr);
-    AIEHLC_LOG(printf("[aie_runtime] free_buffer(%p) via XAie_MemFreeVAddr rc=%d\n", ptr, rc););
+    XAie_MemInst *mem = rt_alloc_map_remove(ptr);
+    AieRC rc = mem ? XAie_MemFree(mem) : XAie_MemFreeVAddr(dev, ptr);
+    AIEHLC_LOG(printf("[aie_runtime] free_buffer(%p) rc=%d\n", ptr, rc););
 }
 
 void __Runtime_free_all_allocs(void) {
@@ -3055,7 +3063,7 @@ static AieRC __Runtime_partition_initialize(XAie_DevInst *dev) {
  * col 3 (= absolute col 6) once and errored on cols 4..6.
  * ----------------------------------------------------------------------- */
 AieRC __Runtime_enable_core_proc_bus(XAie_DevInst *dev) {
-#if AIE_GEN == 5 && !defined(__AIESIM__)
+#if (AIE_GEN == 2 || AIE_GEN == 5) && !defined(__AIESIM__)
     AieRC rc = XAIE_OK;
     u8 rowStart = dev->AieTileRowStart;
     u8 rowEnd = (u8)(dev->AieTileRowStart + dev->AieTileNumRows);
@@ -3223,6 +3231,9 @@ XAie_DevInst *__Runtime_explicit_init_partition(int startCol, int numCols) {
         return NULL;
     }
 
+#if defined(AIEHLC_PHASE_TIMERS) && !defined(__AIESIM__)
+    uint64_t __pt0 = __aie_host_now();
+#endif
     // Enable each core's processor bus so KERNELCONFIGOFFLOAD kernels can
     // self-program their DMA/lock registers via MMIO. No-op unless gen5
     // baremetal; harmless when offload is off.
@@ -3250,6 +3261,10 @@ XAie_DevInst *__Runtime_explicit_init_partition(int startCol, int numCols) {
     }
     */
     __Runtime_routing_init(dev);
+#if defined(AIEHLC_PHASE_TIMERS) && !defined(__AIESIM__)
+    printf("[phase] partition_config (proc bus + routing)=%.1f us\n",
+           (double)(__aie_host_now() - __pt0) * 1e6 / (double)__aie_host_cps());
+#endif
 
     AIEHLC_LOG(printf("[aie_runtime] explicit_init_partition OK startCol=%d numCols=%d dev=%p\n", startCol, numCols,
                       (void *)dev););

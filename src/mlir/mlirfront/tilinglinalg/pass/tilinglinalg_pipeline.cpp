@@ -10,6 +10,7 @@
 #include "passblueprinttoschedule.h"
 #include "passblueprinttoschedulekernel.h"
 #include "passcoretraceinsert/passcoretraceinsert.h"
+#include "passstartiointerleave/passstartiointerleave.h"
 #include "passdfscheduleprovenancemap.h"
 #include "passdfscheduletoapi.h"
 #include "passdfscheduletokernelapi.h"
@@ -683,6 +684,7 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
     // should generate coordinates relative to the partition origin.
     // Only enable partition mode when both startCol and endCol are specified;
     // otherwise keep relStartCol = -1 so RoutingTopology skips setPartitionBounds.
+    setResourcePartitionStartCol(partStartCol >= 0 && partEndCol >= 0 ? partStartCol : 0);
     int relStartCol = (partStartCol >= 0 && partEndCol >= 0) ? 0 : -1;
     int relEndCol = (partStartCol >= 0 && partEndCol >= 0) ? (partEndCol - partStartCol) : -1;
     auto controlPlanAttr =
@@ -976,6 +978,10 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
         return false;
     if (!runPipelineSinglePass(ctx, hostModule, std::make_unique<RoutingConstantFoldPass>(aieGen), irDir, stage,
                                "RoutingConstantFoldPass"))
+        return false;
+
+    if (!runPipelineSinglePass(ctx, hostModule, std::make_unique<StartioInterleavePass>(), irDir, stage,
+                               "StartioInterleavePass"))
         return false;
 
     // Inject declarative per-tile core trace (#pragma aie_trace) into the host
