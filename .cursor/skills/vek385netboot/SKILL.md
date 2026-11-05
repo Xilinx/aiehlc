@@ -54,6 +54,9 @@ python3 $NL status --via huaj@crimini1                      # "pm ok, ... app co
 ```
 On vek385 the app's `_exit` parks the core, so you can repeat load and rerun without a new bootstrap.
 try3 ran bootstrap, then 3 loads, 1 rerun, and the fast path, all PASS. Before ccfcaa2, 15 loads in a row passed.
+try3 also had an uncommitted apppaltest hunk (worktree diff in jane tasks `apppaltest_park_worktree.diff`) that
+parks A78 #0.1 only if it is in Reset Catch. With ccfcaa2 #0.1 came up in `Power On Reset`, so the hunk printed "no park needed"
+and did nothing. If a load still fails with 0x7D2, park #0.1 by hand (see the table).
 
 **Pass/fail: do not trust "exit rc N".** xil-crt0 runs `bl main; bl __libc_fini_array; bl exit`, which
 clobbers w0, so the supervisor reports `exit rc 1` even when main returned 0. Until the loader patch
