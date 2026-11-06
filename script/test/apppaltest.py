@@ -447,6 +447,19 @@ def vek385_start_system_counter(child):
     print("[Connection 1] A78 system counter enabled (SCNTRS CNTCR=1)")
 
 
+def vek385_reset_system(child):
+    """PMC system reset right before `device program`. A farm board's power cycle
+    leaves the previous boot's state behind on VEK385 (the app then exits at once
+    with a NUL-only console); `rst -system` from the PMC target clears it, so the
+    PDI programs a clean system."""
+    # Exactly "PMC": "*PMC*" also hits the ASU target, whose name carries its status
+    # ("ASU (Memory write error ... PMC LPD domain isolation)") -> "more than one targets".
+    xsdb_run(child, 'targets -set -nocase -filter {name =~ "PMC"}', 60, "select PMC")
+    xsdb_run(child, "rst -system", 60, "rst -system (PMC)")
+    time.sleep(2)  # the PMC re-runs its ROM; give it a moment before programming
+    print("[Connection 1] PMC system reset done (rst -system)")
+
+
 def setup_first_connection(nonreboot=False):
     """
     First SSH connection: Setup xsdb and program device.
@@ -530,6 +543,8 @@ def setup_first_connection(nonreboot=False):
     
     # Steps 7-11, each waited on by its own completion token (xsdb_run).
     xsdb_run(child, f"connect -url {HW_SERVER_URL}" if nonreboot or IS_VEK385 else "conn", 60, "connect")
+    if IS_VEK385:
+        vek385_reset_system(child)
     print("[Connection 1] Connected, targeting device 1...")
     xsdb_run(child, "tar 1", 60)
     for image in BOOT_IMAGES:  # rev B VEK385: boot PDI, then PLD PDI, back to back
@@ -893,7 +908,10 @@ def open_console_fast():
         try:
             child.expect(r'Systest[#>]', timeout=60)
             child.sendline(f"connect {CONSOLE_PORT}")
-            child.expect(rf'Connecting to device {CONSOLE_PORT}.*escape', timeout=60)
+            if child.expect([rf'Connecting to device {CONSOLE_PORT}.*escape',
+                             rf'Unrecognized device: {CONSOLE_PORT}'], timeout=60) == 1:
+                child.close(force=True)  # the farm board is powered off: its com ports are gone
+                raise ConnectionError(f"{CONSOLE_PORT}: Unrecognized device (board powered off?)")
             return child
         except pexpect.EOF:
             child.close(force=True)
@@ -912,10 +930,26 @@ def start_console(fast):
     return conn2, th
 
 
+def leave_console(conn2):
+    """Leave `connect <com>` the way systest expects (Ctrl-\\, then exit) before the
+    ssh closes. Force-closing the ssh alone leaves the farm host's long-lived systest
+    holding `telnet <console server> 400N` for that port; those pile up (seen on
+    gomphus3 and crimini1), and a com port held that way showed a `telnet>` prompt +
+    NULs instead of the board's output on crimini1."""
+    try:
+        conn2.sendcontrol('\\')
+        conn2.expect(r'Systest[#>]', timeout=5)
+        conn2.sendline("exit")
+        conn2.expect(pexpect.EOF, timeout=5)
+    except Exception as e:  # best effort: the ssh is closed next anyway
+        log.debug("leave_console: %s", e)
+    conn2.close(force=True)
+
+
 def stop_console(conn2, th):
     stop_console_thread.set()
     th.join(timeout=5)
-    conn2.close(force=True)
+    leave_console(conn2)
 
 
 def drain_until(marker, timeout_s, collected):
@@ -973,6 +1007,59 @@ def netboot_park_app_core(park_addr):
             child.close(force=True)
 
 
+def netboot_park_symbol():
+    """Address of nb_park in the staged supervisor ELF (local build)."""
+    elf = os.path.join(NETBOOT_BUILD_DIR, "netboot.elf")
+    out = subprocess.run(["nm", elf], capture_output=True, text=True, check=True).stdout
+    m = re.search(r"^([0-9a-fA-F]+) T nb_park$", out, re.M)
+    if not m:
+        raise RuntimeError(f"nb_park not found in {elf}")
+    return int(m.group(1), 16)
+
+
+def vek385_park_app_core(conn1, ip):
+    """VEK385 bootstrap: hand A78 #0.1 to the supervisor parked, over the bootstrap's xsdb.
+
+    After `rst -cores` core 1 sits in the debugger's Reset Catch, already powered,
+    and the PLM refuses the supervisor's RequestWakeUp (XPM_PM_NO_ACCESS 2002,
+    vek385-11 2026-11-05); where rst -cores is refused (vek385-3) the wake works
+    but the core still waits in Reset Catch for a `con`. Once core 1 runs (spinning
+    in nb_park) the PLM wake of the first load is accepted (vek385-11 run 3), and
+    later loads are mailbox releases (no PLM call)."""
+    try:
+        xsdb_run(conn1, 'targets -set -nocase -filter {name =~ "*A78*#0.1*"}', 30, "select app core #0.1")
+        # Only a core the debugger holds needs this. setup_first_connection resets
+        # A78 #0.0 alone, leaving #0.1 in Power On Reset for the PLM's wake; it is
+        # in Reset Catch only after the `rst -cores` fallback.
+        # "[expr 1+1]" keeps xsdb's echo of this line from matching the reply.
+        conn1.sendline('puts "@@ST[expr 1+1] [state] @@"')
+        conn1.expect(r"@@ST2 ([^@\r\n]*) @@", timeout=30)
+        core1 = conn1.match.group(1)
+        if "Reset Catch" not in core1:
+            print(f"[netload] vek385: A78 #0.1 is '{core1}', not held by the debugger: no park needed", flush=True)
+            xsdb_run(conn1, 'targets -set -nocase -filter {name =~ "*A78*#0.0*"}', 30, "select A78 #0.0")
+            return True
+        park = netboot_park_symbol()
+        print(f"[netload] vek385: parking A78 #0.1 at nb_park 0x{park:x} over JTAG", flush=True)
+        xsdb_run(conn1, "catch {stop}", 30)
+        # The debugger-side reset is what lets the PLM wake succeed afterwards
+        # (stop + pc + con alone still got XPM_PM_NO_ACCESS on vek385-11).
+        xsdb_run(conn1, "catch {rst -proc}", 30, "rst -proc (app core)")
+        xsdb_run(conn1, "catch {stop}", 30)
+        xsdb_run(conn1, f"rwr pc 0x{park:x}", 30, "pc = nb_park")
+        xsdb_run(conn1, "con", 30, "continue (app core)")
+        xsdb_run(conn1, 'targets -set -nocase -filter {name =~ "*A78*#0.0*"}', 30, "select A78 #0.0")
+    except (RuntimeError, subprocess.CalledProcessError, pexpect.ExceptionPexpect) as e:
+        print(f"\n[ERROR] vek385: JTAG park of A78 #0.1 failed: {e}")
+        return False
+    time.sleep(0.5)
+    st_rc, st = netload_remote(["status", "--host", ip, "--connect-timeout", "3"], timeout=30)
+    if st_rc != 0:
+        print(f"\n[ERROR] vek385: supervisor stopped answering after the park ({st.strip().splitlines()[-1] if st else 'no answer'})")
+        return False
+    return True
+
+
 def netload_start(args, local_elf, collected):
     """Fast path first: console up, then `load` straight to a resident supervisor.
 
@@ -995,7 +1082,12 @@ def netload_start(args, local_elf, collected):
         # The console attaches while the ELF streams; netload holds back the last
         # 4 KB until it is attached, so the app cannot print before we listen.
         box = {}
-        opener = threading.Thread(target=lambda: box.setdefault("c", start_console(fast=True)))
+        def open_console():
+            try:
+                box["c"] = start_console(fast=True)
+            except Exception as e:  # reported below; a bootstrap can still bring the board up
+                box["err"] = e
+        opener = threading.Thread(target=open_console)
         opener.start()
         netboot_stage_proxy()
 
@@ -1010,10 +1102,13 @@ def netload_start(args, local_elf, collected):
                else f"(waits up to {args.netload_wait:g} s if the board is busy)"), flush=True)
         rc, out = netload_remote(load_argv, gate=console_attached, live=True)
         opener.join(timeout=60)
-        if "c" not in box:
-            print(f"\n[ERROR] {CONSOLE_PORT} console did not attach")
+        if "c" not in box and rc != 2:
+            print(f"\n[ERROR] {CONSOLE_PORT} console did not attach ({box.get('err', 'timeout')})")
             return None, None, None, False
-        conn2, th = box["c"]
+        if "c" not in box:  # no console AND no supervisor: board off or never booted
+            print(f"[netload] {CONSOLE_PORT} not available ({box.get('err', 'timeout')}) and no supervisor "
+                  "answering: bootstrapping (power cycle + device program)", flush=True)
+        conn2, th = box.get("c", (None, None))
         if rc == 0:
             print(f"[netload] streamed {local_elf} through the proxy on {palip} in {time.time() - t0:.2f}s (no scp)")
             return None, conn2, th, True
@@ -1040,7 +1135,8 @@ def netload_start(args, local_elf, collected):
                     return None, conn2, th, True
             print(f"[netload] JTAG park did not free the app core ({st.splitlines()[-1] if st else 'no answer'}); "
                   "falling back to a re-bootstrap", flush=True)
-        stop_console(conn2, th)
+        if conn2 is not None:
+            stop_console(conn2, th)
         why = (f"supervisor not answering at {ip}" if rc == 2 else
                "the previous app is past its max run time and this PDI cannot stop it (forced run)" if rc == 5
                else "--netload-force-now: the running app could not be parked over JTAG" if rc == 3
@@ -1058,6 +1154,8 @@ def netload_start(args, local_elf, collected):
         return conn1, conn2, th, False
     if not drain_until("[netboot] ready", NETBOOT_READY_TIMEOUT_S, collected):
         print(f"\n[ERROR] supervisor did not print '[netboot] ready' within {NETBOOT_READY_TIMEOUT_S}s")
+        return conn1, conn2, th, False
+    if IS_VEK385 and not vek385_park_app_core(conn1, ip):
         return conn1, conn2, th, False
     rc, out = netload_remote(load_argv, live=True)
     return conn1, conn2, th, rc == 0
@@ -1413,7 +1511,7 @@ def _close_all(console_thread, conn1, conn2):
     for name, conn in (("conn1", conn1), ("conn2", conn2)):
         if conn:
             try:
-                conn.close(force=True)
+                leave_console(conn) if conn is conn2 else conn.close(force=True)
             except Exception as e:
                 log.debug("main finally: %s.close() error: %s", name, e)
     log.debug("main finally: all cleanup done")

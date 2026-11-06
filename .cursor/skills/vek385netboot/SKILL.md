@@ -28,6 +28,11 @@ deadlocks.
 - `source /scratch/staff/huaj/aiengineers/skills/vitis-2026.2/vitis_env.sh` (xsdb, A78 gcc).
   The supervisor was verified on the board with gcc 13.4 (2026.1). gcc 15.3 is not verified on the board.
 
+**PMC system reset before programming.** With `-board vek385*` the bootstrap runs
+`targets -set -nocase -filter {name =~ "PMC"}; rst -system` right before `device program`
+(after the power cycle and `connect`), so the PDI programs a clean system. Verified on
+vek385-11 (2026-11-04): reset OK, BIN programmed, SCNTRS on, supervisor up (`status`: idle, pm ok).
+
 **Build (automatic).** With `-board vek385*` (or `BOARDNAME=vek385-*`), apppaltest builds
 `src/tool/netboot/build/vek385/netboot.elf` with `NETBOOT_DMA_BASE=0xA00000000` and stages it as
 `~/aiehlc/netboot/netboot_vek385.elf`. This is needed because GEM0 sits on LPD_AXI_NOC0, which reaches
@@ -89,8 +94,10 @@ mrd -force -value 0x73100 4           ;# after: 3504710117 0 0 0
 | GEM TXSR 0x11 (HRESP), RXRES 0x103, PLM EAM NOCTYPE1_NCR, no ARP | GEM DMA buffers in DDR_LOW0 (supervisor built without `NETBOOT_DMA_BASE`) | let apppaltest build `build/vek385/`; check the `GEM DMA memory at 0xA00000000` line |
 | `ERR XPmDevice_Request: 0x7F4` right after the supervisor banner | harmless PLM message at init (also in run1_bootstrap_1752.log, where the network worked) | ignore |
 | `PLM Error Major 0x302 Minor 0x1` during `device program` | device programmed twice without a power cycle (often a second session) | power-cycle, then program once; keep everything under one lock |
-| `connect com3` -> `Unrecognized device`, supervisor silent | board powered off | `board.py power-cycle`, then bootstrap again |
+| `connect com3` -> `Unrecognized device`, supervisor silent | board powered off | automatic now: `--netload` sees no console AND no supervisor and bootstraps (power cycle + PMC reset + program); verified vek385-3 2026-11-05 (109 s, GOLDEN PASS) |
 | supervisor says `exit rc 1` but the app passed | xil-crt0 clobbers w0 (see Procedure) | judge by `__rt_done`, not the rc |
+| `select PMC` fails: `more than one targets found with "name =~ "*PMC*""` | the ASU target's name carries its status (`ASU (Memory write error ... PMC LPD domain isolation)`) | apppaltest selects `{name =~ "PMC"}` (exact) for the PMC `rst -system` it runs before every VEK385 `device program` (`vek385_reset_system`) |
+| `connect com3` prints `Versal PS UART0`, then a `telnet>` prompt and a burst of `^@` (NUL), then nothing -- yet `netload status` answers and the app runs | a telnet to the console server port (`telnet 10.10.71.1 400N`, child of the farm host's long-lived `systest`) left over from an earlier session still holds the port | apppaltest now leaves the port the systest way (`leave_console`: Ctrl-\\, `exit`) instead of force-closing the ssh, so its runs add no telnets (verified gomphus3). Older leftovers: `ssh <host> 'ps -eo pid,etime,args \| grep "telnet 10.10.71"'`, end the stale ones (yours only), reconnect; Enter at `telnet>` resumes but brings no data while the stale one lives |
 | `device program` "PLM stalled" at 85% | `~/aiehlc/vek385.pdi` (= `tutorial/hw/vek385-reva/vek385.pdi`) on vek385-3 | default image `~/aiehlc/netboot/vek385_netboot.BIN` (aiebaremetal boot + pld PDIs) |
 
 ## Verify

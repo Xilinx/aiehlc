@@ -132,6 +132,7 @@ these board differences, each learned on vek385-3 (skill **vek385netboot**):
 | boot image | `~/palboard/BOOT.BIN` | `~/aiehlc/netboot/vek385_netboot.BIN` (rev A), or boot + PLD PDI (`-board-rev b`) |
 | console | com0 | com3 |
 | supervisor | `build/netboot.elf` | `build/vek385/netboot.elf`, `NETBOOT_DMA_BASE=0xA00000000`, staged as `netboot_vek385.elf` |
+| reset before `device program` | power cycle | power cycle, then PMC `rst -system` (`targets -filter {name =~ "PMC"}` -- exact: `*PMC*` also matches the ASU target) |
 | reset before `dow` | `rst -proc` on A78 #0.0 | same (`rst -processor`), **not** the APU `rst -cores` |
 | system counter | running | **off after the PDI boot**: apppaltest writes SCNTRS `0xEC920020` = freq, `0xEC920000` = 1 |
 | JTAG park | `rst -proc` | `catch {rst -proc}` (PLM denies it), then pc = `nb_park`, `con` |
