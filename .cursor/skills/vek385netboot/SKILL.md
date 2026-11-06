@@ -19,6 +19,13 @@ deadlocks.
 
 ## Procedure (verified on vek385-11 @ crimini1, HEAD ccfcaa2, 2026-11-05)
 
+**Re-verified on vek385-3 @ gomphus3, aiehlc main e570563, 2026-11-06:** the exact
+`python3 script/test/apppaltest.py -board vek385 -host gomphus3 -y --netload ./aout/main.elf`
+(conv2dstem ELF, md5 c06b32dd) passed 5/5 under one lock on the fast path (supervisor already up,
+no bootstrap): 4.28 MB sent in 0.29-0.79 s, board rx 195-397 ms, 2.2-3.6 s wall per run.
+Logs: `aiengineers/jane/tasks/2026-11-06_vek385-3_main_netload/s2/`. With `-board/-host` you do not
+need `BOARDNAME/PALIP` or `--netload-bootstrap`: `--netload` bootstraps by itself if the board is off.
+
 **Prerequisites**
 - The board must be held by huaj's job: `/proj/systest/bin/cluster-ping | grep vek385-11`
   shows `huaj`. Pairs: vek385-11 = crimini1 (hw_server `crimini1:3121`), vek385-3 = gomphus3.
@@ -76,6 +83,11 @@ mrd -force -value 0x73100 4           ;# after: 3504710117 0 0 0
 ```
 (`rtdone.tcl [clear]` in the same tasks dir.)
 
+**Apps without `__rt_done`** (e.g. the conv2dstem `aout/main.elf`, `test_conv2d_new.cc`): judge by the
+console line `[conv2dstem] GOLDEN PASS 802816/802816` (+ `conv2dstem done (rc=0)`), but count it only if
+it comes AFTER this run's own `[netboot] run N:` line. When com3 attaches it replays the previous run's
+output, so a plain `grep GOLDEN` sees a stale PASS (seen in 3 of 5 runs on vek385-3).
+
 **Agent rules**
 - One board, one session. Another session's `device program` on the live board caused PLM 0x302 and
   spoiled try1 and try2.
@@ -107,6 +119,7 @@ mrd -force -value 0x73100 4           ;# after: 3504710117 0 0 0
   `LOAD_RUN ... sha256 ok`, app output, `[Program completed after Ns]`.
 - fast path: `app core was parked: released to 0x0 (no PLM call)`.
 - Console lines appear twice on JTAG runs (logfile_read + queue echo); not two runs.
+- netload: com3 replays the previous run's tail on attach; only lines after `[netboot] run N:` are this run.
 - An app without `device_teardown done` ends a JTAG run on the 300 s no-output
   timeout; netload ends on the supervisor's `exited`.
 
