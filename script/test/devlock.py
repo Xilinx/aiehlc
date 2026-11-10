@@ -189,8 +189,32 @@ class DeviceLock:
         return False
 
 
+def _alive(pid):
+    """True while ``pid`` exists and is not a zombie (a dead holder no longer has the flock)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def _wait_gone(pid, secs):
+    deadline = time.time() + secs
+    while _alive(pid) and time.time() < deadline:
+        time.sleep(0.1)
+    return not _alive(pid)
+
+
+BREAK_GRACE_SECS = 5
+
+
 def break_lock(device, lock_dir=None, sig=signal.SIGTERM):
-    """Kill a hung holder on THIS host. A crashed holder never needs this."""
+    """Kill a hung holder on THIS host. A crashed holder never needs this.
+
+    ``sig`` is tried first (SIGTERM lets the holder clean up); a holder that is
+    still there after BREAK_GRACE_SECS gets SIGKILL. A frozen (SIGSTOPped / T state)
+    holder never acts on SIGTERM -- seen on 213 in s5, where --lock-break said
+    "sent SIGTERM" and the board stayed locked -- so it is also sent SIGCONT."""
     path = lock_path(device, lock_dir)
     owner = read_owner(path)
     if not owner or "pid" not in owner:
@@ -199,16 +223,26 @@ def break_lock(device, lock_dir=None, sig=signal.SIGTERM):
     if why_not:
         return why_not
     pid = int(owner["pid"])
+    if not _alive(pid):
+        return f"holder pid {pid} is already gone (lock is free)"
     # Collect the children first: once the holder dies they are re-parented and
     # untraceable, and a surviving xsdb / ssh systest-client is a stale board session.
     kids = devwatch.descendants(pid)
+    sent = [sig.name]
     try:
         os.kill(pid, sig)
+        if sig != signal.SIGKILL:
+            os.kill(pid, signal.SIGCONT)
+            if not _wait_gone(pid, BREAK_GRACE_SECS):
+                os.kill(pid, signal.SIGKILL)
+                sent.append("SIGKILL")
     except ProcessLookupError:
-        return f"holder pid {pid} is already gone (lock is free)"
+        pass
     for k in kids:
         try:
             os.kill(k, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-    return f"sent {sig.name} to holder pid {pid} and SIGKILL to {len(kids)} child process(es)"
+    state = "gone, lock released" if _wait_gone(pid, BREAK_GRACE_SECS) else "STILL ALIVE, lock still held"
+    return (f"sent {' then '.join(sent)} to holder pid {pid} ({state}) and SIGKILL to "
+            f"{len(kids)} child process(es)")

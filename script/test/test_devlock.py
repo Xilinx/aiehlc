@@ -74,3 +74,18 @@ def test_owner_user_is_set_without_USER_env(tmp_path, monkeypatch):
         owner = devlock.read_owner(lk.path)
     assert owner["user"] not in ("", "?")
     assert owner["user"] == devlock.whoami()
+
+
+def test_lock_break_frees_a_frozen_sigstopped_holder(tmp_path):
+    # 213 s5: SIGTERM alone left a SIGSTOPped holder in T state holding the board.
+    p = spawn_holder(tmp_path)
+    os.kill(p.pid, signal.SIGSTOP)
+    try:
+        msg = devlock.break_lock("huaj@10.23.224.213", lock_dir=str(tmp_path))
+        assert "gone, lock released" in msg and "SIGKILL" in msg
+        p.wait(timeout=10)
+        with devlock.DeviceLock("huaj@10.23.224.213", lock_dir=str(tmp_path), wait_secs=0):
+            pass
+    finally:
+        if p.poll() is None:
+            p.kill()
