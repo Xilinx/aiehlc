@@ -1267,12 +1267,40 @@ Examples:
         help="VEK385 revision (default a, or VEK385_REV): a programs VEK385PDI (default "
              "~/aiehlc/netboot/vek385_netboot.BIN), b programs VEK385_BOOT_PDI then VEK385_PLD_PDI"
     )
+    parser.add_argument(
+        "--lock-wait", type=int, default=int(os.environ.get("APPPAL_LOCK_WAIT", "1800")),
+        help="Seconds to wait for the per-device lock before giving up (default 1800). "
+             "Only one apppaltest/board.py run per device at a time; a crashed holder "
+             "releases it automatically (kernel flock)."
+    )
+    parser.add_argument(
+        "--no-lock", action="store_true",
+        help="Skip the per-device lock (only for read-only debugging; can corrupt another run)"
+    )
+    parser.add_argument(
+        "--lock-break", action="store_true",
+        help="Kill a HUNG holder of this device's lock (must run on the holder's host) and exit"
+    )
     return parser
 
 
 def main():
-    """Main test function."""
+    """Parse args, take the per-device lock, then run."""
+    import devlock
     args = build_arg_parser().parse_args()
+    device = palip
+    if args.lock_break:
+        print(f"[devlock] {devlock.break_lock(device)}")
+        return
+    if args.no_lock:
+        print("[devlock] WARNING: --no-lock, not serialising with other runs on this device")
+        return _main(args)
+    with devlock.DeviceLock(device, wait_secs=args.lock_wait):
+        return _main(args)
+
+
+def _main(args):
+    """Main test function."""
 
     # Step 0: Find ELF file using smart selection
     local_elf = find_elf_file(args.elf_file, auto_yes=args.yes)
