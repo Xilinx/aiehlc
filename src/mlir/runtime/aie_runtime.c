@@ -3034,9 +3034,71 @@ static inline void rt_dsync_drain_inputs(void) {
         rt_dsync_run(1, (size_t)-1);
 }
 
+/* Post-DMA invalidate (opt-in, AIEHLC_POST_DMA_INVAL).
+ *
+ * The queue above cleans/invalidates every argument BEFORE (or, for ranges
+ * registered with __Runtime_buffer_device_written, DURING) the data-plane DMA,
+ * and nothing after it. On ARMv8 Normal cacheable memory a line may be
+ * allocated speculatively at any time (hardware prefetch, speculative loads),
+ * and a line that shares a 64-B granule with CPU-touched data (a 16-B aligned
+ * XAie_MemAllocate buffer's head/tail) is refilled on purpose. A line refilled
+ * after its invalidate but before the S2MM wrote it holds the PRE-DMA bytes,
+ * and the CPU reads those after the launch. Linux arm64 invalidates again on
+ * dma_unmap(FROM_DEVICE) for exactly this reason; rt_dmabuf (runtime design
+ * note R5) does to_cpu after the S2MM wait.
+ *   0 (default) = old behaviour, nothing after the DMA
+ *   1           = invalidate every __Runtime_buffer_device_written range of
+ *                 this launch after the DMA (outputs the caller declared)
+ *   2           = invalidate EVERY queued argument after the DMA (the runtime
+ *                 cannot tell inputs from outputs; conservative)
+ * Cost = one more DC CIVAC pass over the chosen bytes on clean/absent lines;
+ * counted in g_post_inval_cyc / g_post_inval_bytes. */
+#ifndef AIEHLC_POST_DMA_INVAL
+#define AIEHLC_POST_DMA_INVAL 0
+#endif
+#if AIEHLC_POST_DMA_INVAL
+static rt_dsync_rng g_post[RT_DSYNC_MAX];
+static int g_post_n;
+unsigned long long g_post_inval_cyc, g_post_inval_n, g_post_inval_bytes;
+
+static void rt_post_record(XAie_DevInst *dev, uintptr_t lo, uintptr_t hi, int dev_written) {
+    if (AIEHLC_POST_DMA_INVAL == 1 && !dev_written)
+        return;
+    for (int i = 0; i < g_post_n; i++)
+        if (g_post[i].dev == dev && g_post[i].cur == lo && g_post[i].end == hi)
+            return;
+    if (g_post_n == RT_DSYNC_MAX) {
+        printf("[aie_runtime] post_dma_inval: table full; %p not re-invalidated\n", (void *)lo);
+        return;
+    }
+    g_post[g_post_n].dev = dev;
+    g_post[g_post_n].cur = lo;
+    g_post[g_post_n].end = hi;
+    g_post[g_post_n].inval_only = 1;
+    g_post_n++;
+}
+
+/* Runs after the launch's DMA is complete (called from __Runtime_dsync_drain,
+ * which the emitted __aie_launch calls after host_canonicalized returns). */
+static void rt_post_inval_run(void) {
+    for (int i = 0; i < g_post_n; i++) {
+        unsigned long long t0 = RT_PROF_TIC();
+        size_t n = (size_t)(g_post[i].end - g_post[i].cur);
+        __Runtime_sync_for_cpu(g_post[i].dev, (void *)g_post[i].cur, n);
+        g_post_inval_bytes += n;
+        RT_PROF_ADD(g_post_inval_cyc, g_post_inval_n, t0);
+    }
+    g_post_n = 0;
+}
+#else
+#define rt_post_record(dev, lo, hi, dev_written) ((void)0)
+#define rt_post_inval_run() ((void)0)
+#endif
+
 void __Runtime_dsync_drain(void) {
     if (g_dsync_n)
         rt_dsync_run(0, (size_t)-1);
+    rt_post_inval_run();
 }
 
 void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size) {
@@ -3047,6 +3109,11 @@ void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size) 
     if (!ptr || !size)
         return;
     if (!dev || g_dsync_n == RT_DSYNC_MAX) {
+#if AIEHLC_POST_DMA_INVAL
+        if (!rt_nc_covers((uintptr_t)ptr, (uintptr_t)ptr + size))
+            rt_post_record(dev, (uintptr_t)ptr, (uintptr_t)ptr + size,
+                           rt_devwr_covers((uintptr_t)ptr, (uintptr_t)ptr + size));
+#endif
         __Runtime_sync_for_dev(dev, ptr, size);
         return;
     }
@@ -3059,6 +3126,7 @@ void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size) 
     g_dsync[g_dsync_n].cur = lo;
     g_dsync[g_dsync_n].end = hi;
     g_dsync[g_dsync_n].inval_only = rt_devwr_covers(lo, hi);
+    rt_post_record(dev, lo, hi, g_dsync[g_dsync_n].inval_only);
     g_dsync_n++;
 }
 
