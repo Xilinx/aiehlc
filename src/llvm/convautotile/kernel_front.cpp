@@ -729,9 +729,9 @@ Candidate evalCandidate(const std::string &src, const std::string &srcDir, const
     KernelOnlyResult b = inferKernelOnly(copy, srcDir, srcName);
     c.notes.insert(c.notes.end(), b.notes.begin(), b.notes.end());
     c.errors = b.errors;
-    if (b.ok && b.derived.count(k.name)) {
+    if (b.ok && b.est_ms.count(k.name)) {
         c.ok = true;
-        c.est_ms = b.derived[k.name].est_ms;
+        c.est_ms = b.est_ms[k.name];
     } else if (c.errors.empty())
         c.errors.push_back(k.name + ": " + (b.error.empty() ? "the DMA could not be derived" : b.error));
     return c;

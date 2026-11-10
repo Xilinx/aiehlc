@@ -46,8 +46,7 @@ __global__(conv, map) void conv2d_spatial(
     const int TAPS = KH * KW * C; // 196 (not K: simpleconv2d_new_load.h #defines K)
 
     // This core's filters: output channels [pid_c*16, +16), all taps.
-    // const int8_t *w = aie::load_buffer(win_b, {pid_c * oc_t, 0, 0, 0}, {oc_t, KH, KW, C});
-    const int8_t *w = aie::load_buffer(win_b, {pid_c * oc_t * 20, 0, 0, 0}, {oc_t, KH, KW, C});
+    const int8_t *w = aie::load_buffer(win_b, {pid_c * oc_t, 0, 0, 0}, {oc_t, KH, KW, C});
 
     for (int i = 0; i < map.oh_per_core / oh_t; i++) {          // 4 row blocks
         for (int j = 0; j < map.ow / ow_t; j++) {               // 4 column blocks

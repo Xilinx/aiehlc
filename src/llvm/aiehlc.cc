@@ -3901,8 +3901,9 @@ public:
             convKernelDecls.clear();
             convDerivedByKernel.clear();
             // Kernel-only sources (no aie::Conv2d / aie::Mapping; ports carry
-            // aie::shape): derive the DMA layout from the kernel's own
-            // load_buffer / store_buffer and rewrite into the (conv, map) form.
+            // aie::shape): map the kernel's traced load_buffer / store_buffer
+            // blocks onto the routing carriers (any operator) and rewrite into
+            // the explicit __global__(policy) + per-port GemmSpace form.
             {
                 // Tensor form (aie::in / aie::out of aie::tensor types): lower
                 // to the kernel-only form first (kernel_front.h).
@@ -3927,6 +3928,14 @@ public:
                             llvm::errs() << "[KernelAnalysis] ERROR: " << e << "\n";
                         std::exit(1);
                     }
+                    // Routed kernels: block descriptors for the kernel TU, and
+                    // (a recognized conv) the derivation the tiling must agree with.
+                    for (auto &kd : ko.tu_decls)
+                        for (auto &decl : kd.second)
+                            if (std::find(convKernelDecls.begin(), convKernelDecls.end(), decl) == convKernelDecls.end())
+                                convKernelDecls.push_back(decl);
+                    for (auto &kd : ko.derived)
+                        convDerivedByKernel[kd.first] = kd.second;
                 }
             }
             convautotile::DesugarResult r =

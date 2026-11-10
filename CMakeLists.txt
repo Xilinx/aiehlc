@@ -131,7 +131,8 @@ set(SOURCE_FILES ./src/llvm/aiehlc.cc
     ./src/llvm/convautotile/conv_desugar.cpp
     ./src/llvm/convautotile/kernel_trace.cpp
     ./src/llvm/convautotile/kernel_static.cpp
-    ./src/llvm/convautotile/kernel_front.cpp)
+    ./src/llvm/convautotile/kernel_front.cpp
+    ./src/llvm/convautotile/trace_routing.cpp)
 set(mlirfrontend src/mlir/mlirfront/)
 
 add_executable(aiehlc ${SOURCE_FILES})
@@ -143,7 +144,7 @@ add_executable(aiehlc-convtile ./src/llvm/convautotile/convtile_cli.cpp
     ./src/llvm/convautotile/conv_autotile.cpp ./src/llvm/convautotile/conv_desugar.cpp
     ./src/llvm/convautotile/kernel_trace.cpp
     ./src/llvm/convautotile/kernel_static.cpp
-    ./src/llvm/convautotile/kernel_front.cpp)
+    ./src/llvm/convautotile/kernel_front.cpp ./src/llvm/convautotile/trace_routing.cpp)
 
 target_compile_definitions(aiehlc-convtile PRIVATE AIEHLC_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 

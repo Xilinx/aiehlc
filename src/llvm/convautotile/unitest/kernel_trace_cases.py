@@ -21,15 +21,18 @@ REPO = pathlib.Path(__file__).resolve().parents[4]
 CCODE = REPO / "example" / "tileprogram" / "ccode"
 BASE = CCODE / "simpleconv2dkernel_port.cc"
 TENSOR_BASE = CCODE / "simpleconv2dkernel.cc"
+GEMM_BASE = pathlib.Path(__file__).resolve().parent / "gemm_kernel_port.cc"
 LOAD_T = "aie::load_buffer(x_t, {oh0 * S - P, ow0 * S - P, 0}, {IH_T, IW_T, C}"
 LOAD_X = "const int8_t *x = aie::load_buffer(win_a, {oh0 * S, ow0 * S, 0}, {ih_t, iw_t, C});"
 
 # (name, [(old, new), ...], expected substring in the output; None = must pass)
 CASES = [
     ("baseline", [], None),
-    ("load too big",
+    # A slab one row taller than the conv footprint is still an affine block
+    # walk inside the tensor: the routing follows the kernel (20-row halo slabs).
+    ("load bigger than the footprint (routed as is)",
      [(LOAD_X, LOAD_X.replace("{ih_t, iw_t, C}", "{ih_t + 1, iw_t, C}"))],
-     "is too big in dim 0 (rows): it takes 20, the DMA block is 19"),
+     None),
     # A slab narrower than the conv footprint makes the compute read past it:
     # caught first as data used without being loaded (at the exact line).
     ("load too small",
@@ -52,7 +55,7 @@ CASES = [
      [("for (int i = 0; i < oh_core / oh_t; i++) {", "@OUTER@"),
       ("for (int j = 0; j < 112 / ow_t; j++) {", "for (int i = 0; i < oh_core / oh_t; i++) {"),
       ("@OUTER@", "for (int j = 0; j < 112 / ow_t; j++) {")],
-     "visited column-outer"),
+     "swap the two loops"),
     ("schedule depends on data",
      [("            aie::release(win_a);\n", "            if (x[0] > 0) { aie::release(win_a); x = aie::load_buffer(win_a, {oh0 * S, ow0 * S, 0}, {ih_t, iw_t, C}); }\n            aie::release(win_a);\n")],
      "depends on the data"),
@@ -112,9 +115,9 @@ TENSOR_CASES = [
     ("tensor: wrong .reuse",
      [("{.reuse = OH_CORE / OH_T * Ofm::dim(1) / OW_T}", "{.reuse = OH_CORE / OH_T}")],
      "load_buffer says {.reuse = 4}, but 16 output block(s) are stored while it is held"),
-    ("tensor: load too big",
+    ("tensor: load bigger than the footprint (routed as is)",
      [(LOAD_T, LOAD_T.replace("{IH_T, IW_T, C}", "{IH_T + 1, IW_T, C}"))],
-     "is too big in dim 0 (rows): it takes 20, the DMA block is 19"),
+     None),
     ("tensor: data used without load (reads past the block)",
      [("x(oh * S + kh, ow * S + kw, c)", "x(oh * S + kh + 1, ow * S + kw, c)")],
      "data used without being loaded"),
@@ -140,7 +143,16 @@ TENSOR_CASES = [
       ("@OUTER@", "for (int j = 0; j < Ofm::dim(1) / OW_T; j++)"),
       # pinned: with one row round (OH_T=28) the swapped order is harmless
       ("conv2d<<<mesh>>>", "conv2d<7, 28, 16><<<mesh>>>")],
-     "visited column-outer"),
+     "swap the two loops"),
+]
+
+# Kernel-only GEMM: routed with no operator recognition (trace_routing.h).
+LOAD_B = "aie::load_buffer(b, {pn * 16, j * 64}, {16, 64})"
+GEMM_CASES = [
+    ("gemm: baseline (routed)", [], None),
+    ("gemm: input block unique per core",
+     [(LOAD_B, "aie::load_buffer(b, {pn * 16, pm * 64}, {16, 64})")],
+     "unique per core"),
 ]
 
 
@@ -166,6 +178,7 @@ def main():
     cli = sys.argv[1] if len(sys.argv) > 1 else str(REPO / "build" / "aiehlc-convtile")
     failed = 0
     cases = [(n, e, x, BASE) for n, e, x in CASES] + [(n, e, x, TENSOR_BASE) for n, e, x in TENSOR_CASES]
+    cases += [(n, e, x, GEMM_BASE) for n, e, x in GEMM_CASES]
     if len(sys.argv) > 2:  # a name filter
         cases = [c for c in cases if sys.argv[2] in c[0]]
     for name, edits, expect, base in cases:
