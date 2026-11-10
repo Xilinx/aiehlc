@@ -64,3 +64,13 @@ def test_lock_break_kills_hung_local_holder(tmp_path):
     p.wait(timeout=10)
     with devlock.DeviceLock("huaj@10.23.224.213", lock_dir=str(tmp_path), wait_secs=0):
         pass
+
+
+def test_owner_user_is_set_without_USER_env(tmp_path, monkeypatch):
+    # The bot container has no USER; .owner must still say who holds the board.
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.delenv("LOGNAME", raising=False)
+    with devlock.DeviceLock("u@10.0.0.9", wait_secs=0, lock_dir=str(tmp_path)) as lk:
+        owner = devlock.read_owner(lk.path)
+    assert owner["user"] not in ("", "?")
+    assert owner["user"] == devlock.whoami()

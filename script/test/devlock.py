@@ -72,6 +72,15 @@ def killable(owner):
     return None
 
 
+def whoami():
+    """Login name even where USER is unset (the bot container): uid lookup first."""
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError):
+        return os.environ.get("USER") or os.environ.get("LOGNAME") or f"uid{os.getuid()}"
+
+
 def read_owner(path):
     try:
         with open(path + ".owner") as f:
@@ -129,7 +138,7 @@ class DeviceLock:
             self._handle_frozen(owner)
             time.sleep(POLL_SECS)
         self.owner = {"pid": os.getpid(), "host": socket.gethostname(),
-                      "user": os.environ.get("USER", "?"), "start": time.time(),
+                      "user": whoami(), "start": time.time(),
                       "heartbeat": time.time(), "cmd": " ".join(sys.argv),
                       "pidns": pid_ns(), "pstart": proc_start(os.getpid())}
         self._write_owner()
