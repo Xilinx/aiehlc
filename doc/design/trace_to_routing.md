@@ -125,4 +125,26 @@ checked and rendered text equal), `kernel_trace_cases.py` 27/27. Full rebuild +
 3. GEMM kernel-only example (`simplematmul2` in load_buffer form) through
    the fullconnect path; GlobalPolicy chosen from the plan (halo ->
    `fullconnect_auto = 0`).
-4. Full build + `simpleconv2d_new_load.cc` compile + `apppaltest.py` on board.
+4. ~~Full build + `simpleconv2d_new_load.cc` compile + `apppaltest.py` on board~~
+   (done below).
+
+## Board result (palmyra 10.23.224.213, 2026-11-10)
+
+`apppaltest.py --netload` from `xiaojiang/apppaltest-devlock` (devlock +
+watchdog), ELFs built by this branch (4267fb3) with `aiehlc.sh --aie-version 5`.
+Logs: `aiengineers/maxwell/tasks/2026-11-10_trace_routing_board/`.
+
+| ELF | result |
+|---|---|
+| `simpleconv2d_new_load.cc` as checked in | rc 0, `aie_wall_ms=164.2`, app exits normally (this source has `verify_conv2d` commented out, so it only checks that the app runs to completion) |
+| same source with `verify_conv2d` enabled (copy in /tmp; header returns right after the compare, without the input dump) | rc 0, `aie_wall_ms=164.3`, **`verify: 0 mismatches of 802816`** against the CPU reference conv2d |
+
+The verify build's `routing.cc`, `kernel.cc`, `aieml.bcf` and `aieml.prx` are
+byte-identical to the checked-in source's build, so the AIE side checked by
+verify is the same one the checked-in source runs.
+
+Board note: after the first new_load run, the next two runs failed apppaltest's
+pre-run netload smoke test (`load nbspin5.elf rc=3/5`) even though hw_server
+was up and the lock was free. Reloading the supervisor with
+`--netload-bootstrap --skip-preflight` fixed it. The cause is not known (the
+supervisor may not take the app core back after this app); owner: apppaltest/netboot.
