@@ -2877,6 +2877,26 @@ void __Runtime_perfcnt_read_mm2s_bd_finished_partition(XAie_DevInst *dev, uint8_
     }
 }
 
+/* Every VAddr cache sync goes through here so a failure is never silent.
+ * On the board (xaie_baremetal.c) both VAddr syncs are an unconditional
+ * Xil_DCache{Flush,Invalidate}Range and always return XAIE_OK; only the sim
+ * backend can fail (XAIE_INVALID_ADDRESS when the VA is not an XAie_MemAllocate
+ * block), and then the DMA reads/writes an unmapped address with no other sign.
+ * Count every failure (g_sync_err_n, readable by JTAG/host) and print the first
+ * RT_SYNC_ERR_PRINT, independent of AIEHLC_LOG. Cost on the board: one compare. */
+#define RT_SYNC_ERR_PRINT 4U
+unsigned long long g_sync_err_n;
+static inline AieRC rt_sync_rc(AieRC rc, const char *dir, const void *ptr, uint64_t n) {
+    if (rc != XAIE_OK) {
+        if (g_sync_err_n < RT_SYNC_ERR_PRINT)
+            printf("[aie_runtime] ERROR sync_for_%s(%p, %llu) rc=%d: range not synced%s\n", dir, ptr,
+                   (unsigned long long)n, (int)rc,
+                   g_sync_err_n + 1 == RT_SYNC_ERR_PRINT ? " (further errors only counted)" : "");
+        g_sync_err_n++;
+    }
+    return rc;
+}
+
 void __Runtime_sync_for_dev(XAie_DevInst *dev, void *ptr, size_t size) {
     if (rt_nc_covers((uintptr_t)ptr, (uintptr_t)ptr + size)) {
         __asm__ volatile("dsb sy" ::: "memory"); /* drain the write buffer; nothing is cached */
@@ -2884,7 +2904,7 @@ void __Runtime_sync_for_dev(XAie_DevInst *dev, void *ptr, size_t size) {
     }
     unsigned long long __sd_t0 = RT_PROF_TIC();
     if (dev) {
-        AieRC rc = XAie_MemSyncForDevVAddr(dev, ptr, (uint64_t)size);
+        AieRC rc = rt_sync_rc(XAie_MemSyncForDevVAddr(dev, ptr, (uint64_t)size), "dev", ptr, size);
         AIEHLC_LOG(printf("[aie_runtime] sync_for_dev(%p, %zu) via VAddr rc=%d\n", ptr, size, rc););
     } else {
         Xil_DCacheFlushRange((UINTPTR)ptr, size);
@@ -2899,7 +2919,7 @@ void __Runtime_sync_for_cpu(XAie_DevInst *dev, void *ptr, size_t size) {
      * inside the kernel-ELF load (measured: kload 28 -> 84 us). The emitted
      * __aie_launch drains after host_canonicalized instead. */
     if (dev) {
-        AieRC rc = XAie_MemSyncForCPUVAddr(dev, ptr, (uint64_t)size);
+        AieRC rc = rt_sync_rc(XAie_MemSyncForCPUVAddr(dev, ptr, (uint64_t)size), "cpu", ptr, size);
         AIEHLC_LOG(printf("[aie_runtime] sync_for_cpu(%p, %zu) via VAddr rc=%d\n", ptr, size, rc););
     } else {
         Xil_DCacheInvalidateRange((UINTPTR)ptr, size);
@@ -3008,9 +3028,11 @@ static void rt_dsync_run(int inputs_only, size_t budget) {
             unsigned long long t0 = RT_PROF_TIC();
             size_t n = (size_t)(r->end - r->cur) < budget ? (size_t)(r->end - r->cur) : budget;
             if (r->inval_only)
-                (void)XAie_MemSyncForCPUVAddr(r->dev, (void *)r->cur, (uint64_t)n);
+                (void)rt_sync_rc(XAie_MemSyncForCPUVAddr(r->dev, (void *)r->cur, (uint64_t)n), "cpu",
+                                 (void *)r->cur, n);
             else
-                (void)XAie_MemSyncForDevVAddr(r->dev, (void *)r->cur, (uint64_t)n);
+                (void)rt_sync_rc(XAie_MemSyncForDevVAddr(r->dev, (void *)r->cur, (uint64_t)n), "dev",
+                                 (void *)r->cur, n);
             r->cur += n;
             budget -= n;
             RT_PROF_ADD(g_sync_dev_cyc, g_sync_dev_n, t0);
