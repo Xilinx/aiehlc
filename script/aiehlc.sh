@@ -273,6 +273,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# shellcheck source=profiling_env_check.sh
+source "${SCRIPT_DIR}/profiling_env_check.sh"
+aiehlc_profiling_env_check "${PROFILING}"
+
 # Parameter validation
 if [ "$COMPILE_AIELIB_ONLY" -eq 0 ] && [ -z "$runtime_source_file" ]; then
     echo "Error: --runtime-source-file is required."
