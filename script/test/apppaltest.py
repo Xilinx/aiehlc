@@ -29,6 +29,7 @@ import glob
 import logging
 import re
 import shlex
+import devwatch  # self-watchdog: progress + stall exit (see devwatch.py)
 
 # Configure logging with timestamps so we can see where things get stuck
 logging.basicConfig(
@@ -275,6 +276,7 @@ def console_reader(child, output_queue, stop_event):
             if output:
                 buffer += output
                 output_queue.put(output)
+                devwatch.progress("console output")
         except pexpect.TIMEOUT:
             # No data available, continue polling
             continue
@@ -419,6 +421,7 @@ def xsdb_run(child, cmd, timeout=60, what=None):
     child.sendline(f'if {{[catch {{{cmd}}} e]}} {{puts "@@ERR_[expr {{{n - 1}+1}}]@@ $e"}} '
                    f'else {{puts "@@OK_[expr {{{n - 1}+1}}]@@"}}')
     index = child.expect([re.escape(ok), re.escape(err), r"PLM stalled"], timeout=timeout)
+    devwatch.progress(f"xsdb `{what or cmd}` returned")
     if index == 0:
         return
     detail = "PLM stalled"
@@ -644,6 +647,7 @@ def download_elf_and_continue(child, elf_path):
 
     log.debug("download_elf_and_continue: sending 'dow -force'...")
     child.sendline(f"dow -force {elf_path}")
+    devwatch.quiet(DOWNLOAD_TIMEOUT_S + 60, f"dow {os.path.basename(elf_path)}")
 
     # Wait for "Successfully downloaded" – this string is emitted only by
     # "dow", never by "device program BOOT.BIN".  Using "100%" was unsafe
@@ -663,6 +667,7 @@ def download_elf_and_continue(child, elf_path):
     # and only matters when the alternative is a spurious failure.
     log.debug("download_elf_and_continue: waiting for download result...")
     index = child.expect([r'Successfully downloaded', r'PLM stalled'], timeout=DOWNLOAD_TIMEOUT_S)
+    devwatch.progress("dow finished")
     if index == 1:
         # Consume remaining output up to the prompt
         child.expect(r'xsdb%', timeout=60)
@@ -806,6 +811,7 @@ def ensure_netboot_built():
     why = "missing" if not os.path.isfile(elf) else "older than its sources"
     print(f"[netload] netboot.elf {why}: building it (src/tool/netboot/build.sh)...")
     env = dict(os.environ, NETBOOT_OUT=NETBOOT_BUILD_DIR, NETBOOT_DMA_BASE=NETBOOT_DMA_BASE)
+    devwatch.quiet(1800 + 60, "building netboot.elf")
     r = subprocess.run(["bash", os.path.join(NETBOOT_LOCAL_DIR, "build.sh")], capture_output=True, text=True,
                        timeout=1800, env=env)
     if r.returncode != 0 or not os.path.isfile(elf):
@@ -863,6 +869,8 @@ class _Tee:
 
     def write(self, text):
         self.buf.write(text)
+        if text.strip():
+            devwatch.progress("netload: " + text.strip()[:80])
         if self.live:
             sys.__stdout__.write(text)
             sys.__stdout__.flush()
@@ -889,6 +897,7 @@ def netload_remote(argv, timeout=600, gate=None, live=False):
     extra += [x for i in range(1, len(SSH_MUX), 2) for x in ("--ssh-opt", SSH_MUX[i])]
     mod = _netload_mod[0]
     mod.send_gate = gate
+    devwatch.quiet(timeout, "netload " + " ".join(argv[:2]))
     try:
         with contextlib.redirect_stdout(out):
             rc = mod.main(argv + extra)
@@ -1278,6 +1287,16 @@ Examples:
         help="Skip the per-device lock (only for read-only debugging; can corrupt another run)"
     )
     parser.add_argument(
+        "--stall-secs", type=int, default=int(os.environ.get("APPPAL_STALL_SECS", "600")),
+        help="Self-watchdog: exit with STALLED (code 124, lock released) after this many seconds "
+             "with no progress (console output, an xsdb command returning, a netload line). "
+             "Known-slow steps (netboot build, dow) extend it. 0 = off. Default 600"
+    )
+    parser.add_argument(
+        "--max-run", type=int, default=int(os.environ.get("APPPAL_MAX_RUN", "3600")),
+        help="Self-watchdog hard cap on the whole run in seconds (default 3600, 0 = off)"
+    )
+    parser.add_argument(
         "--lock-break", action="store_true",
         help="Kill a HUNG holder of this device's lock (must run on the holder's host) and exit"
     )
@@ -1294,9 +1313,18 @@ def main():
         return
     if args.no_lock:
         print("[devlock] WARNING: --no-lock, not serialising with other runs on this device")
-        return _main(args)
-    with devlock.DeviceLock(device, wait_secs=args.lock_wait):
-        return _main(args)
+        with _watchdog(args, None):
+            return _main(args)
+    with devlock.DeviceLock(device, wait_secs=args.lock_wait) as lk:
+        with _watchdog(args, lk.heartbeat):
+            return _main(args)
+
+
+def _watchdog(args, heartbeat):
+    """Start the self-watchdog only after the lock is held (waiting is not a stall)."""
+    wd = devwatch.Watchdog(stall_secs=args.stall_secs, max_run=args.max_run, heartbeat=heartbeat)
+    devwatch.current = wd
+    return wd
 
 
 def _main(args):

@@ -26,6 +26,9 @@ import time
 LOCK_DIR = os.environ.get("BOARD_LOCK_DIR", "/scratch/staff/huaj/tmp/board_locks")
 HWS_PORT = 3121
 POLL_SECS = 5
+HEARTBEAT_SECS = 30
+# A holder whose heartbeat is this stale is frozen (its watchdog thread is stuck too).
+FROZEN_SECS = int(os.environ.get("DEVLOCK_FROZEN_SECS", 3 * HEARTBEAT_SECS))
 
 
 def lock_path(device, lock_dir=None):
@@ -89,14 +92,45 @@ class DeviceLock:
                 print(f"[devlock] {self.device} busy, waiting (up to {self.wait_secs}s): "
                       f"{describe(owner)}", file=self.out, flush=True)
                 announced = True
+            self._handle_frozen(owner)
             time.sleep(POLL_SECS)
-        owner = {"pid": os.getpid(), "host": socket.gethostname(),
-                 "user": os.environ.get("USER", "?"), "start": time.time(),
-                 "cmd": " ".join(sys.argv)}
-        with open(self.path + ".owner", "w") as f:
-            json.dump(owner, f)
+        self.owner = {"pid": os.getpid(), "host": socket.gethostname(),
+                      "user": os.environ.get("USER", "?"), "start": time.time(),
+                      "heartbeat": time.time(), "cmd": " ".join(sys.argv)}
+        self._write_owner()
         print(f"[devlock] acquired {self.device} ({self.path})", file=self.out, flush=True)
         return self
+
+    def _write_owner(self):
+        tmp = f"{self.path}.owner.{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump(self.owner, f)
+        os.replace(tmp, self.path + ".owner")
+
+    def heartbeat(self):
+        """Called by devwatch every HEARTBEAT_SECS while the holder is alive."""
+        if self.fd is not None:
+            self.owner["heartbeat"] = time.time()
+            self._write_owner()
+
+    def _handle_frozen(self, owner):
+        """Holder alive but its heartbeat stopped: break it if it is on this host."""
+        if not owner or "heartbeat" not in owner or "pid" not in owner:
+            return  # board.py / pre-heartbeat apppaltest: no heartbeat to judge by
+        stale = time.time() - owner["heartbeat"]
+        if stale < FROZEN_SECS:
+            return
+        key = (owner["pid"], owner.get("host"))
+        if owner.get("host") == socket.gethostname():
+            print(f"[devlock] holder pid {owner['pid']} frozen (no heartbeat for {int(stale)}s): "
+                  f"breaking the lock", file=self.out, flush=True)
+            print(f"[devlock] {break_lock(self.device, os.path.dirname(self.path), signal.SIGKILL)}",
+                  file=self.out, flush=True)
+        elif getattr(self, "_alerted", None) != key:
+            self._alerted = key
+            print(f"[devlock] ALERT: holder pid {owner['pid']} on {owner.get('host')} looks frozen "
+                  f"(no heartbeat for {int(stale)}s). Not killing across hosts: run "
+                  f"`apppaltest.py --lock-break` on {owner.get('host')}", file=self.out, flush=True)
 
     def __exit__(self, *exc):
         if self.fd is None:
