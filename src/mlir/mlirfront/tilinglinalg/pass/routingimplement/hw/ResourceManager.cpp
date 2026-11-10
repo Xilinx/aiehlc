@@ -16,7 +16,25 @@ std::atomic<int> DataIO::next_{0};
 // CoreMemAllocator impl
 // ──────────────────────────────────────────────────────────────
 CoreMemAllocator::CoreMemAllocator(uint32_t baseAddr, uint32_t totalSize)
-    : baseAddr_(baseAddr), totalSize_(totalSize), nextFree_(baseAddr) {}
+    : baseAddr_(baseAddr), totalSize_(totalSize), nextFree_(baseAddr) {
+    // Experimental: AIEHLC_DM_BUF_BASE=<addr> moves the start of the port-buffer area
+    // (end stays at baseAddr+totalSize; the BCF stack shrinks to [0x70000, addr)).
+    // Used to put A/B/C in different 16 KB DM banks (mm_i8_64_vec11 MEMORY_STALL study).
+    const char *env = std::getenv("AIEHLC_DM_BUF_BASE");
+    if (!env || !*env)
+        return;
+    char *end = nullptr;
+    unsigned long v = std::strtoul(env, &end, 0);
+    const uint32_t limit = baseAddr + totalSize;
+    if (*end != '\0' || v < 0x71000 || v >= limit || (v % 0x1000) != 0) {
+        std::cerr << "CoreMemAllocator: ignoring AIEHLC_DM_BUF_BASE=\"" << env
+                  << "\" (need a 4 KB multiple in [0x71000, end))" << std::endl;
+        return;
+    }
+    baseAddr_ = static_cast<uint32_t>(v);
+    totalSize_ = limit - baseAddr_;
+    nextFree_ = baseAddr_;
+}
 
 std::optional<uint32_t> CoreMemAllocator::allocate(const std::string &name, uint32_t size, uint32_t alignment,
                                                    int ownerId) {
