@@ -132,7 +132,8 @@ def test_frozen_holder_on_same_host_is_broken_by_waiter(tmp_path, monkeypatch):
         assert time.time() - t < 10
     assert "frozen" in buf.getvalue()
     p.wait(timeout=5)
-    os.kill(child, signal.SIGKILL)
+    time.sleep(0.3)
+    assert not alive(child), "the frozen holder's child must be killed with it"
 
 
 def test_frozen_holder_on_other_host_only_alerts(tmp_path, monkeypatch):
@@ -160,3 +161,80 @@ def test_board_py_owner_without_heartbeat_is_never_broken(tmp_path, monkeypatch)
     lk = devlock.DeviceLock(DEV, lock_dir=str(tmp_path), out=io.StringIO())
     lk._handle_frozen({"raw": "board.py huaj 123"})  # plain-text owner from board.py
     lk._handle_frozen({"pid": 1, "host": "x"})        # pre-heartbeat apppaltest
+
+
+# --- break safety: the bot container shares the host's hostname (xsjsswsip51) but has
+# its own pid namespace, so "same host" is not enough to kill by pid.
+
+def _forge_owner(tmp_path, **kw):
+    path = devlock.lock_path(DEV, str(tmp_path)) + ".owner"
+    o = json.load(open(path)); o.update(kw)
+    json.dump(o, open(path, "w"))
+
+
+def test_owner_records_pid_namespace_and_start_time(tmp_path):
+    p, child = spawn(tmp_path, stall=0, run=30, chatty=True)
+    try:
+        o = devlock.read_owner(devlock.lock_path(DEV, str(tmp_path)))
+        assert o["pidns"] == os.readlink("/proc/self/ns/pid")
+        assert o["pstart"] == devlock.proc_start(p.pid)
+    finally:
+        p.kill(); p.wait(); os.kill(child, signal.SIGKILL)
+
+
+def test_break_refuses_holder_in_another_pid_namespace(tmp_path):
+    p, child = spawn(tmp_path, stall=0, run=30, chatty=True)
+    try:
+        _forge_owner(tmp_path, pidns="pid:[1]")  # same hostname, other namespace
+        msg = devlock.break_lock(DEV, lock_dir=str(tmp_path), sig=signal.SIGKILL)
+        assert "namespace" in msg
+        time.sleep(0.3)
+        assert alive(p.pid) and alive(child)
+    finally:
+        p.kill(); p.wait(); os.kill(child, signal.SIGKILL)
+
+
+def test_frozen_holder_in_another_pid_namespace_only_alerts(tmp_path, monkeypatch):
+    monkeypatch.setattr(devlock, "POLL_SECS", 0.2)
+    monkeypatch.setattr(devlock, "FROZEN_SECS", 1)
+    p, child = spawn(tmp_path, stall=0, run=30, chatty=True)
+    os.kill(p.pid, signal.SIGSTOP)
+    _forge_owner(tmp_path, pidns="pid:[1]", heartbeat=time.time() - 100)
+    buf = io.StringIO()
+    try:
+        with pytest.raises(SystemExit):
+            with devlock.DeviceLock(DEV, lock_dir=str(tmp_path), wait_secs=1, out=buf):
+                pass
+        assert "ALERT" in buf.getvalue()
+        assert alive(p.pid)
+    finally:
+        os.kill(p.pid, signal.SIGKILL); p.wait(); os.kill(child, signal.SIGKILL)
+
+
+def test_break_refuses_a_reused_pid(tmp_path):
+    p, child = spawn(tmp_path, stall=0, run=30, chatty=True)
+    try:
+        _forge_owner(tmp_path, pstart=1)  # recorded start time differs: pid was recycled
+        msg = devlock.break_lock(DEV, lock_dir=str(tmp_path), sig=signal.SIGKILL)
+        assert "reused" in msg
+        time.sleep(0.3)
+        assert alive(p.pid)
+    finally:
+        p.kill(); p.wait(); os.kill(child, signal.SIGKILL)
+
+
+def test_break_also_kills_the_holders_children(tmp_path, monkeypatch):
+    """A frozen holder's xsdb / ssh systest-client must not be left behind (the 213 mess)."""
+    monkeypatch.setattr(devlock, "POLL_SECS", 0.2)
+    monkeypatch.setattr(devlock, "FROZEN_SECS", 1)
+    p, child = spawn(tmp_path, stall=0, run=30, chatty=True)
+    os.kill(p.pid, signal.SIGSTOP)
+    try:
+        with devlock.DeviceLock(DEV, lock_dir=str(tmp_path), wait_secs=15, out=io.StringIO()):
+            pass
+        p.wait(timeout=5)
+        time.sleep(0.3)
+        assert not alive(child), "holder's child survived the break"
+    finally:
+        if alive(child):
+            os.kill(child, signal.SIGKILL)

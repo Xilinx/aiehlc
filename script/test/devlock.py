@@ -23,6 +23,8 @@ import socket
 import sys
 import time
 
+import devwatch
+
 LOCK_DIR = os.environ.get("BOARD_LOCK_DIR", "/scratch/staff/huaj/tmp/board_locks")
 HWS_PORT = 3121
 POLL_SECS = 5
@@ -36,6 +38,38 @@ def lock_path(device, lock_dir=None):
     dev = device.split("@")[-1]
     safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in dev)
     return os.path.join(lock_dir or LOCK_DIR, f"{safe}_{HWS_PORT}.lock")
+
+
+def pid_ns():
+    """This process's pid namespace, e.g. 'pid:[4026531836]' (None if unknown).
+
+    The bot container has the host's hostname but its own pid namespace, so a pid
+    is only meaningful together with (host, pidns)."""
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return None
+
+
+def proc_start(pid):
+    """Start time of ``pid`` in clock ticks since boot (guards against pid reuse)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return int(f.read().rsplit(")", 1)[1].split()[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def killable(owner):
+    """Return None if ``owner`` is a process we can safely signal, else the reason not to."""
+    if owner.get("host") != socket.gethostname():
+        return f"holder is on {owner.get('host')}, not here: run --lock-break there"
+    if owner.get("pidns") and owner.get("pidns") != pid_ns():
+        return (f"holder pid {owner['pid']} is in another pid namespace ({owner['pidns']}; "
+                f"container vs host share hostname {owner.get('host')}): run --lock-break there")
+    if owner.get("pstart") and proc_start(owner["pid"]) not in (None, owner["pstart"]):
+        return f"holder pid {owner['pid']} was reused by another process (holder is gone)"
+    return None
 
 
 def read_owner(path):
@@ -96,7 +130,8 @@ class DeviceLock:
             time.sleep(POLL_SECS)
         self.owner = {"pid": os.getpid(), "host": socket.gethostname(),
                       "user": os.environ.get("USER", "?"), "start": time.time(),
-                      "heartbeat": time.time(), "cmd": " ".join(sys.argv)}
+                      "heartbeat": time.time(), "cmd": " ".join(sys.argv),
+                      "pidns": pid_ns(), "pstart": proc_start(os.getpid())}
         self._write_owner()
         print(f"[devlock] acquired {self.device} ({self.path})", file=self.out, flush=True)
         return self
@@ -121,7 +156,7 @@ class DeviceLock:
         if stale < FROZEN_SECS:
             return
         key = (owner["pid"], owner.get("host"))
-        if owner.get("host") == socket.gethostname():
+        if killable(owner) is None:
             print(f"[devlock] holder pid {owner['pid']} frozen (no heartbeat for {int(stale)}s): "
                   f"breaking the lock", file=self.out, flush=True)
             print(f"[devlock] {break_lock(self.device, os.path.dirname(self.path), signal.SIGKILL)}",
@@ -129,7 +164,7 @@ class DeviceLock:
         elif getattr(self, "_alerted", None) != key:
             self._alerted = key
             print(f"[devlock] ALERT: holder pid {owner['pid']} on {owner.get('host')} looks frozen "
-                  f"(no heartbeat for {int(stale)}s). Not killing across hosts: run "
+                  f"(no heartbeat for {int(stale)}s): {killable(owner)}. Not killing it from here; run "
                   f"`apppaltest.py --lock-break` on {owner.get('host')}", file=self.out, flush=True)
 
     def __exit__(self, *exc):
@@ -151,10 +186,20 @@ def break_lock(device, lock_dir=None, sig=signal.SIGTERM):
     owner = read_owner(path)
     if not owner or "pid" not in owner:
         return f"no breakable holder recorded for {device}"
-    if owner.get("host") != socket.gethostname():
-        return f"holder is on {owner.get('host')}, not here: run --lock-break there"
+    why_not = killable(owner)
+    if why_not:
+        return why_not
+    pid = int(owner["pid"])
+    # Collect the children first: once the holder dies they are re-parented and
+    # untraceable, and a surviving xsdb / ssh systest-client is a stale board session.
+    kids = devwatch.descendants(pid)
     try:
-        os.kill(int(owner["pid"]), sig)
+        os.kill(pid, sig)
     except ProcessLookupError:
-        return f"holder pid {owner['pid']} is already gone (lock is free)"
-    return f"sent {sig.name} to holder pid {owner['pid']}"
+        return f"holder pid {pid} is already gone (lock is free)"
+    for k in kids:
+        try:
+            os.kill(k, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return f"sent {sig.name} to holder pid {pid} and SIGKILL to {len(kids)} child process(es)"
