@@ -177,6 +177,35 @@ def test_smoke_not_run_when_service_cannot_be_fixed(board, btype):
     assert ran == []
 
 
+# -- deferred netload: hw_server only before the first JTAG use ---------------
+@BOTH
+def test_deferred_netload_touches_nothing_before_jtag(board, btype):
+    ran = []
+    pf, fake, lines = make(board, btype, smoke=lambda: ran.append(1) or (True, ""))
+    pf.before_run(hp.NETLOAD, defer_netload=True)
+    assert fake.ops() == [] and ran == []
+    assert any("only if the supervisor needs JTAG" in s for s in lines)
+
+
+@BOTH
+def test_need_jtag_ensures_once(board, btype):
+    pf, fake, _ = make(board, btype, status=[hws.DOWN], up=[hws.UP])
+    pf.before_run(hp.NETLOAD, defer_netload=True)
+    pf.need_jtag("supervisor not answering")
+    pf.need_jtag("bootstrap")  # park failed -> bootstrap: no second check
+    assert fake.ops() == ["status", "up"]
+    assert ("up", True) in fake.calls
+
+
+@BOTH
+def test_need_jtag_failure_is_remembered(board, btype):
+    pf, fake, _ = make(board, btype, status=[hws.DEGRADED], restart=[hws.DEGRADED])
+    for _ in range(2):
+        with pytest.raises(hp.PreflightError, match="retry limit reached"):
+            pf.need_jtag("app core busy")
+    assert fake.ops() == ["status", "restart"]  # never retried within the run
+
+
 # -- full mode per board type (contract §8) -----------------------------------
 def test_palmyra_full_mode_takes_hws_down_then_up():
     ran = []
@@ -259,7 +288,8 @@ def _args(app, *argv):
 def test_cli_has_hws_passthrough_and_skip_preflight():
     app = _apppaltest()
     a = _args(app, "--hws", "status")
-    assert a.hws == "status" and not a.skip_preflight and a.hws_restarts == 1
+    assert a.hws == "status" and not a.skip_preflight and a.hws_restarts == 1 and not a.hws_eager
+    assert _args(app, "--hws-eager", "--netload", "x.elf").hws_eager
     assert _args(app, "--skip-preflight", "x.elf").skip_preflight
     with pytest.raises(SystemExit):
         _args(app, "--hws", "clean")
@@ -300,7 +330,7 @@ def test_preflight_failure_exits_before_the_run(monkeypatch, capsys):
     monkeypatch.setattr(app, "_main", lambda a: pytest.fail("run started"))
     monkeypatch.setattr(app.hws, "status", lambda b, t, **k: hws.Health(b, t, hws.FOREIGN, {}, "held by x", 5))
     with pytest.raises(SystemExit) as ei:
-        app._run_with_preflight(_args(app, "--netload"), HeldLock())
+        app._run_with_preflight(_args(app, "--netload", "--hws-eager"), HeldLock())
     assert ei.value.code == hws.RC_FOREIGN
     assert "Test FAILED (hws preflight)" in capsys.readouterr().out
 
@@ -355,3 +385,27 @@ def test_hws_smoke_missing_elf(tmp_path):
     app = _apppaltest()
     ok, msg = app.hws_smoke(_args(app, "--netload", "--smoke-elf", str(tmp_path / "nope.elf")))
     assert ok is False and "not found" in msg
+
+
+def test_netload_defers_preflight_unless_eager(monkeypatch):
+    app = _apppaltest()
+    seen = []
+    monkeypatch.setattr(app, "_main", lambda a: "ran")
+    monkeypatch.setattr(app.hws, "status", lambda b, t, **k: seen.append("status") or
+                        hws.Health(b, t, hws.UP, {}, "up", 0))
+    monkeypatch.setattr(app, "hws_smoke", lambda a: seen.append("smoke") or (True, "ok"))
+    assert app._run_with_preflight(_args(app, "--netload"), HeldLock()) == "ran"
+    assert seen == []
+    assert app._run_with_preflight(_args(app, "--netload", "--hws-eager"), HeldLock()) == "ran"
+    assert seen == ["status", "smoke"]
+
+
+def test_hws_need_jtag_gate(monkeypatch, capsys):
+    app = _apppaltest()
+    monkeypatch.setattr(app, "_preflight", None)
+    assert app.hws_need_jtag("x") is True  # --skip-preflight
+    pf, fake, _ = make(app.palip, app.HWS_TYPE, status=[hws.FOREIGN])
+    monkeypatch.setattr(app, "_preflight", pf)
+    assert app.hws_need_jtag("supervisor not answering") is False
+    assert "HWS PREFLIGHT FAIL" in capsys.readouterr().out
+    assert fake.ops() == ["status"]

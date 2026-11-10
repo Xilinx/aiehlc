@@ -1141,7 +1141,8 @@ def netload_start(args, local_elf, collected):
         if rc == 3:
             print("[netload] --netload-force-now: the board is running another app within its max run time; "
                   "taking the app core over", flush=True)
-        if rc in (3, 5) and m and netboot_park_app_core(int(m.group(1), 16)):
+        if rc in (3, 5) and m and hws_need_jtag("app core busy, parking it over JTAG") \
+                and netboot_park_app_core(int(m.group(1), 16)):
             time.sleep(0.5)
             st_rc, st = netload_remote(["status", "--host", ip, "--connect-timeout", "3"], timeout=30)
             if st_rc == 0 and "app core parked" in st:
@@ -1159,6 +1160,8 @@ def netload_start(args, local_elf, collected):
                else "app core still busy from the previous run")
     else:
         why = "--netload-bootstrap"
+    if not hws_need_jtag(why):
+        return None, None, None, False
     print(f"\n>>> {why}: loading the netboot supervisor over JTAG (one-time)...")
     netboot_stage_proxy()
     # `device program` on a live system aborts at ~18%, so the bootstrap power-cycles
@@ -1318,12 +1321,17 @@ Examples:
              "full-mode hws down/up)"
     )
     parser.add_argument(
+        "--hws-eager", action="store_true",
+        help="--netload: check hw_server and run the smoke test before the run. Default: only when the "
+             "supervisor cannot take the ELF and JTAG is needed (park a stuck app core, bootstrap)"
+    )
+    parser.add_argument(
         "--hws-restarts", type=int, default=hwspreflight.DEFAULT_MAX_RESTARTS,
         help="Preflight retry limit: clean + restart attempts when hws is DEGRADED (default 1, the hws contract)"
     )
     parser.add_argument(
         "--smoke-elf", default=os.environ.get("APPPAL_SMOKE_ELF"),
-        help="Netload preflight smoke-test ELF (default <netboot build>/nbspin5.elf; skipped with a note "
+        help="--hws-eager netload smoke-test ELF (default <netboot build>/nbspin5.elf; skipped with a note "
              "when that default is missing)"
     )
     return parser
@@ -1413,6 +1421,20 @@ def hws_smoke(args):
     return False, f"{name} still running after {SMOKE_DONE_S}s"
 
 
+def hws_need_jtag(why):
+    """Deferred netload preflight: hw_server is checked only before the first JTAG
+    use (the fast path never touches it). False, with the reason printed, if it
+    cannot be made healthy."""
+    if _preflight is None:  # --skip-preflight
+        return True
+    try:
+        _preflight.need_jtag(why)
+        return True
+    except hwspreflight.PreflightError as e:
+        print(f"\n{e.msg}")
+        return False
+
+
 def _run_with_preflight(args, lk):
     """hws preflight (inside the lock), the run, then palmyra full mode's hws up."""
     global _preflight
@@ -1424,7 +1446,7 @@ def _run_with_preflight(args, lk):
     mode = preflight_mode(args)
     print(f"[hws] preflight ({HWS_TYPE}, {mode}) on {palip}")
     try:
-        pf.before_run(mode)
+        pf.before_run(mode, defer_netload=not args.hws_eager)
     except hwspreflight.PreflightError as e:
         print(f"\n{e.msg}")
         print("=" * 60 + "\nTest FAILED (hws preflight)\n" + "=" * 60)

@@ -10,6 +10,12 @@ sections 5 (lock), 6 (retry budget) and 8 (full mode per board type).
     FOREIGN / host unreachable / lock busy -> fail at once, nothing touched
     then (netload only) a short netload smoke test, e.g. nbspin5.
 
+apppaltest's netload defers all of that unless --hws-eager (``defer_netload=True``):
+a resident supervisor takes the ELF without hw_server, so the check costs ~10 s
+(xsdb ``targets`` + the 5 s smoke spin) for nothing. ``need_jtag(why)`` runs
+``ensure_service`` once, right before the run's first JTAG use (park of a stuck
+app core, supervisor bootstrap); the run's own ``load`` is the smoke test.
+
 ATTACH (palmyra full mode with -nonreboot: systest-client + ``connect -url`` to the
 resident hw_server): ensure only, no smoke test, no down/up.
 
@@ -60,6 +66,7 @@ class Preflight:
         self.quiet = quiet or (lambda secs, what: contextlib.nullcontext())
         self.kw = dict(hws_kw or {})
         self.took_down = False
+        self.jtag = None  # deferred netload: None = not checked yet, True = UP, PreflightError = failed
 
     # -- hws calls --------------------------------------------------------
     def _call(self, op, secs=300):
@@ -124,9 +131,12 @@ class Preflight:
             raise self._fail(hws.RC_DEGRADED, f"netload smoke test failed: {msg}")
 
     # -- run hooks --------------------------------------------------------
-    def before_run(self, mode):
+    def before_run(self, mode, defer_netload=False):
         if mode not in (NETLOAD, FULL, ATTACH):
             raise ValueError(f"unknown mode {mode!r}")
+        if mode == NETLOAD and defer_netload:
+            self.out("[hws] netload: hw_server is checked only if the supervisor needs JTAG")
+            return
         if mode == FULL and self.btype == "palmyra":
             self.out("[hws] palmyra full mode: taking hws down for this run (back up afterwards)")
             try:
@@ -140,6 +150,19 @@ class Preflight:
         self.ensure_service()
         if mode == NETLOAD:
             self.smoke_test()
+
+    def need_jtag(self, why):
+        """Deferred netload: ensure hw_server once, before the first JTAG use.
+        A failure is remembered and raised again, never retried within the run."""
+        if self.jtag is None:
+            self.out(f"[hws] {why}: checking hw_server before using JTAG")
+            try:
+                self.ensure_service()
+                self.jtag = True
+            except PreflightError as e:
+                self.jtag = e
+        if isinstance(self.jtag, PreflightError):
+            raise self.jtag
 
     def after_power_cycle(self):
         """VEK385: hw_server must still answer after `power 0/1`, before `connect -url`."""

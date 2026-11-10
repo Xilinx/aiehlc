@@ -400,6 +400,19 @@ ack's `park_addr` -- the same path as `stuck` -- confirms `app core parked`
 with `status`, and resends; a failed park falls back to a re-bootstrap.
 `netload.py` prints `park_addr` for `busy` and `overtime` acks as well.
 
+**hw_server is checked only when JTAG is needed (2026-11-10).** The hws
+preflight (`script/test/hwspreflight.py`) used to run before every netload run:
+`hws status` (~5 s: two ssh round-trips plus a local xsdb `targets` with a 2 s
+settle) and the `nbspin5` smoke test (~5.3 s), i.e. ~10 s, and ~70 s when hws
+was down and had to be brought up. A resident supervisor needs none of it, so
+netload now defers the check: `Preflight.need_jtag(why)` runs `ensure_service`
+once, right before the first JTAG use in `netload_start` -- the park of a busy or
+stuck app core, or the supervisor bootstrap -- and a failure is remembered for the
+run, not retried. The run's own `load` is the smoke test. Measured on palmyra:
+preflight 10.3 s -> 0 s, `load rc=0` 0.35 s after start. `--hws-eager`
+restores the up-front check (status + smoke test); full and attach modes are
+unchanged.
+
 ## 14. VEK385 (2026-11-04)
 
 `apppaltest.py -board vek385 -host gomphus3 [--netload]` runs the same flow on a
