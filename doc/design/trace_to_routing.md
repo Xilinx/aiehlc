@@ -54,15 +54,39 @@ No rule mentions conv or gemm.
 - rejects: per-core-unique input, swapped loops, diagonal walk;
 - real x86 trace of `simpleconv2dkernel_port.cc` routes cleanly.
 
+## Wired into the compiler (`inferKernelOnly`)
+
+Kernel-only sources (`aie::port<T, aie::<ROLE>, aie::shape<...>>`) are now
+traced -> `planRouting` -> `routingSpaces(plan, routingHints(plan))` and
+rewritten into the explicit form
+
+    constexpr aie::GemmSpace __aie_k_IFM = {...};   // one per port (role, or port var if the role repeats)
+    constexpr aie::GlobalPolicy __aie_k_policy = {.fullconnect_auto = 0};
+    __global__(__aie_k_policy) void k(aie::port<T, __aie_k_IFM> x, ...)
+
+with no conv recognition. The kernel TU gets `aiehlc_desc_<port>` straight
+from the traced fit (`routedTUDecls`). `routingHints` sizes `l1_budget` for
+the largest non-halo block and drops to `pp_depth = 1` when double buffering
+would overflow 48 KB (the rule the conv recognizer used, now per plan).
+
+Conv recognition survives only as a cross-check: when the blocks also form a
+spatial-halo conv whose derivation reproduces them, its carriers must equal
+the routed ones (`emitGemmSpace` text) and its `Derived` feeds the pipeline's
+tiling check (`convDerivedByKernel`) and the tensor-form autotune cost;
+otherwise `routingEstMs` (per-core DMA bytes) ranks candidates.
+
+Behaviour change: a block the conv model called "too big" (a 20-row slab for
+a 19-row footprint) is a legal affine walk and is now routed as written.
+
+Checked: `run.sh` (145 + 442), `kernel_trace_cases.py` 27/27 incl. a
+kernel-only GEMM fixture (`unitest/gemm_kernel_port.cc`) and the conv kernel
+(`simpleconv2dkernel_port.cc`, cross-check equal).
+
 ## Next steps
 
-1. `inferKernelOnly`: replace recognize-conv + `derive()` with
-   `planRouting` + `routingSpaces`, rewriting the kernel into the explicit
-   `__global__(policy) k(aie::port<T, __aie_k_<port>>)` GemmSpace form
-   (+ kernel defines / block descriptors the kernel TU needs); keep the conv
-   cost/legality checks (core memory, stack, l1_budget) as generic per-port
-   byte checks. Conv kernels must stay byte-identical (aout/newfile.cpp,
-   host.cc, kernel.cc, routing.cc).
+1. Full aiehlc build: conv kernel-only output must stay byte-identical
+   (aout/host.cc, kernel.cc, routing.cc) to the old (conv, map) path; generic
+   per-port core-memory / stack checks for non-conv plans.
 2. `__global__(conv, map)` (`simpleconv2d_new_load.cc`): cross-check the
    traced plan against the derived carriers (same equality as the unit test).
 3. GEMM kernel-only example (`simplematmul2` in load_buffer form) through

@@ -24,12 +24,13 @@
  *     its release ("data used without load");
  *   - fit: per port, offset = base_p0*p0 + base_p1*p1 + step_i*i + step_j*j
  *     with rounds i outer, j inner, and a constant shape (the form of a DMA BD);
- *   - kernel-only (no aie::Conv2d / aie::Mapping): the fits are recognized as a
- *     spatial-halo conv (mesh split, time tiles, stride, kernel window) and the
- *     source is rewritten into the __global__(conv, map) form the conv
- *     auto-tiling desugar compiles, after checking the kernel's blocks are
- *     exactly what that derivation's DMA delivers (too big / too small / wrong
- *     step are named);
+ *   - kernel-only (no aie::Conv2d / aie::Mapping): the fits are mapped straight
+ *     onto the routing IR carriers (trace_routing.h: per dim mesh split, on-core
+ *     loop, halo; per port broadcast / gather) and the source is rewritten into
+ *     the explicit __global__(policy) + per-port GemmSpace form -- no operator
+ *     recognition, so conv2d, GEMM and eltwise kernels route alike. When the
+ *     blocks also form a spatial-halo conv the conv derivation is kept as a
+ *     cross-check (KernelOnlyResult::derived);
  *   - __global__(conv, map) kernels: the same trace verifies the kernel's
  *     load_buffer / store_buffer blocks against the derived DMA.
  *
@@ -107,7 +108,16 @@ struct KernelOnlyResult {
     std::string error; // first error, with the kernel name
     std::vector<std::string> errors, notes;
     std::string report; // human-readable analysis
-    std::map<std::string, Derived> derived; // per kernel, when the DMA was derived
+    // Per kernel, when the blocks are also recognized as a spatial-halo conv
+    // whose derivation reproduces them: the conv derivation (est_ms, and the
+    // pipeline's tiling cross-check). Not needed to route the kernel.
+    std::map<std::string, Derived> derived;
+    // Per routed kernel: the kernel-TU declarations (block descriptors) for
+    // aie::load_buffer / store_buffer (trace_routing.h routedTUDecls).
+    std::map<std::string, std::vector<std::string>> tu_decls;
+    // Per routed kernel: the estimated time (ms) -- the conv derivation's when
+    // `derived` has the kernel, else the routing cost (routingEstMs).
+    std::map<std::string, double> est_ms;
 };
 
 // Kernel-only sources: analyze, derive, verify, and rewrite `src` into the

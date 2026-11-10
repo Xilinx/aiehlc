@@ -32,6 +32,7 @@
 #include "conv_autotile.h"
 #include "kernel_trace.h"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -92,5 +93,28 @@ std::vector<PortSpace> routingSpaces(const RoutingPlan &plan, const RoutingHints
 
 // One line per port: how each dim is routed.
 std::string planText(const RoutingPlan &plan);
+
+// Hints for a plan: the non-halo port buffers (sized by l1_budget) get room
+// for the largest block the kernel holds; single-buffer (pp_depth 1) when all
+// ports double-buffered at that budget overflow the 48 KB core data memory.
+RoutingHints routingHints(const RoutingPlan &plan);
+
+// Operator-agnostic cost of a plan (ms): the per-core DMA traffic of every
+// port, plus the core's window copies and per-round bookkeeping. Used to rank
+// candidates when no operator model (e.g. the conv derivation) applies.
+double routingEstMs(const RoutingPlan &plan, const RoutingHints &hints, const Target &tgt = Target());
+
+// GemmSpace variable of one port of a routed kernel: __aie_<kernel>_<ROLE>
+// when the role is unique in the kernel, else __aie_<kernel>_<port var>.
+std::string routedSpaceVar(const RoutingPlan &plan, const std::string &kernel, const RoutingPort &rp);
+
+// Source declarations of a routed kernel: one GemmSpace per port (in port
+// order) and the kernel's GlobalPolicy __aie_<kernel>_policy.
+std::string routedDeclsText(const std::string &kernel, const RoutingPlan &plan, const std::vector<PortSpace> &spaces);
+
+// Kernel-TU declarations of a routed kernel for the block convention
+// (src/mlir/runtime/aie_block_io.h): per port the traced fit as
+// aiehlc_desc_<port> + its cursor, which aie::load_buffer / store_buffer check.
+std::vector<std::string> routedTUDecls(const RoutingPlan &plan, const std::map<std::string, PortFit> &fits);
 
 } // namespace convautotile

@@ -6,6 +6,7 @@
  ******************************************************************************/
 #include "kernel_trace.h"
 #include "conv_desugar.h"
+#include "trace_routing.h"
 
 #include <algorithm>
 #include <deque>
@@ -903,38 +904,75 @@ bool recognizeConv(const TracePort &ifm, const TracePort &wgt, const TracePort &
     return true;
 }
 
-std::string declsText(const std::string &kernel, const Conv2dSpec &c, const MappingSpec &m) {
-    std::ostringstream os;
-    os << "// ==== aiehlc kernel analysis: inferred from " << kernel << "'s load_buffer / store_buffer ====\n";
-    os << "constexpr aie::Conv2d __aie_conv_" << kernel << " = {.h = " << c.h << ", .w = " << c.w << ", .c = " << c.c
-       << ", .k = " << c.k << ", .kh = " << c.kh << ", .kw = " << c.kw << ", .stride = " << c.stride
-       << ", .pad = " << c.pad << ", .c_align = " << c.c_align << "};\n";
-    os << "constexpr aie::Mapping __aie_map_" << kernel << " = {.space = {aie::split(aie::OH, " << m.space_rows.factor
-       << "), aie::split(aie::OC, " << m.space_cols.factor << ")}, .time = {aie::tile(aie::OH, " << m.time[0].factor
-       << "), aie::tile(aie::OW, " << m.time[1].factor << ")}, .hints = {.pp_depth = " << m.hints.pp_depth
-       << ", .l1_budget = aie::Bytes{" << m.hints.l1_budget << "}}};\n";
-    return os.str();
-}
-
-// Rewrite one analyzed kernel into the __global__(conv, map) form.
-void rewriteKernelOnly(std::string &src, const TraceKernel &k, const Conv2dSpec &c, const MappingSpec &m, int rows,
-                       int cols) {
+// Rewrite one routed kernel into the explicit __global__(policy) form: each
+// port's `aie::<ROLE>, aie::shape<...>` becomes its routed GemmSpace.
+bool rewriteKernelRouted(std::string &src, const TraceKernel &k, const RoutingPlan &plan,
+                         const std::vector<PortSpace> &spaces, std::string &err) {
     std::string body = src.substr(k.bodyOpen, k.bodyClose - k.bodyOpen + 1);
     auto repl = [&body](const std::string &from, const std::string &to) {
         for (size_t p = 0; (p = body.find(from, p)) != std::string::npos; p += to.size())
             body.replace(p, from.size(), to);
     };
-    repl("aie::num_programs(0)", std::to_string(rows));
-    repl("aie::num_programs(1)", std::to_string(cols));
+    repl("aie::num_programs(0)", std::to_string(plan.rows));
+    repl("aie::num_programs(1)", std::to_string(plan.cols));
     std::string params = src.substr(k.paramOpen, k.paramClose - k.paramOpen + 1);
-    for (size_t p = 0; (p = params.find(", aie::shape<", p)) != std::string::npos;) {
-        size_t e = params.find('>', p);
-        params.erase(p, e - p + 1);
+    size_t from = 0;
+    for (auto &rp : plan.ports) {
+        const std::string tag = "aie::" + rp.role;
+        size_t p = sourceFindToken(params, tag, from);
+        size_t sh = p == std::string::npos ? p : params.find("aie::shape<", p);
+        size_t e = sh == std::string::npos ? sh : sourceMatchClose(params, sh + 10, '<', '>');
+        if (e == std::string::npos) {
+            err = "cannot rewrite port " + rp.var + ": no `" + tag + ", aie::shape<...>` in the parameter list";
+            return false;
+        }
+        const std::string var = routedSpaceVar(plan, k.name, rp);
+        params.replace(p, e + 1 - p, var);
+        from = p + var.size();
     }
     std::string head = src.substr(k.kwEnd, k.paramOpen - k.kwEnd);
-    std::string kw = "__global__(__aie_conv_" + k.name + ", __aie_map_" + k.name + ")";
-    src = src.substr(0, k.kwBegin) + declsText(k.name, c, m) + kw + head + params +
+    std::string kw = "__global__(__aie_" + k.name + "_policy)";
+    src = src.substr(0, k.kwBegin) + routedDeclsText(k.name, plan, spaces) + kw + head + params +
           src.substr(k.paramClose + 1, k.bodyOpen - k.paramClose - 1) + body + src.substr(k.bodyClose + 1);
+    return true;
+}
+
+// Optional cross-check: when the blocks also form a spatial-halo conv, the conv
+// derivation must reproduce them and its ports must be the routed ones. Returns
+// the derivation (ok) or leaves it !ok when the kernel is not such a conv.
+Derived convCrossCheck(const TraceKernel &k, KernelTraceResult &tr, const std::vector<PortSpace> &spaces, int rows,
+                       int cols, std::vector<std::string> &errs, std::ostringstream &rep) {
+    Derived none;
+    const TracePort *ifm = nullptr, *wgt = nullptr, *ofm = nullptr;
+    for (auto &p : k.ports)
+        (p.role == "IFM" ? ifm : p.role == "WEIGHTS" ? wgt : ofm) = &p;
+    Conv2dSpec c;
+    MappingSpec m;
+    std::string err;
+    if (!ifm || !wgt || !ofm || k.ports.size() != 3 ||
+        !recognizeConv(*ifm, *wgt, *ofm, tr.fits[ifm->var], tr.fits[wgt->var], tr.fits[ofm->var], rows, cols, c, m,
+                       err))
+        return none;
+    Derived d = derive(c, m);
+    if (!d.ok)
+        return none;
+    std::vector<std::string> diff;
+    for (auto *p : {ifm, wgt, ofm})
+        compareFit(*p, tr.fits[p->var], expectedFit(p->role, c, d), "", diff);
+    if (!diff.empty())
+        return none; // a conv-like kernel the conv derivation would tile differently: routing alone decides
+    const PortSpace *want[3] = {&d.ifm, &d.weights, &d.ofm};
+    for (size_t i = 0; i < k.ports.size() && i < spaces.size(); i++) {
+        const PortSpace &w = k.ports[i].role == "IFM" ? *want[0] : k.ports[i].role == "WEIGHTS" ? *want[1] : *want[2];
+        if (emitGemmSpace(spaces[i], "x") != emitGemmSpace(w, "x"))
+            errs.push_back(k.ports[i].var + ": the routed carrier differs from the spatial-halo conv derivation of " +
+                           "the same blocks (internal error):\n" + emitGemmSpace(spaces[i], "routed") +
+                           emitGemmSpace(w, "conv"));
+    }
+    rep << "  == spatial-halo conv " << c.h << "x" << c.w << "x" << c.c << " -> " << d.oh << "x" << d.ow << "x" << c.k
+        << ", kernel " << c.kh << "x" << c.kw << " stride " << c.stride << " (cross-check: the conv derivation "
+        << "gives the same carriers)\n";
+    return d;
 }
 
 } // namespace
@@ -980,36 +1018,23 @@ KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, co
             if (tr.fits.count(p.var))
                 rep << fitText(p, tr.fits[p.var]) << "\n";
         std::vector<std::string> errs = tr.errors;
-        const TracePort *ifm = nullptr, *wgt = nullptr, *ofm = nullptr;
-        for (auto &p : k.ports)
-            (p.role == "IFM" ? ifm : p.role == "WEIGHTS" ? wgt : ofm) = &p;
-        Conv2dSpec c;
-        MappingSpec m;
+        RoutingPlan plan;
+        std::vector<PortSpace> spaces;
         if (errs.empty()) {
-            if (!ifm || !wgt || !ofm || k.ports.size() != 3)
-                errs.push_back(
-                    "kernel-only DMA inference supports one aie::IFM, one aie::WEIGHTS and one aie::OFM port");
-            else if (!recognizeConv(*ifm, *wgt, *ofm, tr.fits[ifm->var], tr.fits[wgt->var], tr.fits[ofm->var],
-                                    mesh.first, mesh.second, c, m, err))
-                errs.push_back(err);
+            plan = planRouting(k.ports, tr.fits, mesh.first, mesh.second);
+            errs.insert(errs.end(), plan.errors.begin(), plan.errors.end());
         }
+        RoutingHints hints;
         if (errs.empty()) {
-            Derived d = derive(c, m);
-            if (!d.ok)
-                errs.insert(errs.end(), d.errors.begin(), d.errors.end());
-            else {
-                std::string why = " (a " + std::to_string(d.oh_t) + "x" + std::to_string(d.ow_t) +
-                                  " output tile of a " + std::to_string(c.kh) + "x" + std::to_string(c.kw) +
-                                  " stride-" + std::to_string(c.stride) + " conv)";
-                for (auto *p : {ifm, wgt, ofm})
-                    compareFit(*p, tr.fits[p->var], expectedFit(p->role, c, d), why, errs);
+            hints = routingHints(plan);
+            spaces = routingSpaces(plan, hints);
+            rep << planText(plan);
+            Derived d = convCrossCheck(k, tr, spaces, mesh.first, mesh.second, errs, rep);
+            if (d.ok && errs.empty())
                 res.derived[k.name] = d;
-                rep << "  => conv " << c.h << "x" << c.w << "x" << c.c << " -> " << d.oh << "x" << d.ow << "x" << c.k
-                    << ", kernel " << c.kh << "x" << c.kw << " stride " << c.stride << "; mapping split(OH,"
-                    << mesh.first << ") x split(OC," << mesh.second << "), tile(OH," << d.oh_t << ") x tile(OW,"
-                    << d.ow_t << "); DMA derived and checked against every load/store\n";
-            }
         }
+        if (errs.empty() && !rewriteKernelRouted(src, k, plan, spaces, err))
+            errs.push_back(err);
         if (!errs.empty()) {
             res.ok = false;
             for (auto &e : errs)
@@ -1018,7 +1043,10 @@ KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, co
                 res.error = res.errors[0];
             continue;
         }
-        rewriteKernelOnly(src, k, c, m, mesh.first, mesh.second);
+        res.tu_decls[k.name] = routedTUDecls(plan, tr.fits);
+        res.est_ms[k.name] = res.derived.count(k.name) ? res.derived[k.name].est_ms : routingEstMs(plan, hints);
+        rep << "  => routed: " << plan.ports.size() << " ports on the " << mesh.first << "x" << mesh.second
+            << " mesh, DMA carriers taken from the traced blocks\n";
     }
     res.report = rep.str();
     return res;

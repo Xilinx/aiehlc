@@ -6,11 +6,15 @@
  ******************************************************************************/
 #include "trace_routing.h"
 
+#include <algorithm>
 #include <sstream>
 
 namespace convautotile {
 
 namespace {
+
+// AIE-ML core data memory every port buffer shares (bytes).
+constexpr long kCoreDataBytes = 49152;
 
 std::string vec(const std::vector<int> &v) {
     std::string s = "(";
@@ -214,6 +218,80 @@ std::string planText(const RoutingPlan &plan) {
         os << "\n";
     }
     return os.str();
+}
+
+RoutingHints routingHints(const RoutingPlan &plan) {
+    RoutingHints h;
+    long need = 0;
+    for (auto &rp : plan.ports) {
+        bool slab = false; // halo slabs are sized by the halo path, not l1_budget
+        for (auto &d : rp.dims)
+            slab = slab || d.halo() || d.meshHalo();
+        if (!slab && !(plan.halo && !rp.output && rp.dependsOn(0)))
+            need = std::max(need, rp.blockBytes());
+    }
+    if (need > h.l1_budget)
+        h.l1_budget = (int)((need + 255) / 256 * 256);
+    const long n = (long)plan.ports.size();
+    if ((long)h.pp_depth * h.l1_budget * n > kCoreDataBytes && (long)h.l1_budget * n <= kCoreDataBytes)
+        h.pp_depth = 1;
+    return h;
+}
+
+double routingEstMs(const RoutingPlan &plan, const RoutingHints &hints, const Target &tgt) {
+    double bytes = 0;
+    long rounds = 1;
+    for (auto &rp : plan.ports) {
+        bytes += (double)rp.blockBytes() * rp.rounds_i * rp.rounds_j;
+        rounds = std::max(rounds, (long)rp.rounds_i * rp.rounds_j);
+    }
+    const double copy = bytes * tgt.copy_cycles_per_byte, dma = bytes / tgt.dma_bytes_per_cycle;
+    const double cycles =
+        (hints.pp_depth >= 2 ? std::max(copy, dma) : copy + dma) + (double)rounds * tgt.round_overhead_cycles;
+    return cycles / (tgt.clock_mhz * 1000.0);
+}
+
+std::string routedSpaceVar(const RoutingPlan &plan, const std::string &kernel, const RoutingPort &rp) {
+    int same = 0;
+    for (auto &o : plan.ports)
+        same += o.role == rp.role;
+    return "__aie_" + kernel + "_" + (same == 1 ? rp.role : rp.var);
+}
+
+std::string routedDeclsText(const std::string &kernel, const RoutingPlan &plan, const std::vector<PortSpace> &spaces) {
+    std::ostringstream os;
+    os << "// ==== aiehlc trace -> routing: " << kernel << "'s ports routed from its traced load_buffer / store_buffer"
+       << " blocks ====\n";
+    std::istringstream text(planText(plan));
+    for (std::string line; std::getline(text, line);)
+        os << "//" << line << "\n";
+    for (size_t i = 0; i < plan.ports.size() && i < spaces.size(); i++)
+        os << emitGemmSpace(spaces[i], routedSpaceVar(plan, kernel, plan.ports[i]));
+    os << "constexpr aie::GlobalPolicy __aie_" << kernel << "_policy = {.fullconnect_auto = 0};\n";
+    os << "// ==== end aiehlc trace -> routing ====\n";
+    return os.str();
+}
+
+std::vector<std::string> routedTUDecls(const RoutingPlan &plan, const std::map<std::string, PortFit> &fits) {
+    auto list4 = [](const std::vector<int> &v) {
+        std::string s = "{";
+        for (int i = 0; i < 4; i++)
+            s += (i ? ", " : "") + std::to_string(at(v, i));
+        return s + "}";
+    };
+    std::vector<std::string> out{"#include \"aie_block_io.h\""};
+    for (auto &rp : plan.ports) {
+        auto it = fits.find(rp.var);
+        if (it == fits.end())
+            continue;
+        const PortFit &f = it->second;
+        out.push_back("static const aiehlc_blk_desc aiehlc_desc_" + rp.var + " = {" + std::to_string(f.rank) + ", " +
+                      list4(f.shape) + ", " + list4(f.base_p0) + ", " + list4(f.base_p1) + ", " + list4(f.step_i) +
+                      ", " + list4(f.step_j) + ", " + std::to_string(f.rounds_i) + ", " + std::to_string(f.rounds_j) +
+                      "};");
+        out.push_back("static aiehlc_blk_cursor aiehlc_cur_" + rp.var + ";");
+    }
+    return out;
 }
 
 } // namespace convautotile
