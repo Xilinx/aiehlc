@@ -82,10 +82,23 @@ Checked: `run.sh` (145 + 442), `kernel_trace_cases.py` 27/27 incl. a
 kernel-only GEMM fixture (`unitest/gemm_kernel_port.cc`) and the conv kernel
 (`simpleconv2dkernel_port.cc`, cross-check equal).
 
+## Full aiehlc build (2026-11-09)
+
+Full `aiehlc` built from this branch (`build/`, venv cmake; this host has no
+zstd/libxml2 dev packages, so `zstd_LIBRARY` / `LIBXML2_LIBRARY` point at the
+runtime `.so.1` / `.so.2`). `aiehlc.sh --aie-version 5`:
+
+| source | path | result |
+|---|---|---|
+| `simpleconv2d_new_load.cc` (`__global__(conv, map)`) | conv desugar | `main.elf`, BLK check 0 errors |
+| `simpleconv2dkernel_port.cc` (kernel-only) | trace -> routing | `main.elf`; `routing.cc`, `kernel.cc`, `aieml.bcf`, `aieml.prx` **byte-identical** to the new_load build; generated `host.cc` (lines 3-1464) identical, only the echoed user source / debug pragma differ |
+| `unitest/gemm_kernel_port.cc` (kernel-only GEMM) | trace -> routing | `main.elf` (0 errors) -- GEMM goes end to end through the same path |
+
+Unit: `run.sh` 145 + 442, `kernel_trace_cases.py` 27/27.
+
 ## Next steps
 
-1. Full aiehlc build: conv kernel-only output must stay byte-identical
-   (aout/host.cc, kernel.cc, routing.cc) to the old (conv, map) path; generic
+1. ~~Full aiehlc build / byte-identity~~ (done above). Still open: generic
    per-port core-memory / stack checks for non-conv plans.
 2. `__global__(conv, map)` (`simpleconv2d_new_load.cc`): cross-check the
    traced plan against the derived carriers (same equality as the unit test).
