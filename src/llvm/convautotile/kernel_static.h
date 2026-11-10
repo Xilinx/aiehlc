@@ -25,8 +25,14 @@
  *     change makes EVERY access fit is reported as the cause ("fits with
  *     oc_t = 16").
  *
+ * Offsets are computed in BYTES: each pointer carries its pointee size, so an
+ * `int16_t *` view or a `(const int16_t *)p + e` / `reinterpret_cast<T *>(p) + e`
+ * cast scales correctly; an unknown pointee size is a skip reason.
+ *
  * An access whose index cannot be evaluated (data-dependent, unknown call,
- * reassigned variable) is skipped, never guessed.
+ * reassigned variable) is skipped, never guessed -- with the reason
+ * (StaticAccess::reason); a block pointer used in a form no access models
+ * (passed to a helper, `*(p + e)`) is reported the same way.
  ******************************************************************************/
 #pragma once
 
@@ -42,10 +48,19 @@ struct StaticFinding {
     std::string message; // the access, its block, the overflowing dim and the loops that drive it
 };
 
+// Every access the analysis saw, for cross-checking against the trace.
+struct StaticAccess {
+    int line = 0;
+    std::string text;
+    char status = 'o';  // o: inside its block, x: out of its block, s: not evaluable, u: use in no modelled form
+    std::string reason; // s / u: why
+};
+
 struct StaticBoundsResult {
     std::vector<StaticFinding> findings; // one per out-of-block access
     std::string cause;                   // the constant whose change makes every access fit ("" = none found)
-    int analysed = 0, skipped = 0;       // accesses checked / not evaluable
+    int analysed = 0, skipped = 0;       // accesses checked / not evaluable (incl. unmodelled uses)
+    std::vector<StaticAccess> accesses;
 };
 
 // Analyze kernel `k` of `src` on a rows x cols mesh. `prelude` supplies

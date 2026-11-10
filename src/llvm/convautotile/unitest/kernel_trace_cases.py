@@ -85,6 +85,18 @@ CASES = [
     ("weights block narrower than the compute (oc_t = 15): the store the trace did not reach",
      [("oc_t = 16;", "oc_t = 15;")],
      "out-of-block access (static analysis) at case.cc:74: `aie::store_v(o + 96, z.second.extract<32>(1))`"),
+    # Cross-check: the trace faults on a line the static analysis cannot explain.
+    ("cross-check: the index reads data (static analysis cannot explain it)",
+     [("live ? w[(nb * 8 + n) * TAPS + kh * KW * C + byte] : (int8_t)0;",
+       "live ? w[(nb * 8 + n) * TAPS + kh * KW * C + byte + Bp[0] * 0 + 3136] : (int8_t)0;")],
+     "static analysis: cannot explain line 29: `w[(nb * 8 + n) * TAPS + kh * KW * C + byte + Bp[0] * 0 + 3136]`: "
+     "`Bp[...]` is not a const array with an initializer"),
+    # ... and on a line it evaluated as in bounds: `w` moved through an alias
+    # the model does not follow -- it must say so, not stay silent.
+    ("cross-check: an alias moves the block pointer (static analysis disagrees)",
+     [("    alignas(64) int8_t Bp[7 * 4 * 2 * 64];",
+       "    const int8_t **pw = &w;\n    *pw += 2940;\n    alignas(64) int8_t Bp[7 * 4 * 2 * 64];")],
+     "static analysis DISAGREES: it evaluated `w[(nb * 8 + n) * TAPS + kh * KW * C + byte]` at line 31"),
     ("block larger than core memory",
      [(LOAD_X, LOAD_X.replace("{oh0 * S, ow0 * S, 0}, {ih_t, iw_t, C}", "{0, 0, 0}, {230, 230, 4}"))],
      "larger than the core data memory"),

@@ -283,6 +283,85 @@ static StaticBoundsResult staticOf(const std::string &body) {
     return staticBlockBounds(src, ks[0], 1, 4, "#define NB 2\n", "t.cc");
 }
 
+static const StaticAccess *accessAt(const StaticBoundsResult &r, int line) {
+    for (auto &a : r.accesses)
+        if (a.line == line)
+            return &a;
+    return nullptr;
+}
+
+// What the analysis cannot see is reported with the reason, and pointer
+// arithmetic is in the pointee's bytes.
+static void testStaticSkipsAndTypes() {
+    StaticBoundsResult r = staticOf("    const int8_t *w = aie::load_buffer(win_b, {0, 0}, {16, 4});\n" // line 3
+                                    "    int s = 0, j = 0;\n"
+                                    "    j += 2;\n"            // 5
+                                    "    s += w[j];\n"         // 6
+                                    "    s += w[helper(3)];\n" // 7
+                                    "    use(w, s);\n"         // 8
+                                    "    aie::release(win_b);\n");
+    const StaticAccess *a6 = accessAt(r, 6), *a7 = accessAt(r, 7), *a8 = accessAt(r, 8);
+    CHECK(a6 && a6->status == 's' && a6->reason.find("`j` is reassigned at line 5") != std::string::npos);
+    CHECK(a7 && a7->status == 's' && a7->reason.find("`helper()` is a function call") != std::string::npos);
+    CHECK(a8 && a8->status == 'u' && a8->reason.find("`use(w, s);`") != std::string::npos);
+    CHECK_EQ(r.analysed, 0);
+    CHECK_EQ(r.skipped, 3);
+
+    // An int16 block (32 elements = 64 B) viewed through int8_t casts.
+    const std::string src16 = "__global__ void k(aie::port<input_window_int16 *, aie::IFM, aie::shape<64>> win_a) {\n"
+                              "    const int16_t *a = aie::load_buffer(win_a, {0}, {32});\n" // 2
+                              "    const int8_t *b = (const int8_t *)a + 2;\n"               // 3
+                              "    const int8_t *c = reinterpret_cast<const int8_t *>(a);\n" // 4
+                              "    const v16int8 *v = (const v16int8 *)a;\n"                 // 5
+                              "    int s = a[31] + b[61] + c[63];\n"                         // 6: last byte, in bounds
+                              "    s += c[64];\n"                                            // 7: one byte past
+                              "    s += v[1].x;\n"                                           // 8: unknown pointee size
+                              "    aie::release(win_a);\n"
+                              "}\n";
+    std::string err;
+    auto ks = findPlainKernels(src16, "", err);
+    CHECK(ks.size() == 1);
+    if (ks.size() != 1)
+        return;
+    StaticBoundsResult t = staticBlockBounds(src16, ks[0], 1, 1, "", "t.cc");
+    int ok6 = 0;
+    for (auto &a : t.accesses)
+        ok6 += a.line == 6 && a.status == 'o';
+    CHECK_EQ(ok6, 3);
+    CHECK_EQ(t.findings.size(), 1);
+    CHECK(!t.findings.empty() && t.findings[0].line == 7 &&
+          t.findings[0].message.find("reads byte 64 of block `a` (64 bytes") != std::string::npos);
+    const StaticAccess *a8t = accessAt(t, 8);
+    CHECK(a8t && a8t->status == 's' && a8t->reason.find("`v16int8` of unknown size") != std::string::npos);
+}
+
+// __global__(conv, map) kernels read their sizes from the op / mapping
+// structs of the prelude; `c++, kk++` steps c (kk is a reassigned counter).
+static void testStaticPreludeStructs() {
+    const std::string src = "__global__ void k(aie::port<output_window_int8 *, aie::OFM, aie::shape<64>> win_c) {\n"
+                            "    const int t = map.oh_t * map.c_align;\n"           // 2
+                            "    int8_t *y = aie::store_buffer(win_c, {0}, {t});\n" // 3
+                            "    int kk = 0;\n"                                     // 4
+                            "    for (int c = 0; c < t + 1; c++, kk++)\n"           // 5
+                            "        y[c] = 0;\n"                                   // 6
+                            "    y[kk] = 0;\n"                                      // 7
+                            "    aie::commit(win_c);\n"
+                            "}\n";
+    const std::string prelude = "struct aiehlc_kernel_view_t { int oh, oh_t, c_align; };\n"
+                                "static constexpr aiehlc_kernel_view_t map = {112, 7, 4}; // mapping\n";
+    std::string err;
+    auto ks = findPlainKernels(src, "", err);
+    CHECK(ks.size() == 1);
+    if (ks.size() != 1)
+        return;
+    StaticBoundsResult r = staticBlockBounds(src, ks[0], 1, 1, prelude, "t.cc");
+    CHECK_EQ(r.findings.size(), 1);
+    CHECK(!r.findings.empty() && r.findings[0].line == 6 &&
+          r.findings[0].message.find("writes element 28 of block `y` (28 elements") != std::string::npos);
+    const StaticAccess *a7 = accessAt(r, 7);
+    CHECK(a7 && a7->status == 's' && a7->reason.find("`kk` is reassigned at line 5") != std::string::npos);
+}
+
 static void testStaticBounds() {
     // Block sized by oc_t, compute hardcoded for 16 rows (NB x 8): oc_t is the cause.
     const std::string body =
@@ -341,6 +420,8 @@ int main(int argc, char **argv) {
     testMeshSymbols();
     testDesugarExample(repo);
     testStaticBounds();
+    testStaticSkipsAndTypes();
+    testStaticPreludeStructs();
     std::printf("conv_autotile: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

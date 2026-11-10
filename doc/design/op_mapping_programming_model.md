@@ -380,18 +380,32 @@ ASan says *where* ("data used without being loaded at k.cc:29") and stops at
 the first fault. `staticBlockBounds()` says *why*, from the source alone, and
 runs inside `traceKernel` / `traceLogical` after every trace:
 
-- **Model.** The body's `const int` / `#define` constants, small const arrays
-  (`const int owc[2] = {owA, owB}`), `for (int v = a; v < b; v += s)` loops,
-  `if` / `?:` guards, block pointers (`T *p = aie::load_buffer(port, {off},
-  {shape})`), pointers derived from them (`T *r = p + e`) and local arrays.
-  A name assigned after its declaration has no single value and is dropped.
+- **Model.** The body's `const int` / `#define` constants, the op/mapping
+  struct members of a `__global__(conv, map)` kernel (`map.oh_t`, `conv.kh`,
+  from the prelude's `static constexpr aiehlc_kernel_view_t map = {...}`),
+  small const arrays (`const int owc[2] = {owA, owB}`), `for (int v = a; v < b;
+  v += s)` loops (extra `, kk++` increments allowed), `if` / `?:` guards, block
+  pointers (`T *p = aie::load_buffer(port, {off}, {shape})`), pointers derived
+  from them (`T *r = p + e`, `(T *)p + e`, `reinterpret_cast<T *>(p) + e`) and
+  local arrays. A name assigned after its declaration has no single value and
+  is dropped.
+- **Bytes, not elements.** Every pointer carries its pointee size, so an
+  `int8_t` view of an `int16` block or a cast in a derived pointer scales
+  correctly; messages switch from "element" to "byte" when the types differ.
+  An unknown pointee (`v16int8`, a struct) is a skip, never a guess.
 - **Accesses.** `p[e]`, `aie::load_v<N>(p + e)`, `aie::load_unaligned_v<N>(p + e, ..)`,
   `aie::store_v(p + e, v)` (N from `extract<N>` or an `aie::vector<T, N>`).
 - **Exact, not intervals.** Every loop variable the index needs (and
   `program_id`) is *enumerated*. Interval arithmetic gives `owB = pass * 16 +
   (pass ? 4 : 8)` the range [4, 24] and reports a false overflow; the real
-  values are {8, 20}. An index that cannot be evaluated (data, unknown call) is
-  skipped and counted (`note: static bounds analysis: 11 block access(es) checked`).
+  values are {8, 20}. An index that cannot be evaluated is skipped and counted
+  (`note: static bounds analysis: 11 block access(es) checked`). Each skip is
+  a note with its reason: `` `kk` is reassigned at line 67 ``, `` `helper()` is a
+  function call ``, a loop not of the `for (v = a; v < b; v += s)` form, the
+  4M-iteration budget, an unknown pointee size. A block pointer used where no
+  modelled access accounts for it (`use(w)`, `&w`, `*(w + e)`) is reported as
+  `used in a form the analysis does not model`. On `simpleconv2d_new_load.cc`
+  2 of 3 accesses are checked; the third indexes by the running counter `kk`.
 - **Attribution.** The worst element is decomposed into block coordinates
   (`element 3135 is (15,6,6,3), dim 0 (output channels) index 15 is past its
   extent 15`), the loops that move it are named (`nb < 2` (line 23), `n < 8`
@@ -401,6 +415,13 @@ runs inside `traceKernel` / `traceLogical` after every trace:
   read by both (`ow_t`: block width and row pitch) would only add slack, so it
   is not reported. When nothing qualifies, no cause line is printed; the
   finding points at the index arithmetic.
+- **Cross-check with the trace.** A trace fault at line L with no static
+  finding at L is classified, not left bare: `static analysis: cannot explain
+  line L: <reason>` (it skipped the access), `no block access recognized at
+  line L`, or `static analysis DISAGREES: it evaluated ... at line L and found
+  it inside its block`. The last one means the static model is wrong for this
+  kernel, e.g. `w` moved through an alias (`const int8_t **pw = &w; *pw +=
+  2940;`). It tests the analysis against the compiled code on every fault.
 - **Merging.** A trace fault at line L gets the static finding for L appended.
   Static findings the trace never reached (`store_v` at line 74 in the
   `oc_t = 15` case) become errors too. Without a trace fault they are only

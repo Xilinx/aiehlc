@@ -104,6 +104,16 @@ bool isScalarType(const std::string &s) {
                                             "uint8_t", "uint16_t", "uint32_t", "uint64_t", "std::size_t"};
     return w.count(s) != 0;
 }
+// Bytes of a pointee / element type; 0 = unknown (a struct, a window type, a vector).
+int typeBytes(const std::string &s) {
+    static const std::map<std::string, int> b = {
+        {"int8_t", 1},   {"uint8_t", 1}, {"char", 1},   {"signed", 4},  {"unsigned", 4}, {"bool", 1},  {"int16_t", 2},
+        {"uint16_t", 2}, {"short", 2},   {"int", 4},    {"int32_t", 4}, {"uint32_t", 4}, {"float", 4}, {"int64_t", 8},
+        {"uint64_t", 8}, {"long", 8},    {"double", 8}, {"size_t", 8},  {"bfloat16", 2}};
+    auto it = b.find(s);
+    return it == b.end() ? 0 : it->second;
+}
+
 bool isTypeName(const std::string &s) {
     return isScalarType(s) || (s.size() > 2 && s.compare(s.size() - 2, 2, "_t") == 0);
 }
@@ -256,6 +266,11 @@ Node ExprParser::unary() {
     } else if (at("(")) {
         i_ = skipGroup(i_, "(", ")") + 1; // an unmodelled call
         n.op = 'x';
+        n.name = t.s + "()";
+    } else if (at(".") && i_ + 1 < e_ && t_[i_ + 1].kind == 'i' && !(i_ + 2 < e_ && t_[i_ + 2].s == "(")) {
+        n.op = 'v'; // a constant struct member: map.oh_t
+        n.name = t.s + "." + t_[i_ + 1].s;
+        i_ += 2;
     } else if (at("[")) {
         i_++;
         n.op = 'i';
@@ -315,21 +330,29 @@ struct Def { // a named constant / local, or a small const array
     Node expr;
     std::vector<Node> elems;
     bool array = false, mut = false, root = false;
-    long value = 0; // root: the literal
+    long value = 0;  // root: the literal
+    int mutLine = 0; // first reassignment
 };
 struct Block { // what a load_buffer / store_buffer returns, or a local array
     std::string var, port, role, text;
     std::vector<Node> shape;
     long pos = 0;
-    int line = 0;
+    int line = 0, eb = 1; // eb: bytes per element (port elem_bytes / array element type), 0 = unknown
     bool local = false;
 };
-struct Ptr { // p = block, or p = base +/- off
-    std::string name;
+struct Ptr {                // p = block, or p = [(T *)] base +/- off
+    std::string name, type; // type: the pointee as declared (or cast to)
     long pos = 0, end = 0;
     int block = -1, base = -1;
+    int eb = 0, offEb = 0, mutLine = 0; // bytes per element of p / of the `off` arithmetic; 0 = unknown
     Node off;
     bool hasOff = false, mut = false;
+};
+struct Term { // one offset term of an access, in units of `eb` bytes
+    const Node *node;
+    long pos;
+    int eb;
+    std::string ptr; // whose arithmetic it is (for messages)
 };
 struct Loop {
     std::string var, cmp = "<", cond;
@@ -391,7 +414,22 @@ class Analyzer {
     std::vector<Guard> ifs_;
     std::vector<Access> acc_;
     std::map<std::string, long> vecLen_;
-    Loop pid_[2]; // program_id(0 / 1) as loops over the mesh
+    Loop pid_[2];             // program_id(0 / 1) as loops over the mesh
+    std::set<long> consumed_; // pointer-name tokens an access / derived pointer accounts for
+    mutable std::string why_; // first reason the current access is not evaluable
+    std::vector<std::pair<long, std::string>> unmodelled_; // block-pointer uses in no modelled form
+
+    bool fail(const std::string &w) const {
+        if (why_.empty())
+            why_ = w;
+        return false;
+    }
+    int portBytes(const std::string &port) const {
+        for (auto &p : k_.ports)
+            if (p.var == port)
+                return p.elem_bytes;
+        return 0;
+    }
 
     long n() const { return (long)t_.size(); }
     const std::string &s(long i) const {
@@ -413,10 +451,12 @@ class Analyzer {
     void parseMacros(const std::string &prelude);
     void scanDecls();
     void addDeclarators(long name, long end);
-    void addPtrDecl(long name);
-    void addArrayDecl(long typeTok, long name);
+    void addPtrDecl(long name, const std::string &type);
+    bool castBase(long rhs, long &baseTok, long &after, std::string &castType) const;
+    void addArrayDecl(long typeTok, long name, const std::string &type);
     void scanControl();
     void scanAccesses();
+    void scanUnmodelled();
     void addAccess(long a, long b, long e, long span, bool write, long textEnd);
     std::vector<Guard> ternaryGuards(long a) const;
     void markMutations();
@@ -429,7 +469,8 @@ class Analyzer {
     void collect(const Node &nd, long pos, const std::set<std::string> &loopVars, std::set<std::string> &vars,
                  std::set<int> &seen, int depth = 0) const;
 
-    std::vector<std::pair<const Node *, long>> terms(const Access &a, int &block) const;
+    std::vector<Term> terms(const Access &a, int &block) const;
+    long spanBytes(const Access &a) const { return a.span * std::max(0, ptrs_[a.ptr].eb); }
     bool plan(const Access &a, std::vector<const Loop *> &its, std::set<int> &defsUsed) const;
     int walk(const std::vector<const Loop *> &its, size_t i, Env &env, const std::function<int(Env &)> &leaf,
              long &budget) const;
@@ -538,29 +579,59 @@ void Analyzer::build(const std::string &prelude) {
     scanControl();
     scanAccesses();
     markMutations();
+    scanUnmodelled();
     markRoots();
 }
 
+// The prelude: object-like `#define NAME value`, and the constant op /
+// mapping structs of a __global__(conv, map) kernel --
+// `struct T { int f0, f1, ...; };` + `static constexpr T var = {v0, v1, ...};`
+// become the constants `var.f0`, `var.f1`, ...
 void Analyzer::parseMacros(const std::string &prelude) {
+    std::map<std::string, std::vector<std::string>> fields;
+    auto addDef = [&](const std::string &name, const Node &expr, const std::string &text) {
+        Def d;
+        d.name = name;
+        d.pos = -1;
+        d.end = LONG_MAX;
+        d.expr = expr;
+        d.text = text;
+        defByName_.insert({d.name, (int)defs_.size()});
+        defs_.push_back(d);
+    };
     std::istringstream is(prelude);
     std::string line;
     while (std::getline(is, line)) {
         std::vector<Tok> mt = tokenize(line, 0, line.size());
-        // # define NAME value...   (object-like only)
-        if (mt.size() < 4 || mt[0].s != "#" || mt[1].s != "define" || mt[2].kind != 'i' ||
-            (mt[3].s == "(" && mt[3].off == mt[2].off + mt[2].s.size()))
+        const long m = (long)mt.size();
+        if (m >= 4 && mt[0].s == "#" && mt[1].s == "define" && mt[2].kind == 'i' &&
+            !(mt[3].s == "(" && mt[3].off == mt[2].off + mt[2].s.size())) {
+            addDef(mt[2].s, ExprParser(mt, 3, m).parse(), "#define " + line.substr(mt[2].off));
             continue;
-        Def d;
-        d.name = mt[2].s;
-        d.pos = -1;
-        d.end = LONG_MAX;
-        d.expr = ExprParser(mt, 3, (long)mt.size()).parse();
-        d.text = "#define " + line.substr(mt[2].off);
-        defByName_.insert({d.name, (int)defs_.size()});
-        defs_.push_back(d);
+        }
+        if (m >= 4 && mt[0].s == "struct" && mt[1].kind == 'i' && mt[2].s == "{") {
+            for (long j = 3; j < m && mt[j].s != "}"; j++)
+                if (mt[j].kind == 'i' && (mt[j + 1].s == "," || mt[j + 1].s == ";") && !isScalarType(mt[j].s))
+                    fields[mt[1].s].push_back(mt[j].s);
+            continue;
+        }
+        long j = 0;
+        while (j < m && (mt[j].s == "static" || mt[j].s == "constexpr" || mt[j].s == "const"))
+            j++;
+        if (j + 4 >= m || !fields.count(mt[j].s) || mt[j + 1].kind != 'i' || mt[j + 2].s != "=" || mt[j + 3].s != "{")
+            continue;
+        const auto &f = fields[mt[j].s];
+        const std::string var = mt[j + 1].s;
+        long b = j + 4;
+        for (size_t k = 0; k < f.size() && b < m; k++) {
+            long e = b;
+            for (int depth = 0; e < m && !(depth == 0 && (mt[e].s == "," || mt[e].s == "}")); e++)
+                depth += mt[e].s == "(" ? 1 : mt[e].s == ")" ? -1 : 0;
+            addDef(var + "." + f[k], ExprParser(mt, b, e).parse(), var + "." + f[k] + " (prelude)");
+            b = e + 1;
+        }
     }
 }
-
 // Declarations at statement starts: scalars (`const int a = 1, b = 2;`),
 // pointers (`T *p = ...`), arrays (`T a[N] (= {...})`), aie::vector lengths.
 void Analyzer::scanDecls() {
@@ -607,9 +678,9 @@ void Analyzer::scanDecls() {
         if (vlen)
             vecLen_[t_[j].s] = vlen;
         if ((ptr || type == "auto") && s(j + 1) == "=")
-            addPtrDecl(j);
+            addPtrDecl(j, type);
         else if (!ptr && s(j + 1) == "[")
-            addArrayDecl(typeTok, j);
+            addArrayDecl(typeTok, j, type);
         else if (!ptr && isScalarType(type) && (s(j + 1) == "=" || s(j + 1) == "," || s(j + 1) == ";"))
             addDeclarators(j, scanTo(j, ";"));
     }
@@ -636,12 +707,14 @@ void Analyzer::addDeclarators(long name, long end) {
     }
 }
 
-void Analyzer::addPtrDecl(long name) {
+void Analyzer::addPtrDecl(long name, const std::string &type) {
     const long rhs = name + 2, end = scanTo(rhs, ";");
     Ptr p;
     p.name = t_[name].s;
+    p.type = type;
     p.pos = name;
     p.end = scopeEnd(name);
+    p.eb = type == "auto" ? -1 : typeBytes(type); // -1: as the right-hand side
     declNames_.insert(name);
     const std::string &f = s(rhs);
     if ((f == "aie::load_buffer" || f == "aie::store_buffer") && s(rhs + 1) == "(") {
@@ -651,6 +724,7 @@ void Analyzer::addPtrDecl(long name) {
         Block b;
         b.var = p.name;
         b.port = s(args[0].first);
+        b.eb = portBytes(b.port);
         for (auto &port : k_.ports)
             if (port.var == b.port)
                 b.role = port.role;
@@ -660,21 +734,69 @@ void Analyzer::addPtrDecl(long name) {
         b.line = lineOf(name);
         b.text = textOf(rhs, match_[rhs + 1] + 1);
         p.block = (int)blocks_.size();
+        if (p.eb < 0) {
+            p.eb = b.eb;
+            p.type = "the port's element";
+        }
         blocks_.push_back(b);
-    } else if (t_[rhs].kind == 'i' && (p.base = findPtr(f, name)) >= 0) {
-        if (end > rhs + 1 && s(rhs + 1) != "+" && s(rhs + 1) != "-")
-            return;
-        p.hasOff = end > rhs + 1;
-        if (p.hasOff)
-            p.off = parse(rhs, end, rhs);
-    } else
+        ptrs_.push_back(p);
         return;
+    }
+    long bt = -1, after = -1;
+    std::string castType;
+    if (!castBase(rhs, bt, after, castType) || (p.base = findPtr(s(bt), name)) < 0)
+        return;
+    if (end > after && s(after) != "+" && s(after) != "-")
+        return;
+    consumed_.insert(bt);
+    const Ptr &base = ptrs_[p.base];
+    p.offEb = castType.empty() ? base.eb : typeBytes(castType);
+    if (p.eb < 0) {
+        p.eb = p.offEb;
+        p.type = castType.empty() ? base.type : castType;
+    }
+    p.hasOff = end > after;
+    if (p.hasOff)
+        p.off = parse(after - 1, end, after - 1); // the token before `+` reads as 0
     ptrs_.push_back(p);
 }
 
+// `base`, `(T *)base` or `reinterpret_cast<T *>(base)` at rhs: the base token,
+// the first token after the base expression, and the cast's pointee ("" = none).
+bool Analyzer::castBase(long rhs, long &baseTok, long &after, std::string &castType) const {
+    auto pointee = [&](long b, long e) {
+        for (long j = b; j < e; j++)
+            if (t_[j].kind == 'i' && s(j) != "const" && s(j) != "volatile")
+                return s(j);
+        return std::string();
+    };
+    if (t_[rhs].kind == 'i' && s(rhs) != "reinterpret_cast" && s(rhs) != "static_cast") {
+        baseTok = rhs;
+        after = rhs + 1;
+        return true;
+    }
+    if (s(rhs) == "(" && match_[rhs] > rhs && s(match_[rhs] - 1) == "*") { // (T *)base
+        castType = pointee(rhs + 1, match_[rhs]);
+        baseTok = match_[rhs] + 1;
+        after = baseTok + 1;
+        return baseTok < n() && t_[baseTok].kind == 'i';
+    }
+    if ((s(rhs) == "reinterpret_cast" || s(rhs) == "static_cast") && s(rhs + 1) == "<") {
+        long q = rhs + 2;
+        while (q < n() && s(q) != ">" && s(q) != ";")
+            q++;
+        if (s(q) != ">" || s(q - 1) != "*" || s(q + 1) != "(" || match_[q + 1] != q + 3 || t_[q + 2].kind != 'i')
+            return false;
+        castType = pointee(rhs + 2, q);
+        baseTok = q + 2;
+        after = q + 4;
+        return true;
+    }
+    return false;
+}
 // `T a[N];` -- a local array, bounds-checked like a block -- and
 // `T a[N] = {e0, e1, ...};` -- also a const array the index math may read.
-void Analyzer::addArrayDecl(long typeTok, long name) {
+void Analyzer::addArrayDecl(long typeTok, long name, const std::string &type) {
     const long close = match_[name + 1];
     if (close <= name || s(close + 1) == "[")
         return; // multi-dimensional: not modelled
@@ -682,12 +804,15 @@ void Analyzer::addArrayDecl(long typeTok, long name) {
     Block b;
     b.var = t_[name].s;
     b.local = true;
+    b.eb = typeBytes(type);
     b.shape.push_back(parse(name + 2, close));
     b.pos = name;
     b.line = lineOf(name);
     b.text = textOf(typeTok, close + 1);
     Ptr p;
     p.name = b.var;
+    p.type = type;
+    p.eb = b.eb;
     p.pos = name;
     p.end = scopeEnd(name);
     p.block = (int)blocks_.size();
@@ -750,15 +875,25 @@ void Analyzer::scanControl() {
                 Node one;
                 one.op = 'n';
                 one.val = 1;
-                const long c = s2 + 1;
-                if ((s(c) == L.var && s(c + 1) == "++" && c + 2 == close) || (s(c) == "++" && s(c + 1) == L.var))
+                // `v++, kk++`: the step is the part that names v (the others
+                // reassign their own variables, which markMutations drops).
+                long c = s2 + 1, ce = close;
+                for (long q = s2 + 1; q < close;) {
+                    const long e = std::min(scanTo(q, ","), close);
+                    if (s(q) == L.var || s(q + 1) == L.var) {
+                        c = q;
+                        ce = e;
+                    }
+                    q = e + 1;
+                }
+                if ((s(c) == L.var && s(c + 1) == "++" && c + 2 == ce) || (s(c) == "++" && s(c + 1) == L.var))
                     L.step = one;
-                else if ((s(c) == L.var && s(c + 1) == "--" && c + 2 == close) || (s(c) == "--" && s(c + 1) == L.var)) {
+                else if ((s(c) == L.var && s(c + 1) == "--" && c + 2 == ce) || (s(c) == "--" && s(c + 1) == L.var)) {
                     L.step.op = 'u';
                     L.step.name = "-";
                     L.step.kids.push_back(one);
                 } else if (s(c) == L.var && (s(c + 1) == "+=" || s(c + 1) == "-=")) {
-                    L.step = parse(c + 2, close);
+                    L.step = parse(c + 2, ce);
                     if (s(c + 1) == "-=") {
                         Node neg;
                         neg.op = 'u';
@@ -830,6 +965,7 @@ void Analyzer::addAccess(long a, long b, long e, long span, bool write, long tex
     else
         return;
     x.guards = ternaryGuards(a);
+    consumed_.insert(b);
     acc_.push_back(x);
 }
 
@@ -864,8 +1000,27 @@ void Analyzer::scanAccesses() {
             x.idx = parse(a + 2, c);
             x.text = textOf(a, c + 1);
             x.guards = ternaryGuards(a);
+            consumed_.insert(a);
             acc_.push_back(x);
         }
+    }
+}
+
+// A block pointer used where no modelled access / derived pointer accounts
+// for it (passed to a helper, `*(p + e)`, a cast in an expression): the
+// analysis cannot see those reads and says so.
+void Analyzer::scanUnmodelled() {
+    for (long i = 1; i + 1 < n(); i++) {
+        if (t_[i].kind != 'i' || declNames_.count(i) || consumed_.count(i) || s(i - 1) == "." || s(i - 1) == "->" ||
+            isAssignOp(s(i + 1)) || findPtr(t_[i].s, i) < 0)
+            continue;
+        long b = i;
+        while (b > 0 && s(b - 1) != ";" && s(b - 1) != "{" && s(b - 1) != "}")
+            b--;
+        std::string ctx = textOf(b, std::min(stmtEnd(b), n() - 1) + 1);
+        if (ctx.size() > 80)
+            ctx = ctx.substr(0, 77) + "...";
+        unmodelled_.push_back({i, "`" + t_[i].s + "` is used in a form the analysis does not model: `" + ctx + "`"});
     }
 }
 
@@ -877,17 +1032,23 @@ void Analyzer::markMutations() {
         const std::string &nx = s(i + 1), &pv = s(i - 1);
         if (nx == "[" && match_[i + 1] > i && isAssignOp(s(match_[i + 1] + 1))) {
             int d = findDef(t_[i].s, i);
-            if (d >= 0 && defs_[d].array)
+            if (d >= 0 && defs_[d].array && !defs_[d].mut) {
                 defs_[d].mut = true;
+                defs_[d].mutLine = lineOf(i);
+            }
             continue;
         }
         if (!(isAssignOp(nx) || nx == "++" || nx == "--" || pv == "++" || pv == "--"))
             continue;
         int d = findDef(t_[i].s, i), p = findPtr(t_[i].s, i);
-        if (d >= 0)
+        if (d >= 0 && !defs_[d].mutLine) {
             defs_[d].mut = true;
-        if (p >= 0)
+            defs_[d].mutLine = lineOf(i);
+        }
+        if (p >= 0 && !ptrs_[p].mutLine) {
             ptrs_[p].mut = true;
+            ptrs_[p].mutLine = lineOf(i);
+        }
     }
 }
 
@@ -936,19 +1097,25 @@ bool Analyzer::lookup(const std::string &name, long pos, const Env &env, long &o
     }
     const int d = findDef(name, pos);
     if (d < 0)
-        return false;
+        return fail("`" + name + "` has no compile-time value in scope (data, a parameter or an unknown name)");
     if (env.ovr && env.ovr->count(d)) {
         out = env.ovr->at(d);
         return true;
     }
-    if (defs_[d].mut || defs_[d].array)
-        return false;
+    if (defs_[d].mut)
+        return fail(defs_[d].mutLine ? "`" + name + "` is reassigned at line " + std::to_string(defs_[d].mutLine)
+                                     : "`" + name + "` is declared without an initializer");
+    if (defs_[d].array)
+        return fail("array `" + name + "` is used as a value");
+    if (defs_[d].expr.op == 'x' && defs_[d].expr.name.empty())
+        return fail("`" + name + "` (line " + std::to_string(defs_[d].line) + ") is `" + defs_[d].text +
+                    "`, which the analysis does not parse");
     return eval(defs_[d].expr, defs_[d].pos, env, out, depth + 1);
 }
 
 bool Analyzer::eval(const Node &nd, long pos, const Env &env, long &out, int depth) const {
     if (depth > 64)
-        return false;
+        return fail("definitions nest more than 64 deep");
     long a = 0, b = 0;
     switch (nd.op) {
     case 'n':
@@ -968,9 +1135,14 @@ bool Analyzer::eval(const Node &nd, long pos, const Env &env, long &out, int dep
         return lookup(nd.name, pos, env, out, depth);
     case 'i': {
         const int d = findDef(nd.name, pos);
-        if (d < 0 || !defs_[d].array || defs_[d].mut || !eval(nd.kids[0], pos, env, a, depth + 1) || a < 0 ||
-            a >= (long)defs_[d].elems.size())
+        if (d < 0 || !defs_[d].array)
+            return fail("`" + nd.name + "[...]` is not a const array with an initializer");
+        if (defs_[d].mut)
+            return fail("`" + nd.name + "` is written at line " + std::to_string(defs_[d].mutLine));
+        if (!eval(nd.kids[0], pos, env, a, depth + 1))
             return false;
+        if (a < 0 || a >= (long)defs_[d].elems.size())
+            return fail("index " + std::to_string(a) + " is outside `" + nd.name + "`");
         return eval(defs_[d].elems[a], defs_[d].pos, env, out, depth + 1);
     }
     case 'u':
@@ -993,9 +1165,12 @@ bool Analyzer::eval(const Node &nd, long pos, const Env &env, long &out, int dep
             out = b != 0;
             return true;
         }
-        return eval(nd.kids[1], pos, env, b, depth + 1) && binop(nd.name, a, b, out);
+        if (!eval(nd.kids[1], pos, env, b, depth + 1))
+            return false;
+        return binop(nd.name, a, b, out) ||
+               fail("`" + nd.name + "` by " + std::to_string(b) + " (division by zero / shift)");
     }
-    return false;
+    return fail(nd.name.empty() ? "an expression the analysis does not parse" : "`" + nd.name + "` is a function call");
 }
 
 // Loop variables (of `loopVars`) and defs an expression depends on, transitively.
@@ -1020,14 +1195,16 @@ void Analyzer::collect(const Node &nd, long pos, const std::set<std::string> &lo
 }
 
 // Offset terms of an access: its index plus every derived pointer's offset.
-std::vector<std::pair<const Node *, long>> Analyzer::terms(const Access &a, int &block) const {
-    std::vector<std::pair<const Node *, long>> out{{&a.idx, a.pos}};
+std::vector<Term> Analyzer::terms(const Access &a, int &block) const {
+    std::vector<Term> out{{&a.idx, a.pos, ptrs_[a.ptr].eb, ptrs_[a.ptr].name}};
     block = -1;
     for (int p = a.ptr; p >= 0; p = ptrs_[p].base) {
-        if (ptrs_[p].mut)
+        if (ptrs_[p].mut) {
+            fail("pointer `" + ptrs_[p].name + "` is reassigned at line " + std::to_string(ptrs_[p].mutLine));
             return {};
+        }
         if (ptrs_[p].hasOff)
-            out.push_back({&ptrs_[p].off, ptrs_[p].pos});
+            out.push_back({&ptrs_[p].off, ptrs_[p].pos, ptrs_[p].offEb, ptrs_[p].name});
         if (ptrs_[p].block >= 0) {
             block = ptrs_[p].block;
             break;
@@ -1035,7 +1212,6 @@ std::vector<std::pair<const Node *, long>> Analyzer::terms(const Access &a, int 
     }
     return out;
 }
-
 // The loops to enumerate for an access, outer to inner (program ids first).
 bool Analyzer::plan(const Access &a, std::vector<const Loop *> &its, std::set<int> &defsUsed) const {
     int block = -1;
@@ -1050,7 +1226,7 @@ bool Analyzer::plan(const Access &a, std::vector<const Loop *> &its, std::set<in
             loopVars.insert(L.var);
         }
     for (auto &t : ts)
-        collect(*t.first, t.second, loopVars, vars, defsUsed);
+        collect(*t.node, t.pos, loopVars, vars, defsUsed);
     for (auto &sh : blocks_[block].shape)
         collect(sh, blocks_[block].pos, loopVars, vars, defsUsed);
     for (auto &g : ifs_)
@@ -1064,7 +1240,8 @@ bool Analyzer::plan(const Access &a, std::vector<const Loop *> &its, std::set<in
         if (!vars.count(L.var))
             continue;
         if (!L.ok)
-            return false;
+            return fail("the loop at line " + std::to_string(L.line) +
+                        " is not `for (int v = a; v <op> b; v++ / v += s)`");
         collect(L.init, L.hdr, loopVars, vars, defsUsed);
         collect(L.bound, L.hdr, loopVars, vars, defsUsed);
         collect(L.step, L.hdr, loopVars, vars, defsUsed);
@@ -1082,8 +1259,12 @@ bool Analyzer::plan(const Access &a, std::vector<const Loop *> &its, std::set<in
 // budget, 1: the leaf stopped it, 0: done.
 int Analyzer::walk(const std::vector<const Loop *> &its, size_t i, Env &env, const std::function<int(Env &)> &leaf,
                    long &budget) const {
-    if (i == its.size())
-        return --budget < 0 ? -1 : leaf(env);
+    if (i == its.size()) {
+        if (--budget >= 0)
+            return leaf(env);
+        fail("the loop nest has more than 4000000 iterations");
+        return -1;
+    }
     const Loop &L = *its[i];
     long v = 0, bound = L.var == "$p0" ? rows_ : cols_, step = 1;
     if (!L.pseudo && (!eval(L.init, L.hdr, env, v) || !eval(L.bound, L.hdr, env, bound) ||
@@ -1091,8 +1272,10 @@ int Analyzer::walk(const std::vector<const Loop *> &its, size_t i, Env &env, con
         return -1;
     int r = 0;
     for (long iter = 0; r == 0 && cmpOp(L.cmp, v, bound); v += step) {
-        if (++iter > 1000000)
+        if (++iter > 1000000) {
+            fail("the loop `" + L.cond + "` (line " + std::to_string(L.line) + ") runs more than 1000000 times");
             return -1;
+        }
         env.v[L.var] = v;
         r = walk(its, i + 1, env, leaf, budget);
     }
@@ -1100,30 +1283,39 @@ int Analyzer::walk(const std::vector<const Loop *> &its, size_t i, Env &env, con
     return r;
 }
 
+// Byte offset of the access in its block and the block's size in bytes.
 bool Analyzer::flatAt(const Access &a, const Env &env, long &idx, long &size, std::vector<long> *shape) const {
     int block = -1;
     auto ts = terms(a, block);
     if (block < 0)
         return false;
+    const Block &B = blocks_[block];
+    if (B.eb <= 0)
+        return fail(B.local ? "the element type of array `" + B.var + "` has an unknown size"
+                            : "`" + B.port + "` is not a port of the kernel");
     idx = 0;
     for (auto &t : ts) {
         long v;
-        if (!eval(*t.first, t.second, env, v))
+        if (t.eb <= 0)
+            return fail("pointer `" + t.ptr + "` has element type `" + ptrs_[findPtr(t.ptr, a.pos + 1)].type +
+                        "` of unknown size");
+        if (!eval(*t.node, t.pos, env, v))
             return false;
-        idx += v;
+        idx += v * t.eb;
     }
-    size = 1;
-    for (auto &sh : blocks_[block].shape) {
+    size = B.eb;
+    for (auto &sh : B.shape) {
         long v;
-        if (!eval(sh, blocks_[block].pos, env, v) || v <= 0)
+        if (!eval(sh, B.pos, env, v))
             return false;
+        if (v <= 0)
+            return fail("block `" + B.var + "` has a dimension of " + std::to_string(v));
         size *= v;
         if (shape)
             shape->push_back(v);
     }
     return true;
 }
-
 bool Analyzer::check(const Access &a, const std::map<int, long> *ovr, bool stopEarly, AccessEval &r) const {
     std::vector<const Loop *> its;
     std::set<int> used;
@@ -1139,6 +1331,7 @@ bool Analyzer::check(const Access &a, const std::map<int, long> *ovr, bool stopE
     Env env;
     env.ovr = ovr;
     long budget = 4000000;
+    const long sb = spanBytes(a);
     auto leaf = [&](Env &e) -> int {
         for (auto *g : guards) {
             long c;
@@ -1152,16 +1345,16 @@ bool Analyzer::check(const Access &a, const std::map<int, long> *ovr, bool stopE
             r.lo = idx;
             r.wLo = e;
         }
-        if (idx + a.span - size > r.worst) {
-            r.worst = idx + a.span - size;
-            r.hiEnd = idx + a.span;
+        if (idx + sb - size > r.worst) {
+            r.worst = idx + sb - size;
+            r.hiEnd = idx + sb;
             r.size = size;
             r.wHi = e;
         }
-        r.out |= idx < 0 || idx + a.span > size;
+        r.out |= idx < 0 || idx + sb > size;
         return stopEarly && r.out ? 1 : 0;
     };
-    r.ok = walk(its, 0, env, leaf, budget) >= 0 && r.worst != LONG_MIN;
+    r.ok = walk(its, 0, env, leaf, budget) >= 0; // no leaf at all: the guards never let it run
     return r.ok;
 }
 
@@ -1194,7 +1387,7 @@ std::set<int> Analyzer::decoupledRoots(const Access &a) const {
     for (auto &sh : blocks_[block].shape)
         collect(sh, blocks_[block].pos, none, vars, shapeDefs);
     for (auto &t : ts)
-        collect(*t.first, t.second, none, vars, indexDefs);
+        collect(*t.node, t.pos, none, vars, indexDefs);
     for (auto &L : loops_)
         if (L.bodyB <= a.pos && a.pos <= L.bodyE) {
             collect(L.init, L.hdr, none, vars, indexDefs);
@@ -1273,35 +1466,44 @@ std::string Analyzer::findCause(const std::vector<int> &bad, const std::vector<i
 
 std::string Analyzer::describe(const Access &a, const AccessEval &r, int causeDef) const {
     int block = -1;
-    terms(a, block);
+    const auto ts = terms(a, block);
     const Block &B = blocks_[block];
     const bool under = r.lo < 0 && !(r.worst > 0);
     const Env &w = under ? r.wLo : r.wHi;
     long idx = 0, size = 0;
     std::vector<long> shape;
     flatAt(a, w, idx, size, &shape);
+    // Report in block elements when every pointer on the way has the block's
+    // element type; in bytes when a cast / other pointee type is involved.
+    bool uniform = ptrs_[a.ptr].eb == B.eb;
+    for (auto &t : ts)
+        uniform &= t.eb == B.eb;
+    const long u = uniform ? B.eb : 1, sb = spanBytes(a);
+    const char *unit = uniform ? "element" : "byte";
     std::ostringstream os;
-    const long first = under ? r.lo : r.hiEnd - 1;
-    os << "`" << a.text << "` " << (a.write ? "writes" : "reads") << " element " << first;
+    const long first = (under ? r.lo : r.hiEnd - 1) / u;
+    os << "`" << a.text << "` " << (a.write ? "writes" : "reads") << " " << unit << " " << first;
     if (a.span > 1)
-        os << " (a " << a.span << "-lane access from element " << (under ? r.lo : r.hiEnd - a.span) << ")";
-    os << " of " << (B.local ? "local array" : "block") << " `" << B.var << "` (" << size << " elements";
+        os << " (a " << a.span << "-lane access from " << unit << " " << (under ? r.lo : r.hiEnd - sb) / u << ")";
+    os << " of " << (B.local ? "local array" : "block") << " `" << B.var << "` (" << size / u << " " << unit << "s";
     if (!B.local) {
         os << ", shape (";
         for (size_t d = 0; d < shape.size(); d++)
             os << (d ? "," : "") << shape[d];
         os << ") = " << B.text << (B.role.empty() ? "" : " [" + B.role + "]");
     }
+    if (!uniform)
+        os << ", " << B.eb << " B per element, accessed through `" << ptrs_[a.ptr].type << "`";
     os << ", line " << B.line << ")" << witnessText(a, w);
     if (under) {
         os << ": before the start of the block";
         return os.str();
     }
-    // The overflow seen in block coordinates, and the loops that move it.
-    long inner = shape.empty() ? 1 : size / shape[0];
-    const long c0 = first / std::max(1L, inner);
+    // The overflow seen in block coordinates (elements), and the loops that move it.
+    const long lastElem = (r.hiEnd - 1) / B.eb, inner = shape.empty() ? 1 : size / B.eb / shape[0];
+    const long c0 = lastElem / std::max(1L, inner);
     std::vector<long> coord(shape.size());
-    long rest = first;
+    long rest = lastElem;
     for (long d = (long)shape.size() - 1; d > 0; d--) {
         coord[d] = rest % shape[d];
         rest /= shape[d];
@@ -1309,14 +1511,15 @@ std::string Analyzer::describe(const Access &a, const AccessEval &r, int causeDe
     if (!coord.empty())
         coord[0] = rest;
     if (shape.size() > 1) {
-        os << ": element " << first << " is (";
+        os << ": element " << lastElem << " is (";
         for (size_t d = 0; d < coord.size(); d++)
             os << (d ? "," : "") << coord[d];
         os << ")";
     }
     const std::string dim = B.local ? std::string("the array") : std::string("dim 0 (") + traceDimName(B.role, 0) + ")";
-    os << ", " << dim << " index " << c0 << " is past its extent " << (shape.empty() ? 0 : shape[0]) << " (" << r.worst
-       << " element" << (r.worst == 1 ? "" : "s") << " past the end)";
+    const long past = (r.worst + u - 1) / u;
+    os << ", " << dim << " index " << c0 << " is past its extent " << (shape.empty() ? 0 : shape[0]) << " (" << past
+       << " " << unit << (past == 1 ? "" : "s") << " past the end)";
     std::vector<const Loop *> drivers;
     for (auto &L : loops_) {
         if (!w.v.count(L.var) || !(L.bodyB <= a.pos && a.pos <= L.bodyE))
@@ -1326,7 +1529,7 @@ std::string Analyzer::describe(const Access &a, const AccessEval &r, int causeDe
         if (!eval(L.init, L.hdr, w2, v0))
             continue;
         w2.v[L.var] = v0;
-        if (flatAt(a, w2, i2, s2, nullptr) && (i2 + a.span - 1) / std::max(1L, inner) < c0)
+        if (flatAt(a, w2, i2, s2, nullptr) && (i2 + sb - 1) / B.eb / std::max(1L, inner) < c0)
             drivers.push_back(&L);
     }
     if (!drivers.empty()) {
@@ -1338,8 +1541,8 @@ std::string Analyzer::describe(const Access &a, const AccessEval &r, int causeDe
     if (causeDef >= 0) {
         std::set<std::string> vars, none;
         std::set<int> seen;
-        for (auto &t : terms(a, block))
-            collect(*t.first, t.second, none, vars, seen);
+        for (auto &t : ts)
+            collect(*t.node, t.pos, none, vars, seen);
         for (auto *L : drivers) {
             collect(L->init, L->hdr, none, vars, seen);
             collect(L->bound, L->hdr, none, vars, seen);
@@ -1350,7 +1553,6 @@ std::string Analyzer::describe(const Access &a, const AccessEval &r, int causeDe
     }
     return os.str();
 }
-
 StaticBoundsResult Analyzer::run() {
     StaticBoundsResult res;
     std::vector<AccessEval> evals(acc_.size());
@@ -1358,12 +1560,30 @@ StaticBoundsResult Analyzer::run() {
     for (size_t i = 0; i < acc_.size(); i++) {
         std::vector<const Loop *> its;
         std::set<int> used;
+        StaticAccess sa;
+        sa.line = acc_[i].line;
+        sa.text = acc_[i].text;
+        why_.clear();
         if (!plan(acc_[i], its, used) || !check(acc_[i], nullptr, false, evals[i])) {
             res.skipped++;
+            sa.status = 's';
+            sa.reason = why_.empty() ? "not evaluable" : why_;
+            res.accesses.push_back(sa);
             continue;
         }
         res.analysed++;
+        sa.status = evals[i].out ? 'x' : 'o';
+        res.accesses.push_back(sa);
         (evals[i].out ? bad : good).push_back((int)i);
+    }
+    for (auto &u : unmodelled_) {
+        StaticAccess sa;
+        sa.line = lineOf(u.first);
+        sa.text = t_[u.first].s;
+        sa.status = 'u';
+        sa.reason = u.second;
+        res.accesses.push_back(sa);
+        res.skipped++;
     }
     if (bad.empty())
         return res;
@@ -1373,7 +1593,6 @@ StaticBoundsResult Analyzer::run() {
         res.findings.push_back({acc_[b].line, describe(acc_[b], evals[b], causeDef)});
     return res;
 }
-
 } // namespace
 
 StaticBoundsResult staticBlockBounds(const std::string &src, const TraceKernel &k, int rows, int cols,

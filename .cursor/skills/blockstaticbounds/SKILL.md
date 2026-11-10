@@ -43,12 +43,26 @@ widths, bound those loops by `oc_t` instead.
   row pitch both) would "fit" at 29 or 47 just by adding slack. That once
   mis-blamed the `load too small` / `off = kb * 8` regression cases, so such
   constants are excluded and no cause line is printed.
-- **Unknown means skipped, never guessed.** Data-dependent indices, unknown calls,
-  reassigned names (`x = aie::load_buffer(...)` again) and multi-dim local arrays
-  are skipped and counted in the `not evaluable` note.
+- **Unknown means skipped, never guessed, and the reason is printed.** Data-dependent
+  indices, unknown calls, reassigned names (`x = aie::load_buffer(...)` again, a
+  running `kk++` counter), multi-dim local arrays and pointees of unknown size are
+  skipped, each with a `not evaluable at <file>:<line>` note.
+- **Bytes.** Offsets are summed in bytes (each pointer's pointee size), so
+  `(const int8_t *)a` over an int16 block is exact.
 - **Errors vs notes.** Static findings are errors only when the trace also faulted.
   Otherwise they are `possible ...` notes, because an unmodelled guard may stop the
   access from running.
+
+## Reading the other messages
+
+| Message | Meaning |
+|---|---|
+| `note: static bounds analysis: not evaluable at k.cc:69 \`w[oc * TAPS + kk]\`: \`kk\` is reassigned at line 67` | skipped access, with the reason; nothing was guessed |
+| `` `w` is used in a form the analysis does not model: `use(w, s);` `` | a block pointer escapes (helper, `&w`, `*(w + e)`); reads through it are invisible |
+| `static analysis: cannot explain line L: ...` (appended to an ASan error) | the trace faulted on an access the analysis skipped |
+| `static analysis: no block access recognized at line L` | the fault is through something not modelled as an access |
+| `static analysis DISAGREES: it evaluated ... and found it inside its block` | **the static model is wrong for this kernel** (alias, cast, escape). Trust ASan; fix the model; add a regression case |
+| `reads byte 64 of block \`a\` (64 bytes, 2 B per element, accessed through \`int8_t\`)` | byte units: the pointer type differs from the port's element type |
 
 ## Verify after a change
 

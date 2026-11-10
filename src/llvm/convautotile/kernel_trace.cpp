@@ -732,31 +732,69 @@ void compareFit(const TracePort &port, const PortFit &got, const PortFit &want, 
     }
 }
 
+// The line an ASan "data used without being loaded" error names, or 0.
+int faultLine(const std::string &e, const std::string &srcName) {
+    const std::string tag = " at " + srcName + ":";
+    size_t p = e.find(tag);
+    return p == std::string::npos ? 0 : std::atoi(e.c_str() + p + tag.size());
+}
+
+// What the static analysis has to say about a trace fault at `line` it found
+// no overflow at: it could not evaluate the access (and why), it saw no
+// access there, or it DISAGREES -- it evaluated every access on the line and
+// all stay inside their block, so its model of the kernel is wrong somewhere.
+std::string crossCheck(const StaticBoundsResult &sb, int line) {
+    const std::string at = "line " + std::to_string(line);
+    std::string why, seen;
+    for (auto &a : sb.accesses) {
+        if (a.line != line)
+            continue;
+        if (a.status == 's' || a.status == 'u')
+            why += (why.empty() ? "" : "; ") + ("`" + a.text + "`: " + a.reason);
+        else
+            seen += (seen.empty() ? "`" : ", `") + a.text + "`";
+    }
+    if (!why.empty())
+        return "static analysis: cannot explain " + at + ": " + why;
+    if (seen.empty())
+        return "static analysis: no block access recognized at " + at + " -- it cannot explain this fault";
+    return "static analysis DISAGREES: it evaluated " + seen + " at " + at +
+           " and found it inside its block -- its model of this kernel misses something (an alias, a cast, an "
+           "unmodelled pointer); please report it";
+}
+
 // The static bounds analysis (kernel_static.h) says WHY a block access leaves
 // its block. A trace that hit "data used without being loaded" at line L gets
-// the static finding for L appended, plus the constant that causes it; static
-// findings the trace did not hit (it stops at the first) are errors then too.
-// Without a trace failure they are notes: a guard the analysis does not model
-// may keep the access from running.
+// the static finding for L appended, plus the constant that causes it (or the
+// cross-check above when there is none); static findings the trace did not hit
+// (it stops at the first) are errors then too. Without a trace failure they
+// are notes: a guard the analysis does not model may keep the access from
+// running. Every access it could not evaluate is a note with the reason.
 void addStaticBounds(const std::string &src, const TraceKernel &k, int rows, int cols, const std::string &prelude,
                      const std::string &srcName, KernelTraceResult &r) {
     StaticBoundsResult sb = staticBlockBounds(src, k, rows, cols, prelude, srcName);
     if (sb.analysed + sb.skipped)
         r.notes.push_back("static bounds analysis: " + std::to_string(sb.analysed) + " block access(es) checked" +
-                          (sb.skipped ? ", " + std::to_string(sb.skipped) + " not evaluable (skipped)" : ""));
-    if (sb.findings.empty())
-        return;
+                          (sb.skipped ? ", " + std::to_string(sb.skipped) + " not evaluable" : ""));
+    for (auto &a : sb.accesses)
+        if (a.status == 's' || a.status == 'u')
+            r.notes.push_back("static bounds analysis: not evaluable at " + srcName + ":" + std::to_string(a.line) +
+                              " `" + a.text + "`: " + a.reason);
     bool confirmed = false;
     std::vector<bool> used(sb.findings.size(), false);
     for (auto &e : r.errors) {
         if (e.find("data used without being loaded") == std::string::npos)
             continue;
         confirmed = true;
+        const int line = faultLine(e, srcName);
+        bool explained = false;
         for (size_t i = 0; i < sb.findings.size(); i++)
-            if (!used[i] && e.find(srcName + ":" + std::to_string(sb.findings[i].line) + " ") != std::string::npos) {
+            if (!used[i] && line && sb.findings[i].line == line) {
                 e += "\n    static analysis: " + sb.findings[i].message;
-                used[i] = true;
+                used[i] = explained = true;
             }
+        if (!explained && line)
+            e += "\n    " + crossCheck(sb, line);
     }
     auto &out = confirmed ? r.errors : r.notes;
     for (size_t i = 0; i < sb.findings.size(); i++)
