@@ -647,7 +647,6 @@ def download_elf_and_continue(child, elf_path):
 
     log.debug("download_elf_and_continue: sending 'dow -force'...")
     child.sendline(f"dow -force {elf_path}")
-    devwatch.quiet(DOWNLOAD_TIMEOUT_S + 60, f"dow {os.path.basename(elf_path)}")
 
     # Wait for "Successfully downloaded" – this string is emitted only by
     # "dow", never by "device program BOOT.BIN".  Using "100%" was unsafe
@@ -666,7 +665,8 @@ def download_elf_and_continue(child, elf_path):
     # nothing on a fast link (the expect returns as soon as the match arrives)
     # and only matters when the alternative is a spurious failure.
     log.debug("download_elf_and_continue: waiting for download result...")
-    index = child.expect([r'Successfully downloaded', r'PLM stalled'], timeout=DOWNLOAD_TIMEOUT_S)
+    with devwatch.quiet(DOWNLOAD_TIMEOUT_S + 60, f"dow {os.path.basename(elf_path)}"):
+        index = child.expect([r'Successfully downloaded', r'PLM stalled'], timeout=DOWNLOAD_TIMEOUT_S)
     devwatch.progress("dow finished")
     if index == 1:
         # Consume remaining output up to the prompt
@@ -811,9 +811,9 @@ def ensure_netboot_built():
     why = "missing" if not os.path.isfile(elf) else "older than its sources"
     print(f"[netload] netboot.elf {why}: building it (src/tool/netboot/build.sh)...")
     env = dict(os.environ, NETBOOT_OUT=NETBOOT_BUILD_DIR, NETBOOT_DMA_BASE=NETBOOT_DMA_BASE)
-    devwatch.quiet(1800 + 60, "building netboot.elf")
-    r = subprocess.run(["bash", os.path.join(NETBOOT_LOCAL_DIR, "build.sh")], capture_output=True, text=True,
-                       timeout=1800, env=env)
+    with devwatch.quiet(1800 + 60, "building netboot.elf"):
+        r = subprocess.run(["bash", os.path.join(NETBOOT_LOCAL_DIR, "build.sh")], capture_output=True, text=True,
+                           timeout=1800, env=env)
     if r.returncode != 0 or not os.path.isfile(elf):
         tail = "\n".join((r.stdout + r.stderr).strip().splitlines()[-15:])
         raise RuntimeError(f"building netboot.elf failed (exit {r.returncode}):\n{tail}\n"
@@ -897,9 +897,8 @@ def netload_remote(argv, timeout=600, gate=None, live=False):
     extra += [x for i in range(1, len(SSH_MUX), 2) for x in ("--ssh-opt", SSH_MUX[i])]
     mod = _netload_mod[0]
     mod.send_gate = gate
-    devwatch.quiet(timeout, "netload " + " ".join(argv[:2]))
     try:
-        with contextlib.redirect_stdout(out):
+        with devwatch.quiet(timeout, "netload " + " ".join(argv[:2])), contextlib.redirect_stdout(out):
             rc = mod.main(argv + extra)
     finally:
         mod.send_gate = None

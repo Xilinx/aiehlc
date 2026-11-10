@@ -6,7 +6,8 @@ cannot tell "hung" from "a long board run", so the holder judges itself:
 
   * no-progress timeout (--stall-secs): progress = new console output, an xsdb
     command returning, a netload line. A step that is legitimately quiet for a
-    long time (netboot build, ELF download) calls ``quiet(secs, what)`` first.
+    long time (netboot build, ELF download) runs inside ``with quiet(secs, what):``;
+    the allowance ends with the step.
   * hard cap (--max-run) on the whole run.
 
 On either, the watchdog kills this process's own children (xsdb / hw_server /
@@ -18,6 +19,7 @@ It also refreshes a heartbeat in the lock's .owner file; a waiter that sees the
 heartbeat stop (the whole process frozen, watchdog thread included) can break
 the lock -- see devlock.FROZEN_SECS.
 """
+import contextlib
 import os
 import signal
 import sys
@@ -87,11 +89,26 @@ class Watchdog:
                 self.what = what
 
     def quiet(self, secs, what):
-        """Allow up to ``secs`` without progress for a known-slow step."""
+        """Allow up to ``secs`` without progress for a known-slow step.
+
+        Returns the previous allowance; pass it to ``end_quiet`` when the step
+        ends, or the window outlives the step and masks a real stall after it
+        (seen on 213: a netload `load` left 600 s of allowance behind, so
+        --stall-secs 60 could not fire while the app hung silently)."""
         with self._lock:
-            self.quiet_until = max(self.quiet_until, time.time() + secs)
+            prev = self.quiet_until
+            self.quiet_until = max(prev, time.time() + secs)
             self.what = what
             self.last = time.time()
+            return prev
+
+    def end_quiet(self, prev=0.0, what=None):
+        """The slow step finished: restore the allowance that was in force before it."""
+        with self._lock:
+            self.quiet_until = prev
+            self.last = time.time()
+            if what:
+                self.what = what
 
     def check(self, now=None):
         """Return the stall reason, or None. Pure: easy to unit-test."""
@@ -148,6 +165,13 @@ def progress(what=None):
         current.touch(what)
 
 
+@contextlib.contextmanager
 def quiet(secs, what):
-    if current:
-        current.quiet(secs, what)
+    """``with devwatch.quiet(secs, what):`` -- a known-slow step; the allowance ends with the block."""
+    wd = current
+    prev = wd.quiet(secs, what) if wd else None
+    try:
+        yield
+    finally:
+        if wd:
+            wd.end_quiet(prev, f"{what}: finished")

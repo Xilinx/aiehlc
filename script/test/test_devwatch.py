@@ -238,3 +238,34 @@ def test_break_also_kills_the_holders_children(tmp_path, monkeypatch):
     finally:
         if alive(child):
             os.kill(child, signal.SIGKILL)
+
+
+def test_quiet_window_ends_with_the_step():
+    # 213 s5: a netload `load` (quiet 600 s) left its allowance behind, so a silent
+    # app after it was not caught by --stall-secs 60 until ~600 s later.
+    wd = devwatch.Watchdog(stall_secs=60, max_run=0)
+    devwatch.current = wd
+    try:
+        with devwatch.quiet(600, "netload load"):
+            assert wd.check(wd.last + 300) is None      # inside the step: allowed
+        t_end = wd.last
+        assert wd.check(t_end + 59) is None
+        assert "netload load: finished" in wd.check(t_end + 61)  # after it: normal stall clock
+    finally:
+        devwatch.current = None
+
+
+def test_nested_quiet_restores_outer_allowance():
+    wd = devwatch.Watchdog(stall_secs=10, max_run=0)
+    outer = wd.quiet(1000, "build")
+    inner = wd.quiet(100, "dow")
+    wd.end_quiet(inner, "dow done")
+    assert wd.check(wd.last + 500) is None              # outer step still running
+    wd.end_quiet(outer, "build done")
+    assert wd.check(wd.last + 11) is not None
+
+
+def test_quiet_without_watchdog_is_a_noop():
+    devwatch.current = None
+    with devwatch.quiet(5, "x"):
+        pass
