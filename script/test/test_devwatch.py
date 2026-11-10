@@ -269,3 +269,26 @@ def test_quiet_without_watchdog_is_a_noop():
     devwatch.current = None
     with devwatch.quiet(5, "x"):
         pass
+
+
+def _apppaltest():
+    os.environ.setdefault("USERNAME", "u"); os.environ.setdefault("PALIP", "10.0.0.9")
+    os.environ.setdefault("BOARDNAME", "palmyra")
+    import apppaltest
+    return apppaltest
+
+
+def test_netload_status_poll_is_not_progress():
+    # 213 s5: the 0.5 s `status` probe during the console wait printed a line each
+    # time, which reset the stall clock, so a silent hung app never STALLED.
+    app = _apppaltest()
+    wd = devwatch.Watchdog(stall_secs=60, max_run=0)
+    devwatch.current = wd
+    try:
+        wd.last = wd.start - 100                       # 100 s of silence so far
+        app._Tee(live=False, progress=False).write("[netload] status rc=0 state=running runs=8\n")
+        assert wd.check() is not None                  # still a stall
+        app._Tee(live=False).write("[netload] load rc=0 state=running\n")
+        assert wd.check() is None                      # a real netload step is progress
+    finally:
+        devwatch.current = None

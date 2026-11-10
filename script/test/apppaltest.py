@@ -863,13 +863,13 @@ class _Tee:
     the output only buffered, those "busy, N s left -- waiting" lines appeared
     after the wait, i.e. apppaltest looked hung."""
 
-    def __init__(self, live):
+    def __init__(self, live, progress=True):
         import io
-        self.buf, self.live = io.StringIO(), live
+        self.buf, self.live, self.progress = io.StringIO(), live, progress
 
     def write(self, text):
         self.buf.write(text)
-        if text.strip():
+        if self.progress and text.strip():
             devwatch.progress("netload: " + text.strip()[:80])
         if self.live:
             sys.__stdout__.write(text)
@@ -880,11 +880,14 @@ class _Tee:
         pass
 
 
-def netload_remote(argv, timeout=600, gate=None, live=False):
+def netload_remote(argv, timeout=600, gate=None, live=False, progress=True):
     """Run netload.py's main() in this process and reach the board through
     netboot_proxy.py on the lab host over the multiplexed ssh: the ELF streams
     through the ssh pipe, nothing is scp'd. Returns (exit status, printed text);
-    live=True also prints netload's lines as they come (load: busy waits)."""
+    live=True also prints netload's lines as they come (load: busy waits).
+    progress=False: a monitoring poll (the 0.5 s `status` probe while waiting for the
+    app), which must not feed the self-watchdog -- otherwise a silent hung app never
+    trips --stall-secs, because the probe itself always answers."""
     import contextlib
     import importlib.util
     if not _netload_mod:
@@ -892,13 +895,14 @@ def netload_remote(argv, timeout=600, gate=None, live=False):
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         _netload_mod.append(mod)
-    out = _Tee(live)
+    out = _Tee(live, progress)
     extra = ["--via", host, "--proxy", f"{NETBOOT_REMOTE_DIR}/netboot_proxy.py"]
     extra += [x for i in range(1, len(SSH_MUX), 2) for x in ("--ssh-opt", SSH_MUX[i])]
     mod = _netload_mod[0]
     mod.send_gate = gate
+    step = devwatch.quiet(timeout, "netload " + " ".join(argv[:2])) if progress else contextlib.nullcontext()
     try:
-        with devwatch.quiet(timeout, "netload " + " ".join(argv[:2])), contextlib.redirect_stdout(out):
+        with step, contextlib.redirect_stdout(out):
             rc = mod.main(argv + extra)
     finally:
         mod.send_gate = None
@@ -1380,7 +1384,8 @@ def _main(args):
         finished = None
         if args.netload:
             def finished():  # the app returned through its patched _exit, or ran past its max run time
-                rc, out = netload_remote(["status", "--host", args.netload_ip, "--connect-timeout", "3"], timeout=30)
+                rc, out = netload_remote(["status", "--host", args.netload_ip, "--connect-timeout", "3"], timeout=30,
+                                         progress=False)
                 if rc == 0 and ("state=watchdog-timeout" in out or "state=killed" in out):
                     print(f"\n[netload] the supervisor ended the wait: {out.splitlines()[0]}")
                 return rc == 0 and any(f"state={st}" in out for st in ("exited", "watchdog-timeout", "killed"))
