@@ -74,6 +74,17 @@ CASES = [
     ("vector: aligned 64-byte load on a 32-byte aligned window",
      [("aie::load_unaligned_v<64>(r + owA * 8 + off, 4)", "aie::load_v<64>(r + owA * 8 + off)")],
      "needs a 64-byte aligned address (DMA windows are only 32-byte aligned"),
+    # Static bounds analysis (kernel_static.cpp): the block is sized by oc_t
+    # but the compute walks 16 output channels whatever oc_t is -- the trace
+    # names the line, the static analysis the constant and the fix, and the
+    # OFM store the trace never reached (it stops at the first fault).
+    ("weights block narrower than the compute (oc_t = 15): the cause",
+     [("oc_t = 16;", "oc_t = 15;")],
+     "cause (static analysis): `oc_t = 15` (case.cc:8) sizes the block of the access at line 29, whose index never "
+     "reads oc_t -- with oc_t = 16 every analysed block access fits"),
+    ("weights block narrower than the compute (oc_t = 15): the store the trace did not reach",
+     [("oc_t = 16;", "oc_t = 15;")],
+     "out-of-block access (static analysis) at case.cc:74: `aie::store_v(o + 96, z.second.extract<32>(1))`"),
     ("block larger than core memory",
      [(LOAD_X, LOAD_X.replace("{oh0 * S, ow0 * S, 0}, {ih_t, iw_t, C}", "{0, 0, 0}, {230, 230, 4}"))],
      "larger than the core data memory"),

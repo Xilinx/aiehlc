@@ -21,7 +21,9 @@
  *     every block released / committed, every declared port used, the same
  *     schedule on every core and for any data, the output written exactly once,
  *     and -- through ASan -- no access outside a loaded block and none after
- *     its release ("data used without load");
+ *     its release ("data used without load"); the static bounds analysis
+ *     (kernel_static.h) then names the constant behind such an access
+ *     ("cause: `oc_t = 15` ... fits with oc_t = 16");
  *   - fit: per port, offset = base_p0*p0 + base_p1*p1 + step_i*i + step_j*j
  *     with rounds i outer, j inner, and a constant shape (the form of a DMA BD);
  *   - kernel-only (no aie::Conv2d / aie::Mapping): the fits are recognized as a
@@ -97,6 +99,9 @@ KernelTraceResult traceLogical(const std::string &src, const TraceKernel &k, int
 
 // The plain `__global__ <ret> name(aie::port<...> ...)` kernels of a source.
 std::vector<TraceKernel> findPlainKernels(const std::string &src, const std::string &srcDir, std::string &err);
+
+// Name of block dim `d` of a port role ("output channels" for WEIGHTS dim 0).
+const char *traceDimName(const std::string &role, int d);
 
 // The object-like #define lines of a source (what its kernel TU sees).
 std::string traceDefines(const std::string &src);

@@ -6,7 +6,7 @@ REPO="$(cd "$HERE/../../../.." && pwd)"
 OUT="${TMPDIR:-/tmp}/convautotile_unitest_$$"
 mkdir -p "$OUT"
 g++ -std=c++17 -O1 -Wall -Wextra -pthread -DAIEHLC_SOURCE_DIR="\"$REPO\"" -o "$OUT/test_conv_autotile" \
-    "$HERE/test_conv_autotile.cpp" "$HERE/../conv_autotile.cpp" "$HERE/../conv_desugar.cpp" "$HERE/../kernel_trace.cpp" "$HERE/../kernel_front.cpp"
+    "$HERE/test_conv_autotile.cpp" "$HERE/../conv_autotile.cpp" "$HERE/../conv_desugar.cpp" "$HERE/../kernel_trace.cpp" "$HERE/../kernel_static.cpp" "$HERE/../kernel_front.cpp"
 "$OUT/test_conv_autotile" "$REPO"
 rc=$?
 rm -rf "$OUT"

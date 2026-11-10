@@ -6,6 +6,7 @@
  ******************************************************************************/
 #include "kernel_trace.h"
 #include "conv_desugar.h"
+#include "kernel_static.h"
 
 #include <algorithm>
 #include <deque>
@@ -409,12 +410,15 @@ std::vector<Event> parseTrace(const std::string &text) {
 // Compile + run the harness twice; fills events (run 1) and records errors.
 bool runHarness(const std::string &harness, const std::string &srcName, int rows, int cols, int pp,
                 std::vector<Event> &events, KernelTraceResult &r) {
-    char tmpl[] = "/tmp/aiehlc_trace_XXXXXX";
-    if (!mkdtemp(tmpl)) {
+    const char *tmpEnv = std::getenv("TMPDIR");
+    std::string tmplStr = std::string(tmpEnv && *tmpEnv ? tmpEnv : "/tmp") + "/aiehlc_trace_XXXXXX";
+    std::vector<char> tmpl(tmplStr.begin(), tmplStr.end());
+    tmpl.push_back('\0');
+    if (!mkdtemp(tmpl.data())) {
         r.errors.push_back("kernel analysis: cannot create a temp directory");
         return false;
     }
-    std::string dir = tmpl;
+    std::string dir = tmpl.data();
     {
         std::ofstream f(dir + "/harness.cc");
         f << harness;
@@ -679,12 +683,16 @@ PortFit expectedFit(const std::string &role, const Conv2dSpec &c, const Derived 
     return f;
 }
 
-const char *dimName(const std::string &role, int d) {
+} // namespace
+
+const char *traceDimName(const std::string &role, int d) {
     static const char *ifm[] = {"rows", "cols", "channels", "?"};
     static const char *ofm[] = {"rows", "cols", "channels", "?"};
     static const char *wgt[] = {"output channels", "kernel rows", "kernel cols", "channels"};
     return role == "WEIGHTS" ? wgt[d] : role == "IFM" ? ifm[d] : ofm[d];
 }
+
+namespace {
 
 // Kernel blocks vs the derived DMA; one message per mismatching aspect.
 void compareFit(const TracePort &port, const PortFit &got, const PortFit &want, const std::string &why,
@@ -699,7 +707,7 @@ void compareFit(const TracePort &port, const PortFit &got, const PortFit &want, 
         if (got.shape[d] != want.shape[d])
             errors.push_back(who + ": block " + vecStr(got.shape) + " is too " +
                              (got.shape[d] > want.shape[d] ? "big" : "small") + " in dim " + std::to_string(d) + " (" +
-                             dimName(port.role, d) + "): it takes " + std::to_string(got.shape[d]) +
+                             traceDimName(port.role, d) + "): it takes " + std::to_string(got.shape[d]) +
                              ", the DMA block is " + std::to_string(want.shape[d]) + why);
     auto cmp = [&](const std::vector<int> &g, const std::vector<int> &w, const char *what) {
         if (g != w)
@@ -724,6 +732,41 @@ void compareFit(const TracePort &port, const PortFit &got, const PortFit &want, 
     }
 }
 
+// The static bounds analysis (kernel_static.h) says WHY a block access leaves
+// its block. A trace that hit "data used without being loaded" at line L gets
+// the static finding for L appended, plus the constant that causes it; static
+// findings the trace did not hit (it stops at the first) are errors then too.
+// Without a trace failure they are notes: a guard the analysis does not model
+// may keep the access from running.
+void addStaticBounds(const std::string &src, const TraceKernel &k, int rows, int cols, const std::string &prelude,
+                     const std::string &srcName, KernelTraceResult &r) {
+    StaticBoundsResult sb = staticBlockBounds(src, k, rows, cols, prelude, srcName);
+    if (sb.analysed + sb.skipped)
+        r.notes.push_back("static bounds analysis: " + std::to_string(sb.analysed) + " block access(es) checked" +
+                          (sb.skipped ? ", " + std::to_string(sb.skipped) + " not evaluable (skipped)" : ""));
+    if (sb.findings.empty())
+        return;
+    bool confirmed = false;
+    std::vector<bool> used(sb.findings.size(), false);
+    for (auto &e : r.errors) {
+        if (e.find("data used without being loaded") == std::string::npos)
+            continue;
+        confirmed = true;
+        for (size_t i = 0; i < sb.findings.size(); i++)
+            if (!used[i] && e.find(srcName + ":" + std::to_string(sb.findings[i].line) + " ") != std::string::npos) {
+                e += "\n    static analysis: " + sb.findings[i].message;
+                used[i] = true;
+            }
+    }
+    auto &out = confirmed ? r.errors : r.notes;
+    for (size_t i = 0; i < sb.findings.size(); i++)
+        if (!used[i])
+            out.push_back(std::string(confirmed ? "" : "possible ") + "out-of-block access (static analysis) at " +
+                          srcName + ":" + std::to_string(sb.findings[i].line) + ": " + sb.findings[i].message);
+    if (!sb.cause.empty())
+        out.push_back(sb.cause);
+}
+
 std::string fitText(const TracePort &p, const PortFit &f) {
     std::ostringstream os;
     os << "  " << p.var << " (" << p.role << ", tensor " << vecStr(p.shape) << "): block " << vecStr(f.shape)
@@ -741,7 +784,9 @@ KernelTraceResult traceKernel(const std::string &src, const TraceKernel &k, int 
                               const std::string &prelude, const std::string &srcName, int pp_depth) {
     KernelTraceResult r;
     std::vector<Event> events;
-    if (!runHarness(buildHarness(src, k, prelude, srcName), srcName, rows, cols, pp_depth, events, r)) {
+    const bool ran = runHarness(buildHarness(src, k, prelude, srcName), srcName, rows, cols, pp_depth, events, r);
+    addStaticBounds(src, k, rows, cols, prelude, srcName, r);
+    if (!ran) {
         r.ok = false;
         return r;
     }
@@ -770,7 +815,9 @@ KernelTraceResult traceLogical(const std::string &src, const TraceKernel &k, int
                                std::map<std::string, PortUse> &use) {
     KernelTraceResult r;
     std::vector<Event> events;
-    if (!runHarness(buildHarness(src, k, prelude, srcName), srcName, rows, cols, pp_depth, events, r)) {
+    const bool ran = runHarness(buildHarness(src, k, prelude, srcName), srcName, rows, cols, pp_depth, events, r);
+    addStaticBounds(src, k, rows, cols, prelude, srcName, r);
+    if (!ran) {
         r.ok = false;
         return r;
     }

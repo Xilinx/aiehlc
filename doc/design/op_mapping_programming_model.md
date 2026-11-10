@@ -350,7 +350,7 @@ compared against their declared mapping (`verifyKernelBlocks`, from
 ### What the verifier rejects
 
 `src/llvm/convautotile/unitest/kernel_trace_cases.py` mutates the example into
-each bug and checks the diagnostic (13 cases):
+each bug and checks the diagnostic:
 
 | Bug | Diagnostic |
 |---|---|
@@ -368,8 +368,44 @@ each bug and checks the diagnostic (13 cases):
 | store on an input port / load on an output | `aie::store_buffer on an input port` |
 | block over the core memory | `block is 211600 B, larger than the core data memory (49152 B)` |
 
+| block sized by a constant the compute ignores (`oc_t = 15`, loops walk 16 channels) | `cause (static analysis): \`oc_t = 15\` (case.cc:8) sizes the block of the access at line 29, whose index never reads oc_t -- with oc_t = 16 every analysed block access fits` |
+
 `aiehlc-convtile trace <src.cc> [--emit]` runs the analysis standalone
-(`AIEHLC_TRACE_KEEP=1` keeps the generated harness).
+(`AIEHLC_TRACE_KEEP=1` keeps the generated harness; the harness goes under
+`$TMPDIR`, default `/tmp`).
+
+### Why an access leaves its block: static bounds (`kernel_static.{h,cpp}`)
+
+ASan says *where* ("data used without being loaded at k.cc:29") and stops at
+the first fault. `staticBlockBounds()` says *why*, from the source alone, and
+runs inside `traceKernel` / `traceLogical` after every trace:
+
+- **Model.** The body's `const int` / `#define` constants, small const arrays
+  (`const int owc[2] = {owA, owB}`), `for (int v = a; v < b; v += s)` loops,
+  `if` / `?:` guards, block pointers (`T *p = aie::load_buffer(port, {off},
+  {shape})`), pointers derived from them (`T *r = p + e`) and local arrays.
+  A name assigned after its declaration has no single value and is dropped.
+- **Accesses.** `p[e]`, `aie::load_v<N>(p + e)`, `aie::load_unaligned_v<N>(p + e, ..)`,
+  `aie::store_v(p + e, v)` (N from `extract<N>` or an `aie::vector<T, N>`).
+- **Exact, not intervals.** Every loop variable the index needs (and
+  `program_id`) is *enumerated*. Interval arithmetic gives `owB = pass * 16 +
+  (pass ? 4 : 8)` the range [4, 24] and reports a false overflow; the real
+  values are {8, 20}. An index that cannot be evaluated (data, unknown call) is
+  skipped and counted (`note: static bounds analysis: 11 block access(es) checked`).
+- **Attribution.** The worst element is decomposed into block coordinates
+  (`element 3135 is (15,6,6,3), dim 0 (output channels) index 15 is past its
+  extent 15`), the loops that move it are named (`nb < 2` (line 23), `n < 8`
+  (line 25)), and each literal constant is varied alone. A constant is a
+  **cause** only if it sizes the block while the overflowing index (and its
+  loops) never read it, *and* changing it makes every access fit. A constant
+  read by both (`ow_t`: block width and row pitch) would only add slack, so it
+  is not reported. When nothing qualifies, no cause line is printed; the
+  finding points at the index arithmetic.
+- **Merging.** A trace fault at line L gets the static finding for L appended.
+  Static findings the trace never reached (`store_v` at line 74 in the
+  `oc_t = 15` case) become errors too. Without a trace fault they are only
+  notes (`possible out-of-block access`): a guard the model misses may keep the
+  access from running.
 
 ### Limits
 

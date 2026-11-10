@@ -9,6 +9,7 @@
  * Build + run:  src/llvm/convautotile/unitest/run.sh
  ******************************************************************************/
 #include "../conv_desugar.h"
+#include "../kernel_static.h"
 
 #include <cstdio>
 #include <fstream>
@@ -269,6 +270,68 @@ static void testDesugarExample(const std::string &repo) {
     CHECK(src.find("\nconstexpr aie::Mapping") == std::string::npos); // lowered (commented out)
 }
 
+// Static block bounds (kernel_static.h): the constant behind an out-of-block
+// access, without running the kernel.
+static StaticBoundsResult staticOf(const std::string &body) {
+    const std::string src = "__global__ void k(aie::port<input_window_int8 *, aie::WEIGHTS, aie::shape<64, 4>> win_b,\n"
+                            "                  aie::port<output_window_int8 *, aie::OFM, aie::shape<64>> win_c) {\n" +
+                            body + "}\n";
+    std::string err;
+    auto ks = findPlainKernels(src, "", err);
+    if (ks.size() != 1)
+        return StaticBoundsResult();
+    return staticBlockBounds(src, ks[0], 1, 4, "#define NB 2\n", "t.cc");
+}
+
+static void testStaticBounds() {
+    // Block sized by oc_t, compute hardcoded for 16 rows (NB x 8): oc_t is the cause.
+    const std::string body =
+        "    const int oc_t = OCT, C = 4;\n"
+        "    const int8_t *w = aie::load_buffer(win_b, {aie::program_id(1) * oc_t, 0}, {oc_t, C});\n"
+        "    int s = 0;\n"
+        "    for (int nb = 0; nb < NB; nb++)\n"
+        "        for (int n = 0; n < 8; n++)\n"
+        "            for (int c = 0; c < C; c++)\n"
+        "                s += w[(nb * 8 + n) * C + c];\n"
+        "    aie::release(win_b);\n";
+    auto with = [&](const std::string &b, const std::string &v) {
+        std::string t = b;
+        t.replace(t.find("OCT"), 3, v);
+        return t;
+    };
+    StaticBoundsResult r = staticOf(with(body, "15"));
+    CHECK_EQ(r.findings.size(), 1);
+    CHECK(!r.findings.empty() && r.findings[0].line == 9);
+    CHECK(!r.findings.empty() && r.findings[0].message.find("dim 0 (output channels) index 15") != std::string::npos);
+    CHECK(!r.findings.empty() &&
+          r.findings[0].message.find("`nb < NB` (line 6), `n < 8` (line 7)") != std::string::npos);
+    CHECK(r.cause.find("`oc_t = 15` (t.cc:3)") != std::string::npos);
+    CHECK(r.cause.find("with oc_t = 16 every analysed block access fits") != std::string::npos);
+    StaticBoundsResult ok = staticOf(with(body, "16"));
+    CHECK(ok.findings.empty() && ok.analysed == 1 && ok.skipped == 0);
+    // A guard the index honours is no overflow.
+    std::string guarded = with(body, "15");
+    guarded.replace(guarded.find("s += w["), 7, "s += nb * 8 + n < oc_t ? w[");
+    guarded.replace(guarded.find("+ c];"), 5, "+ c] : 0;");
+    CHECK(staticOf(guarded).findings.empty());
+    // Correlated values stay exact (an interval for owB would be [4, 24]).
+    StaticBoundsResult corr = staticOf("    int8_t *y = aie::store_buffer(win_c, {0}, {28});\n"
+                                       "    for (int pass = 0; pass < 2; pass++) {\n"
+                                       "        const int owB = pass * 16 + (pass ? 4 : 8);\n"
+                                       "        y[owB + 7] = 0;\n"
+                                       "    }\n"
+                                       "    aie::commit(win_c);\n");
+    CHECK(corr.findings.empty() && corr.analysed == 1);
+    // Both index and block read ow_t: widening it only adds slack -- no cause.
+    StaticBoundsResult slack = staticOf("    const int ow_t = 8;\n"
+                                        "    int8_t *y = aie::store_buffer(win_c, {0}, {ow_t});\n"
+                                        "    for (int i = 0; i < ow_t; i++)\n"
+                                        "        y[i + 1] = 0;\n"
+                                        "    aie::commit(win_c);\n");
+    CHECK_EQ(slack.findings.size(), 1);
+    CHECK(slack.cause.empty());
+}
+
 int main(int argc, char **argv) {
     std::string repo = argc > 1 ? argv[1] : ".";
     testGoldenStem();
@@ -277,6 +340,7 @@ int main(int argc, char **argv) {
     testAutotuneAndOverrides();
     testMeshSymbols();
     testDesugarExample(repo);
+    testStaticBounds();
     std::printf("conv_autotile: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
