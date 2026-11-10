@@ -30,6 +30,8 @@ import logging
 import re
 import shlex
 import devwatch  # self-watchdog: progress + stall exit (see devwatch.py)
+import hws  # hw_server service (hws.py), used through hwspreflight
+import hwspreflight  # hws preflight before every run (see hwspreflight.py)
 
 # Configure logging with timestamps so we can see where things get stuck
 logging.basicConfig(
@@ -527,6 +529,8 @@ def setup_first_connection(nonreboot=False):
     child.sendline("power 1")
     child.expect(r'Systest[#>]', timeout=60)  # Wait for power cycle to complete
     time.sleep(3)  # Extra wait for board to initialize
+    if _preflight:  # VEK385: hw_server must survive power 0/1 (hws contract §8); no-op on palmyra
+        _preflight.after_power_cycle()
     print("[Connection 1] Power on complete, sourcing Vitis and starting xsdb...")
 
     # Step 5b: Source Vitis environment so xsdb is on PATH
@@ -1303,6 +1307,25 @@ Examples:
         "--lock-break", action="store_true",
         help="Kill a HUNG holder of this device's lock (must run on the holder's host) and exit"
     )
+    parser.add_argument(
+        "--hws", choices=("status", "up", "down"), default=None,
+        help="Only run this hw_server-service (hws.py) command on the board and exit with its code "
+             "(0 ok, 1 down, 3 degraded, 4 lock busy, 5 foreign, 6 unreachable). up/down take the board lock"
+    )
+    parser.add_argument(
+        "--skip-preflight", action="store_true",
+        help="Manual debugging: skip the hws preflight (status/up/restart, netload smoke test, palmyra "
+             "full-mode hws down/up)"
+    )
+    parser.add_argument(
+        "--hws-restarts", type=int, default=hwspreflight.DEFAULT_MAX_RESTARTS,
+        help="Preflight retry limit: clean + restart attempts when hws is DEGRADED (default 1, the hws contract)"
+    )
+    parser.add_argument(
+        "--smoke-elf", default=os.environ.get("APPPAL_SMOKE_ELF"),
+        help="Netload preflight smoke-test ELF (default <netboot build>/nbspin5.elf; skipped with a note "
+             "when that default is missing)"
+    )
     return parser
 
 
@@ -1314,13 +1337,104 @@ def main():
     if args.lock_break:
         print(f"[devlock] {devlock.break_lock(device)}")
         return
+    if args.hws:
+        sys.exit(hws_passthrough(args))
     if args.no_lock:
         print("[devlock] WARNING: --no-lock, not serialising with other runs on this device")
         with _watchdog(args, None):
-            return _main(args)
+            return _run_with_preflight(args, None)
     with devlock.DeviceLock(device, wait_secs=args.lock_wait) as lk:
         with _watchdog(args, lk.heartbeat):
-            return _main(args)
+            return _run_with_preflight(args, lk)
+
+
+# --------------------------------------------------------------------------
+# hws preflight (plan-1109-b1597a s5): hw_server healthy before every run, under
+# this run's board lock. Logic and tests: hwspreflight.py / test_hwspreflight.py.
+# --------------------------------------------------------------------------
+HWS_TYPE = "vek385" if IS_VEK385 else "palmyra"
+SMOKE_MAX_RUN_MS = 30000
+SMOKE_DONE_S = 60
+_preflight = None  # the running Preflight; setup_first_connection calls after_power_cycle()
+
+
+def hws_passthrough(args):
+    """--hws status|up|down: one hws command on this board; returns its exit code."""
+    try:
+        if args.hws == "status":
+            h = hws.status(palip, HWS_TYPE)
+            rc = hws.RC_DOWN if h.state == hws.DOWN else h.rc
+        else:
+            h = getattr(hws, args.hws)(palip, HWS_TYPE, wait_lock=args.lock_wait)
+            rc = h.rc
+    except hws.HwsError as e:
+        print(f"HWS ERROR {palip} rc={e.rc} {e.msg}")
+        return e.rc
+    print(f"HWS {h.state} {h.board} rc={rc} {h.msg} checks={h.checks}")
+    return rc
+
+
+def preflight_mode(args):
+    if args.netload:
+        return hwspreflight.NETLOAD
+    if not IS_VEK385 and args.nonreboot:  # systest-client + connect -url to the resident hw_server
+        return hwspreflight.ATTACH
+    return hwspreflight.FULL
+
+
+def hws_smoke(args):
+    """Netload smoke test: run a short ELF (nbspin5) through the supervisor and wait
+    until it has exited. Returns (True|False|None, msg); None = skipped."""
+    elf = args.smoke_elf or os.path.join(NETBOOT_BUILD_DIR, "nbspin5.elf")
+    name = os.path.basename(elf)
+    if not os.path.isfile(elf):
+        if args.smoke_elf:
+            return False, f"--smoke-elf {elf} not found"
+        return None, f"no {elf} (build it with src/tool/netboot/test/build.sh 5, or pass --smoke-elf)"
+    ip = args.netload_ip
+    t0 = time.time()
+    rc, out = netload_remote(["load", elf, "--host", ip, "--max-run-ms", str(SMOKE_MAX_RUN_MS),
+                              "--wait", "30", "--force"], timeout=120)
+    last = out.splitlines()[-1] if out else "no output"
+    if rc == 2:
+        return None, (f"netboot supervisor not answering at {ip} ({last}); "
+                      "the netload run bootstraps it over the healthy hw_server")
+    if rc != 0:
+        return False, f"load {name} rc={rc}: {last}"
+    m = re.search(r"runs=(\d+)", out)
+    while time.time() - t0 < SMOKE_DONE_S:
+        st_rc, st = netload_remote(["status", "--host", ip, "--connect-timeout", "3"], timeout=30, progress=False)
+        if st_rc == 0 and (not m or f"runs={m.group(1)}" in st):
+            if "state=exited" in st:
+                return True, f"{name} ran and exited in {time.time() - t0:.1f}s"
+            if "state=watchdog-timeout" in st or "state=killed" in st:
+                return False, f"{name} did not exit by itself: {st.splitlines()[0]}"
+        time.sleep(0.5)
+    return False, f"{name} still running after {SMOKE_DONE_S}s"
+
+
+def _run_with_preflight(args, lk):
+    """hws preflight (inside the lock), the run, then palmyra full mode's hws up."""
+    global _preflight
+    if args.skip_preflight:
+        print("[hws] --skip-preflight: not checking hw_server")
+        return _main(args)
+    pf = hwspreflight.Preflight(palip, HWS_TYPE, lock=lk, smoke=lambda: hws_smoke(args),
+                                max_restarts=args.hws_restarts, quiet=devwatch.quiet)
+    mode = preflight_mode(args)
+    print(f"[hws] preflight ({HWS_TYPE}, {mode}) on {palip}")
+    try:
+        pf.before_run(mode)
+    except hwspreflight.PreflightError as e:
+        print(f"\n{e.msg}")
+        print("=" * 60 + "\nTest FAILED (hws preflight)\n" + "=" * 60)
+        sys.exit(e.rc)
+    _preflight = pf
+    try:
+        return _main(args)
+    finally:
+        _preflight = None
+        pf.after_run()
 
 
 def _watchdog(args, heartbeat):
