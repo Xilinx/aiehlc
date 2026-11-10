@@ -335,6 +335,13 @@ __attribute__((unused)) static void rt_core_perf_snap_at_startio(void) {
 
 AieRC __Runtime_core_perf_setup(XAie_DevInst *dev, XAie_LocType tile) {
     AieRC rc;
+    /* XAie_LoadElfMem (EccStatus on by default) programs core counter 0 for ECC
+     * scrubbing: event value 1,000,000 and reset-on-own-event. Clear the reset
+     * event, or counter 0 reads (count mod 1e6). See
+     * jane/knowledge/2026-11-10-aie-rt-ecc-owns-core-perf-ctr0.md */
+    rc = XAie_PerfCounterResetControlSet(dev, tile, XAIE_CORE_MOD, 0, XAIE_EVENT_NONE_CORE);
+    if (rc != XAIE_OK)
+        return rc;
     rc = XAie_PerfCounterSet(dev, tile, XAIE_CORE_MOD, 0, 0);
     if (rc != XAIE_OK)
         return rc;
