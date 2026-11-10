@@ -48,6 +48,7 @@ struct RoutingDim {
     int loop = -1;      // -1 none, 0 = outer loop (i), 1 = inner loop (j)
     int rounds = 1;     // rounds of that loop
     int step = 0;       // offset between consecutive rounds
+    int padsize = 0;    // trailing elements of fullsize that are DMA padding, not data
     // Extent one core covers: (rounds - 1) * step + block.
     int coreSlice() const { return loop >= 0 ? (rounds - 1) * step + block : block; }
     // Consecutive blocks overlap (a halo): the DMA re-reads block - step.

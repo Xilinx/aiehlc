@@ -96,12 +96,32 @@ runtime `.so.1` / `.so.2`). `aiehlc.sh --aie-version 5`:
 
 Unit: `run.sh` 145 + 442, `kernel_trace_cases.py` 27/27.
 
+## `__global__(conv, map)` sources go through trace -> routing too (step 4)
+
+`verifyKernelBlocks` (the desugar path of `simpleconv2d_new_load.cc`) now also
+runs `planRouting` / `routingSpaces` on the traced fits and compares every
+port's carrier with the derivation (`routingCrossCheck`; the scheduling knobs
+pp_depth / l1_budget / pad are the declaration's and are copied over first).
+The result is a desugar warning/note; the derived carriers stay authoritative.
+
+That check found one real gap: the routed carriers had no channel padding.
+`simpleconv2d_new_load.cc` has C = 3 aligned to 4, so the derivation emits
+`.padsize = 1` on IFM d3 / WEIGHTS d4. `TracePort::extent` (the data extent
+per dim, empty = whole shape) and `RoutingDim::padsize` now carry it, and
+`routingSpaces` emits `.padsize`. Result on new_load:
+
+    conv2d_spatial: routing cross-check: trace -> routing gives the derived carriers (3 ports)
+
+Unit: `run.sh` 145 + 725 (`testConvEquivalence` also with C = 3: padsize
+checked and rendered text equal), `kernel_trace_cases.py` 27/27. Full rebuild +
+`aiehlc.sh --aie-version 5` on new_load: `main.elf`; `routing.cc`, `kernel.cc`,
+`aieml.bcf`, `aieml.prx` byte-identical to the build before this change.
+
 ## Next steps
 
 1. ~~Full aiehlc build / byte-identity~~ (done above). Still open: generic
    per-port core-memory / stack checks for non-conv plans.
-2. `__global__(conv, map)` (`simpleconv2d_new_load.cc`): cross-check the
-   traced plan against the derived carriers (same equality as the unit test).
+2. ~~`__global__(conv, map)` cross-check~~ (done below).
 3. GEMM kernel-only example (`simplematmul2` in load_buffer form) through
    the fullconnect path; GlobalPolicy chosen from the plan (halo ->
    `fullconnect_auto = 0`).

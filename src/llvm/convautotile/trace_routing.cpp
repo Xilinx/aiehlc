@@ -49,6 +49,8 @@ void planPort(const TracePort &p, const PortFit &f, int rows, int cols, RoutingP
     for (int d = 0; d < f.rank; d++) {
         RoutingDim r;
         r.fullsize = p.shape[d];
+        if (d < (int)p.extent.size() && p.extent[d] > 0 && p.extent[d] < p.shape[d])
+            r.padsize = p.shape[d] - p.extent[d];
         r.block = f.shape[d];
         const int b0 = rows > 1 ? at(f.base_p0, d) : 0, b1 = cols > 1 ? at(f.base_p1, d) : 0;
         if (b0 && b1) {
@@ -168,6 +170,7 @@ std::vector<PortSpace> routingSpaces(const RoutingPlan &plan, const RoutingHints
             TileDimOut &t = s.d[d];
             t.used = true;
             t.fullsize = r.fullsize;
+            t.padsize = r.padsize;
             if (r.mesh_axis >= 0) {
                 // Mesh split; an on-core loop on the same dim tiles the core's slice.
                 t.tile_round = r.mesh_parts;

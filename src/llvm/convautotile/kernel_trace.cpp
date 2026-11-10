@@ -1052,6 +1052,40 @@ KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, co
     return res;
 }
 
+// __global__(conv, map) kernels: the trace -> routing mapping (the kernel-only
+// path, no operator knowledge) must give the carriers the conv derivation
+// emits. Scheduling knobs (pp_depth, l1_budget, pad) are the declaration's /
+// autotune's choice, so they are taken from the derivation before comparing.
+// A difference is reported as a note: the derived carriers stay authoritative.
+static void routingCrossCheck(const TraceKernel &tk, KernelTraceResult &tr, const KernelDesugar &kd,
+                              std::vector<std::string> &notes) {
+    const Derived &d = kd.derived;
+    RoutingPlan plan = planRouting(tk.ports, tr.fits, d.mesh_rows, d.mesh_cols);
+    if (!plan.ok || !plan.errors.empty()) {
+        std::string why = plan.errors.empty() ? std::string("not routable") : plan.errors[0];
+        notes.push_back(kd.kernel + ": routing cross-check skipped: " + why);
+        return;
+    }
+    std::vector<PortSpace> spaces = routingSpaces(plan, routingHints(plan));
+    int differ = 0;
+    for (size_t i = 0; i < tk.ports.size() && i < spaces.size(); i++) {
+        const std::string &role = tk.ports[i].role;
+        const PortSpace &want = role == "IFM" ? d.ifm : role == "WEIGHTS" ? d.weights : d.ofm;
+        PortSpace got = spaces[i];
+        got.pp_depth = want.pp_depth;
+        got.l1_budget = want.l1_budget;
+        got.pad = want.pad;
+        if (emitGemmSpace(got, "x") == emitGemmSpace(want, "x"))
+            continue;
+        differ++;
+        notes.push_back(kd.kernel + ": " + tk.ports[i].var + ": routed carrier differs from the " + kd.convVar +
+                        " derivation:\n" + emitGemmSpace(got, "routed") + emitGemmSpace(want, "derived"));
+    }
+    if (!differ)
+        notes.push_back(kd.kernel + ": routing cross-check: trace -> routing gives the derived carriers (" +
+                        std::to_string(spaces.size()) + " ports)");
+}
+
 std::vector<std::string> verifyKernelBlocks(const std::string &src, const std::string &srcDir,
                                             const std::string &srcName, const KernelDesugar &kd,
                                             std::vector<std::string> &notes) {
@@ -1071,11 +1105,13 @@ std::vector<std::string> verifyKernelBlocks(const std::string &src, const std::s
     const Conv2dSpec &c = kd.conv;
     TraceKernel tk = *k;
     for (auto &p : tk.ports) {
-        if (p.role == "IFM")
+        if (p.role == "IFM") {
             p.shape = {d.h_pad, d.w_pad, d.c_align};
-        else if (p.role == "WEIGHTS")
+            p.extent = {d.h_pad, d.w_pad, c.c};
+        } else if (p.role == "WEIGHTS") {
             p.shape = {c.k, c.kh, c.kw, d.c_align};
-        else
+            p.extent = {c.k, c.kh, c.kw, c.c};
+        } else
             p.shape = {d.oh, d.ow, c.k};
     }
     std::string prelude = sourceDefines(src) +
@@ -1092,6 +1128,8 @@ std::vector<std::string> verifyKernelBlocks(const std::string &src, const std::s
     for (auto &p : tk.ports)
         if (tr.fits.count(p.var))
             compareFit(p, tr.fits[p.var], expectedFit(p.role, c, d), why, errs);
+    if (errs.empty())
+        routingCrossCheck(tk, tr, kd, notes);
     return errs;
 }
 

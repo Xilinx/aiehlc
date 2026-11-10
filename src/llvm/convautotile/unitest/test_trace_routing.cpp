@@ -86,10 +86,13 @@ static void checkSameSpace(const PortSpace &got, const PortSpace &want) {
 
 // The conv derivation's DMA, read back as fits (what a correct kernel traces
 // to), must route to the very same carriers.
-static void testConvEquivalence(int th, int tw) {
+// `ch` < 4: the channels are padded to c_align = 4 (simpleconv2d_new_load.cc
+// has C = 3); the ports then carry the data extent and the carriers .padsize.
+static void testConvEquivalence(int th, int tw, int ch = 4) {
     Conv2dSpec c;
     c.h = c.w = 230;
-    c.c = c.c_align = 4;
+    c.c = ch;
+    c.c_align = 4;
     c.k = 64;
     c.kh = c.kw = 7;
     c.stride = 2;
@@ -104,6 +107,10 @@ static void testConvEquivalence(int th, int tw) {
     std::vector<TracePort> ports = {port("win_a", "IFM", {d.h_pad, d.w_pad, d.c_align}, false),
                                     port("win_b", "WEIGHTS", {c.k, c.kh, c.kw, d.c_align}, false),
                                     port("win_c", "OFM", {d.oh, d.ow, c.k}, true)};
+    if (c.c < d.c_align) {
+        ports[0].extent = {d.h_pad, d.w_pad, c.c};
+        ports[1].extent = {c.k, c.kh, c.kw, c.c};
+    }
     std::map<std::string, PortFit> fits;
     fits["win_a"] = fit({d.tile_h, d.tile_w, d.c_align}, {d.mesh_step_h, 0, 0}, {0, 0, 0}, d.h_rounds,
                         {d.tile_step_h, 0, 0}, d.w_rounds, {0, d.tile_step_w, 0});
@@ -123,7 +130,10 @@ static void testConvEquivalence(int th, int tw) {
     checkSameSpace(sp[0], d.ifm);
     checkSameSpace(sp[1], d.weights);
     checkSameSpace(sp[2], d.ofm);
-    // Rendered text equal too (padsize 0 on both sides here).
+    CHECK_EQ(sp[0].d[2].padsize, d.ifm.d[2].padsize);
+    CHECK_EQ(sp[1].d[3].padsize, d.weights.d[3].padsize);
+    CHECK_EQ(d.ifm.d[2].padsize, d.c_align - c.c);
+    // Rendered text equal too (padsize included).
     CHECK(emitGemmSpace(sp[0], "X") == emitGemmSpace(d.ifm, "X"));
     CHECK(emitGemmSpace(sp[1], "X") == emitGemmSpace(d.weights, "X"));
     CHECK(emitGemmSpace(sp[2], "X") == emitGemmSpace(d.ofm, "X"));
@@ -244,6 +254,8 @@ int main(int argc, char **argv) {
     testConvEquivalence(7, 28);
     testConvEquivalence(14, 16);
     testConvEquivalence(28, 8);
+    testConvEquivalence(7, 28, 3);
+    testConvEquivalence(14, 16, 3);
     testGemm();
     testEltwise();
     testRejects();

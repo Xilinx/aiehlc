@@ -50,6 +50,10 @@ struct TracePort {
     std::string var;        // kernel parameter name
     std::string role;       // IFM / WEIGHTS / OFM
     std::vector<int> shape; // tensor shape, elements
+    // Data extent per dim when the tensor is padded up to `shape` (e.g. 3
+    // channels aligned to 4); empty = the whole shape is data. The DMA fills
+    // shape - extent elements (GemmSpace .padsize).
+    std::vector<int> extent;
     int elem_bytes = 1;
     bool output = false;
 };
