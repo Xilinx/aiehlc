@@ -125,6 +125,20 @@ checked and rendered text equal), `kernel_trace_cases.py` 27/27. Full rebuild +
 3. GEMM kernel-only example (`simplematmul2` in load_buffer form) through
    the fullconnect path; GlobalPolicy chosen from the plan (halo ->
    `fullconnect_auto = 0`).
+   **2026-11-10, board:** `example/tileprogram/ccode/simplegemm_kernel_port.cc`
+   (kernel-only) and `simplegemm_kernel_space.cc` (the same body under
+   hand-written GemmSpaces, `verifySpaceKernels`) both build and pass the trace
+   check, and both hang on palmyra 213 with `wait_io TIMEOUT tile(3,0) ch=0/1
+   dir=0` (output shim). The C tensor's `#routing.tiling` is `d0 = base 16,
+   slice 4, step 4, rounds 4` -- each core's 16 output rows split again into 4
+   rounds of 4 -- while the kernel commits one 16x16 block per core:
+   `tile_round = 4` on the mesh-split d1 is applied as the mesh split AND as an
+   on-core round count. `fullconnect_auto = 1` (the GlobalPolicy is the user's in
+   the hand-written form) hangs the same way, so the policy alone is not it. The
+   earlier "GEMM goes end to end" above meant `main.elf` was produced; it had not
+   run on a board. Fix belongs where `routingSpaces` renders a non-halo mesh
+   split and where the pipeline derives per-core rounds from `tile_round`
+   (`aiehlc.cc`, `perCoreSpatialRounds` / output group1/d2), kept in agreement.
 4. ~~Full build + `simpleconv2d_new_load.cc` compile + `apppaltest.py` on board~~
    (done below).
 
