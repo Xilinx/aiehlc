@@ -109,6 +109,10 @@ struct ParsedTensorInfo {
                                      // channel coverage for the filter K). Used by the
                                      // structured-dim coalescing path.
     bool perPort2D = false;          // true when d1/d2 were set on this port
+    // The placeholder shape the launch parse gave this port (defaultDim0 x
+    // defaultDim1, 16x16 when the launch has no dim scalars). A port whose
+    // shape is still this after all overrides never got a real extent.
+    std::vector<int64_t> placeholderShape;
     int layoutTransform = 0;         // 0=None, 1=DmaShuffle, 2=CoreShuffle
     int tileMode = 0;                // 0=Partition, 1=Overlap
     bool requireFullCoverage = true; // validation: tiles must cover the dim
@@ -1356,6 +1360,7 @@ public:
                                 } else {
                                     pti.shape = {defaultDim0, defaultDim1};
                                 }
+                                pti.placeholderShape = pti.shape;
                                 pti.elementBitWidth = bitWidth;
                                 pti.isInput = isInput;
                                 pti.spatialTag = spatialTag;
@@ -2309,6 +2314,41 @@ public:
                         gemmDimsFromSpaces(parsedTensors, macroDimM, macroDimN, macroDimK))
                         llvm::outs() << "[TilingLinalg] GEMM dims from the ports' GemmSpaces: M=" << macroDimM
                                      << " N=" << macroDimN << " K=" << macroDimK << "\n";
+
+                    // Non-GEMM kernel-only ports (eltwise, row reductions: GroupNorm,
+                    // LayerNorm, softmax, SiLU ...). Trace routing writes each port's
+                    // full tensor extent into its GemmSpace d1..d4 fullsize, but only
+                    // GEMM (M/N/K) re-derived the shape from it; every other port kept
+                    // the launch placeholder (16x16), so the windows and the shim BDs
+                    // moved 128 B where the kernel's blocks were KBs and the array
+                    // deadlocked in wait_io with no build error. Take the shape from
+                    // the port's own d1..d4 here; a port that still has the placeholder
+                    // while it declares a GemmSpace is a hard error.
+                    if (macroDimM == 0 && macroDimN == 0 && macroDimK == 0) {
+                        for (auto &t : parsedTensors) {
+                            if (!t.policyResolved || !t.perPort2D || t.shape != t.placeholderShape)
+                                continue;
+                            std::vector<int64_t> sh;
+                            for (const auto *td : {&t.tdD1, &t.tdD2, &t.tdD3, &t.tdD4}) {
+                                if (td->base <= 0)
+                                    break;
+                                sh.push_back(td->base);
+                            }
+                            if (sh.size() < 2) {
+                                llvm::errs() << "[TilingLinalg] ERROR: port " << t.varName
+                                             << " declares a GemmSpace but no d1/d2 fullsize; refusing the "
+                                             << t.placeholderShape[0] << "x" << t.placeholderShape[1]
+                                             << " placeholder shape (its DMA would move the wrong byte count)\n";
+                                std::exit(1);
+                            }
+                            t.shape = sh;
+                            llvm::outs() << "[TilingLinalg] Port shape from GemmSpace d1..d" << sh.size() << ": "
+                                         << t.varName << " [";
+                            for (size_t k = 0; k < sh.size(); ++k)
+                                llvm::outs() << (k ? "x" : "") << sh[k];
+                            llvm::outs() << "] (non-GEMM kernel-only port)\n";
+                        }
+                    }
 
                     // ---- Compute derived tiling parameters from M/K/N + per-port policy ----
                     int effectiveMeshRows = localMeshRows > 0 ? localMeshRows : tilingMeshRows;

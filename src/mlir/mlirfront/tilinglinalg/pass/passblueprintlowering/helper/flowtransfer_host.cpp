@@ -355,10 +355,44 @@ void FlowTransferConversion::emitShimBdOoo(FlowLoweringCtx &c) const {
                          << " totalRounds=" << c.oooMRounds << " bdLen=" << c.outDesc.bdLenBytes << "\n";
         } else if (shimDimStrides && shimDimWraps && shimDimStrides.size() >= 2) {
             SmallVector<Attribute> strides2d, wraps2d;
-            strides2d.push_back(shimDimStrides[0]);
-            wraps2d.push_back(shimDimWraps[0]);
-            strides2d.push_back(shimDimStrides[1]);
-            wraps2d.push_back(rewriter.getI32IntegerAttr(rowsPerRound));
+            const int64_t stride0 = cast<IntegerAttr>(shimDimStrides[0]).getInt();
+            const int64_t wrap0 = cast<IntegerAttr>(shimDimWraps[0]).getInt();
+            // Rounds that split the contiguous d0 run instead of the d1 rows: a
+            // per-core slice of ONE row (eltwise / row-reduction kernel-only
+            // ports, e.g. GroupNorm y[4 x 20480] gathered as 1 row x 2 rounds
+            // per core). The row split below gave rowsPerRound = 1/2 = 0, i.e.
+            // d1_wrap 0 + iter_step 0 (every round on the same DDR bytes) and
+            // d0_wrap = the whole slice (2,560 words > the 1,024 shim wrap max:
+            // aie-rt rejects the BD and the gather hangs in wait_io). Step the
+            // rounds along d0 and fold an over-long run into d0 x d1 (both
+            // wraps <= 1,024 words).
+            constexpr int64_t kShimWrapMax = 1024;
+            if (rowsPerRound == 0 && perTileD1Rows == 1 && c.ooNumIterations > 1 && stride0 == 4 &&
+                wrap0 % c.ooNumIterations == 0) {
+                const int64_t roundWords = wrap0 / c.ooNumIterations;
+                int64_t f = std::min<int64_t>(roundWords, kShimWrapMax);
+                while (roundWords % f != 0)
+                    --f;
+                strides2d.push_back(shimDimStrides[0]);
+                wraps2d.push_back(rewriter.getI32IntegerAttr(static_cast<int32_t>(f)));
+                strides2d.push_back(rewriter.getI32IntegerAttr(static_cast<int32_t>(f * stride0)));
+                wraps2d.push_back(rewriter.getI32IntegerAttr(static_cast<int32_t>(roundWords / f)));
+                c.oooIterStepSize = static_cast<int32_t>(roundWords * stride0);
+                llvm::errs() << "[OOO ShimBD] 1-row slice: " << c.ooNumIterations << " rounds along d0, "
+                             << roundWords << " words/round as " << f << " x " << roundWords / f
+                             << ", iter_step=" << c.oooIterStepSize << " B\n";
+            } else {
+                if (rowsPerRound == 0 && c.ooNumIterations > 1)
+                    llvm::errs() << "[OOO ShimBD] ERROR: " << c.ooNumIterations << " rounds over " << perTileD1Rows
+                                 << " row(s) of " << wrap0 << " words: rounds land on the same DDR bytes\n";
+                if (wrap0 > kShimWrapMax)
+                    llvm::errs() << "[OOO ShimBD] ERROR: d0_wrap " << wrap0 << " > shim wrap max " << kShimWrapMax
+                                 << "; aie-rt will reject this BD\n";
+                strides2d.push_back(shimDimStrides[0]);
+                wraps2d.push_back(shimDimWraps[0]);
+                strides2d.push_back(shimDimStrides[1]);
+                wraps2d.push_back(rewriter.getI32IntegerAttr(rowsPerRound));
+            }
             c.perTileDimStrides = rewriter.getArrayAttr(strides2d);
             c.perTileDimWraps = rewriter.getArrayAttr(wraps2d);
         }
