@@ -786,6 +786,7 @@ def copy_elf_to_remote(local_elf):
 NETBOOT_LOCAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "tool", "netboot")
 NETBOOT_REMOTE_DIR = f"/home/{username}/aiehlc/netboot"
 NETBOOT_READY_TIMEOUT_S = 120
+NETBOOT_BOOTSTRAP_TRIES = 2  # full bootstraps per run when the supervisor comes up without a network
 # Supervisor variant per board: (build dir, NETBOOT_DMA_BASE, name staged on the lab
 # host). /home is shared between the farm hosts, so the variants get distinct names.
 NETBOOT_DMA_BASE = os.environ.get("NETBOOT_DMA_BASE", "0xA00000000") if IS_VEK385 else ""
@@ -1162,22 +1163,46 @@ def netload_start(args, local_elf, collected):
         why = "--netload-bootstrap"
     if not hws_need_jtag(why):
         return None, None, None, False
+    return netboot_bootstrap(why, ip, load_argv, collected)
+
+
+def netboot_bootstrap(why, ip, load_argv, collected):
+    """JTAG bootstrap of the supervisor, then the load. Returns (conn1, conn2,
+    console_thread, ok).
+
+    A supervisor that came up without a network -- the Ethernet PHY's
+    autonegotiation timed out after the power cycle (seen 1 in 3 on 213): no
+    `ready` within NETBOOT_READY_TIMEOUT_S, or (a supervisor older than the link
+    retry) `ready` and still no answer -- gets another full bootstrap, whose power
+    cycle resets the PHY, instead of failing this run and leaving the next run to
+    redo everything."""
     print(f"\n>>> {why}: loading the netboot supervisor over JTAG (one-time)...")
     netboot_stage_proxy()
-    # `device program` on a live system aborts at ~18%, so the bootstrap power-cycles
-    # first, through the non-owning systest-client session. The app finishing never
-    # powers anything off, and the fast path above never reaches this.
-    conn1 = setup_first_connection(nonreboot=True)
-    conn2, th = start_console(fast=False)
-    if not download_elf_and_continue(conn1, netboot_stage_supervisor()):
-        return conn1, conn2, th, False
-    if not drain_until("[netboot] ready", NETBOOT_READY_TIMEOUT_S, collected):
-        print(f"\n[ERROR] supervisor did not print '[netboot] ready' within {NETBOOT_READY_TIMEOUT_S}s")
-        return conn1, conn2, th, False
-    if IS_VEK385 and not vek385_park_app_core(conn1, ip):
-        return conn1, conn2, th, False
-    rc, out = netload_remote(load_argv, live=True)
-    return conn1, conn2, th, rc == 0
+    for attempt in range(1, NETBOOT_BOOTSTRAP_TRIES + 1):
+        # `device program` on a live system aborts at ~18%, so the bootstrap power-cycles
+        # first, through the non-owning systest-client session. The app finishing never
+        # powers anything off, and the fast path never reaches this.
+        conn1 = setup_first_connection(nonreboot=True)
+        conn2, th = start_console(fast=False)
+        if not download_elf_and_continue(conn1, netboot_stage_supervisor()):
+            return conn1, conn2, th, False
+        if drain_until("[netboot] ready", NETBOOT_READY_TIMEOUT_S, collected):
+            if IS_VEK385 and not vek385_park_app_core(conn1, ip):
+                return conn1, conn2, th, False
+            rc, out = netload_remote(load_argv, live=True)
+            if rc != 2:
+                return conn1, conn2, th, rc == 0
+            why = f"supervisor printed ready but does not answer at {ip}"
+        else:
+            why = (f"supervisor did not print '[netboot] ready' within {NETBOOT_READY_TIMEOUT_S}s "
+                   "(Ethernet link down?)")
+        print(f"\n[ERROR] {why}")
+        if attempt == NETBOOT_BOOTSTRAP_TRIES:
+            return conn1, conn2, th, False
+        print(f">>> bootstrapping again, the power cycle resets the PHY "
+              f"(attempt {attempt + 1}/{NETBOOT_BOOTSTRAP_TRIES})...", flush=True)
+        stop_console(conn2, th)
+        conn1.close(force=True)
 
 
 def build_arg_parser():

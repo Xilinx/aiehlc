@@ -107,6 +107,10 @@ fi
 APP_SRCS=("${HERE}"/supervisor/*.c "${HERE}"/supervisor/*.S)
 DEFS=(-DNETBOOT_IP="$(ipdef "${NETBOOT_IP}")" -DNETBOOT_MASK="$(ipdef "${NETBOOT_MASK}")"
     -DNETBOOT_GW="$(ipdef "${NETBOOT_GW}")")
+# NETBOOT_TEST_LINK_DOWN=1|2: test build that forces the Ethernet link down after
+# init, to exercise the PHY-setup retry (1) or the main-loop link poll (2) on a
+# board whose link always comes up. Never stage one for normal use.
+[ -n "${NETBOOT_TEST_LINK_DOWN:-}" ] && DEFS+=(-DNB_TEST_LINK_DOWN="${NETBOOT_TEST_LINK_DOWN}")
 OBJS=()
 for s in "${APP_SRCS[@]}"; do
     b="$(basename "$s")"; o="${OUT}/obj/${b%.*}.o"

@@ -413,6 +413,19 @@ preflight 10.3 s -> 0 s, `load rc=0` 0.35 s after start. `--hws-eager`
 restores the up-front check (status + smoke test); full and attach modes are
 unchanged.
 
+**Ethernet link after a bootstrap (2026-11-10).** The lwIP port gives the TI
+PHY 5 s to autonegotiate (`PHY_AUTONEG_TIMEOUT_DEFAULT`); right after the
+bootstrap's power cycle the lab switch sometimes takes longer (1 of 3 on 213),
+and the port's link recovery runs from `link_detect_thread`, which NO_SYS does
+not have. The supervisor then sat on a dead link -- yet printed `ready` -- and
+every load failed `No route to host`, so the next run bootstrapped again. Now
+`net_init` retries the PHY setup (6 x ~5 s), `ready` is printed only with the
+link up, `link_poll()` checks BMSR every second from the main loop (recovers a
+late or lost link), and `apppaltest` re-bootstraps once when `ready` never comes
+or a ready supervisor does not answer. Verified on 213 with test builds that
+force the link down (`NETBOOT_TEST_LINK_DOWN=1|2`): both recover to `Ethernet
+link up, 1000 Mb/s` and load.
+
 ## 14. VEK385 (2026-11-04)
 
 `apppaltest.py -board vek385 -host gomphus3 [--netload]` runs the same flow on a

@@ -409,3 +409,65 @@ def test_hws_need_jtag_gate(monkeypatch, capsys):
     assert app.hws_need_jtag("supervisor not answering") is False
     assert "HWS PREFLIGHT FAIL" in capsys.readouterr().out
     assert fake.ops() == ["status"]
+
+
+# -- netboot_bootstrap: a supervisor up without a network gets one more bootstrap --
+class _Conn:
+    def __init__(self):
+        self.closed = False
+
+    def close(self, force=False):
+        self.closed = True
+
+
+def _bootstrap_env(monkeypatch, app, ready, loads):
+    """ready: per-attempt drain results; loads: per-load netload rcs."""
+    ev = {"setup": 0, "stopped": 0, "conns": []}
+
+    def setup(nonreboot):
+        ev["setup"] += 1
+        c = _Conn()
+        ev["conns"].append(c)
+        return c
+    monkeypatch.setattr(app, "setup_first_connection", setup)
+    monkeypatch.setattr(app, "start_console", lambda fast: ("c2", "th"))
+    monkeypatch.setattr(app, "stop_console", lambda c, t: ev.__setitem__("stopped", ev["stopped"] + 1))
+    monkeypatch.setattr(app, "netboot_stage_proxy", lambda: None)
+    monkeypatch.setattr(app, "netboot_stage_supervisor", lambda: "/x/netboot.elf")
+    monkeypatch.setattr(app, "download_elf_and_continue", lambda c, elf: True)
+    monkeypatch.setattr(app, "drain_until", lambda m, t, col: ready.pop(0))
+    monkeypatch.setattr(app, "netload_remote", lambda argv, **kw: (loads.pop(0), "out"))
+    monkeypatch.setattr(app, "IS_VEK385", False)
+    return ev
+
+
+def test_bootstrap_once_when_supervisor_comes_up(monkeypatch):
+    app = _apppaltest()
+    ev = _bootstrap_env(monkeypatch, app, ready=[True], loads=[0])
+    assert app.netboot_bootstrap("x", "1.2.3.4", ["load"], [])[3] is True
+    assert ev["setup"] == 1 and ev["stopped"] == 0
+
+
+@pytest.mark.parametrize("ready,loads", [([False, True], [0]), ([True, True], [2, 0])],
+                         ids=["no-ready", "ready-but-no-answer"])
+def test_bootstrap_retries_a_supervisor_without_network(monkeypatch, ready, loads):
+    app = _apppaltest()
+    ev = _bootstrap_env(monkeypatch, app, ready, loads)
+    assert app.netboot_bootstrap("x", "1.2.3.4", ["load"], [])[3] is True
+    assert ev["setup"] == 2 and ev["stopped"] == 1
+    assert ev["conns"][0].closed and not ev["conns"][1].closed  # the live session is the caller's
+
+
+def test_bootstrap_gives_up_after_the_retry(monkeypatch, capsys):
+    app = _apppaltest()
+    ev = _bootstrap_env(monkeypatch, app, ready=[True, False], loads=[2])
+    assert app.netboot_bootstrap("x", "1.2.3.4", ["load"], [])[3] is False
+    assert ev["setup"] == app.NETBOOT_BOOTSTRAP_TRIES == 2
+    assert "Ethernet link down?" in capsys.readouterr().out
+
+
+def test_bootstrap_does_not_retry_a_real_refusal(monkeypatch):
+    app = _apppaltest()
+    ev = _bootstrap_env(monkeypatch, app, ready=[True], loads=[1])
+    assert app.netboot_bootstrap("x", "1.2.3.4", ["load"], [])[3] is False
+    assert ev["setup"] == 1

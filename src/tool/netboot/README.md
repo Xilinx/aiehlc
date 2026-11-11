@@ -244,3 +244,12 @@ device_teardown done
 
 On a fault the supervisor prints `[netboot] FATAL ...: ESR_EL3 .. FAR_EL3 .. ELR_EL3 ..`
 instead of hanging silently.
+
+`[netboot] ready` means the Ethernet link is up. When the PHY's autonegotiation
+times out after a power cycle (the port gives it 5 s), the supervisor prints
+`Ethernet link down: PHY setup retry N/6`, then `Ethernet link up, 1000 Mb/s` and
+`ready`; if it is still down it prints `NOT ready: Ethernet link down ...` and
+keeps polling the link every second (`ready` follows when it comes up). A link
+lost later prints `Ethernet link lost` and recovers the same way. `apppaltest
+--netload` re-bootstraps once if `ready` never comes. Test builds that force the
+link down: `NETBOOT_TEST_LINK_DOWN=1|2` (see `build.sh`).
