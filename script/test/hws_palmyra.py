@@ -9,6 +9,17 @@ Rules learned on 213 (plan-1109-cd847e):
   * ``clean`` kills only huaj-owned xsdb / hw_server / systest / JTAG holders that are
     outside our ``hws`` tmux, older than STALE_SECS and not under the current lock owner.
     Every kill is logged. Afterwards it waits out a possible self-reboot.
+  * systest logs a session out after ``$SYSTEST_AUTOLOGOUT`` s without input
+    (default.cmd: 3600), taking hw_server with it -- the hws session ended 60 min 20 s
+    after every start (2026-11-10 journal). ``_start_once`` sets
+    ``$SYSTEST_DISABLE_AUTOLOGOUT = 1`` (read by the timer when it fires).
+  * ANY ``/bin/systest`` of this user that exits runs its ``cleanup_session``:
+    ``killall -9 hw_server`` (and cs_server, tftpd, nfsd; with ``lsf=on`` in
+    /proc/cmdline also every process of the user -- 213 is ``lsf=off``). So a full-mode
+    apppaltest run, another agent's systest or our own restart kills the hws hw_server;
+    ``status`` then says DEGRADED (session alive, 3121 closed) and ``up`` restarts it.
+    systest-client exits (console, JTAG park, bootstrap) do not -- checked: clean exit,
+    force-kill, after power 0/1, with xsdb attached, started before hws.
 """
 import os
 import re
@@ -21,6 +32,12 @@ TARGETS_EXPECT = {"Cortex-A78AE": 8, "Cortex-R52": 10}
 DEVICE = "xc2ve3858"
 PROMPT_RE = re.compile(r"Systest#\s*$")
 BECOME_CMD = 'become "palmyra"'
+# systest logs a session out after $SYSTEST_AUTOLOGOUT seconds without input
+# (/opt/systest/common/etc/default.cmd: 3600), and hw_server goes with it: on 213
+# the hws session ended 60 min 20 s after each start (journal, 2026-11-10). The
+# autologout timer (systest.jar Session$3) skips when this variable is set, and
+# reads it when it fires, so setting it in the running session is enough.
+NO_AUTOLOGOUT_CMD = "$SYSTEST_DISABLE_AUTOLOGOUT = 1"
 # On 213 the prompt is "[cpg-lab-06] Systest#" before AND after become, so the
 # proof that become worked is the setup banner it prints (seen 2026-11-10 22:57).
 BECAME_RE = re.compile(r"com0 \(PS\)")
@@ -332,6 +349,8 @@ class Backend:
                     break
             else:
                 return f"become palmyra printed no setup banner (com0 (PS)) in 2x{BECOME_WAIT}s"
+        self.send(NO_AUTOLOGOUT_CMD)
+        self.wait_for(self.at_prompt, BECOME_WAIT)
         if not self.io.port_open(self.host):
             self.send("hw_server")
             if not self.wait_for(lambda: self.io.port_open(self.host), PORT_WAIT):

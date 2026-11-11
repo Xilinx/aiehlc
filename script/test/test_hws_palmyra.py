@@ -38,6 +38,7 @@ class Fake213(hws.Io):
         self.killed = []
         self.other = {}  # other tmux sessions of huaj: name -> pane pid
         self.sent = []
+        self.no_autologout = False
         self.cmds = []
         self.broken_become = False
         self.hw_server_ignores_stop = False
@@ -138,6 +139,9 @@ class Fake213(hws.Io):
             self.pane_lines.append(prompt)
         elif text == "power 0":
             self.pane_lines.append(prompt)
+        elif text == hp.NO_AUTOLOGOUT_CMD:
+            self.no_autologout = True
+            self.pane_lines.append(prompt)
         elif text == "exit":
             self.session = self.palmyra = False
             self.procs = [p for p in self.procs if p[0] not in (500, 600)]
@@ -231,8 +235,16 @@ def test_cli_status_down_is_rc1(fake, monkeypatch, capsys):
 def test_up_creates_session_becomes_palmyra_and_starts_plain_hw_server(fake):
     h = run("up", fake)
     assert h.state == hws.UP
-    assert fake.sent == ['become "palmyra"', "hw_server"]
+    assert fake.sent == ['become "palmyra"', hp.NO_AUTOLOGOUT_CMD, "hw_server"]
     assert not any("-stcp" in c for c in fake.cmds)
+
+
+def test_up_disables_systest_autologout_before_hw_server(fake):
+    """systest's 60 min autologout took hw_server down on 213 (default.cmd SYSTEST_AUTOLOGOUT 3600)."""
+    run("up", fake)
+    assert fake.no_autologout
+    assert fake.sent.index(hp.NO_AUTOLOGOUT_CMD) < fake.sent.index("hw_server")
+    assert any("SYSTEST_DISABLE_AUTOLOGOUT" in c and c.startswith("tmux send-keys") for c in fake.cmds)
 
 
 def test_up_is_idempotent(fake):
@@ -246,7 +258,7 @@ def test_up_restarts_hw_server_in_existing_session(fake):
     fake.hw_server = False
     fake.procs = fake.procs[:1]
     assert run("up", fake).state == hws.UP
-    assert fake.sent == ["hw_server"]
+    assert fake.sent == [hp.NO_AUTOLOGOUT_CMD, "hw_server"]
 
 
 def test_up_fails_degraded_with_lab_pointer_after_two_attempts(fake):
@@ -412,7 +424,7 @@ def test_restart_is_down_clean_up(fake):
     make_up(fake)
     h = run("restart", fake)
     assert h.state == hws.UP
-    assert fake.sent == ['hw_server "stop"', "power 0", "exit", 'become "palmyra"', "hw_server"]
+    assert fake.sent == ['hw_server "stop"', "power 0", "exit", 'become "palmyra"', hp.NO_AUTOLOGOUT_CMD, "hw_server"]
 
 
 def test_ensure_noop_when_up(fake):
