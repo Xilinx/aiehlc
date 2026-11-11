@@ -372,6 +372,20 @@ bool ResourceMgr::occupyLink(Point a, Point b,const int ioId,int& portidx, PortD
     return false;
 }
 
+bool ResourceMgr::occupyLinkAtPort(Point a, Point b, const int ioId, int portidx, PortDirection& directionAtoB,
+                                   PortDirection& directionBtoA) {
+    directionAtoB = getDir(a, b);
+    directionBtoA = opposite(directionAtoB);
+    const auto &va_out = tile(a.r, a.c).bank(directionAtoB).slave;
+    const auto &vb_in = tile(b.r, b.c).bank(directionBtoA).master;
+    if (portidx < 0 || portidx >= (int)va_out.size() || portidx >= (int)vb_in.size())
+        return false;
+    if (va_out[portidx].used || vb_in[portidx].used)
+        return false;
+    return tile(a.r, a.c).allocate(IOType::Output, portidx, directionAtoB, ioId) &&
+           tile(b.r, b.c).allocate(IOType::Input, portidx, directionBtoA, ioId);
+}
+
 bool ResourceMgr::occupyPointDirection(Point a,int& portidx, PortDirection& pd, bool slave) {
     if (!portDirAvailable(a, portidx, pd, !slave))
         return false;
