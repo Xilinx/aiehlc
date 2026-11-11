@@ -330,7 +330,13 @@ std::string routedDeclsText(const std::string &kernel, const RoutingPlan &plan, 
         os << "//" << line << "\n";
     for (size_t i = 0; i < plan.ports.size() && i < spaces.size(); i++)
         os << emitGemmSpace(spaces[i], routedSpaceVar(plan, kernel, plan.ports[i]));
-    os << "constexpr aie::GlobalPolicy __aie_" << kernel << "_policy = {.fullconnect_auto = 0};\n";
+    // The GlobalPolicy follows the plan. A halo plan (spatial conv) sends each
+    // input once along its tiling (fullconnect_auto = 0), the path the conv
+    // backend implements. Any other plan (GEMM, eltwise) uses the GEMM
+    // fullconnect schedule (fullconnect_auto = 1); with 0 the kernel-only GEMM
+    // simplegemm_kernel_port.cc hung in wait_io on the board.
+    os << "constexpr aie::GlobalPolicy __aie_" << kernel << "_policy = {.fullconnect_auto = " << (plan.halo ? 0 : 1)
+       << "};\n";
     os << "// ==== end aiehlc trace -> routing ====\n";
     return os.str();
 }

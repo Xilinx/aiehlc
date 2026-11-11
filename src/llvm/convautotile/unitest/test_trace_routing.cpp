@@ -148,6 +148,7 @@ static void testConvEquivalence(int th, int tw, int ch = 4) {
     checkSameSpace(sp[0], d.ifm);
     checkSameSpace(sp[1], d.weights);
     checkSameSpace(sp[2], d.ofm);
+    CHECK(routedDeclsText("k", plan, sp).find("fullconnect_auto = 0") != std::string::npos); // halo plan
     CHECK_EQ(sp[0].d[2].padsize, d.ifm.d[2].padsize);
     CHECK_EQ(sp[1].d[3].padsize, d.weights.d[3].padsize);
     CHECK_EQ(d.ifm.d[2].padsize, d.c_align - c.c);
@@ -199,6 +200,8 @@ static void testGemm() {
     CHECK_EQ(sp[2].d[0].tile_size, 16);
     CHECK_EQ(sp[2].d[1].tile_size, 16);
     checkRoundTrip(sp);
+    // No halo: the GEMM fullconnect schedule (with 0 the kernel-only GEMM hung on the board).
+    CHECK(routedDeclsText("k", plan, sp).find("fullconnect_auto = 1") != std::string::npos);
 }
 
 // Eltwise on a 4x1 mesh: rows split, 4 column chunks per core, no halo.

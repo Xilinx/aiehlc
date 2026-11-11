@@ -574,7 +574,18 @@ struct ExtractDataConversion : public OpConversionPattern<routing::extract_data>
             // Read halo step from the optional #routing.tiling attr propagated from
             // createroutingfuncBySplitModel (the split dim's outer level step).
             if (auto tiling = partitionOp.getTilingAttr()) {
-                haloStep = tiling.getDims()[splitDim].getOuter().getStep();
+                // Only a level whose step differs from its slice (overlap, e.g. the
+                // conv halo 61/56, or a gap) moves tiles by `step`. With step ==
+                // slice the tiles are contiguous and advance by the slice actually
+                // extracted (sliceSize, from the result shape). The GEMM
+                // #routing.tiling of the col-broadcast B describes it as [N, K]
+                // while the tensor is declared [K, N]: its step (tileCols = N /
+                // meshCols, 16) is not a row count of this tensor (K / meshCols,
+                // 64), and using it put mesh col c at row 16c instead of 64c when
+                // K != N (simplegemm_kernel_space.cc: cols 1..3 read the wrong B).
+                auto outer = tiling.getDims()[splitDim].getOuter();
+                if (outer.getStep() != outer.getSlice())
+                    haloStep = outer.getStep();
                 tilingAttr = tiling;
             }
         }

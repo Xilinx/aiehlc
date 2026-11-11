@@ -125,20 +125,33 @@ checked and rendered text equal), `kernel_trace_cases.py` 27/27. Full rebuild +
 3. GEMM kernel-only example (`simplematmul2` in load_buffer form) through
    the fullconnect path; GlobalPolicy chosen from the plan (halo ->
    `fullconnect_auto = 0`).
-   **2026-11-10, board:** `example/tileprogram/ccode/simplegemm_kernel_port.cc`
-   (kernel-only) and `simplegemm_kernel_space.cc` (the same body under
-   hand-written GemmSpaces, `verifySpaceKernels`) both build and pass the trace
-   check, and both hang on palmyra 213 with `wait_io TIMEOUT tile(3,0) ch=0/1
-   dir=0` (output shim). The C tensor's `#routing.tiling` is `d0 = base 16,
-   slice 4, step 4, rounds 4` -- each core's 16 output rows split again into 4
-   rounds of 4 -- while the kernel commits one 16x16 block per core:
-   `tile_round = 4` on the mesh-split d1 is applied as the mesh split AND as an
-   on-core round count. `fullconnect_auto = 1` (the GlobalPolicy is the user's in
-   the hand-written form) hangs the same way, so the policy alone is not it. The
-   earlier "GEMM goes end to end" above meant `main.elf` was produced; it had not
-   run on a board. Fix belongs where `routingSpaces` renders a non-halo mesh
-   split and where the pipeline derives per-core rounds from `tile_round`
-   (`aiehlc.cc`, `perCoreSpatialRounds` / output group1/d2), kept in agreement.
+   **Done 2026-11-10** -- `example/tileprogram/ccode/simplegemm_kernel_port.cc`
+   (kernel-only) and `simplegemm_kernel_space.cc` (hand-written GemmSpaces) run on
+   palmyra 213, 18.5 ms, bit-exact (`PASS: all 4096 output elements match`).
+   Before, both built and passed the trace check but hung in `wait_io TIMEOUT
+   tile(3,0) ch=0/1 dir=0`. Three compiler bugs, none in the examples:
+   1. **No M/N/K.** The GEMM tiling derivation took M/N/K only from extra launch
+      scalars (`k<<<mesh>>>(A, B, C, M, N, K)`) or `#define M/N/K`; every tensor
+      fell back to 16x16. `gemmDimsFromSpaces` (`aiehlc.cc`) now derives them from
+      the ports' own 2-D GemmSpaces (row bcast `A[M,K]`, col bcast `B[N,K]`,
+      gather `C[M,N]`, checked to agree) when neither is given.
+   2. **2-D output through the conv group2 path.** `mesh_tiling_group2_dim = 2` on
+      a 2-D C sent it down the 3-D conv-output path, which cut the per-row view to
+      one tile's block and `DmapToDmaphop` then split it across the row again
+      (16x16 -> 4x16 per core, 64-B output window). A 2-D output now takes the
+      plain GEMM gather.
+   3. **B's per-column DDR offset.** `DmaphopTodfscheblueprintPass` moved every
+      partition slice by its `#routing.tiling` outer step. The GEMM tiling
+      describes the col-broadcast B as [N, K] while the tensor is declared
+      [K, N], so mesh col c started at row 16c (1024 B) instead of 64c (4096 B):
+      cols 1..3 computed on the wrong B whenever K != N. The tiling step is now
+      used only when it differs from the slice (overlap / gap, e.g. the conv halo
+      61/56); contiguous slices advance by the slice actually extracted.
+   And the plan now picks the GlobalPolicy, as planned here: halo ->
+   `fullconnect_auto = 0`, otherwise 1 (`routedDeclsText`).
+   Unchanged: `simpleconv2dkernel_port.cc` and `simplematmul2.cc` give
+   byte-identical kernel.cc / routing.cc / host.cc / bcf / prx before and after.
+   Skill **gemmblockloadhang**.
 4. ~~Full build + `simpleconv2d_new_load.cc` compile + `apppaltest.py` on board~~
    (done below).
 

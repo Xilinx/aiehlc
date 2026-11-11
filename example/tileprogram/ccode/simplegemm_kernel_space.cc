@@ -19,13 +19,9 @@
  * GemmSpace alone does not say which is which -- the kernel's blocks do, and
  * the check compares against them instead of guessing.
  *
- * Status (palmyra 213, 2026-11-10): builds and passes the trace check, but
- * HANGS on the board (wait_io TIMEOUT on the output shim, cols 3 ch 0/1). The
- * pipeline gives each core's C block the tiling d0 = 16 rows in 4 rounds of 4
- * (#routing.tiling in ir/simplerouting/0_initial.mlir), while the kernel
- * commits one 16x16 block: tile_round on a mesh-split GEMM dim is applied
- * twice. Same with fullconnect_auto = 0 or 1. Open item 3 of
- * doc/design/trace_to_routing.md; not specific to either example.
+ * Status (palmyra 213, 2026-11-10): runs, 18.5 ms, PASS (all 4096 outputs
+ * bit-exact). It hung until three compiler fixes; see
+ * doc/design/trace_to_routing.md, next step 3.
  ******************************************************************************/
 #include "simplegemm_load.h"
 // A[64, 256]: 16 rows per mesh row (step 16), 4 K chunks of 64 per core;

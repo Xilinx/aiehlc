@@ -295,6 +295,45 @@ static std::string userKernelPrologue;
 using namespace clang;
 using namespace clang::tooling;
 
+// GEMM M/N/K from the ports' own 2-D GemmSpaces, for a kernel whose launch
+// passes no M/N/K scalars and whose source defines no M/N/K macros -- e.g. a
+// kernel-only block-load GEMM routed by convautotile, whose ports carry the
+// tensor extents as d1/d2 fullsize. Without this every GEMM tensor fell back to
+// 16x16 and the DMA moved the wrong byte counts (simplegemm_kernel_port.cc hung
+// in wait_io). Roles as in the policy shape assignment below: row broadcast =
+// A[M, K], col broadcast = B[N, K], gather = C[M, N]. Leaves M/N/K untouched
+// unless exactly one port of each role is 2-D (no d3) and all three agree; on
+// success the ports get the GEMM shapes the launch-args path would give them.
+static bool gemmDimsFromSpaces(std::vector<ParsedTensorInfo> &tensors, int64_t &M, int64_t &N, int64_t &K) {
+    ParsedTensorInfo *a = nullptr, *b = nullptr, *c = nullptr;
+    for (auto &t : tensors) {
+        if (!t.policyResolved || !t.perPort2D || t.tdD1.base <= 0 || t.tdD2.base <= 0 || t.tdD3.base > 0)
+            return false;
+        ParsedTensorInfo *&slot = !t.isInput                              ? c
+                                  : t.pattern == 0 && t.distribution == 0 ? a
+                                  : t.pattern == 0 && t.distribution == 1 ? b
+                                                                          : c;
+        if (slot)
+            return false;
+        slot = &t;
+    }
+    if (!a || !b || !c)
+        return false;
+    if (a->tdD2.base != b->tdD2.base || a->tdD1.base != c->tdD1.base || b->tdD1.base != c->tdD2.base) {
+        llvm::errs() << "[TilingLinalg] WARNING: GEMM ports disagree (A " << a->tdD1.base << "x" << a->tdD2.base
+                     << ", B " << b->tdD1.base << "x" << b->tdD2.base << ", C " << c->tdD1.base << "x" << c->tdD2.base
+                     << "); not deriving M/N/K from them\n";
+        return false;
+    }
+    M = a->tdD1.base;
+    K = a->tdD2.base;
+    N = b->tdD1.base;
+    a->shape = {M, K};
+    b->shape = {K, N};
+    c->shape = {M, N};
+    return true;
+}
+
 // Populate SplitModel.tensorSplits[i].gemmTiling for the even-mesh GEMM path
 // (fullconnect_auto=1) from the derived M/N/K tiling. Each tensor gets one
 // GemmDimTile per tensor dim so routingmanager::buildGemmTilingAttr can emit a
@@ -2266,6 +2305,11 @@ public:
 						}
 					}
 
+                    if (macroDimM == 0 && macroDimN == 0 && macroDimK == 0 &&
+                        gemmDimsFromSpaces(parsedTensors, macroDimM, macroDimN, macroDimK))
+                        llvm::outs() << "[TilingLinalg] GEMM dims from the ports' GemmSpaces: M=" << macroDimM
+                                     << " N=" << macroDimN << " K=" << macroDimK << "\n";
+
                     // ---- Compute derived tiling parameters from M/K/N + per-port policy ----
                     int effectiveMeshRows = localMeshRows > 0 ? localMeshRows : tilingMeshRows;
                     int effectiveMeshCols = localMeshCols > 0 ? localMeshCols : tilingMeshCols;
@@ -2996,7 +3040,18 @@ public:
                             // tile for that dim (base=full extent, size=per-col slice)
                             // and stash it on the split desc; createroutingfuncBySplitModel
                             // emits the col=channel #routing.tiling dim from these.
-                            if (!pt.isInput && pt.meshTilingGroup2Dim > 0) {
+                            // group2 is the 3-D conv OUTPUT split (d1 rows over mesh rows, d3
+                            // channels over mesh cols, d2 = W on-core). A 2-D output (no d3)
+                            // with d1 / d2 over mesh rows / cols is the plain GEMM gather the
+                            // default path already builds; routed through group2 its per-tile
+                            // view was cut to one tile's block and then split again across
+                            // the row's tiles (C 16x16 -> 4x16 per core: wait_io hang).
+                            const bool output2D = pt.tdD3.base <= 0;
+                            if (!pt.isInput && pt.meshTilingGroup2Dim > 0 && output2D)
+                                llvm::outs() << "[TilingLinalg] output " << pt.varName
+                                             << ": 2-D, mesh_tiling_group2_dim=" << pt.meshTilingGroup2Dim
+                                             << " is the plain GEMM gather (no group2 split)\n";
+                            if (!pt.isInput && pt.meshTilingGroup2Dim > 0 && !output2D) {
                                 auto &ts = mkd.splitModel.tensorSplits.back();
                                 const ParsedTensorInfo::TileDim *g2 = nullptr;
                                 switch (pt.meshTilingGroup2Dim) {
