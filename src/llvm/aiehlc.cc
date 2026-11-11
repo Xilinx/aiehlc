@@ -3937,6 +3937,31 @@ public:
                     for (auto &kd : ko.derived)
                         convDerivedByKernel[kd.first] = kd.second;
                 }
+                // Hand-written GemmSpaces + aie::load_buffer / store_buffer: the
+                // GemmSpaces stay the authority; the kernel's traced blocks must
+                // give the same DMA, and the loads get their block descriptors.
+                std::vector<std::string> routed;
+                for (auto &kd : ko.tu_decls)
+                    routed.push_back(kd.first);
+                convautotile::KernelOnlyResult hs =
+                    convautotile::verifySpaceKernels(src, userSourceDir, userSourceName, routed);
+                if (hs.found) {
+                    llvm::outs() << hs.report;
+                    for (auto &n : hs.notes)
+                        llvm::outs() << "[KernelAnalysis] note: " << n << "\n";
+                    if (!hs.ok) {
+                        for (auto &e : hs.errors.empty() ? std::vector<std::string>{hs.error} : hs.errors)
+                            llvm::errs() << "[KernelAnalysis] ERROR: " << e << "\n";
+                        std::exit(1);
+                    }
+                    for (auto &kd : hs.tu_decls)
+                        for (auto &decl : kd.second)
+                            if (std::find(convKernelDecls.begin(), convKernelDecls.end(), decl) ==
+                                convKernelDecls.end())
+                                convKernelDecls.push_back(decl);
+                    for (auto &kd : hs.derived)
+                        convDerivedByKernel[kd.first] = kd.second;
+                }
             }
             convautotile::DesugarResult r =
                 convautotile::desugarConvMapping(src, userSourceDir, ov, convautotile::Target(), userSourceName);

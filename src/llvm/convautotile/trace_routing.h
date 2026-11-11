@@ -92,6 +92,16 @@ struct RoutingHints {
 // in port order.
 std::vector<PortSpace> routingSpaces(const RoutingPlan &plan, const RoutingHints &hints = RoutingHints());
 
+// Field-by-field difference between a hand-written GemmSpace (`hand`, from
+// sourceGemmSpace) and the one the kernel's traced blocks render to
+// (`traced`, from routingSpaces), over everything that fixes the DMA: the map
+// (layout, act / wgt, merge order, mesh groups), im2col and d1..d4 with their
+// slice_tiling. Both sides are compared with aiehlc's defaults filled in.
+// pad / pp_depth / l1_budget are the user's scheduling choices: not compared.
+// Empty = the pipeline gets the same input as for the traced kernel, so the
+// DMA delivers exactly the blocks the kernel loads / stores.
+std::vector<std::string> spaceDiff(const PortSpace &hand, const PortSpace &traced);
+
 // One line per port: how each dim is routed.
 std::string planText(const RoutingPlan &plan);
 

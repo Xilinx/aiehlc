@@ -200,6 +200,66 @@ std::vector<PortSpace> routingSpaces(const RoutingPlan &plan, const RoutingHints
     return out;
 }
 
+namespace {
+
+// A PortSpace with aiehlc's defaults made explicit (see sourceGemmSpace).
+PortSpace withDefaults(PortSpace s) {
+    for (std::string *f : {&s.act, &s.wgt})
+        if (f->empty())
+            *f = "Broadcast";
+    if (s.layout.empty())
+        s.layout = "Row";
+    if (s.merge_order.empty())
+        s.merge_order = "Default";
+    for (auto &t : s.d) {
+        if (!t.used)
+            t = TileDimOut();
+        else if (!t.has_stride)
+            t.stride = 0;
+    }
+    return s;
+}
+
+} // namespace
+
+std::vector<std::string> spaceDiff(const PortSpace &hand, const PortSpace &traced) {
+    const PortSpace h = withDefaults(hand), t = withDefaults(traced);
+    std::vector<std::string> out;
+    auto str = [&out](const std::string &what, const std::string &a, const std::string &b) {
+        if (a != b)
+            out.push_back(what + " = " + a + ", the kernel's blocks give " + b);
+    };
+    auto num = [&str](const std::string &what, int a, int b) { str(what, std::to_string(a), std::to_string(b)); };
+    str(".policy.map.layout", h.layout, t.layout);
+    str(".policy.map.act", h.act, t.act);
+    str(".policy.map.wgt", h.wgt, t.wgt);
+    str(".policy.map.merge_order", h.merge_order, t.merge_order);
+    num(".policy.map.mesh_tiling_group1_dim", h.group1_dim, t.group1_dim);
+    num(".policy.map.mesh_tiling_group2_dim", h.group2_dim, t.group2_dim);
+    str(".policy.mat.im2col", h.im2col ? "Dma" : "None", t.im2col ? "Dma" : "None");
+    for (int i = 0; i < 4; i++) {
+        const TileDimOut &a = h.d[i], &b = t.d[i];
+        const std::string d = ".d" + std::to_string(i + 1);
+        if (a.used != b.used) {
+            int rank = 0;
+            for (auto &x : t.d)
+                rank += x.used;
+            out.push_back(d + (a.used ? " is set" : " is missing") + ", but the kernel's blocks have " +
+                          std::to_string(rank) + " dims");
+            continue;
+        }
+        num(d + ".fullsize", a.fullsize, b.fullsize);
+        num(d + ".tile_round", a.tile_round, b.tile_round);
+        num(d + ".tile_size", a.tile_size, b.tile_size);
+        num(d + ".stride", a.stride, b.stride);
+        num(d + ".padsize", a.padsize, b.padsize);
+        num(d + ".slice_tiling.tile_size", a.l2_size, b.l2_size);
+        num(d + ".slice_tiling.stride", a.l2_stride, b.l2_stride);
+        num(d + ".slice_tiling.rounds", a.l2_rounds, b.l2_rounds);
+    }
+    return out;
+}
+
 std::string planText(const RoutingPlan &plan) {
     std::ostringstream os;
     os << "  routing plan on the " << plan.rows << "x" << plan.cols << " mesh" << (plan.halo ? " (halo)" : "") << ":\n";

@@ -439,6 +439,74 @@ runs inside `traceKernel` / `traceLogical` after every trace:
 - The input tensor is the DDR buffer as the kernel reads it (pre-padded);
   `load_opts{.pad}` from the proposal is not implemented.
 
+### Hand-written GemmSpaces with block loads (2026-11-10)
+
+The explicit form -- one `constexpr aie::GemmSpace` per port, `__global__(policy)`,
+`aie::port<T, Space>` -- can now be combined with `aie::load_buffer` /
+`store_buffer` in the body (`example/tileprogram/ccode/simpleconv2dkernel_space.cc`:
+`simpleconv2dkernel_port.cc`'s body under hand-written `RowBC_halo` / `ColBC` /
+`LtoR_Merge`). Before, this did not build: the pipeline rewrites every
+`aie::load_buffer(P, ...)` to reference `aiehlc_desc_P` (`tilinglinalg_pipeline.cpp`,
+`resolveBlockIoBuiltins`), and those descriptors were only emitted for kernels
+whose GemmSpaces convautotile had derived itself.
+
+`verifySpaceKernels` (`kernel_trace.cpp`) handles such a kernel. **The GemmSpaces
+stay the authority and are not rewritten**:
+
+1. each port's GemmSpace is parsed (`sourceGemmSpace`, `conv_desugar.cpp`; the
+   designated-initializer parser of the `aie::Conv2d` path, plus the file's
+   `constexpr int` names) with aiehlc's defaults for omitted fields (act / wgt
+   Broadcast, layout Row, merge Default, im2col None, an omitted `.stride` is 0).
+   It fails closed: `.m/.n/.k`, an unknown or positional field, or a value that
+   is not a constant is an error. The tensor (shape, padsize, role) comes from
+   d1..d4;
+2. the body is traced exactly as for a kernel-only kernel and routed
+   (`planRouting`);
+3. **the routed plan, rendered through `routingSpaces`, must equal every
+   hand-written GemmSpace** (`spaceDiff`, `trace_routing.cpp`), field by field:
+   the map (layout, act / wgt, merge order, mesh groups), im2col and d1..d4 with
+   their slice_tiling. `pad`, `pp_depth` and `l1_budget` are the user's
+   scheduling choices and are not compared (the trace uses the smallest
+   `pp_depth` for its held-blocks check);
+4. on success the kernel gets `aiehlc_desc_<port>` from the traced fits and
+   `aie::num_programs` is resolved; a recognized conv also feeds the pipeline's
+   `checkConvTilingAgainstAnalysis`.
+
+**Why compare forward instead of inverting the GemmSpace.** The GemmSpace ->
+block mapping is ambiguous for inputs: `tile_round` marks a mesh split or an
+on-core loop depending on the dim, and a row-broadcast `A[M, K]` with "d1 split
+over 4 mesh rows, d2 walked in 4 rounds" renders to the same GemmSpace as "d1
+walked in 4 rounds, d2 split over 4 mesh rows". An inverse would have to guess.
+Comparing in GemmSpace space needs no guess: equal GemmSpaces give the pipeline
+the same input as the kernel-only build of the same kernel, so the DMA delivers
+exactly the traced blocks -- the same soundness argument the kernel-only path
+rests on.
+
+A conflict is a build error naming the field, from either side:
+
+```
+win_a (GemmSpace RowBC_halo) .d1.slice_tiling.stride = 13, the kernel's blocks give 14
+win_c (GemmSpace LtoR_Merge) .d1.slice_tiling.tile_size = 7, the kernel's blocks give 14   <- kernel's oh_t changed
+win_a (GemmSpace RowBC_halo) .policy.map.layout = Col, the kernel's blocks give Row
+win_c block 0 on core (0,0): offset has 3 and shape 3 dims, but the tensor has 2           <- GemmSpace lost a dim
+```
+
+Verified: `simpleconv2dkernel_space.cc` builds with `kernel.cc`, `routing.cc`,
+`aieml.bcf/.prx` and the AIE kernel ELF **byte-identical** to
+`simpleconv2dkernel_port.cc`'s build, and `host.cc` identical outside the copied
+user source; a conflicting GemmSpace stops aiehlc with rc 1 before any ELF.
+Unit tests: `unitest/test_trace_routing.cpp` (parse / defaults / errors, spaceDiff,
+render -> parse round trip for conv, GEMM and eltwise plans, descriptors equal to
+the kernel-only build), `unitest/kernel_trace_cases.py` `SPACE_CASES` (10).
+
+**Open, not caused by this:** on the board (palmyra 213) the example's output
+does **not** match `verify_conv2d` -- 128+ mismatches starting in the output
+channels of the last two mesh columns (first at f=32 or f=48, varying run to
+run). `simpleconv2dkernel_port.cc` gives the same failure (its `main()` never
+called `verify_conv2d`, so it went unnoticed); the two builds run identical
+kernel and DMA code. `simpleconv2dkernel_space.cc` calls the check and returns
+non-zero, so the failure stays visible.
+
 ## 6. Tensor form: typed tensors, `.pad` / `.reuse`, block views, autotune
 
 `example/tileprogram/ccode/simpleconv2dkernel.cc` is the full proposal: the

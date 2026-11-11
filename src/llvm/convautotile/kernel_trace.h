@@ -133,6 +133,18 @@ struct KernelOnlyResult {
 // __global__(conv, map) form (in place). No-op when not applicable.
 KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, const std::string &srcName);
 
+// Hand-written GemmSpaces + block loads: a `__global__(policy)` kernel whose
+// ports name `constexpr aie::GemmSpace`s (aie::port<T, Space>) and whose body
+// uses aie::load_buffer / store_buffer. The GemmSpaces are the authority and
+// stay as written; the kernel is traced, its routing plan rendered through
+// routingSpaces must equal every port's GemmSpace (spaceDiff: a conflict is
+// an error naming the field), and then the kernel gets the block descriptors
+// (tu_decls) its loads check against at run time, with aie::num_programs
+// resolved in `src`. No-op (found == false) for any other kernel, and for the
+// kernels in `skip` (the ones inferKernelOnly just rewrote into this form).
+KernelOnlyResult verifySpaceKernels(std::string &src, const std::string &srcDir, const std::string &srcName,
+                                    const std::vector<std::string> &skip = {});
+
 struct KernelDesugar;
 
 // __global__(conv, map) kernels that use aie::load_buffer / store_buffer:

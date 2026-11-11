@@ -243,6 +243,10 @@ static AnyPtr block(Port &p, std::initializer_list<int> off, std::initializer_li
                          ? " (a conv border? load it with {.pad = aie::pad_value::zero})" : "");
         bytes *= s[d] > 0 ? s[d] : 1;
     }
+    // A rank mismatch is reported above; size the block as the kernel asked so
+    // that report is what surfaces, not the ASan overflow it would cause.
+    for (int d = p.rank; d < rs && d < 4; d++)
+        bytes *= s[d] > 0 ? s[d] : 1;
     if (bytes > 49152) AIEHLC_E(p, "block is %ld B, larger than the core data memory (49152 B)", bytes);
     if ((int)p.live.size() >= g_pp)
         AIEHLC_E(p, "takes a block while %d of this port are still held (pp_depth %d): release first", (int)p.live.size(), g_pp);
@@ -1142,6 +1146,173 @@ KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, co
 // emits. Scheduling knobs (pp_depth, l1_budget, pad) are the declaration's /
 // autotune's choice, so they are taken from the derivation before comparing.
 // A difference is reported as a note: the derived carriers stay authoritative.
+namespace {
+
+// `aie::port<T, Space> var` with Space an identifier: the GemmSpace name, or "".
+std::string spacePortName(const std::string &param, TracePort &p) {
+    size_t a = param.find("aie::port<");
+    size_t close = a == std::string::npos ? a : sourceMatchClose(param, a + 9, '<', '>');
+    if (close == std::string::npos)
+        return "";
+    std::vector<std::string> targs = splitTop(param.substr(a + 10, close - a - 10));
+    if (targs.size() != 2 || targs[1].empty() || targs[1].find("::") != std::string::npos ||
+        !std::all_of(targs[1].begin(), targs[1].end(), isIdentChar))
+        return "";
+    size_t v = param.find_first_not_of(" \t\r\n*&", close + 1);
+    size_t ve = v;
+    while (ve != std::string::npos && ve < param.size() && isIdentChar(param[ve]))
+        ve++;
+    if (v == std::string::npos || ve == v)
+        return "";
+    p.var = param.substr(v, ve - v);
+    p.elem_bytes = elemBytesOf(targs[0]);
+    p.output = targs[0].find("output") != std::string::npos;
+    return targs[1];
+}
+
+// The port's tensor as its GemmSpace describes it: d1..dN fullsize (padsize
+// trailing elements are DMA padding) and a role for the messages / the conv
+// cross-check (output -> OFM, col broadcast -> WEIGHTS, else IFM).
+bool spacePort(const PortSpace &s, TracePort &p, std::string &err) {
+    p.role = p.output ? "OFM" : s.layout == "Col" ? "WEIGHTS" : "IFM";
+    for (int d = 0; d < 4; d++) {
+        if (!s.d[d].used)
+            continue;
+        if ((int)p.shape.size() != d) {
+            err = "uses .d" + std::to_string(d + 1) + " without .d" + std::to_string(d);
+            return false;
+        }
+        if (s.d[d].fullsize <= 0) {
+            err = ".d" + std::to_string(d + 1) + ".fullsize must be positive";
+            return false;
+        }
+        p.shape.push_back(s.d[d].fullsize);
+        p.extent.push_back(s.d[d].fullsize - s.d[d].padsize);
+    }
+    if (p.shape.empty())
+        err = "describes no tensor dims (.d1 ...)";
+    return err.empty();
+}
+
+// One hand-written kernel: trace, compare, and on success its descriptors.
+void verifySpaceKernel(std::string &src, const std::string &srcDir, const std::string &srcName, TraceKernel k,
+                       std::pair<int, int> mesh, KernelOnlyResult &res, std::ostringstream &rep) {
+    std::vector<std::string> errs;
+    std::vector<std::string> spaceNames;
+    std::vector<PortSpace> hand;
+    std::string params = sourceBlankComments(src).substr(k.paramOpen + 1, k.paramClose - k.paramOpen - 1);
+    int pp = 0;
+    for (auto &prm : splitTop(params)) {
+        TracePort p;
+        PortSpace s;
+        std::string name = spacePortName(prm, p), err;
+        if (name.empty())
+            errs.push_back("parameter `" + trim(prm) + "` is not an aie::port<T, <GemmSpace>>");
+        else if (!sourceGemmSpace(src, srcDir, name, s, err))
+            errs.push_back(p.var + ": " + err); // names the GemmSpace itself
+        else if (!spacePort(s, p, err))
+            errs.push_back(p.var + " (GemmSpace " + name + "): " + err);
+        else {
+            k.ports.push_back(p);
+            spaceNames.push_back(name);
+            hand.push_back(s);
+            pp = pp ? std::min(pp, s.pp_depth) : s.pp_depth;
+        }
+    }
+    rep << "[KernelAnalysis] " << k.name << ": hand-written GemmSpaces checked against the blocks traced on the "
+        << mesh.first << "x" << mesh.second << " mesh\n";
+    KernelTraceResult tr;
+    RoutingPlan plan;
+    std::vector<PortSpace> spaces;
+    if (errs.empty()) {
+        tr = traceKernel(src, k, mesh.first, mesh.second, sourceDefines(src), srcName, std::max(pp, 1));
+        res.notes.insert(res.notes.end(), tr.notes.begin(), tr.notes.end());
+        for (auto &p : k.ports)
+            if (tr.fits.count(p.var))
+                rep << fitText(p, tr.fits[p.var]) << "\n";
+        errs = tr.errors;
+    }
+    if (errs.empty()) {
+        plan = planRouting(k.ports, tr.fits, mesh.first, mesh.second);
+        errs = plan.errors;
+    }
+    if (errs.empty()) {
+        spaces = routingSpaces(plan);
+        rep << planText(plan);
+        for (size_t i = 0; i < hand.size() && i < spaces.size(); i++) {
+            std::vector<std::string> diff = spaceDiff(hand[i], spaces[i]);
+            for (auto &d : diff)
+                errs.push_back(k.ports[i].var + " (GemmSpace " + spaceNames[i] + ") " + d);
+            rep << "    " << k.ports[i].var << " = " << spaceNames[i]
+                << (diff.empty() ? ": same DMA as the traced blocks\n" : ": CONFLICTS with the traced blocks\n");
+        }
+    }
+    Derived d;
+    if (errs.empty())
+        d = convCrossCheck(k, tr, spaces, mesh.first, mesh.second, errs, rep);
+    if (!errs.empty()) {
+        res.ok = false;
+        for (auto &e : errs)
+            res.errors.push_back(k.name + ": " + e);
+        if (res.error.empty())
+            res.error = res.errors[0];
+        return;
+    }
+    if (d.ok)
+        res.derived[k.name] = d;
+    std::string body = src.substr(k.bodyOpen, k.bodyClose - k.bodyOpen + 1);
+    for (int axis : {0, 1}) {
+        const std::string from = "aie::num_programs(" + std::to_string(axis) + ")";
+        const std::string to = std::to_string(axis ? plan.cols : plan.rows);
+        for (size_t p = 0; (p = body.find(from, p)) != std::string::npos; p += to.size())
+            body.replace(p, from.size(), to);
+    }
+    src.replace(k.bodyOpen, k.bodyClose - k.bodyOpen + 1, body);
+    res.tu_decls[k.name] = routedTUDecls(plan, tr.fits);
+    res.est_ms[k.name] = d.ok ? d.est_ms : routingEstMs(plan, routingHints(plan));
+    rep << "  => verified: " << plan.ports.size() << " ports match their GemmSpace; block descriptors from the "
+        << "traced blocks\n";
+}
+
+} // namespace
+
+KernelOnlyResult verifySpaceKernels(std::string &src, const std::string &srcDir, const std::string &srcName,
+                                    const std::vector<std::string> &skip) {
+    KernelOnlyResult res;
+    const std::string blank = sourceBlankComments(src);
+    if (blank.find("aie::load_buffer") == std::string::npos && blank.find("aie::store_buffer") == std::string::npos)
+        return res;
+    std::string err;
+    std::vector<TraceKernel> kernels = findKernels(src, sourceMacros(src, srcDir), false, err);
+    // Ports that parsed as aie::IFM / aie::shape belong to the kernel-only form.
+    kernels.erase(std::remove_if(kernels.begin(), kernels.end(),
+                                 [&blank, &skip](const TraceKernel &k) {
+                                     const std::string body = blank.substr(k.bodyOpen, k.bodyClose - k.bodyOpen);
+                                     return !k.ports.empty() ||
+                                            std::find(skip.begin(), skip.end(), k.name) != skip.end() ||
+                                            (body.find("aie::load_buffer") == std::string::npos &&
+                                             body.find("aie::store_buffer") == std::string::npos);
+                                 }),
+                  kernels.end());
+    if (kernels.empty())
+        return res;
+    res.found = true;
+    auto mesh = sourceLaunchMesh(src, srcDir);
+    if (mesh.first <= 0 || mesh.second <= 0) {
+        res.ok = false;
+        res.error = "kernel analysis needs the launch mesh: no device.partition({...}, ROWS, COLS) found";
+        return res;
+    }
+    // Back to front: resolving aie::num_programs edits the body in place.
+    std::sort(kernels.begin(), kernels.end(),
+              [](const TraceKernel &a, const TraceKernel &b) { return a.kwBegin > b.kwBegin; });
+    std::ostringstream rep;
+    for (auto &k : kernels)
+        verifySpaceKernel(src, srcDir, srcName, k, mesh, res, rep);
+    res.report = rep.str();
+    return res;
+}
+
 static void routingCrossCheck(const TraceKernel &tk, KernelTraceResult &tr, const KernelDesugar &kd,
                               std::vector<std::string> &notes) {
     const Derived &d = kd.derived;

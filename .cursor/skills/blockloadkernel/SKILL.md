@@ -1,6 +1,6 @@
 ---
 name: blockloadkernel
-description: Writing or debugging a Triton-style block-load AIE kernel -- kernel-only (`__global__ void k(aie::port<T, aie::IFM, aie::shape<...>> ...)`, DMA inferred from the kernel) or on top of `__global__(conv, map)` -- with `aie::program_id`, `aie::load_buffer` / `aie::store_buffer` in tensor coordinates, `aie::release` / `aie::commit`. Tensor form (`aie::in<aie::tensor>`, `.pad`, `.reuse`, `aie::autotune`, `[TensorForm]` report). Vector kernels (`aie::mmul` traced through `aie_api_x86emu.h`). Use for `[KernelAnalysis] ERROR` (too big / too small, outside the tensor, data used without being loaded, use after release, never committed, column-outer loops, schedule depends on data, never stored), Use for "no member named 'program_id' in namespace 'aie'", klog BLKE/BLKW/BLKG, a kernel local clashing with an emitted macro (`OH_T`, `OW_T`, `TILE_*`, `SP_*`, `K`), or to emulate the generated kernel on x86 before a board run.
+description: Writing or debugging a Triton-style block-load AIE kernel -- kernel-only (`__global__ void k(aie::port<T, aie::IFM, aie::shape<...>> ...)`, DMA inferred from the kernel) or on top of `__global__(conv, map)` -- with `aie::program_id`, `aie::load_buffer` / `aie::store_buffer` in tensor coordinates, `aie::release` / `aie::commit`. Tensor form (`aie::in<aie::tensor>`, `.pad`, `.reuse`, `aie::autotune`, `[TensorForm]` report). Vector kernels (`aie::mmul` traced through `aie_api_x86emu.h`). Use for `[KernelAnalysis] ERROR` (too big / too small, outside the tensor, data used without being loaded, use after release, never committed, column-outer loops, schedule depends on data, never stored), Use for "no member named 'program_id' in namespace 'aie'", klog BLKE/BLKW/BLKG, a kernel local clashing with an emitted macro (`OH_T`, `OW_T`, `TILE_*`, `SP_*`, `K`), or to emulate the generated kernel on x86 before a board run. Also: hand-written `constexpr aie::GemmSpace` ports (`aie::port<T, MySpace>`) with `aie::load_buffer` -- `use of undeclared identifier 'aiehlc_desc_<port>'`, or `(GemmSpace X) .d1... = A, the kernel's blocks give B`.
 ---
 
 # Triton-style block-load kernels
@@ -44,6 +44,26 @@ convautotile: `doc/design/conv_autotiling.md`).
   as a shape mismatch: the conv compute reads past it first.
 - The body must compile on x86 and the schedule must be data-independent.
 - Regression: `python3 src/llvm/convautotile/unitest/kernel_trace_cases.py build/aiehlc-convtile`.
+
+## Hand-written GemmSpaces + block loads
+- `__global__(policy) void k(aie::port<T, MySpace> p, ...)` with
+  `aie::load_buffer` in the body (`simpleconv2dkernel_space.cc`). Before
+  2026-11-10 this failed at kernel compile: `aiehlc_desc_<port>` is referenced
+  by every rewritten load but was only emitted for convautotile-derived ports.
+- `verifySpaceKernels` traces the body and requires `routingSpaces(trace plan)`
+  == each hand GemmSpace (`spaceDiff`). The GemmSpace is never rewritten. Do NOT
+  try to invert a GemmSpace into blocks: `tile_round` is a mesh split on one dim
+  and a loop on another, and some GemmSpaces are ambiguous (GEMM A: M-split +
+  K-loop renders like K-split + M-loop).
+- Compared: layout, act/wgt, merge_order, mesh groups, im2col, d1..d4 incl.
+  slice_tiling, with aiehlc's defaults filled in (an omitted `.stride` is 0, so
+  writing `.stride` where the derived form has none is a conflict). Not compared:
+  pad, pp_depth, l1_budget.
+- Fails closed: `.m/.n/.k`, unknown fields (`.win`), non-constant values,
+  GemmSpace in a header (only the .cc is searched) are errors.
+- A kernel-only kernel is rewritten into this form first; aiehlc passes its
+  name as `skip` so it is not traced twice.
+- Quick check: `build/aiehlc-convtile trace <file.cc>`; regression `SPACE_CASES`.
 
 ## Tensor form (aie::in / aie::out, .pad / .reuse, autotune)
 - `simpleconv2dkernel.cc`: `kernel_front.cpp::lowerTensorForm` lowers it to the

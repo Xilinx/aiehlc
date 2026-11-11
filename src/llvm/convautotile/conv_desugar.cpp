@@ -708,6 +708,204 @@ bool parseAll(const std::string &src, const std::string &srcDir, Parsed &P, Desu
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Hand-written GemmSpace -> PortSpace (kernel_trace.cpp checks it against the
+// kernel's blocks)
+// ---------------------------------------------------------------------------
+namespace {
+
+// `constexpr int NAME = expr;` anywhere in the text, as extra macros: GemmSpace
+// fields often use them (simpleconv2d.cc: OC_PER_G * HW_COLS).
+void addConstexprInts(const std::string &blank, std::map<std::string, std::string> &m) {
+    size_t p = 0;
+    while ((p = findToken(blank, "constexpr", p)) != std::string::npos) {
+        size_t semi = blank.find(';', p);
+        if (semi == std::string::npos)
+            break;
+        std::istringstream is(blank.substr(p + 9, semi - p - 9));
+        std::string type, name, eq;
+        is >> type >> name >> eq;
+        if ((type == "int" || type == "long" || type == "unsigned" || type == "int32_t") && eq == "=" &&
+            !name.empty() && std::all_of(name.begin(), name.end(), isIdent)) {
+            std::string expr;
+            std::getline(is, expr, '\0');
+            if (!m.count(name))
+                m[name] = expr;
+        }
+        p = semi;
+    }
+}
+
+bool spaceInt(const Value &v, int &out, const std::string &what, std::string &err) {
+    if (v.kind == Value::Int) {
+        out = (int)v.i;
+        return true;
+    }
+    if (v.kind == Value::Call && v.items.size() == 1 && v.items[0].second.kind == Value::Int) {
+        out = (int)v.items[0].second.i; // aie::Bytes{4096}
+        return true;
+    }
+    err = what + " is not an integer constant (only #define and constexpr int names are evaluated)";
+    return false;
+}
+
+bool spaceTileDim(const Value &v, TileDimOut &t, const std::string &who, std::string &err) {
+    t = TileDimOut();
+    t.used = true;
+    t.has_stride = false;
+    for (auto &kv : v.items) {
+        const std::string what = who + "." + kv.first;
+        if (kv.first == "slice_tiling") {
+            for (auto &lv : kv.second.items) {
+                int *dst = lv.first == "tile_size" ? &t.l2_size
+                           : lv.first == "stride"  ? &t.l2_stride
+                           : lv.first == "rounds"  ? &t.l2_rounds
+                                                   : nullptr;
+                if (!dst) {
+                    err = "unknown field " + what + "." + (lv.first.empty() ? "<positional>" : lv.first);
+                    return false;
+                }
+                if (!spaceInt(lv.second, *dst, what + "." + lv.first, err))
+                    return false;
+            }
+            continue;
+        }
+        int *dst = kv.first == "fullsize"     ? &t.fullsize
+                   : kv.first == "tile_round" ? &t.tile_round
+                   : kv.first == "tile_size"  ? &t.tile_size
+                   : kv.first == "stride"     ? &t.stride
+                   : kv.first == "padsize"    ? &t.padsize
+                                              : nullptr;
+        if (!dst) {
+            err = "unknown field " + (kv.first.empty() ? who + " <positional>" : what);
+            return false;
+        }
+        if (!spaceInt(kv.second, *dst, what, err))
+            return false;
+        t.has_stride = t.has_stride || kv.first == "stride";
+    }
+    return true;
+}
+
+bool spacePolicy(const Value &v, PortSpace &s, std::string &err) {
+    for (auto &grp : v.items) {
+        for (auto &kv : grp.second.items) {
+            const std::string what = ".policy." + grp.first + "." + kv.first;
+            const std::string sym = kv.second.kind == Value::Sym ? lastComponent(kv.second.sym) : "";
+            bool ok = true;
+            if (grp.first == "map" && kv.first == "act")
+                s.act = sym, ok = !sym.empty();
+            else if (grp.first == "map" && kv.first == "wgt")
+                s.wgt = sym, ok = !sym.empty();
+            else if (grp.first == "map" && kv.first == "layout")
+                s.layout = sym, ok = !sym.empty();
+            else if (grp.first == "map" && kv.first == "merge_order")
+                s.merge_order = sym, ok = !sym.empty();
+            else if (grp.first == "map" && kv.first == "mesh_tiling_group1_dim")
+                ok = spaceInt(kv.second, s.group1_dim, what, err);
+            else if (grp.first == "map" && kv.first == "mesh_tiling_group2_dim")
+                ok = spaceInt(kv.second, s.group2_dim, what, err);
+            else if (grp.first == "mat" && kv.first == "pad")
+                s.pad = sym == "Memtile", ok = sym == "Memtile" || sym == "DDR";
+            else if (grp.first == "mat" && kv.first == "im2col")
+                s.im2col = sym == "Dma", ok = sym == "Dma" || sym == "None";
+            else if (grp.first == "sched" && kv.first == "pp_depth")
+                ok = spaceInt(kv.second, s.pp_depth, what, err);
+            else if (grp.first == "sched" && kv.first == "l1_budget")
+                ok = spaceInt(kv.second, s.l1_budget, what, err);
+            else {
+                err = "unknown field " + what;
+                return false;
+            }
+            if (!ok) {
+                if (err.empty())
+                    err = what + ": unexpected value";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+bool sourceGemmSpace(const std::string &src, const std::string &srcDir, const std::string &name, PortSpace &out,
+                     std::string &err) {
+    std::string blank = blankComments(src);
+    std::map<std::string, std::string> macros;
+    collectMacros(src, srcDir, macros, 0);
+    addConstexprInts(blank, macros);
+    std::vector<Decl> decls;
+    std::string perr;
+    // Parse only `name`: another GemmSpace of the file may use what this
+    // checker does not evaluate, and is no concern of this kernel.
+    size_t p = 0;
+    const Decl *d = nullptr;
+    while ((p = findToken(blank, "aie::GemmSpace", p)) != std::string::npos) {
+        size_t q = p + 14;
+        while (q < blank.size() && std::isspace((unsigned char)blank[q]))
+            q++;
+        size_t nb = q;
+        while (q < blank.size() && isIdent(blank[q]))
+            q++;
+        if (blank.substr(nb, q - nb) == name) {
+            size_t lineStart = blank.rfind('\n', p);
+            lineStart = lineStart == std::string::npos ? 0 : lineStart;
+            size_t ob = blank.find('{', q);
+            size_t cb = ob == std::string::npos ? ob : matchClose(blank, ob, '{', '}');
+            size_t semi = cb == std::string::npos ? cb : blank.find(';', cb);
+            if (semi == std::string::npos) {
+                err = "unterminated aie::GemmSpace " + name;
+                return false;
+            }
+            std::string one = blank.substr(lineStart, semi + 1 - lineStart);
+            if (!findDecls(one, one, "GemmSpace", macros, decls, perr)) {
+                err = perr;
+                return false;
+            }
+            for (auto &x : decls)
+                if (x.name == name)
+                    d = &x;
+            break;
+        }
+        p = q;
+    }
+    if (!d) {
+        err = "no `constexpr aie::GemmSpace " + name + " = {...};` in the source (headers are not searched)";
+        return false;
+    }
+    PortSpace s;
+    s.act = s.wgt = "Broadcast";
+    s.layout = "Row";
+    s.merge_order = "Default";
+    s.im2col = 0;
+    s.l1_budget = 32 * 1024;
+    for (auto &kv : d->init.items) {
+        const std::string what = "aie::GemmSpace " + name + ": ";
+        if (kv.first == "policy") {
+            if (!spacePolicy(kv.second, s, err)) {
+                err = what + err;
+                return false;
+            }
+        } else if (kv.first.size() == 2 && kv.first[0] == 'd' && kv.first[1] >= '1' && kv.first[1] <= '4') {
+            if (!spaceTileDim(kv.second, s.d[kv.first[1] - '1'], "." + kv.first, err)) {
+                err = what + err;
+                return false;
+            }
+        } else if (kv.first == "m" || kv.first == "n" || kv.first == "k") {
+            err = what + "uses ." + kv.first +
+                  " (the GEMM form); a block-load kernel's GemmSpace describes its "
+                  "tensor with .d1 ... .d4";
+            return false;
+        } else {
+            err = what + "unknown field ." + (kv.first.empty() ? "<positional>" : kv.first);
+            return false;
+        }
+    }
+    out = s;
+    return true;
+}
+
 DesugarResult parseConvMapping(const std::string &src, const std::string &srcDir) {
     DesugarResult r;
     Parsed P;

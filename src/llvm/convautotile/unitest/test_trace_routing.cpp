@@ -9,6 +9,7 @@
  * Build + run:  src/llvm/convautotile/unitest/run.sh
  ******************************************************************************/
 #include "../conv_desugar.h"
+#include "../kernel_trace.h"
 #include "../trace_routing.h"
 
 #include <cstdio>
@@ -88,6 +89,23 @@ static void checkSameSpace(const PortSpace &got, const PortSpace &want) {
 // to), must route to the very same carriers.
 // `ch` < 4: the channels are padded to c_align = 4 (simpleconv2d_new_load.cc
 // has C = 3); the ports then carry the data extent and the carriers .padsize.
+// Round trip of the hand-written path: every rendered carrier, parsed back as
+// a hand-written GemmSpace, must give no difference (sourceGemmSpace and
+// spaceDiff agree with emitGemmSpace on every field and default).
+static void checkRoundTrip(const std::vector<PortSpace> &sp) {
+    for (auto &s : sp) {
+        PortSpace back;
+        std::string err;
+        CHECK(sourceGemmSpace(emitGemmSpace(s, "S"), "", "S", back, err));
+        if (!err.empty())
+            std::printf("  parse error: %s\n", err.c_str());
+        std::vector<std::string> diff = spaceDiff(back, s);
+        CHECK(diff.empty());
+        for (auto &d : diff)
+            std::printf("  round-trip diff: %s\n", d.c_str());
+    }
+}
+
 static void testConvEquivalence(int th, int tw, int ch = 4) {
     Conv2dSpec c;
     c.h = c.w = 230;
@@ -137,6 +155,7 @@ static void testConvEquivalence(int th, int tw, int ch = 4) {
     CHECK(emitGemmSpace(sp[0], "X") == emitGemmSpace(d.ifm, "X"));
     CHECK(emitGemmSpace(sp[1], "X") == emitGemmSpace(d.weights, "X"));
     CHECK(emitGemmSpace(sp[2], "X") == emitGemmSpace(d.ofm, "X"));
+    checkRoundTrip(sp);
 }
 
 // GEMM C[M,N] = A[M,K] * B[N,K]^T on a 4x4 mesh: A rows over mesh rows, B rows
@@ -179,6 +198,7 @@ static void testGemm() {
     CHECK_EQ(sp[2].group2_dim, 2);
     CHECK_EQ(sp[2].d[0].tile_size, 16);
     CHECK_EQ(sp[2].d[1].tile_size, 16);
+    checkRoundTrip(sp);
 }
 
 // Eltwise on a 4x1 mesh: rows split, 4 column chunks per core, no halo.
@@ -196,6 +216,7 @@ static void testEltwise() {
         CHECK_EQ(sp[1].group2_dim, -1);
         CHECK_EQ(sp[1].d[1].tile_round, 4);
     }
+    checkRoundTrip(sp);
 }
 
 // What the routing cannot express is named.
@@ -249,6 +270,118 @@ static void testTraceExample(const std::string &repo) {
     }
 }
 
+// Hand-written GemmSpace parsing: defaults, #define / constexpr int
+// arithmetic, and fail-closed errors.
+static void testSpaceParse() {
+    const std::string src = "#define H 112\n"
+                            "constexpr int PARTS = 4;\n"
+                            "constexpr aie::GemmSpace A = {\n"
+                            "    .policy = {.map = {.layout = aie::Layout::Col}},\n"
+                            "    .d1 = {.fullsize = H * 2, .tile_round = PARTS, .tile_size = H / 2, .stride = 56,\n"
+                            "           .slice_tiling = {.tile_size = 19, .stride = 14, .rounds = PARTS}},\n"
+                            "    .d2 = {.fullsize = 4, .tile_size = 4, .padsize = 1}};\n"
+                            "constexpr aie::GemmSpace M = {.m = {.fullsize = 64}};\n"
+                            "constexpr aie::GemmSpace U = {.d1 = {.fullsize = 8, .win = 7}};\n"
+                            "constexpr aie::GemmSpace V = {.d1 = {.fullsize = runtime_value}};\n";
+    PortSpace a;
+    std::string err;
+    CHECK(sourceGemmSpace(src, "", "A", a, err));
+    CHECK(a.act == "Broadcast" && a.wgt == "Broadcast" && a.layout == "Col" && a.merge_order == "Default");
+    CHECK_EQ(a.im2col, 0);
+    CHECK_EQ(a.pp_depth, 2);
+    CHECK_EQ(a.l1_budget, 32 * 1024);
+    CHECK_EQ(a.d[0].fullsize, 224);
+    CHECK_EQ(a.d[0].tile_round, 4);
+    CHECK_EQ(a.d[0].tile_size, 56);
+    CHECK_EQ(a.d[0].l2_rounds, 4);
+    CHECK(a.d[0].has_stride && !a.d[1].has_stride);
+    CHECK_EQ(a.d[1].padsize, 1);
+    CHECK(a.d[1].used && !a.d[2].used);
+    PortSpace x;
+    err.clear();
+    CHECK(!sourceGemmSpace(src, "", "M", x, err) && err.find("uses .m (the GEMM form)") != std::string::npos);
+    err.clear();
+    CHECK(!sourceGemmSpace(src, "", "U", x, err) && err.find("unknown field .d1.win") != std::string::npos);
+    err.clear();
+    CHECK(!sourceGemmSpace(src, "", "V", x, err) && err.find("not an integer constant") != std::string::npos);
+    err.clear();
+    CHECK(!sourceGemmSpace(src, "", "Nope", x, err) &&
+          err.find("no `constexpr aie::GemmSpace Nope") != std::string::npos);
+}
+
+// spaceDiff names each DMA-shaping field and ignores the scheduling ones.
+static void testSpaceDiff() {
+    PortSpace t;
+    t.act = "Broadcast";
+    t.layout = "Row";
+    t.im2col = 1;
+    t.d[0].used = true;
+    t.d[0].fullsize = 230;
+    t.d[0].tile_round = 4;
+    t.d[0].tile_size = 61;
+    t.d[0].stride = 56;
+    t.d[0].l2_size = 19;
+    t.d[0].l2_stride = 14;
+    t.d[0].l2_rounds = 4;
+    PortSpace h = t;
+    h.wgt = "Broadcast"; // a default: no difference
+    h.pp_depth = 1;      // scheduling: not compared
+    h.l1_budget = 8192;
+    h.pad = 1;
+    CHECK(spaceDiff(h, t).empty());
+    h.d[0].l2_stride = 13;
+    std::vector<std::string> d = spaceDiff(h, t);
+    CHECK_EQ(d.size(), 1);
+    CHECK(!d.empty() && d[0] == ".d1.slice_tiling.stride = 13, the kernel's blocks give 14");
+    h = t;
+    h.layout = "Col";
+    h.d[1].used = true;
+    h.d[1].fullsize = 4;
+    d = spaceDiff(h, t);
+    CHECK_EQ(d.size(), 2);
+    CHECK(d.size() == 2 && d[0] == ".policy.map.layout = Col, the kernel's blocks give Row");
+    CHECK(d.size() == 2 && d[1] == ".d2 is set, but the kernel's blocks have 1 dims");
+    h = t;
+    h.d[0].has_stride = false; // omitted .stride is 0, not "whatever the trace says"
+    d = spaceDiff(h, t);
+    CHECK(d.size() == 1 && d[0] == ".d1.stride = 0, the kernel's blocks give 56");
+}
+
+// The hand-written example: verified, and its block descriptors are exactly the
+// kernel-only example's (same kernel body, same DMA).
+static void testSpaceKernel(const std::string &repo) {
+    const std::string dir = repo + "/example/tileprogram/ccode";
+    auto read = [&dir](const std::string &f) {
+        std::ifstream in(dir + "/" + f);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        return ss.str();
+    };
+    std::string hand = read("simpleconv2dkernel_space.cc"), port = read("simpleconv2dkernel_port.cc");
+    CHECK(!hand.empty() && !port.empty());
+    KernelOnlyResult hs = verifySpaceKernels(hand, dir, "space.cc");
+    CHECK(hs.found && hs.ok);
+    for (auto &e : hs.errors)
+        std::printf("  space error: %s\n", e.c_str());
+    KernelOnlyResult ko = inferKernelOnly(port, dir, "port.cc");
+    CHECK(ko.found && ko.ok);
+    CHECK(hs.tu_decls.count("conv2d_spatial") && ko.tu_decls.count("conv2d_spatial"));
+    CHECK(hs.tu_decls["conv2d_spatial"] == ko.tu_decls["conv2d_spatial"]);
+    CHECK(hs.derived.count("conv2d_spatial") == 1);
+    CHECK(hand.find("aie::num_programs") == std::string::npos); // resolved in place
+    // Not applicable: the kernel-only source has no GemmSpace ports.
+    std::string again = read("simpleconv2dkernel_port.cc");
+    CHECK(!verifySpaceKernels(again, dir, "port.cc").found);
+    // inferKernelOnly rewrote `port` into the GemmSpace form: checked as if
+    // hand-written it must pass (a round trip on the real path), and aiehlc
+    // skips it as already routed.
+    std::string rewritten = port;
+    KernelOnlyResult rt = verifySpaceKernels(rewritten, dir, "port.cc");
+    CHECK(rt.found && rt.ok);
+    CHECK(rt.tu_decls["conv2d_spatial"] == ko.tu_decls["conv2d_spatial"]);
+    CHECK(!verifySpaceKernels(port, dir, "port.cc", {"conv2d_spatial"}).found);
+}
+
 int main(int argc, char **argv) {
     std::string repo = argc > 1 ? argv[1] : AIEHLC_SOURCE_DIR;
     testConvEquivalence(7, 28);
@@ -260,6 +393,9 @@ int main(int argc, char **argv) {
     testEltwise();
     testRejects();
     testTraceExample(repo);
+    testSpaceParse();
+    testSpaceDiff();
+    testSpaceKernel(repo);
     std::printf("trace_routing: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

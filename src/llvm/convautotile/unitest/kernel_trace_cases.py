@@ -7,7 +7,8 @@
 bug and checks `aiehlc-convtile trace` rejects it with the expected diagnostic.
 CASES use the kernel-only port form (simpleconv2dkernel_port.cc), TENSOR_CASES
 the tensor form (simpleconv2dkernel.cc: aie::in / aie::out, .pad, .reuse,
-block views, aie::autotune).
+block views, aie::autotune), SPACE_CASES hand-written GemmSpaces + block loads
+(simpleconv2dkernel_space.cc: a GemmSpace and the kernel's blocks must agree).
 
     python3 src/llvm/convautotile/unitest/kernel_trace_cases.py [build/aiehlc-convtile]
 """
@@ -22,6 +23,7 @@ CCODE = REPO / "example" / "tileprogram" / "ccode"
 BASE = CCODE / "simpleconv2dkernel_port.cc"
 TENSOR_BASE = CCODE / "simpleconv2dkernel.cc"
 GEMM_BASE = pathlib.Path(__file__).resolve().parent / "gemm_kernel_port.cc"
+SPACE_BASE = CCODE / "simpleconv2dkernel_space.cc"
 LOAD_T = "aie::load_buffer(x_t, {oh0 * S - P, ow0 * S - P, 0}, {IH_T, IW_T, C}"
 LOAD_X = "const int8_t *x = aie::load_buffer(win_a, {oh0 * S, ow0 * S, 0}, {ih_t, iw_t, C});"
 
@@ -156,6 +158,42 @@ GEMM_CASES = [
 ]
 
 
+# Hand-written GemmSpaces + block loads (verifySpaceKernels): each side may be
+# wrong, and the conflict names the GemmSpace field.
+SLICE = ".slice_tiling = {.tile_size = 19, .stride = 14, .rounds = 4}"
+OFM_D3 = "    .d3 = {.fullsize = 64, .tile_round = 4, .tile_size = 16}};"
+SPACE_CASES = [
+    ("space: baseline (GemmSpaces match the blocks)", [], None),
+    ("space: GemmSpace slab step wrong",
+     [(SLICE, SLICE.replace(".stride = 14", ".stride = 13"))],
+     "win_a (GemmSpace RowBC_halo) .d1.slice_tiling.stride = 13, the kernel's blocks give 14"),
+    ("space: GemmSpace splits the weights over 2 mesh cols",
+     [(".d1 = {.fullsize = 64, .tile_round = 4, .tile_size = 16, .stride = 16},",
+       ".d1 = {.fullsize = 64, .tile_round = 2, .tile_size = 32, .stride = 32},")],
+     "win_b (GemmSpace ColBC) .d1.tile_round = 2, the kernel's blocks give 4"),
+    ("space: kernel changed (14-row output blocks), GemmSpace not",
+     [("const int oh_t = 7,", "const int oh_t = 14,")],
+     "win_c (GemmSpace LtoR_Merge) .d1.slice_tiling.tile_size = 7, the kernel's blocks give 14"),
+    ("space: input broadcast along the wrong mesh axis",
+     [(".map = {.act = aie::Pattern::Broadcast, .layout = aie::Layout::Row}",
+       ".map = {.act = aie::Pattern::Broadcast, .layout = aie::Layout::Col}")],
+     ".policy.map.layout = Col, the kernel's blocks give Row"),
+    ("space: GemmSpace missing a dim the kernel blocks have",
+     [(OFM_D3, "};")],
+     "offset has 3 and shape 3 dims, but the tensor has 2"),
+    ("space: scheduling fields are the user's (pp_depth 1, l1_budget 8 KB)",
+     [(".sched = {.pp_depth = 2, .l1_budget = aie::Bytes{4096}}}",  # the first: RowBC_halo
+       ".sched = {.pp_depth = 1, .l1_budget = aie::Bytes{8192}}}")],
+     None),
+    ("space: GEMM-form field", [(OFM_D3, OFM_D3[:-2] + ",\n    .m = {.fullsize = 112}};")],
+     "uses .m (the GEMM form)"),
+    ("space: unknown field", [(SLICE, SLICE[:-1] + ", .win = 7}")], "unknown field .d1.slice_tiling.win"),
+    ("space: undefined GemmSpace",
+     [("aie::port<input_window_int8 *, ColBC> win_b", "aie::port<input_window_int8 *, ColBX> win_b")],
+     "no `constexpr aie::GemmSpace ColBX"),
+]
+
+
 def run_case(cli, name, edits, expect, base=BASE):
     src = base.read_text()
     for old, new in edits:
@@ -179,6 +217,7 @@ def main():
     failed = 0
     cases = [(n, e, x, BASE) for n, e, x in CASES] + [(n, e, x, TENSOR_BASE) for n, e, x in TENSOR_CASES]
     cases += [(n, e, x, GEMM_BASE) for n, e, x in GEMM_CASES]
+    cases += [(n, e, x, SPACE_BASE) for n, e, x in SPACE_CASES]
     if len(sys.argv) > 2:  # a name filter
         cases = [c for c in cases if sys.argv[2] in c[0]]
     for name, edits, expect, base in cases:
