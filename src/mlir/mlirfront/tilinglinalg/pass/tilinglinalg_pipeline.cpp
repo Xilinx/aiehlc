@@ -41,6 +41,11 @@
 #include "aiegraphmanager.h"
 
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/Verifier.h"
+#include "mlir/Parser/Parser.h"
+#include "mlir/Support/FileUtilities.h"
+#include <sstream>
+#include "llvm/Support/SourceMgr.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
@@ -652,6 +657,66 @@ mlir::ModuleOp TilingLinalgPipeline::buildRoutingIR(mlir::MLIRContext &ctx, int 
     return m;
 }
 
+// Routing IR re-entry (AIEHLC_ROUTING_IR_IN). The routing IR handed to
+// runPipeline is the frontend's whole tiling decision (#routing.tiling /
+// partition / halo / pp_depth on the ops, control switches on the module) and
+// is dumped as ir/dfschedule/0_initial.mlir. Setting AIEHLC_ROUTING_IR_IN to a
+// .mlir file (`{kernel}` = the kernel name, for multi-kernel sources) replaces
+// the frontend's module with that file before anything reads it, so an agent or
+// a tuner can edit the IR and continue from there; the kernel body, port names
+// and tensors still come from the frontend. A round trip (0_initial.mlir fed
+// back unchanged) must reproduce the build byte for byte -- see
+// doc/design/routing_ir_reentry.md. Returns false on a parse / verify error.
+static bool readRoutingIROverride(mlir::MLIRContext &ctx, mlir::ModuleOp module, const std::string &kernelName) {
+    const char *env = std::getenv("AIEHLC_ROUTING_IR_IN");
+    if (!env || !*env)
+        return true;
+    std::string path = env;
+    for (size_t p = path.find("{kernel}"); p != std::string::npos; p = path.find("{kernel}"))
+        path.replace(p, 8, kernelName);
+    std::string err;
+    auto file = mlir::openInputFile(path, &err);
+    if (!file) {
+        llvm::errs() << "[TilingLinalg] ERROR: AIEHLC_ROUTING_IR_IN: cannot open " << path << ": " << err << "\n";
+        return false;
+    }
+    llvm::SourceMgr sm;
+    sm.AddNewSourceBuffer(std::move(file), llvm::SMLoc());
+    mlir::OwningOpRef<mlir::ModuleOp> in = mlir::parseSourceFile<mlir::ModuleOp>(sm, &ctx);
+    if (!in || mlir::failed(mlir::verify(*in))) {
+        llvm::errs() << "[TilingLinalg] ERROR: AIEHLC_ROUTING_IR_IN: " << path << " does not parse / verify\n";
+        return false;
+    }
+    std::string before, after;
+    {
+        llvm::raw_string_ostream os(before);
+        module.print(os);
+    }
+    module->setAttrs(in.get()->getAttrDictionary());
+    module.getBody()->getOperations().clear();
+    module.getBody()->getOperations().splice(module.getBody()->end(), in.get().getBody()->getOperations());
+    {
+        llvm::raw_string_ostream os(after);
+        module.print(os);
+    }
+    size_t differ = 0;
+    {
+        std::istringstream a(before), b(after);
+        std::string la, lb;
+        while (true) {
+            bool ga = (bool)std::getline(a, la), gb = (bool)std::getline(b, lb);
+            if (!ga && !gb)
+                break;
+            differ += !(ga && gb && la == lb);
+        }
+    }
+    llvm::outs() << "[TilingLinalg] routing IR read from " << path << " (AIEHLC_ROUTING_IR_IN): "
+                 << (differ ? std::to_string(differ) + " line(s) differ from the generated IR"
+                            : std::string("identical to the generated IR"))
+                 << "\n";
+    return true;
+}
+
 bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp module, const std::string &outputDir,
                                        const std::string &userKernelBody, const std::string &userKernelFuncName,
                                        int runtimeDebugLevel, const std::string &userRewrittenSource,
@@ -662,6 +727,8 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
     // Mutable copy so the PARAMETER resolver (below) can stamp resolved dmaKind/
     // dmaCh back into the specs before CoreTraceInsertPass consumes them.
     std::vector<TraceTileSpec> traceTiles = traceTilesIn;
+    if (!readRoutingIROverride(ctx, module, userKernelFuncName))
+        return false;
 
     // Extract partition bounds from createhwmesh op in the IR (if present)
     int partStartCol = -1, partEndCol = -1, partStartRow = -1, partEndRow = -1;

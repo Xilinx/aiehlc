@@ -7,6 +7,7 @@
 #include <pybind11/stl.h>
 #include "tilinglinalg_pipeline.h"
 #include "kernel_body_emitter.h"
+#include "routing_ir_api.h"
 #include "aiegraphmanager.h"
 #include "lower/AiegraphLowerDriver.h"
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
@@ -293,6 +294,7 @@ static py::list lower_aiegraph(const std::string &mlirText) {
 }
 
 PYBIND11_MODULE(_aiebackend, m) {
+    bindRoutingIrApi(m);
     m.doc() = "AIE backend: pybind11 bindings to TilingLinalgPipeline (shared by the Triton and TVM frontends)";
     m.def("run_aie_pipeline", &run_aie_pipeline, py::arg("mesh_rows"), py::arg("mesh_cols"), py::arg("tensor_specs"),
           py::arg("output_dir"), py::arg("user_kernel_body") = "", py::arg("user_kernel_func_name") = "",

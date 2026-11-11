@@ -9,6 +9,7 @@ find_package(pybind11 REQUIRED)
 pybind11_add_module(_aiebackend
     aiebackend_pybind.cpp
     kernel_body_emitter.cpp
+    routing_ir_api.cpp
 )
 
 target_link_libraries(_aiebackend PRIVATE

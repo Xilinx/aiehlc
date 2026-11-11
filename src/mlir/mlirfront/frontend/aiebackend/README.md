@@ -8,6 +8,8 @@ drive it.
 | File | Role |
 |------|------|
 | `aiebackend_pybind.cpp` | The `_aiebackend` module: `run_aie_pipeline`, `build_aiegraph_module`, `lower_aiegraph`, `build_kernel_body`, `orchestrate_conv_layer` |
+| `routing_ir_api.{h,cpp}` | `routing_ir_parse` / `routing_ir_edit` / `routing_ir_check`: inspect, edit and check a routing IR (`ir/dfschedule/0_initial.mlir`) in memory |
+| `routing_ir.py` | Agent / tuner API over them: `RoutingIR` (view, typed edits, `lint()`, `check()`), `build()` with `AIEHLC_ROUTING_IR_IN`; doc/design/routing_ir_reentry.md; tests `test/test_routing_ir.py` |
 | `kernel_body_emitter.{h,cpp}` | `KernelOp[]` → MLIR EmitC → C kernel body (behind `build_kernel_body`) |
 | `CMakeLists.txt` | Builds `_aiebackend`, links `mlirtestlib` + MLIR libs |
 | `__init__.py` | `find_module_dir()`, `load()` (in-process), `spawn()` → `BackendProcess` (child process) |

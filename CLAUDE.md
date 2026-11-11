@@ -716,6 +716,16 @@ skill **aieuserkernel**.
 3. `DmapToDmaphopPass` — logical → physical hops
 4. `DmaphopTodfscheblueprintPass` — hops → schedule blueprints
 
+**Routing IR re-entry (agents / tuners).** `AIEHLC_ROUTING_IR_IN=<file.mlir>` makes
+`runPipeline` read the routing IR (the `ir/dfschedule/0_initial.mlir` it dumps) from a
+file, so an edited IR continues through the whole pipeline; a round trip is
+byte-identical (`script/test/routing_ir_roundtrip.sh`, GEMM + conv). Python:
+`aiebackend.routing_ir.RoutingIR` (typed view, edits, `lint()`, in-process `check()`,
+`build()`). Gate on `lint()` too -- the pipeline accepts some illegal tilings
+silently -- and remember the kernel body is not in the IR. Design
+**[doc/design/routing_ir_reentry.md](doc/design/routing_ir_reentry.md)**; skill
+**routingirreentry**.
+
 **Routing module attributes are control switches only** (`routing.fullconnect_auto`,
 `routing.kernel_config_offload`, `routing.output_tile_major`, `routing.control_*`,
 `routing.iter_policy`). Tiling/data-movement info is a typed attribute on its op:
@@ -878,6 +888,7 @@ Read the matching skill when the task fits:
 | GEMM / non-conv block-load kernel (kernel-only `aie::shape` or hand-written 2-D GemmSpace) builds and traces OK but hangs in `wait_io TIMEOUT ... dir=0`, or only mesh column 0 is right; `Tensor param: a [16x16]`; B offset `subview[16, 0] [64, 64]` | gemmblockloadhang |
 | Spatial-halo conv hangs (`wait_io TIMEOUT`) though kernel analysis passed: `out_rounds` ≠ kernel rounds (e.g. 98 for a 14x16x16 tile), tiny core output window; or `[TilingLinalg] ERROR: ... the kernel's blocks give ..` | convoutroundsdoublecount |
 | Triton-style block-load kernel (`aie::program_id`, `aie::load_buffer` / `store_buffer` in tensor coordinates, `aie::release` / `commit`): `no member named 'program_id' in namespace 'aie'`, klog `BLKE`, wrong offsets but correct output, emulating the generated kernel on x86; hand-written `aie::GemmSpace` ports + `load_buffer` (`(GemmSpace X) .d1... = A, the kernel's blocks give B`) | blockloadkernel |
+| Edit the routing IR and feed it back (`AIEHLC_ROUTING_IR_IN`, `aiebackend.routing_ir`: view / set_level / lint / check / build), round-trip test, an IR edit that does nothing or is silently accepted although illegal | routingirreentry |
 | Adding/reading tiling or per-tensor DMA info in routing IR (halo, shim_dma, pp_depth, kernel rounds); "where did `tensor_N.halo` / `routing.spatial_out_rounds` go"; value reads 0 inside a conversion pattern | routingirtilingcarriers |
 | A `#pragma` you added is never `Detected` in the aiehlc log and its feature silently does nothing (build still rc=0) — stale `aiehlc` binary | stalepragmabinary |
 | Gen2-only build break: missing `xpseudo_asm_armclang.h`, or `XPAR_CPU_TIMESTAMP_CLK_FREQ` undeclared | bspheadergen2 |
