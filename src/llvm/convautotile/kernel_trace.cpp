@@ -1133,6 +1133,13 @@ KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, co
             continue;
         }
         res.tu_decls[k.name] = routedTUDecls(plan, tr.fits);
+        for (auto &rp : plan.ports) {
+            bool slab = false; // halo slabs are sized by the halo path
+            for (auto &d : rp.dims)
+                slab = slab || d.halo() || d.meshHalo();
+            if (!slab && !(plan.halo && !rp.output && rp.dependsOn(0)) && rp.blockBytes() > 0)
+                res.window_bytes[k.name][rp.var] = rp.blockBytes();
+        }
         res.est_ms[k.name] = res.derived.count(k.name) ? res.derived[k.name].est_ms : routingEstMs(plan, hints);
         rep << "  => routed: " << plan.ports.size() << " ports on the " << mesh.first << "x" << mesh.second
             << " mesh, DMA carriers taken from the traced blocks\n";

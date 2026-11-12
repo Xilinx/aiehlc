@@ -111,6 +111,12 @@ inline constexpr llvm::StringLiteral kDeclHaloAttr = "routing.halo";
 inline constexpr llvm::StringLiteral kDeclShimDmaAttr = "routing.shim_dma";
 inline constexpr llvm::StringLiteral kDeclLayoutTransformAttr = "routing.layout_transform";
 inline constexpr llvm::StringLiteral kDeclPpDepthAttr = "routing.pp_depth";
+// Per-port core window cap in bytes (trace-routed kernel-only ports: the traced
+// load_buffer / store_buffer block). Discardable attr on the declaring op:
+// `window_bytes` on routing.routingcreatescheduletensor, copied to
+// declare_data as `routing.window_bytes`.
+inline constexpr llvm::StringLiteral kScheduleWindowBytesAttr = "window_bytes";
+inline constexpr llvm::StringLiteral kDeclWindowBytesAttr = "routing.window_bytes";
 // Kernel round schedule on the routing func.func (see KernelTilingAttr).
 inline constexpr llvm::StringLiteral kKernelTilingAttr = "routing.kernel_tiling";
 
@@ -119,6 +125,7 @@ struct TensorRoutingInfo {
     ShimDmaAttr shimDma;             // null: no user DmaTransform
     llvm::StringRef layoutTransform; // "" when unset
     std::optional<int64_t> ppDepth;  // unset when absent
+    int64_t windowBytes = 0;         // per-port core window cap (bytes); 0 = none
 };
 using TensorRoutingInfoMap = llvm::DenseMap<int, TensorRoutingInfo>;
 
@@ -127,6 +134,9 @@ using TensorRoutingInfoMap = llvm::DenseMap<int, TensorRoutingInfo>;
 TensorRoutingInfoMap collectTensorRoutingInfo(mlir::ModuleOp moduleOp);
 // Descriptor of func arg `argIdx`, or nullptr.
 const TensorRoutingInfo *lookupTensorRoutingInfo(const TensorRoutingInfoMap &map, int argIdx);
+// Per-port core window cap of func arg `argIdx` in bytes (the traced block of a
+// trace-routed kernel-only port), or 0 when the port has none.
+int64_t lookupWindowBytes(const TensorRoutingInfoMap &map, int argIdx);
 // The map's func-arg indices in ascending order (DenseMap order is unstable).
 llvm::SmallVector<int> sortedTensorIndices(const TensorRoutingInfoMap &map);
 // The halo of func arg `argIdx`, or null.

@@ -285,6 +285,14 @@ LogicalResult computeCoreIterations(FlowLoweringCtx &c, CoreTileCtx &t, const Co
         if (maxElements > 0 && t.pingPongBufferSize > maxElements)
             t.pingPongBufferSize = maxElements;
     }
+    // Per-port window cap (trace-routed kernel-only ports): the traced block.
+    // Lockstep with the kernel pass (passblueprinttoschedulekernel.cpp).
+    if (!t.hostSpatialHaloPort && !t.kSplitSlabPort && t.elementSizeBytes > 0) {
+        const int64_t capBytes = routing::lookupWindowBytes(d.passState->tensorInfo, c.funcArgIdx);
+        const int64_t capElements = capBytes / t.elementSizeBytes;
+        if (capElements > 0 && t.pingPongBufferSize > capElements)
+            t.pingPongBufferSize = capElements;
+    }
     // numIterations: use perCorePerKRound (per-k-round data) so that
     // base iterations count one k-round. The kRounds multiplier below
     // then scales to the total across all k-rounds.

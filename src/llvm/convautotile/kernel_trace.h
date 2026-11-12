@@ -127,6 +127,10 @@ struct KernelOnlyResult {
     // Per routed kernel: the estimated time (ms) -- the conv derivation's when
     // `derived` has the kernel, else the routing cost (routingEstMs).
     std::map<std::string, double> est_ms;
+    // Per routed kernel, per port var: the traced block in bytes. TilingLinalg
+    // caps that port's core window at it (else a port whose block is smaller
+    // than its per-core slice gets one slice-sized window -> lock deadlock).
+    std::map<std::string, std::map<std::string, int64_t>> window_bytes;
 };
 
 // Kernel-only sources: analyze, derive, verify, and rewrite `src` into the

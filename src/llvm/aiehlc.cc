@@ -242,6 +242,9 @@ static std::vector<std::string> convKernelDecls;
 // The authority for per-core rounds and per-round block bytes: the tiling
 // derivation below re-derives both through the GEMM model and must agree.
 static std::map<std::string, convautotile::Derived> convDerivedByKernel;
+// Trace-routed kernel-only kernels: kernel -> port var -> traced block bytes
+// (the per-port core window cap, TensorSplitDesc::windowBytes).
+static std::map<std::string, std::map<std::string, int64_t>> traceWindowBytesByKernel;
 
 // Spatial-halo conv: the core windows and round count the GEMM-model derivation
 // produced must be the blocks the kernel loads / stores, as the conv auto-tiling
@@ -3059,6 +3062,14 @@ public:
                                 mkd.splitModel.tensorSplits.push_back(SplitModel::fromPolicyFields(
                                     pt.isInput ? 0 : 3, 0, pt.isInput ? 0 : 1, 2, pt.isInput, pt.maxBufferBytes));
                             }
+                            {
+                                auto wk = traceWindowBytesByKernel.find(currentLaunchKernel);
+                                if (wk != traceWindowBytesByKernel.end()) {
+                                    auto wp = wk->second.find(pt.varName);
+                                    if (wp != wk->second.end())
+                                        mkd.splitModel.tensorSplits.back().windowBytes = wp->second;
+                                }
+                            }
                             // Spatial-halo: mirror halo descriptor onto the just-pushed split
                             // so createroutingfuncBySplitModel produces overlapping partitions.
                             if (pt.shimDma.mode == 1 && pt.shimDma.halo_slice > 0) {
@@ -4031,6 +4042,8 @@ public:
                                 convKernelDecls.push_back(decl);
                     for (auto &kd : ko.derived)
                         convDerivedByKernel[kd.first] = kd.second;
+                    for (auto &kd : ko.window_bytes)
+                        traceWindowBytesByKernel[kd.first] = kd.second;
                 }
                 // Hand-written GemmSpaces + aie::load_buffer / store_buffer: the
                 // GemmSpaces stay the authority; the kernel's traced blocks must

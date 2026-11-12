@@ -521,6 +521,10 @@ static void attachTensorRoutingInfo(OpBuilder &builder, ArrayRef<routing::create
         const auto &split = splitModel.tensorSplits[i];
         routing::createscheduletensor decl = decls[i];
         decl.setPpDepthAttr(builder.getI64IntegerAttr(split.pingPong));
+        if (split.windowBytes > 0) {
+            decl->setAttr(routing::kScheduleWindowBytesAttr, builder.getI64IntegerAttr(split.windowBytes));
+            llvm::outs() << "[TilingLinalg] tensor_" << i << " window_bytes=" << split.windowBytes << "\n";
+        }
         if (!split.layoutTransform.empty()) {
             decl.setLayoutTransformAttr(builder.getStringAttr(split.layoutTransform));
             llvm::outs() << "[TilingLinalg] tensor_" << i << " layout_transform=" << split.layoutTransform << "\n";
