@@ -270,6 +270,9 @@ void __Runtime_pmap_print_cycles(unsigned long long *cyc, unsigned int *lines) {
 static int s_core_perf_probe_valid = 0;
 static XAie_LocType s_core_perf_probe_tile;
 static XAie_DevInst *s_core_perf_probe_dev = NULL;
+#define RT_CORE_PERF_MAX_TILES 64
+static XAie_LocType s_core_perf_tiles[RT_CORE_PERF_MAX_TILES];
+static int s_core_perf_ntiles = 0;
 
 AieRC __Runtime_core_perf_setup(XAie_DevInst *dev, XAie_LocType tile) {
     AieRC rc;
@@ -329,6 +332,49 @@ void __Runtime_core_perf_read_probe(uint32_t *active, uint32_t *vec_instr, uint3
         XAie_PerfCounterGet(dev, tile, XAIE_CORE_MOD, 2, stream_stall);
     if (lock_stall)
         XAie_PerfCounterGet(dev, tile, XAIE_CORE_MOD, 3, lock_stall);
+}
+
+/* Read the 4 core perf counters armed by __Runtime_core_perf_setup on any core tile
+ * (declared in aie_runtime.h; was never defined). Counters: 0 ACTIVE, 1 INSTR_VECTOR,
+ * 2 STREAM_STALL, 3 LOCK_STALL. NULL outputs are skipped. */
+AieRC __Runtime_core_perf_read(XAie_DevInst *dev, XAie_LocType tile, uint32_t *active, uint32_t *vec_instr,
+                               uint32_t *stream_stall, uint32_t *lock_stall) {
+    uint32_t *out[4] = {active, vec_instr, stream_stall, lock_stall};
+    if (dev == NULL)
+        return XAIE_INVALID_ARGS;
+    for (uint8_t c = 0; c < 4; c++) {
+        if (out[c] == NULL)
+            continue;
+        AieRC rc = XAie_PerfCounterGet(dev, tile, XAIE_CORE_MOD, c, out[c]);
+        if (rc != XAIE_OK)
+            return rc;
+    }
+    return XAIE_OK;
+}
+
+/* Print the core perf counters of every core tile armed at the last kernel launch
+ * (needs AIEHLC_PROFILING and AIE_DEBUG_FLAG_CORE_PERF_COUNTER in g_runtime_debug_level).
+ * One "[PERF] tag=.. tile=(c,r) ..." line per tile + one "[PERFSUM]" line. */
+void __Runtime_core_perf_report(int tag) {
+    uint32_t amax = 0, amin = 0xffffffffu;
+    unsigned long long asum = 0;
+    if (s_core_perf_ntiles == 0 || s_core_perf_probe_dev == NULL) {
+        printf("[PERF] tag=%d no core tiles armed (build with --profiling and set g_runtime_debug_level |= 0x100)\n", tag);
+        return;
+    }
+    for (int i = 0; i < s_core_perf_ntiles; i++) {
+        uint32_t a = 0, v = 0, ss = 0, ls = 0;
+        AieRC rc = __Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, &v, &ss, &ls);
+        printf("[PERF] tag=%d tile=(%u,%u) rc=%d active_cyc=%u vec_instr=%u stream_stall=%u lock_stall=%u\n", tag,
+               (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row, (int)rc, a, v, ss, ls);
+        asum += a;
+        if (a > amax)
+            amax = a;
+        if (a < amin)
+            amin = a;
+    }
+    printf("[PERFSUM] tag=%d tiles=%d active_cyc min=%u max=%u mean=%llu\n", tag, s_core_perf_ntiles, amin, amax,
+           asum / (unsigned long long)s_core_perf_ntiles);
 }
 
 void __Runtime_perfcnt_read_mm2s_probe(uint32_t *ch0, uint32_t *ch1) {
@@ -7888,9 +7934,12 @@ static void rt_kernel_profile_setup(XAie_DevInst *dev, struct_kernel_group kg) {
     }
     if (AIE_DEBUG_HAS_FLAG(g_runtime_debug_level, AIE_DEBUG_FLAG_CORE_PERF_COUNTER)) {
         int chosen = 0;
+        s_core_perf_ntiles = 0;
         for (uint32_t i = 0; i < kg.num_tiles; i++) {
             if (__Runtime_is_aie_core_tile(kg.tiles[i])) {
                 __Runtime_core_perf_setup(dev, kg.tiles[i]);
+                if (s_core_perf_ntiles < RT_CORE_PERF_MAX_TILES)
+                    s_core_perf_tiles[s_core_perf_ntiles++] = kg.tiles[i];
                 if (!chosen) {
                     s_core_perf_probe_tile = kg.tiles[i];
                     s_core_perf_probe_valid = 1;

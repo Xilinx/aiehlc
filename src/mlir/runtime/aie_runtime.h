@@ -473,6 +473,7 @@ AieRC __Runtime_core_perf_setup(XAie_DevInst *dev, XAie_LocType tile);
 AieRC __Runtime_core_perf_read(XAie_DevInst *dev, XAie_LocType tile, uint32_t *active, uint32_t *vec_instr,
                                uint32_t *stream_stall, uint32_t *lock_stall);
 int __Runtime_core_perf_probe_valid(void);
+void __Runtime_core_perf_report(int tag);
 void __Runtime_core_perf_read_probe(uint32_t *active, uint32_t *vec_instr, uint32_t *stream_stall,
                                     uint32_t *lock_stall);
 void __Runtime_perfcnt_read_mm2s_probe(uint32_t *ch0, uint32_t *ch1);
