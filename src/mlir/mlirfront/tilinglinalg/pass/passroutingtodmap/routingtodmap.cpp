@@ -202,7 +202,28 @@ std::optional<TileListRoutingMap> GetSeqPath(
                 const Point& nextPoint = branch[i+1];
                 int portNum;
                 PortDirection slaveDirOnNext, masterDirOnCurrent;
-                if (!router_.occupyLink(currentPoint, nextPoint, dioid, portNum, masterDirOnCurrent, slaveDirOnNext)) {
+                // Packet-gather tail same-side turn (see passdmaphoptoroutinghw
+                // GetSeqPath, M3 probe14 2026-11-11): AIE2/2PS core tiles only
+                // connect WEST i -> WEST i, so force the input port index or
+                // fail the build instead of silently dropping packets.
+                bool sameSideTurn = lastPkttilemap && currentPoint == lastPkttilemap->tile &&
+                                    lastPkttilemap->pktconn.SlaveReceiveForwardDirection != PortDirection::NONE &&
+                                    getDir(currentPoint, nextPoint) ==
+                                        lastPkttilemap->pktconn.SlaveReceiveForwardDirection;
+                if (sameSideTurn) {
+                    portNum = lastPkttilemap->pktconn.SlaveReceiveForwardDirectionPortIdx;
+                    if (!router_.occupyLinkAtPort(currentPoint, nextPoint, dioid, portNum, masterDirOnCurrent,
+                                                  slaveDirOnNext)) {
+                        llvm::report_fatal_error(llvm::Twine("aiehlc routing: packet-gather tail at tile (row ") +
+                                                 llvm::Twine(currentPoint.r) + ", col " + llvm::Twine(currentPoint.c) +
+                                                 ") turns back to its input side " +
+                                                 PortDirectiontoString(slaveDirOnNext) + " and port index " +
+                                                 llvm::Twine(portNum) +
+                                                 " is taken; a same-side turn needs equal port numbers");
+                    }
+                    std::cout << "[GetSeqPath] same-side turn at (" << currentPoint.r << "," << currentPoint.c
+                              << ") -> forced port " << portNum << std::endl;
+                } else if (!router_.occupyLink(currentPoint, nextPoint, dioid, portNum, masterDirOnCurrent, slaveDirOnNext)) {
                     llvm::report_fatal_error("Failed to occupy link in routing topology.");
                 }
 
