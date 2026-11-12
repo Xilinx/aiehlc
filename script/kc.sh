@@ -541,8 +541,30 @@ if [[ "$use_llvm_aie" != "true" ]]; then
 
     # Step 3: xchessmk -> kernel ELF
     dbg_echo $chess_elf_compiler +o "$output_dir" "$prx_file"
-    $chess_elf_compiler +o "$output_dir" "$prx_file"
-    if [ $? -ne 0 ]; then
+    # Exit status kept with "|| rc=$?": callers run under set -e.
+    _mk_rc=0
+    $chess_elf_compiler +o "$output_dir" "$prx_file" > "$output_dir/xchessmk.log" 2>&1 || _mk_rc=$?
+    cat "$output_dir/xchessmk.log"
+    # Kernel statics (.data/.bss) are not in aiehlc's DM budget: the BCF reserves
+    # a 32 KB stack at 0x70000 and the port buffers sit above it, so a kernel with
+    # large statics (e.g. flash-attention, 18 KB) fails to link with "could not
+    # find free space ... in memory DMb". Shrink the BCF stack to
+    # AIEHLC_DM_MIN_STACK (default 4 KB) and link once more; hostcompile's
+    # check_kernel_stack then checks chess's stack bound against the new size.
+    if [ $_mk_rc -ne 0 ] && grep -q "could not find free space for SpaceSymbol .* in memory DM" "$output_dir/xchessmk.log"; then
+        _bcfname=$(sed -nE 's/.*id="bridge.cfg" value="([^"]+)".*/\1/p' "$prx_file" | head -1)
+        _bcf="$(dirname "$prx_file")/${_bcfname:-aieml.bcf}"
+        _st=$(awk '$1=="_stack"{print strtonum($4); exit}' "$_bcf" 2>/dev/null)
+        _min=$(( ${AIEHLC_DM_MIN_STACK:-0x1000} ))
+        if [ -n "$_st" ] && [ "$_st" -gt "$_min" ]; then
+            echo "[kc.sh] kernel statics do not fit next to the ${_st} B core stack; relinking with a ${_min} B stack (AIEHLC_DM_MIN_STACK)"
+            sed -i -E "s/^(_stack[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+)[^[:space:]]+/\1$(printf '0x%x' "$_min")/" "$_bcf"
+            _mk_rc=0
+            $chess_elf_compiler +o "$output_dir" "$prx_file" > "$output_dir/xchessmk.log" 2>&1 || _mk_rc=$?
+            cat "$output_dir/xchessmk.log"
+        fi
+    fi
+    if [ $_mk_rc -ne 0 ]; then
         echo "Error: xchessmk ELF linking failed"
         return 1
     fi
