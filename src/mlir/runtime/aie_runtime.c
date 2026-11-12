@@ -273,6 +273,25 @@ static XAie_DevInst *s_core_perf_probe_dev = NULL;
 #define RT_CORE_PERF_MAX_TILES 64
 static XAie_LocType s_core_perf_tiles[RT_CORE_PERF_MAX_TILES];
 static int s_core_perf_ntiles = 0;
+/* Snapshot of ACTIVE / LOCK_STALL taken right before the first DMA start of a launch, so the
+ * report can separate "core enabled, host still configuring BDs / flushing inputs" from the
+ * on-array run (the kernel group is enabled before the host writes BDs and starts IO). */
+static uint32_t s_core_perf_snap_a[RT_CORE_PERF_MAX_TILES];
+static uint32_t s_core_perf_snap_ls[RT_CORE_PERF_MAX_TILES];
+static int s_core_perf_snap_pending = 0;
+static int s_core_perf_snap_valid = 0;
+__attribute__((unused)) static void rt_core_perf_snap_at_startio(void) {
+    if (!s_core_perf_snap_pending || s_core_perf_probe_dev == NULL)
+        return;
+    s_core_perf_snap_pending = 0;
+    for (int i = 0; i < s_core_perf_ntiles; i++) {
+        s_core_perf_snap_a[i] = 0;
+        s_core_perf_snap_ls[i] = 0;
+        (void)XAie_PerfCounterGet(s_core_perf_probe_dev, s_core_perf_tiles[i], XAIE_CORE_MOD, 0, &s_core_perf_snap_a[i]);
+        (void)XAie_PerfCounterGet(s_core_perf_probe_dev, s_core_perf_tiles[i], XAIE_CORE_MOD, 3, &s_core_perf_snap_ls[i]);
+    }
+    s_core_perf_snap_valid = 1;
+}
 
 AieRC __Runtime_core_perf_setup(XAie_DevInst *dev, XAie_LocType tile) {
     AieRC rc;
@@ -367,6 +386,10 @@ void __Runtime_core_perf_report(int tag) {
         AieRC rc = __Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, &v, &ss, &ls);
         printf("[PERF] tag=%d tile=(%u,%u) rc=%d active_cyc=%u vec_instr=%u stream_stall=%u lock_stall=%u\n", tag,
                (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row, (int)rc, a, v, ss, ls);
+        if (s_core_perf_snap_valid)
+            printf("[PERFIO] tag=%d tile=(%u,%u) pre_io_active=%u pre_io_lock_stall=%u io_active=%u io_lock_stall=%u\n",
+                   tag, (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row, s_core_perf_snap_a[i],
+                   s_core_perf_snap_ls[i], a - s_core_perf_snap_a[i], ls - s_core_perf_snap_ls[i]);
         asum += a;
         if (a > amax)
             amax = a;
@@ -6762,6 +6785,9 @@ void __Runtime_dma_channel_enable_ooo(XAie_DevInst *dev, XAie_LocType tile, int3
  */
 struct_ioevent __Runtime_startio(XAie_DevInst *dev, struct_io io, int32_t bd_id, int32_t repeat) {
     rt_dsync_drain_inputs(); /* CPU-written launch args clean before any DMA starts */
+#if AIEHLC_PROFILING
+    rt_core_perf_snap_at_startio();
+#endif
     unsigned long long __sio_t0 = RT_PROF_TIC();
     struct_ioevent evt;
     evt.io = io;
@@ -7935,6 +7961,8 @@ static void rt_kernel_profile_setup(XAie_DevInst *dev, struct_kernel_group kg) {
     if (AIE_DEBUG_HAS_FLAG(g_runtime_debug_level, AIE_DEBUG_FLAG_CORE_PERF_COUNTER)) {
         int chosen = 0;
         s_core_perf_ntiles = 0;
+        s_core_perf_snap_pending = 1;
+        s_core_perf_snap_valid = 0;
         for (uint32_t i = 0; i < kg.num_tiles; i++) {
             if (__Runtime_is_aie_core_tile(kg.tiles[i])) {
                 __Runtime_core_perf_setup(dev, kg.tiles[i]);
