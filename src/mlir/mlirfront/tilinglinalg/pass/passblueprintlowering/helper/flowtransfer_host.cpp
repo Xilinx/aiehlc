@@ -246,6 +246,26 @@ LogicalResult FlowTransferConversion::computeShimBdParams(FlowLoweringCtx &c) co
             c.ooPingPongSize = chosen;
         }
     }
+    // Per-port window cap (trace-routed kernel-only ports): the core MM2S sends
+    // one packet per traced block (window_bytes, see computeCoreIterations), so
+    // the OOO gather must take one block per round too. Without it a y port with
+    // 2 KB windows x 20 rounds met shim BDs of 20 KB x 2 rounds -> the core MM2S
+    // stalls on the stream and the row-broadcast inputs back up (probe24).
+    if (!ooSpatialOutSlab && c.ooElementSizeBytes > 0) {
+        const int64_t capElements =
+            routing::lookupWindowBytes(passState->tensorInfo, traceFlowConfigToFuncArgIndex(c.shimFlowConfig)) /
+            c.ooElementSizeBytes;
+        if (capElements > 0 && c.ooPingPongSize > capElements) {
+            if (c.ooPerCoreElements % capElements != 0) {
+                op.emitError("OOO iteration: perCoreElements (")
+                    << c.ooPerCoreElements << ") not divisible by the traced window (" << capElements << " elems)";
+                return failure();
+            }
+            llvm::errs() << "[BlueprintToSchedule] OOO gather: per-round " << c.ooPingPongSize << " -> "
+                         << capElements << " elems (traced window)\n";
+            c.ooPingPongSize = capElements;
+        }
+    }
     if (c.ooPerCoreElements % c.ooPingPongSize != 0) {
         op.emitError("OOO iteration: perCoreElements (")
             << c.ooPerCoreElements << ") not divisible by pingPongSize (" << c.ooPingPongSize << ")";

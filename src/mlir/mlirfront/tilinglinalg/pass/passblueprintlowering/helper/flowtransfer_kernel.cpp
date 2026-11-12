@@ -711,6 +711,16 @@ void emitCoreBufferAlloc(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitD
             if (maxElements > 0 && kernelBufElements > maxElements)
                 kernelBufElements = maxElements;
         }
+        // Per-port window cap (trace-routed kernel-only ports, see computeCoreIterations):
+        // the core never holds more than the traced block, so don't reserve the
+        // whole per-core slice (GN+SiLU 32x32: y slice 20 KB vs 2 KB window
+        // exhausted the buffer region). kernel.cc declares max(memref, slot).
+        if (!t.hostSpatialHaloPort && !t.kSplitSlabPort && t.elementSizeBytes > 0 && d.passState) {
+            const int64_t capElements =
+                routing::lookupWindowBytes(d.passState->tensorInfo, c.funcArgIdx) / t.elementSizeBytes;
+            if (capElements > 0 && kernelBufElements > capElements)
+                kernelBufElements = capElements;
+        }
         if (kernelBufElements < t.pingPongBufferSize)
             kernelBufElements = t.pingPongBufferSize;
         uint32_t bufSizeBytes = ((kernelBufElements * t.elementSizeBytes) + 3) & ~3;
@@ -737,6 +747,19 @@ void emitCoreBufferAlloc(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEmitD
         } catch (...) {
             // ResourceMgr singleton not initialized; fall back to relative offsets
         }
+        // The allocator only warns on overflow; going on would program the core
+        // BDs at DM offset 0 while the linker places the unpinned buffer
+        // elsewhere -> silent lock deadlock on the board (probe23).
+        bool haveAllocator = true;
+        try {
+            (void)ResourceMgr::instance();
+        } catch (...) {
+            haveAllocator = false;
+        }
+        if (haveAllocator && !c.flowAddrsValid)
+            llvm::report_fatal_error(llvm::Twine("core buffer ") + pingName + " (" + llvm::Twine(bufSizeBytes) +
+                                     " B x " + llvm::Twine(t.ppDepth == 1 ? 1 : 2) +
+                                     ") does not fit the core port-buffer region (CoreMemAllocator)");
     }
     if (c.flowAddrsValid) {
         t.pingL1Offset = c.flowPingL1Offset;
