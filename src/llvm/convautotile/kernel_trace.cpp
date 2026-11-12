@@ -303,10 +303,27 @@ static inline unsigned get_coreid() { return ((unsigned)aiehlc_trace::g_p1 << 16
 static inline void klog(const char *, int) {}
 )HARNESS";
 
+// The source's AIEHLC_KERNEL_PROLOGUE_BEGIN/END block (file-scope helpers the
+// kernel body calls). aiehlc.cc carries it into the AIE kernel; the trace harness
+// needs it too or the body does not compile. A prologue that uses AIE-only code
+// (intrinsics, chess pragmas) guards it with #if defined(__chess__) and gives
+// x86 stubs in the #else branch: only the load/store_buffer pattern is traced.
+static std::string sourcePrologue(const std::string &src) {
+    std::istringstream is(src);
+    std::string line, out;
+    bool in = false;
+    while (std::getline(is, line)) {
+        if (line.find("AIEHLC_KERNEL_PROLOGUE_BEGIN") != std::string::npos) { in = true; continue; }
+        if (line.find("AIEHLC_KERNEL_PROLOGUE_END") != std::string::npos) { in = false; continue; }
+        if (in) out += line + "\n";
+    }
+    return out;
+}
+
 std::string buildHarness(const std::string &src, const TraceKernel &k, const std::string &prelude,
                          const std::string &srcName) {
     std::ostringstream os;
-    os << kHarnessRuntime << "\n" << prelude << "\n";
+    os << kHarnessRuntime << "\n" << prelude << "\n" << sourcePrologue(src) << "\n";
     os << "static void aiehlc_kernel(";
     for (size_t i = 0; i < k.ports.size(); i++)
         os << (i ? ", " : "") << "aiehlc_trace::Port &" << k.ports[i].var;

@@ -299,6 +299,22 @@ static bool checkConvTilingAgainstAnalysis(const std::string &kernel, const Deri
 // undocumented address_space number the frontend happens to use.
 static std::string userKernelPrologue;
 
+// Text prepended to the user's __global__ body in the tiling / multi-kernel
+// paths: the user's #define lines, then the AIEHLC_KERNEL_PROLOGUE block
+// (file-scope helpers, static scratch arrays, ...). Before 2026-11-12 only the
+// macros were carried here, so a prologue was silently dropped in these paths.
+static std::string userMacroAndPrologueBlock() {
+    std::string out;
+    if (!userMacroDefines.empty()) {
+        out = "// User macro definitions from source file\n";
+        for (const auto &macro : userMacroDefines) out += macro + "\n";
+        out += "\n";
+    }
+    if (!userKernelPrologue.empty())
+        out += "// User kernel prologue from source file (AIEHLC_KERNEL_PROLOGUE_BEGIN/END)\n" + userKernelPrologue + "\n";
+    return out;
+}
+
 using namespace clang;
 using namespace clang::tooling;
 
@@ -5258,14 +5274,8 @@ public:
 
                     // Prepend user macros to kernel body
                     std::string kernelBodyWithMacros = resolvedBody;
-                    if (!userMacroDefines.empty() && !resolvedBody.empty()) {
-                        std::string macroBlock = "// User macro definitions from source file\n";
-                        for (const auto &macro : userMacroDefines) {
-                            macroBlock += macro + "\n";
-                        }
-                        macroBlock += "\n";
-                        kernelBodyWithMacros = macroBlock + resolvedBody;
-                    }
+                    if (!resolvedBody.empty())
+                        kernelBodyWithMacros = userMacroAndPrologueBlock() + resolvedBody;
 
                     // First kernel writes host.cc fresh; subsequent kernels append
                     bool appendMode = (ki > 0);
@@ -5959,14 +5969,8 @@ public:
 
                 // Prepend user macros to kernel body for multi-tile path
                 std::string kernelBodyWithMacros = singleKernelBody;
-                if (!userMacroDefines.empty() && !singleKernelBody.empty()) {
-                    std::string macroBlock = "// User macro definitions from source file\n";
-                    for (const auto &macro : userMacroDefines) {
-                        macroBlock += macro + "\n";
-                    }
-                    macroBlock += "\n";
-                    kernelBodyWithMacros = macroBlock + singleKernelBody;
-                }
+                if (!singleKernelBody.empty())
+                    kernelBodyWithMacros = userMacroAndPrologueBlock() + singleKernelBody;
 
                 // Port var names (indexed by tensor order) for IR-sourced builtin
                 // resolution (get_arg_per_round_size_in_dim) inside runPipeline.
