@@ -8,6 +8,7 @@
 //====================================================================
 #include "hw/ResourceManager.h"
 #include <iostream>
+#include <cstdlib>
 #include <algorithm> 
 // ── global DataIO id init ──
 std::atomic<int> DataIO::next_{0};
@@ -48,8 +49,31 @@ std::optional<uint32_t> CoreMemAllocator::allocate(const std::string &name, uint
     // Align nextFree_ up to the requested alignment
     uint32_t aligned = (nextFree_ + alignment - 1) & ~(alignment - 1);
     if (aligned + size > baseAddr_ + totalSize_) {
+        // Default layout keeps a 32 KB stack at [0x70000, 0x78000) although most kernels
+        // need far less (GN+SiLU 512 B, vec8 192 B per kernel.calltree). Instead of failing,
+        // take the space from the top of the stack: place the buffer just below the current
+        // area start. The BCF stack becomes [0x70000, baseAddr_) and the kernel build checks
+        // the chess "Maximum stack size" against it (script/hostcompile.sh). Not done when
+        // AIEHLC_DM_BUF_BASE pins the layout, or below kStackBase + minStack.
+        constexpr uint32_t kStackBase = 0x70000;
+        uint32_t minStack = 0x1000;
+        if (const char *ms = std::getenv("AIEHLC_DM_MIN_STACK"); ms && *ms)
+            minStack = static_cast<uint32_t>(std::strtoul(ms, nullptr, 0));
+        const char *pinned = std::getenv("AIEHLC_DM_BUF_BASE");
+        uint32_t below = baseAddr_ >= size ? ((baseAddr_ - size) & ~(alignment - 1)) : 0;
+        if ((!pinned || !*pinned) && below >= kStackBase + minStack) {
+            std::cerr << "CoreMemAllocator: \"" << name << "\" (" << size << " B) placed at 0x" << std::hex
+                      << below << " below the buffer area; core stack shrinks to 0x" << (below - kStackBase)
+                      << std::dec << " B" << std::endl;
+            allocations_.push_back({name, below, size, ownerId});
+            totalSize_ += baseAddr_ - below;
+            baseAddr_ = below;
+            return below;
+        }
         std::cerr << "CoreMemAllocator: out of memory for \"" << name << "\" (need " << size << " bytes, "
-                  << (baseAddr_ + totalSize_ - aligned) << " available)" << std::endl;
+                  << (baseAddr_ + totalSize_ - aligned) << " available above, "
+                  << (baseAddr_ > kStackBase + minStack ? baseAddr_ - kStackBase - minStack : 0)
+                  << " below down to a " << minStack << " B stack)" << std::endl;
         return std::nullopt;
     }
     allocations_.push_back({name, aligned, size, ownerId});
