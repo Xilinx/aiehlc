@@ -894,6 +894,11 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
             if (info && info->ppDepth)
                 ppDepth = static_cast<int>(*info->ppDepth);
             uint32_t bufSize = (maxPingPongBytes > 0) ? maxPingPongBytes : 4096;
+            // A trace-routed port's core window is capped at its traced block
+            // (routing.window_bytes, see computeCoreIterations / window_init),
+            // so charge that instead of the kernel-wide maximum.
+            if (info && info->windowBytes > 0 && static_cast<uint64_t>(info->windowBytes) < bufSize)
+                bufSize = static_cast<uint32_t>(info->windowBytes);
             totalBufferBytes += ppDepth * bufSize;
         }
 
