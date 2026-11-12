@@ -6969,29 +6969,88 @@ struct_ioevent _Runtime_startio_ooo(XAie_DevInst *dev, struct_io io, int32_t bd_
 static unsigned g_elf_load_seq;
 
 #if !defined(__AIESIM__)
-static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc, const unsigned char *elfmem) {
+/* True if [lo, hi) is fully covered by the kernel's DMA port buffers, i.e. by
+ * symbols aiehlc emits as buf_in_ping_N / buf_in_pong_N / buf_out_ping_N /
+ * buf_out_pong_N (passblueprinttoschedulekernel.cpp, flowtransfer_kernel.cpp).
+ * Port buffers are always written (by the DMA or by the core) before they are
+ * read, so zero-filling them on load is wasted MMIO. Anything else in .bss
+ * (kernel statics, klog, runtime state) may rely on C zero-init. If the ELF
+ * has no symbol table, or any byte of the range is not a port buffer, this
+ * returns 0 and the caller zero-fills the segment as before (safe fallback). */
+static int __Runtime_elf_range_is_port_bufs(const unsigned char *elfmem, u32 lo, u32 hi) {
+    const Elf32_Ehdr *ehdr = (const Elf32_Ehdr *)elfmem;
+    if (ehdr->e_shoff == 0U || ehdr->e_shnum == 0U || ehdr->e_shentsize != sizeof(Elf32_Shdr))
+        return 0;
+    const Elf32_Shdr *sh = (const Elf32_Shdr *)(elfmem + ehdr->e_shoff);
+    const Elf32_Shdr *symsh = NULL;
+    for (u32 i = 0; i < ehdr->e_shnum; i++) {
+        if (sh[i].sh_type == (u32)SHT_SYMTAB) {
+            symsh = &sh[i];
+            break;
+        }
+    }
+    if (!symsh || symsh->sh_entsize != sizeof(Elf32_Sym) || symsh->sh_link >= ehdr->e_shnum)
+        return 0;
+    const Elf32_Sym *sym = (const Elf32_Sym *)(elfmem + symsh->sh_offset);
+    const char *strtab = (const char *)(elfmem + sh[symsh->sh_link].sh_offset);
+    const u32 nsym = symsh->sh_size / (u32)sizeof(Elf32_Sym);
+    u32 cur = lo;
+    while (cur < hi) {
+        u32 best_end = cur;
+        for (u32 k = 0; k < nsym; k++) {
+            const u32 a = sym[k].st_value, e = sym[k].st_value + sym[k].st_size;
+            if (sym[k].st_size == 0U || a > cur || e <= best_end)
+                continue;
+            const char *n = strtab + sym[k].st_name;
+            if (strncmp(n, "buf_in_ping_", 12) != 0 && strncmp(n, "buf_in_pong_", 12) != 0 &&
+                strncmp(n, "buf_out_ping_", 13) != 0 && strncmp(n, "buf_out_pong_", 13) != 0)
+                continue;
+            best_end = e;
+        }
+        if (best_end == cur)
+            return 0; /* a gap that is not a port buffer */
+        cur = best_end;
+    }
+    return 1;
+}
+
+/* mode 1: skip every zero-filled (.bss-only) segment (unsafe if the kernel
+ *         reads a zero-initialised static before writing it).
+ * mode 2: skip only .bss segments made entirely of DMA port buffers; all other
+ *         .bss is still zero-filled. */
+static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc, const unsigned char *elfmem,
+                                             int mode) {
     g_elf_load_seq++;
     const Elf32_Ehdr *ehdr = (const Elf32_Ehdr *)elfmem;
-    u32 skipped = 0, loaded = 0;
+    u32 skipped = 0, loaded = 0, skipped_bytes = 0, zfill_bytes = 0;
     for (u32 ph = 0; ph < ehdr->e_phnum; ph++) {
         const Elf32_Phdr *phdr = (const Elf32_Phdr *)(elfmem + ehdr->e_phoff + (u64)ph * sizeof(Elf32_Phdr));
         if (phdr->p_type != (u32)PT_LOAD)
             continue;
-        if (phdr->p_filesz == 0U) {
+        if (phdr->p_filesz == 0U &&
+            (mode == 1 || __Runtime_elf_range_is_port_bufs(elfmem, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz))) {
             skipped++;
+            skipped_bytes += phdr->p_memsz;
             continue;
         }
+        if (phdr->p_memsz > phdr->p_filesz)
+            zfill_bytes += phdr->p_memsz - phdr->p_filesz;
         AieRC rc = XAie_LoadElfSection(dev, loc, elfmem + phdr->p_offset, phdr);
         if (rc != XAIE_OK)
             return rc;
         loaded++;
     }
-    AIEHLC_LOG(printf("[aie_runtime] skip-bss load: %u segs loaded, %u bss segs skipped\n", loaded, skipped));
+    AIEHLC_LOG(printf("[aie_runtime] skip-bss(mode %d) load: %u segs loaded (%u B zero-filled), %u bss segs skipped "
+                      "(%u B)\n",
+                      mode, loaded, zfill_bytes, skipped, skipped_bytes));
     return XAIE_OK;
 }
 #endif
 
 #if !defined(__AIESIM__)
+/* 0 = zero-fill all .bss (XAie_LoadElfMem), 1 = skip all .bss, 2 = skip only
+ * port-buffer .bss. Build default -DAIEHLC_SKIP_BSS_DEFAULT=<n> (aiehlc.sh
+ * --skip-bss / --skip-port-bss), else env AIEHLC_SKIP_BSS=0|1|2|ports. */
 static int __Runtime_skip_bss_enabled(void) {
 #if defined(AIEHLC_SKIP_BSS_DEFAULT)
     return (AIEHLC_SKIP_BSS_DEFAULT);
@@ -6999,7 +7058,12 @@ static int __Runtime_skip_bss_enabled(void) {
     static int s_skip_bss = -1;
     if (s_skip_bss < 0) {
         const char *e = getenv("AIEHLC_SKIP_BSS");
-        s_skip_bss = (e && e[0] && e[0] != '0') ? 1 : 0;
+        if (!e || !e[0] || e[0] == '0')
+            s_skip_bss = 0;
+        else if (e[0] == '2' || e[0] == 'p')
+            s_skip_bss = 2;
+        else
+            s_skip_bss = 1;
     }
     return s_skip_bss;
 #endif
@@ -7009,8 +7073,9 @@ static int __Runtime_skip_bss_enabled(void) {
 static void __Runtime_load_kernel_elf(XAie_DevInst *dev, XAie_LocType loc, unsigned char *elfmem) {
     g_elf_load_seq++;
 #if !defined(__AIESIM__)
-    if (__Runtime_skip_bss_enabled()) {
-        __Runtime_load_elf_mem_skip_bss(dev, loc, elfmem);
+    const int skip_mode = __Runtime_skip_bss_enabled();
+    if (skip_mode) {
+        __Runtime_load_elf_mem_skip_bss(dev, loc, elfmem, skip_mode);
         return;
     }
 #endif

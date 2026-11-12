@@ -20,12 +20,13 @@ run_cmd() {
 }
 
 usage() {
-    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss]"
+    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss]"
     echo "  --platform    baremetal (default) | sim | linux | baremetal_debug"
     echo "                'baremetal_debug' builds a baremetal ELF and writes sim_config.sh so the debug"
     echo "                UI can run either a hardware test or a simulator run from one build."
     echo "  --profiling   build the host with the PMU profiling layer (-DAIEHLC_PROFILING=1)"
-    echo "  --skip-bss    skip .bss zero-init on kernel load (-DAIEHLC_SKIP_BSS_DEFAULT=1)"
+    echo "  --skip-bss    skip ALL .bss zero-init on kernel load (-DAIEHLC_SKIP_BSS_DEFAULT=1; unsafe if the kernel reads zeroed statics)"
+    echo "  --skip-port-bss  skip zero-init only for DMA port-buffer .bss (buf_in_*/buf_out_*), keep it for the rest (-DAIEHLC_SKIP_BSS_DEFAULT=2)"
     return 1
 }
 
@@ -254,6 +255,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --profiling)
             PROFILING=1
+            shift
+            ;;
+        --skip-port-bss)
+            SKIP_BSS=2
             shift
             ;;
         --skip-bss)
@@ -556,8 +561,8 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
 
     # Run hostcompile.sh with WORKLOCAL_DIR pointing at aout/worklocal.
     hc_extra_defs="${EXTRA_DEFS:-}"
-    if [ "${SKIP_BSS}" -eq 1 ]; then
-        hc_extra_defs="${hc_extra_defs} -DAIEHLC_SKIP_BSS_DEFAULT=1"
+    if [ "${SKIP_BSS}" -ne 0 ]; then
+        hc_extra_defs="${hc_extra_defs} -DAIEHLC_SKIP_BSS_DEFAULT=${SKIP_BSS}"
     fi
     WORKLOCAL_DIR="${WORKLOCAL_DIR}" AIE_VERSION="${aie_version}" PLATFORM="${platform}" \
         SIM_TILES="${SIM_TILES:-}" DEBUG_SYMS="${DEBUG_SYMS}" \
