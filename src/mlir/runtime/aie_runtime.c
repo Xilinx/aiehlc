@@ -2973,12 +2973,64 @@ void __Runtime_buffer_device_written(void *ptr, size_t size) {
     g_devwr_n++;
 }
 
+/* Device-only ranges: the CPU neither writes nor reads them after registration,
+ * so no line of them can be dirty (cleaned here, never written since) and no
+ * stale clean line can be consumed (the CPU does not read; the non-coherent DMA
+ * reads DDR). A launch arg inside one needs no maintenance at all. This is the
+ * "weights CIVAC once at load" + "device-only activation arena" class from
+ * steve/tasks/2026-11-13_launch-arg-cache-maintenance-price.md. */
+#define RT_DEVONLY_MAX 8
+static struct {
+    uintptr_t lo, hi;
+} g_devonly[RT_DEVONLY_MAX];
+static int g_devonly_n;
+static unsigned long long g_devonly_skip_bytes;
+
+int __Runtime_buffer_device_only(void *ptr, size_t size) {
+    if (!ptr || !size)
+        return -1;
+    uintptr_t lo = (uintptr_t)ptr, hi = lo + size;
+    if (hi < lo)
+        return -1;
+    int i = 0;
+    while (i < g_devonly_n && !(g_devonly[i].lo == lo && g_devonly[i].hi == hi))
+        i++;
+    if (i == g_devonly_n && g_devonly_n == RT_DEVONLY_MAX) {
+        printf("[aie_runtime] buffer_device_only: table full; %p keeps per-launch clean\n", ptr);
+        return -1;
+    }
+    /* Clean BEFORE the range is published: a launch that sees it registered may
+     * skip its maintenance, so no dirty line may exist at that point. Also done
+     * on a repeat registration (the caller wrote it again). */
+    Xil_DCacheFlushRange((UINTPTR)ptr, size);
+    if (i == g_devonly_n) {
+        g_devonly[i].lo = lo;
+        g_devonly[i].hi = hi;
+        g_devonly_n++;
+    }
+    return 0;
+}
+
+unsigned long long __Runtime_buffer_device_only_skipped(void) { return g_devonly_skip_bytes; }
+
+static int rt_devonly_covers(uintptr_t lo, uintptr_t hi) {
+    for (int i = 0; i < g_devonly_n; i++)
+        if (lo >= g_devonly[i].lo && hi <= g_devonly[i].hi)
+            return 1;
+    return 0;
+}
+
 void __Runtime_buffer_forget(void *ptr) {
     int k = 0;
     for (int i = 0; i < g_devwr_n; i++)
         if (g_devwr[i].lo != (uintptr_t)ptr)
             g_devwr[k++] = g_devwr[i];
     g_devwr_n = k;
+    k = 0;
+    for (int i = 0; i < g_devonly_n; i++)
+        if (g_devonly[i].lo != (uintptr_t)ptr)
+            g_devonly[k++] = g_devonly[i];
+    g_devonly_n = k;
 }
 
 static int rt_devwr_covers(uintptr_t lo, uintptr_t hi) {
@@ -3046,6 +3098,10 @@ void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size) 
 #endif
     if (!ptr || !size)
         return;
+    if (rt_devonly_covers((uintptr_t)ptr, (uintptr_t)ptr + size)) {
+        g_devonly_skip_bytes += size; /* cleaned at registration; CPU has not touched it since */
+        return;
+    }
     if (!dev || g_dsync_n == RT_DSYNC_MAX) {
         __Runtime_sync_for_dev(dev, ptr, size);
         return;

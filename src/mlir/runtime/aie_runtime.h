@@ -1006,7 +1006,19 @@ void __Runtime_dsync_drain(void);
 // afterwards its deferred maintenance is invalidate-only and may overlap the
 // launch's own DMA.
 void __Runtime_buffer_device_written(void *ptr, size_t size);
-// Drop a __Runtime_buffer_device_written registration (call before freeing it).
+// Contract: after this call the CPU neither writes NOR reads [ptr, ptr+size)
+// until __Runtime_buffer_forget(ptr): the array is its only user (weights after
+// load, device-written/device-read activation arenas). Cleans+invalidates it
+// ONCE now; afterwards __Runtime_sync_for_dev_deferred does no maintenance at
+// all for a launch arg contained in it. Call AFTER the last CPU write (calling
+// it again on the same range = "I wrote it again", cleans again). Explicit
+// __Runtime_sync_for_dev/_for_cpu still do their work (debug reads, reloads).
+// Returns 0, or -1 (bad args / table full: the range keeps per-launch CIVAC).
+int __Runtime_buffer_device_only(void *ptr, size_t size);
+// Bytes of launch-arg maintenance skipped because of device_only (stats).
+unsigned long long __Runtime_buffer_device_only_skipped(void);
+// Drop a __Runtime_buffer_device_written or _device_only registration whose
+// range starts at ptr (call before freeing it or handing it back to the CPU).
 void __Runtime_buffer_forget(void *ptr);
 // Allocate a CPU-written DMA buffer (<= 2 MB) mapped Normal Non-cacheable: the
 // CPU's stores reach DDR directly and launches skip its cache maintenance. Falls
