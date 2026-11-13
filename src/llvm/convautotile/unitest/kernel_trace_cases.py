@@ -155,6 +155,18 @@ GEMM_CASES = [
     ("gemm: input block unique per core",
      [(LOAD_B, "aie::load_buffer(b, {pn * 16, pm * 64}, {16, 64})")],
      "unique per core"),
+    # example/other/aiehlcpm_gemm1.cc: the mesh macros come from an <angle>
+    # include, which used to be skipped -> "no device.partition(...) found".
+    ("gemm: mesh ROWS/COLS from an #include <header> macro",
+     [('#include "simpleconv2d_new_load.h"', "#include <simplegemm_load.h>"),
+      ("device.partition({3, 6, 0, 6}, 4, 4)", "device.partition({3, 6, 0, 6}, HW_ROWS, HW_COLS)")],
+     None),
+    ("gemm: mesh ROWS is an undefined macro",
+     [("device.partition({3, 6, 0, 6}, 4, 4)", "device.partition({3, 6, 0, 6}, MY_ROWS, 4)")],
+     "ROWS `MY_ROWS` is not an integer constant expression -- no `#define MY_ROWS`"),
+    ("gemm: window passed by value",
+     [("aie::port<input_window_int8 *, aie::IFM", "aie::port<input_window_int8, aie::IFM")],
+     "port a: the window type must be a pointer"),
 ]
 
 

@@ -73,14 +73,15 @@ std::vector<std::string> kernelTUDecls(const KernelDesugar &k);
 
 // Source-text helpers (shared with kernel_trace.cpp): comments blanked with
 // offsets preserved, bracket matching, whole-token search, the source's
-// object-like integer macros (and its quoted headers'), integer expression
+// object-like integer macros (and those of the headers it includes from its own directory), integer expression
 // evaluation over them, and the launch mesh of `device.partition({..}, R, C)`.
 std::string sourceBlankComments(const std::string &s);
 size_t sourceMatchClose(const std::string &s, size_t open, char o, char c);
 size_t sourceFindToken(const std::string &s, const std::string &word, size_t from);
 std::map<std::string, std::string> sourceMacros(const std::string &src, const std::string &srcDir);
 bool sourceEvalInt(const std::string &expr, const std::map<std::string, std::string> &macros, long &v);
-std::pair<int, int> sourceLaunchMesh(const std::string &src, const std::string &srcDir);
+// 0x0 when unresolved; `why` (optional) then says what was missing.
+std::pair<int, int> sourceLaunchMesh(const std::string &src, const std::string &srcDir, std::string *why = nullptr);
 
 // A hand-written `constexpr aie::GemmSpace <name> = {...};` of `src` as the
 // PortSpace it describes (role left empty), with aiehlc's defaults for omitted

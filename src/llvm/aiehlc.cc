@@ -11,6 +11,7 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendAction.h"
+#include "clang/Lex/HeaderSearchOptions.h"
 #include "clang/Lex/MacroInfo.h"
 #include "clang/Lex/Pragma.h"
 #include "clang/Lex/Preprocessor.h"
@@ -19,6 +20,7 @@
 #include "clang/Tooling/Tooling.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 
 //#include "AieFrontEnd.h"
@@ -238,6 +240,33 @@ static std::vector<std::string> convKernelDecls;
 // The authority for per-core rounds and per-round block bytes: the tiling
 // derivation below re-derives both through the GEMM model and must agree.
 static std::map<std::string, convautotile::Derived> convDerivedByKernel;
+// Per kernel-only kernel, per port variable: the blocks its traced
+// load_buffer / store_buffer calls take, and its {.depth / .resident / .tile}
+// options. Carried to the routing IR as #routing.kernel_block (the lowering
+// checks its core windows against it and follows it where needed).
+static std::map<std::string, std::map<std::string, convautotile::PortBlock>> kernelBlocksByKernel;
+
+// The #routing.kernel_block payload of one port, or an empty one.
+static KernelBlock kernelBlockFor(const std::string &kernel, const std::string &var) {
+    KernelBlock kb;
+    auto k = kernelBlocksByKernel.find(kernel);
+    if (k == kernelBlocksByKernel.end())
+        return kb;
+    auto p = k->second.find(var);
+    if (p == k->second.end())
+        return kb;
+    const convautotile::PortFit &f = p->second.fit;
+    kb.tensorShape.assign(p->second.tensor.begin(), p->second.tensor.end());
+    kb.shape.assign(f.shape.begin(), f.shape.end());
+    kb.stepI.assign(f.step_i.begin(), f.step_i.end());
+    kb.stepJ.assign(f.step_j.begin(), f.step_j.end());
+    kb.roundsI = f.rounds_i;
+    kb.roundsJ = f.rounds_j;
+    kb.resident = p->second.opts.resident;
+    kb.tileR = p->second.opts.tile[0];
+    kb.tileC = p->second.opts.tile[1];
+    return kb;
+}
 
 // Spatial-halo conv: the core windows and round count the GEMM-model derivation
 // produced must be the blocks the kernel loads / stores, as the conv auto-tiling
@@ -2999,7 +3028,8 @@ public:
                                 shimDma.iter_step = pt.shimDma.iter_step;
                                 shimDma.iter_wrap = pt.shimDma.iter_wrap;
                             }
-                            mkd.tensors.push_back({pt.shape, pt.elementBitWidth, pt.isInput, shimDma});
+                            mkd.tensors.push_back({pt.shape, pt.elementBitWidth, pt.isInput, shimDma,
+                                                   kernelBlockFor(currentLaunchKernel, pt.varName)});
                         }
                         // Store per-kernel body from globalKernelBodies map
                         auto bodyIt = globalKernelBodies.find(currentLaunchKernel);
@@ -3930,6 +3960,72 @@ public:
             }
         }
 
+        // An unconditional #include that Clang cannot resolve is fatal anyway, but
+        // the source-text passes (applyConvAutoTiling: KernelAnalysis, conv
+        // auto-tiling) run BEFORE Clang preprocesses, read macros straight from
+        // the headers, and silently skip one they cannot open -- so a misspelled
+        // header surfaced as "`HW_ROWS` ... no #define" and Clang's own "file not
+        // found" was never reached. Check every include outside #if/#ifdef
+        // against Clang's search path (the source dir + its -I/-isystem entries)
+        // and stop with Clang's message first. Conditional includes are left to
+        // Clang: they may belong to another platform.
+        void checkSourceIncludes(const std::string &src) {
+            const clang::HeaderSearchOptions &hs = getCompilerInstance().getHeaderSearchOpts();
+            std::vector<std::string> dirs{userSourceDir};
+            for (const auto &e : hs.UserEntries)
+                dirs.push_back(!e.Path.empty() && e.Path[0] == '=' ? hs.Sysroot + e.Path.substr(1) : e.Path);
+            if (!hs.ResourceDir.empty())
+                dirs.push_back(hs.ResourceDir + "/include");
+            auto found = [&](const std::string &name) {
+                if (!name.empty() && name[0] == '/')
+                    return llvm::sys::fs::exists(name);
+                for (auto &d : dirs)
+                    if (llvm::sys::fs::exists(d + "/" + name))
+                        return true;
+                return false;
+            };
+            std::istringstream is(src);
+            std::string line;
+            int lineNo = 0, depth = 0, missing = 0;
+            while (std::getline(is, line)) {
+                lineNo++;
+                size_t h = line.find_first_not_of(" \t");
+                if (h == std::string::npos || line[h] != '#')
+                    continue;
+                size_t q = line.find_first_not_of(" \t", h + 1);
+                if (q == std::string::npos)
+                    continue;
+                if (line.compare(q, 2, "if") == 0) { // #if / #ifdef / #ifndef
+                    depth++;
+                    continue;
+                }
+                if (line.compare(q, 5, "endif") == 0) {
+                    depth = std::max(0, depth - 1);
+                    continue;
+                }
+                if (depth > 0 || line.compare(q, 7, "include") != 0)
+                    continue;
+                size_t a = line.find_first_of("\"<", q + 7);
+                size_t b = a == std::string::npos ? a : line.find(line[a] == '<' ? '>' : '"', a + 1);
+                if (b == std::string::npos)
+                    continue;
+                std::string name = line.substr(a + 1, b - a - 1);
+                if (found(name))
+                    continue;
+                llvm::errs() << userSourceDir << "/" << userSourceName << ":" << lineNo << ":" << a + 1
+                             << ": fatal error: '" << name << "' file not found\n"
+                             << line << "\n"
+                             << std::string(a, ' ') << "^\n";
+                missing++;
+            }
+            if (missing) {
+                llvm::errs() << "[aiehlc] ERROR: " << missing << " #include(s) not found in " << userSourceDir
+                             << " or the " << dirs.size() - 1 << " include path(s) Clang searches; fix the "
+                             << "name, or add the header's directory with -I\n";
+                std::exit(1);
+            }
+        }
+
         // Lower the declarative conv2d model (aie::Conv2d + aie::Mapping +
         // aie::port<T, aie::IFM|WEIGHTS|OFM>) into the explicit GemmSpace form
         // before any other rewrite sees the text (src/llvm/convautotile/). The
@@ -3955,6 +4051,7 @@ public:
             }
             convKernelDecls.clear();
             convDerivedByKernel.clear();
+            kernelBlocksByKernel.clear();
             // Kernel-only sources (no aie::Conv2d / aie::Mapping; ports carry
             // aie::shape): map the kernel's traced load_buffer / store_buffer
             // blocks onto the routing carriers (any operator) and rewrite into
@@ -3991,6 +4088,8 @@ public:
                                 convKernelDecls.push_back(decl);
                     for (auto &kd : ko.derived)
                         convDerivedByKernel[kd.first] = kd.second;
+                    for (auto &kb : ko.blocks)
+                        kernelBlocksByKernel[kb.first] = kb.second;
                 }
                 // Hand-written GemmSpaces + aie::load_buffer / store_buffer: the
                 // GemmSpaces stay the authority; the kernel's traced blocks must
@@ -4118,6 +4217,7 @@ public:
                 // aout/newfile.cpp, which is that buffer verbatim.
                 //
                 // Headers (`.h`) are left to Clang, as before.
+                checkSourceIncludes(SourceCodeString);
                 inlineSourceIncludes(SourceCodeString);
                 applyConvAutoTiling(SourceCodeString);
 
@@ -5665,7 +5765,8 @@ public:
                             shimDma.iter_step = pt.shimDma.iter_step;
                             shimDma.iter_wrap = pt.shimDma.iter_wrap;
                         }
-                        tensors.push_back({pt.shape, pt.elementBitWidth, pt.isInput, shimDma});
+                        tensors.push_back({pt.shape, pt.elementBitWidth, pt.isInput, shimDma,
+                                           kernelBlockFor(userKernelFuncName, pt.varName)});
                     }
                     splitModel = SplitModel::gemm();
                 }

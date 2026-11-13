@@ -67,7 +67,9 @@ int elemBytesOf(const std::string &windowType) {
     return 1;
 }
 
-// One `aie::port<WindowT, aie::ROLE[, aie::shape<d...>]> var` parameter.
+// One `aie::port<WindowT, aie::ROLE[, aie::shape<d...>]> var` parameter, or the
+// kernel-only form without the role tag, `aie::port<WindowT, aie::shape<d...>> var`
+// (role inferred, TracePort::roleInferred).
 bool parsePort(const std::string &param, const std::map<std::string, std::string> &macros, TracePort &p,
                std::string &err) {
     size_t a = param.find("aie::port<");
@@ -89,18 +91,24 @@ bool parsePort(const std::string &param, const std::map<std::string, std::string
     std::vector<std::string> targs = splitTop(param.substr(open + 1, close - open - 1));
     if (targs.size() < 2)
         return false;
+    p.elem_bytes = elemBytesOf(targs[0]);
+    p.output = targs[0].find("output") != std::string::npos;
     for (const char *role : {"IFM", "WEIGHTS", "OFM"})
         if (targs[1] == std::string("aie::") + role)
             p.role = role;
-    if (p.role.empty())
-        return false;
-    p.elem_bytes = elemBytesOf(targs[0]);
-    p.output = targs[0].find("output") != std::string::npos;
-    if (targs.size() >= 3) {
-        const std::string &sh = targs[2];
+    size_t shapeArg = 2;
+    if (p.role.empty()) {
+        if (targs.size() != 2 || targs[1].compare(0, 11, "aie::shape<") != 0)
+            return false;
+        p.role = p.output ? "OFM" : "IFM"; // refined by inferRoles() after the trace
+        p.roleInferred = true;
+        shapeArg = 1;
+    }
+    if (targs.size() > shapeArg) {
+        const std::string &sh = targs[shapeArg];
         size_t lt = sh.find('<'), gt = sh.rfind('>');
         if (sh.compare(0, 11, "aie::shape<") != 0 || gt == std::string::npos) {
-            err = "port " + param + ": third template argument must be aie::shape<d0, d1, ...>";
+            err = "port " + param + ": the shape template argument must be aie::shape<d0, d1, ...>";
             return false;
         }
         for (auto &d : splitTop(sh.substr(lt + 1, gt - lt - 1))) {
@@ -123,6 +131,17 @@ bool parsePort(const std::string &param, const std::map<std::string, std::string
     if (v == std::string::npos || ve == v)
         return false;
     p.var = param.substr(v, ve - v);
+    // The core receives a window by pointer, and aie::load_buffer / release /
+    // store_buffer / commit take that pointer. A by-value window traces fine
+    // on x86 and only fails in xchesscc as "no matching function for call to
+    // 'aiehlc_load_buffer'" -- say so here instead.
+    const std::string &wt = targs[0];
+    if (wt.find("window") != std::string::npos && wt.back() != '*') {
+        err = "port " + p.var + ": the window type must be a pointer -- write aie::port<" + wt + " *, ...> " + p.var +
+              ", not aie::port<" + wt + ", ...> (the kernel receives windows by pointer; a by-value window fails "
+              "in xchesscc as 'no matching function for call to aiehlc_load_buffer')";
+        return false;
+    }
     return true;
 }
 
@@ -217,7 +236,10 @@ struct AnyPtr { void *p; template <class T> operator T *() const { return (T *)p
 } // namespace aiehlc_trace
 namespace aie {
 enum class pad_value { none, zero };
-struct load_opts { int reuse = 0; pad_value pad = pad_value::none; };
+// Block options; designated initializers in this order (all optional).
+struct load_opts { int reuse = 0; pad_value pad = pad_value::none; int depth = 0; bool resident = false;
+                   int tile[2] = {0, 0}; };
+using store_opts = load_opts;
 } // namespace aie
 namespace aiehlc_trace {
 #define AIEHLC_E(port, ...) do { fprintf(g_out, "E %d %d %s %d ", g_p0, g_p1, (port).name, (port).n); \
@@ -228,10 +250,13 @@ static AnyPtr block(Port &p, std::initializer_list<int> off, std::initializer_li
     int o[4] = {0, 0, 0, 0}, s[4] = {0, 0, 0, 0}, ro = 0, rs = 0;
     for (int v : off) { if (ro < 4) o[ro] = v; ro++; }
     for (int v : shape) { if (rs < 4) s[rs] = v; rs++; }
-    fprintf(g_out, "%c %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d\n", st ? 'S' : 'L', g_p0, g_p1, p.name, p.n,
-            ro, rs, o[0], o[1], o[2], o[3], s[0], s[1], s[2], s[3], opt.reuse, pad);
+    fprintf(g_out, "%c %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", st ? 'S' : 'L', g_p0, g_p1,
+            p.name, p.n, ro, rs, o[0], o[1], o[2], o[3], s[0], s[1], s[2], s[3], opt.reuse, pad, opt.depth,
+            opt.resident ? 1 : 0, opt.tile[0], opt.tile[1]);
     if (st && !p.out) AIEHLC_E(p, "aie::store_buffer on an input port");
     if (!st && p.out) AIEHLC_E(p, "aie::load_buffer on an output port");
+    if (st && (opt.reuse || pad || opt.resident || opt.tile[0] || opt.tile[1]))
+        AIEHLC_E(p, "aie::store_buffer takes only {.depth}; .reuse / .pad / .resident / .tile are load options");
     if (ro != p.rank || rs != p.rank)
         AIEHLC_E(p, "offset has %d and shape %d dims, but the tensor has %d", ro, rs, p.rank);
     long bytes = p.eb;
@@ -248,8 +273,11 @@ static AnyPtr block(Port &p, std::initializer_list<int> off, std::initializer_li
     for (int d = p.rank; d < rs && d < 4; d++)
         bytes *= s[d] > 0 ? s[d] : 1;
     if (bytes > 49152) AIEHLC_E(p, "block is %ld B, larger than the core data memory (49152 B)", bytes);
-    if ((int)p.live.size() >= g_pp)
-        AIEHLC_E(p, "takes a block while %d of this port are still held (pp_depth %d): release first", (int)p.live.size(), g_pp);
+    // This port's buffers: .resident is one buffer, .depth its own count,
+    // else the kernel-wide pp_depth.
+    const int pp = opt.resident ? 1 : opt.depth > 0 ? opt.depth : g_pp;
+    if ((int)p.live.size() >= pp)
+        AIEHLC_E(p, "takes a block while %d of this port are still held (pp_depth %d): release first", (int)p.live.size(), pp);
     // Like a DMA window on the core: 32-byte aligned and NOT 64-byte aligned,
     // with ASan guarding both ends of exactly `bytes`.
     void *raw = nullptr;
@@ -287,8 +315,9 @@ inline aiehlc_trace::AnyPtr load_buffer(Port &p, std::initializer_list<int> o, s
                                         load_opts opt = {}) {
     return aiehlc_trace::block(p, o, s, 0, opt);
 }
-inline aiehlc_trace::AnyPtr store_buffer(Port &p, std::initializer_list<int> o, std::initializer_list<int> s) {
-    return aiehlc_trace::block(p, o, s, 1);
+inline aiehlc_trace::AnyPtr store_buffer(Port &p, std::initializer_list<int> o, std::initializer_list<int> s,
+                                         store_opts opt = {}) {
+    return aiehlc_trace::block(p, o, s, 1, opt);
 }
 inline void release(Port &p) { aiehlc_trace::release(p, 0); }
 inline void commit(Port &p) { aiehlc_trace::release(p, 1); }
@@ -386,6 +415,7 @@ struct Event {
     std::string port, msg;
     int off[4] = {0, 0, 0, 0}, shape[4] = {0, 0, 0, 0};
     int reuse = 0, pad = 0; // load_opts of an L event
+    BlockOpts opts;         // .depth / .resident / .tile of an L or S event
 };
 
 std::vector<Event> parseTrace(const std::string &text) {
@@ -406,6 +436,9 @@ std::vector<Event> parseTrace(const std::string &text) {
             for (int &v : ev.shape)
                 ls >> v;
             ls >> ev.reuse >> ev.pad;
+            int resident = 0;
+            ls >> ev.opts.depth >> resident >> ev.opts.tile[0] >> ev.opts.tile[1];
+            ev.opts.resident = resident != 0;
         }
         out.push_back(ev);
     }
@@ -810,6 +843,75 @@ void addStaticBounds(const std::string &src, const TraceKernel &k, int rows, int
         out.push_back(sb.cause);
 }
 
+// The dataflow options of one port (BlockOpts): the same on every block, and
+// each one something the DMA can do for this port's blocks.
+void checkBlockOpts(const TracePort &p, const PortFit &f, const std::vector<Event> &events, KernelTraceResult &r) {
+    const Event *first = nullptr;
+    for (auto &e : events) {
+        if ((e.kind != 'L' && e.kind != 'S') || e.port != p.var)
+            continue;
+        if (!first)
+            first = &e;
+        else if (!(e.opts == first->opts)) {
+            r.errors.push_back(p.var + ": block " + std::to_string(e.n) + " on core (" + std::to_string(e.p0) + "," +
+                               std::to_string(e.p1) + ") passes different {.depth / .resident / .tile} options " +
+                               "than block 0 (they configure the port's DMA, one setting per port)");
+            return;
+        }
+    }
+    if (!first || !first->opts.any())
+        return;
+    const BlockOpts o = first->opts;
+    const std::string who = p.var + " (" + p.role + "): ";
+    const int blocks = f.rounds_i * f.rounds_j;
+    bool ok = true;
+    auto err = [&](const std::string &m) {
+        r.errors.push_back(who + m);
+        ok = false;
+    };
+    if (o.depth < 0 || o.depth > 2)
+        err("{.depth = " + std::to_string(o.depth) + "}: a core buffer is single (1) or ping-pong (2)");
+    if (o.resident && o.depth > 1)
+        err("{.resident = true} holds its block in ONE buffer; {.depth = " + std::to_string(o.depth) +
+            "} contradicts it (drop .depth)");
+    if (o.resident && blocks != 1)
+        err("{.resident = true}, but the kernel takes " + std::to_string(blocks) +
+            " blocks of this port per core; a resident block is loaded once (outside the loop) and held for the "
+            "whole launch");
+    if (o.tile[0] || o.tile[1]) {
+        const int tr = o.tile[0], tc = o.tile[1];
+        const long rowBytes = (long)(p.shape.size() == 2 ? p.shape[1] : 0) * p.elem_bytes;
+        if (f.rank != 2)
+            err("{.tile} re-lays out a 2-D block; this port's blocks have " + std::to_string(f.rank) + " dims");
+        else if (tr <= 0 || tc <= 0 || f.shape[0] % tr || f.shape[1] % tc)
+            err("{.tile = {" + std::to_string(tr) + ", " + std::to_string(tc) + "}} does not divide the block " +
+                vecStr(f.shape));
+        else if ((tc * p.elem_bytes) % 4 || rowBytes % 4)
+            err("{.tile = {" + std::to_string(tr) + ", " + std::to_string(tc) + "}}: the DMA moves 32-bit words, " +
+                "so a tile row (" + std::to_string(tc * p.elem_bytes) + " B) and the tensor row (" +
+                std::to_string(rowBytes) + " B) must be multiples of 4 bytes");
+    }
+    if (ok)
+        r.opts[p.var] = o;
+}
+
+// ", options {.depth = 1, .resident = true, .tile = {4, 16}}" or "".
+std::string optsText(const std::map<std::string, BlockOpts> &opts, const std::string &var) {
+    auto it = opts.find(var);
+    if (it == opts.end())
+        return "";
+    const BlockOpts &o = it->second;
+    std::string s;
+    if (o.depth)
+        s += ".depth = " + std::to_string(o.depth);
+    if (o.resident)
+        s += std::string(s.empty() ? "" : ", ") + ".resident = true";
+    if (o.tile[0])
+        s += std::string(s.empty() ? "" : ", ") + ".tile = {" + std::to_string(o.tile[0]) + ", " +
+             std::to_string(o.tile[1]) + "}";
+    return ", options {" + s + "}";
+}
+
 std::string fitText(const TracePort &p, const PortFit &f) {
     std::ostringstream os;
     os << "  " << p.var << " (" << p.role << ", tensor " << vecStr(p.shape) << "): block " << vecStr(f.shape)
@@ -846,6 +948,7 @@ KernelTraceResult traceKernel(const std::string &src, const TraceKernel &k, int 
             r.errors.push_back(p.var + ": core (0,0) starts at " + vecStr(origin) +
                                ", not at the tensor origin (the DMA tiles a tensor from its origin)");
         r.fits[p.var] = f;
+        checkBlockOpts(p, f, events, r);
         if (p.output)
             checkCoverage(p, events, r.errors);
     }
@@ -1007,13 +1110,22 @@ bool rewriteKernelRouted(std::string &src, const TraceKernel &k, const RoutingPl
     std::string params = src.substr(k.paramOpen, k.paramClose - k.paramOpen + 1);
     size_t from = 0;
     for (auto &rp : plan.ports) {
-        const std::string tag = "aie::" + rp.role;
-        size_t p = sourceFindToken(params, tag, from);
-        size_t sh = p == std::string::npos ? p : params.find("aie::shape<", p);
-        size_t e = sh == std::string::npos ? sh : sourceMatchClose(params, sh + 10, '<', '>');
+        // The port by its parameter name; `[aie::ROLE, ]aie::shape<...>` inside it
+        // becomes the routed GemmSpace (the role tag is optional).
+        size_t v = sourceFindToken(params, rp.var, from);
+        size_t a = v == std::string::npos ? v : params.rfind("aie::port<", v);
+        size_t sh = a == std::string::npos ? a : params.find("aie::shape<", a);
+        size_t e = sh == std::string::npos || sh > v ? std::string::npos : sourceMatchClose(params, sh + 10, '<', '>');
         if (e == std::string::npos) {
-            err = "cannot rewrite port " + rp.var + ": no `" + tag + ", aie::shape<...>` in the parameter list";
+            err = "cannot rewrite port " + rp.var + ": no `aie::port<T, [aie::ROLE, ]aie::shape<...>> " + rp.var +
+                  "` in the parameter list";
             return false;
+        }
+        size_t p = sh;
+        for (const char *role : {"IFM", "WEIGHTS", "OFM"}) {
+            size_t t = params.find(std::string("aie::") + role, a);
+            if (t != std::string::npos && t < sh)
+                p = std::min(p, t);
         }
         const std::string var = routedSpaceVar(plan, k.name, rp);
         params.replace(p, e + 1 - p, var);
@@ -1066,6 +1178,27 @@ Derived convCrossCheck(const TraceKernel &k, KernelTraceResult &tr, const std::v
 
 } // namespace
 
+namespace {
+
+// Untagged ports (TracePort::roleInferred): an input whose blocks move with
+// program_id(1) only -- broadcast along a mesh column, the B / filter side --
+// is WEIGHTS; the parse already made outputs OFM and other inputs IFM. The same
+// rule names a hand-written GemmSpace's port (spacePort).
+void inferRoles(std::vector<TracePort> &ports, const std::map<std::string, PortFit> &fits) {
+    for (auto &p : ports) {
+        auto it = fits.find(p.var);
+        if (!p.roleInferred || p.output || it == fits.end())
+            continue;
+        auto moves = [](const std::vector<int> &v) {
+            return std::any_of(v.begin(), v.end(), [](int x) { return x != 0; });
+        };
+        if (moves(it->second.base_p1) && !moves(it->second.base_p0))
+            p.role = "WEIGHTS";
+    }
+}
+
+} // namespace
+
 KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, const std::string &srcName) {
     KernelOnlyResult res;
     auto macros = sourceMacros(src, srcDir);
@@ -1088,10 +1221,11 @@ KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, co
     if (kernels.empty())
         return res;
     res.found = true;
-    auto mesh = sourceLaunchMesh(src, srcDir);
+    std::string meshWhy;
+    auto mesh = sourceLaunchMesh(src, srcDir, &meshWhy);
     if (mesh.first <= 0 || mesh.second <= 0) {
         res.ok = false;
-        res.error = "kernel analysis needs the launch mesh: no device.partition({...}, ROWS, COLS) found";
+        res.error = "kernel analysis needs the launch mesh: " + meshWhy;
         return res;
     }
     // Back to front so earlier offsets stay valid.
@@ -1101,21 +1235,25 @@ KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, co
     for (auto &k : kernels) {
         rep << "[KernelAnalysis] " << k.name << ": traced on the " << mesh.first << "x" << mesh.second << " mesh\n";
         KernelTraceResult tr = traceKernel(src, k, mesh.first, mesh.second, sourceDefines(src), srcName);
+        inferRoles(k.ports, tr.fits);
         for (auto &n : tr.notes)
             res.notes.push_back(n);
         for (auto &p : k.ports)
             if (tr.fits.count(p.var))
-                rep << fitText(p, tr.fits[p.var]) << "\n";
+                rep << fitText(p, tr.fits[p.var]) << optsText(tr.opts, p.var) << "\n";
         std::vector<std::string> errs = tr.errors;
         RoutingPlan plan;
         std::vector<PortSpace> spaces;
         if (errs.empty()) {
-            plan = planRouting(k.ports, tr.fits, mesh.first, mesh.second);
+            plan = planRouting(k.ports, tr.fits, mesh.first, mesh.second, tr.opts);
             errs.insert(errs.end(), plan.errors.begin(), plan.errors.end());
         }
         RoutingHints hints;
         if (errs.empty()) {
             hints = routingHints(plan);
+            const std::string mem = checkPortBuffers(plan, hints);
+            if (!mem.empty())
+                errs.push_back(mem);
             spaces = routingSpaces(plan, hints);
             rep << planText(plan);
             Derived d = convCrossCheck(k, tr, spaces, mesh.first, mesh.second, errs, rep);
@@ -1133,6 +1271,8 @@ KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, co
             continue;
         }
         res.tu_decls[k.name] = routedTUDecls(plan, tr.fits);
+        for (auto &p : k.ports)
+            res.blocks[k.name][p.var] = {p.shape, tr.fits[p.var], tr.opts.count(p.var) ? tr.opts[p.var] : BlockOpts()};
         res.est_ms[k.name] = res.derived.count(k.name) ? res.derived[k.name].est_ms : routingEstMs(plan, hints);
         rep << "  => routed: " << plan.ports.size() << " ports on the " << mesh.first << "x" << mesh.second
             << " mesh, DMA carriers taken from the traced blocks\n";
@@ -1297,10 +1437,11 @@ KernelOnlyResult verifySpaceKernels(std::string &src, const std::string &srcDir,
     if (kernels.empty())
         return res;
     res.found = true;
-    auto mesh = sourceLaunchMesh(src, srcDir);
+    std::string meshWhy;
+    auto mesh = sourceLaunchMesh(src, srcDir, &meshWhy);
     if (mesh.first <= 0 || mesh.second <= 0) {
         res.ok = false;
-        res.error = "kernel analysis needs the launch mesh: no device.partition({...}, ROWS, COLS) found";
+        res.error = "kernel analysis needs the launch mesh: " + meshWhy;
         return res;
     }
     // Back to front: resolving aie::num_programs edits the body in place.

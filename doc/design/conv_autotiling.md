@@ -29,7 +29,8 @@ instead of hand-writing three `aie::GemmSpace`s (d1/d2/d3/d4, halo slice/step,
 * `aie::Conv2d` fields: `h w c k kh kw stride pad`, optional `dilation` (1) and
   `c_align` (default: `c` rounded up to 4, the int8 channel-layout stride).
 * Split/tile factors are integer constant expressions (object-like `#define`s
-  from the file and its quoted headers are resolved), or `MESH_ROW` / `MESH_COL`,
+  from the file and the headers it includes from its own directory --
+  `#include "x.h"` or `#include <x.h>` -- are resolved), or `MESH_ROW` / `MESH_COL`,
   which resolve to the launch mesh of `device.partition({...}, ROWS, COLS)`.
   An explicit factor that disagrees with that mesh is an error.
 * Supported mapping (what the tilinglinalg spatial-halo path implements):

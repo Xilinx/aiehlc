@@ -77,8 +77,11 @@ size_t findToken(const std::string &s, const std::string &word, size_t from) {
 }
 
 // ---------------------------------------------------------------------------
-// Object-like integer macros (#define NAME expr) from the source and its
-// quoted headers.
+// Object-like integer macros (#define NAME expr) from the source and the
+// headers it includes from its own directory -- `#include "x.h"` and
+// `#include <x.h>` alike (aiehlc.sh puts that directory on the include path,
+// so both resolve there; an angle include that is not there is a system
+// header and is skipped).
 // ---------------------------------------------------------------------------
 void collectMacros(const std::string &text, const std::string &dir, std::map<std::string, std::string> &out,
                    int depth) {
@@ -110,8 +113,8 @@ void collectMacros(const std::string &text, const std::string &dir, std::map<std
             if (!out.count(name))
                 out[name] = body;
         } else if (rest.compare(0, 7, "include") == 0 && depth < 4 && !dir.empty()) {
-            size_t a = rest.find('"');
-            size_t b = a == std::string::npos ? a : rest.find('"', a + 1);
+            size_t a = rest.find_first_of("\"<", 7);
+            size_t b = a == std::string::npos ? a : rest.find(rest[a] == '<' ? '>' : '"', a + 1);
             if (b == std::string::npos)
                 continue;
             std::ifstream f(dir + "/" + rest.substr(a + 1, b - a - 1));
@@ -382,6 +385,7 @@ bool toConv(const Value &v, Conv2dSpec &c, std::string &err) {
 // Launch mesh shape, from the host's `device.partition({...}, ROWS, COLS)`.
 struct MeshShape {
     int rows = 0, cols = 0;
+    std::string why; // rows/cols unresolved: what was missing, for the error
 };
 
 bool toSplit(const Value &v, const char *fn, const MeshShape &mesh, AxisSplit &out, std::string &err) {
@@ -400,7 +404,7 @@ bool toSplit(const Value &v, const char *fn, const MeshShape &mesh, AxisSplit &o
         bool row = lastComponent(f.sym).compare(0, 8, "MESH_ROW") == 0;
         out.factor = row ? mesh.rows : mesh.cols;
         if (out.factor <= 0) {
-            err = f.sym + " needs the launch mesh shape, but no device.partition({...}, ROWS, COLS) was found";
+            err = f.sym + " needs the launch mesh shape, but " + mesh.why;
             return false;
         }
     } else {
@@ -618,15 +622,21 @@ std::string commentOut(const std::string &text) {
     return r;
 }
 
-// `<obj>.partition({...}, ROWS, COLS)` -> mesh shape (0x0 if absent/unevaluable).
+// `<obj>.partition({...}, ROWS, COLS)` -> mesh shape. 0x0 if absent or
+// unevaluable, with `why` naming the cause: "no partition call" and "ROWS is a
+// macro from a header we did not read" must not look the same to the user.
 MeshShape findMeshShape(const std::string &blank, const std::map<std::string, std::string> &macros) {
     MeshShape ms;
     size_t p = blank.find(".partition(");
-    if (p == std::string::npos)
+    if (p == std::string::npos) {
+        ms.why = "no device.partition({...}, ROWS, COLS) call was found in the source";
         return ms;
+    }
     size_t open = p + 10, close = matchClose(blank, open, '(', ')');
-    if (close == std::string::npos)
+    if (close == std::string::npos) {
+        ms.why = "the device.partition( call has no closing ')'";
         return ms;
+    }
     std::string args = blank.substr(open + 1, close - open - 1);
     size_t brace = args.find('{');
     size_t afterBrace = brace == std::string::npos ? 0 : matchClose(args, brace, '{', '}') + 1;
@@ -640,19 +650,34 @@ MeshShape findMeshShape(const std::string &blank, const std::map<std::string, st
             cur += args[i];
     }
     parts.push_back(cur);
-    std::vector<long> vals;
+    std::vector<std::string> exprs;
     for (auto &t : parts) {
-        if (t.find_first_not_of(" \t\r\n") == std::string::npos)
+        size_t a = t.find_first_not_of(" \t\r\n");
+        if (a != std::string::npos)
+            exprs.push_back(t.substr(a, t.find_last_not_of(" \t\r\n") - a + 1));
+    }
+    const std::string call = "device.partition(" + args + ")";
+    if (exprs.size() < 2) {
+        ms.why = call + " has no ROWS, COLS arguments after the {...} partition";
+        return ms;
+    }
+    long v[2];
+    for (int i = 0; i < 2; i++) {
+        const std::string &e = exprs[exprs.size() - 2 + i];
+        Parser ps(e, macros);
+        if (ps.parseExprOnly(v[i]))
             continue;
-        Parser ps(t, macros);
-        long v;
-        if (ps.parseExprOnly(v))
-            vals.push_back(v);
+        ms.why = call + ": " + (i ? "COLS" : "ROWS") + " `" + e + "` is not an integer constant expression";
+        bool ident = !e.empty() && !std::isdigit((unsigned char)e[0]) &&
+                     std::all_of(e.begin(), e.end(), [](char c) { return isIdent(c); });
+        if (ident && !macros.count(e))
+            ms.why += " -- no `#define " + e +
+                      "` in the source or in a header #included from the source's directory "
+                      "(macros are read from those files only)";
+        return ms;
     }
-    if (vals.size() >= 2) {
-        ms.rows = (int)vals[vals.size() - 2];
-        ms.cols = (int)vals[vals.size() - 1];
-    }
+    ms.rows = (int)v[0];
+    ms.cols = (int)v[1];
     return ms;
 }
 
@@ -1026,8 +1051,10 @@ bool sourceEvalInt(const std::string &expr, const std::map<std::string, std::str
     Parser ps(expr, macros);
     return ps.parseExprOnly(v);
 }
-std::pair<int, int> sourceLaunchMesh(const std::string &src, const std::string &srcDir) {
+std::pair<int, int> sourceLaunchMesh(const std::string &src, const std::string &srcDir, std::string *why) {
     MeshShape ms = findMeshShape(blankComments(src), sourceMacros(src, srcDir));
+    if (why)
+        *why = ms.why;
     return {ms.rows, ms.cols};
 }
 

@@ -785,9 +785,10 @@ TensorFormResult lowerTensorForm(std::string &src, const std::string &srcDir, co
     if (kernels.size() != 1)
         return fail("tensor form: one aie::in / aie::out kernel per source is supported");
     const TKernel &k = kernels[0];
-    auto mesh = sourceLaunchMesh(src, srcDir);
+    std::string meshWhy;
+    auto mesh = sourceLaunchMesh(src, srcDir, &meshWhy);
     if (mesh.first <= 0 || mesh.second <= 0)
-        return fail(k.name + ": no device.partition({...}, ROWS, COLS) launch mesh found");
+        return fail(k.name + ": no launch mesh: " + meshWhy);
     std::vector<Launch> launches = findLaunches(src, k, err);
     if (!err.empty())
         return fail(err);

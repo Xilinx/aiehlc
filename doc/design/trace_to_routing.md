@@ -96,6 +96,38 @@ runtime `.so.1` / `.so.2`). `aiehlc.sh --aie-version 5`:
 
 Unit: `run.sh` 145 + 442, `kernel_trace_cases.py` 27/27.
 
+## Source-level diagnostics before the trace (2026-11-12)
+
+Two mistakes in `example/other/aiehlcpm_gemm1.cc` used to fail with no usable
+message. Both are now named where they are detected:
+
+- **Launch mesh unresolved.** The mesh is read from the source text
+  (`findMeshShape`), with macros taken from the file and the headers it
+  includes from its own directory. Only `#include "x.h"` used to be followed,
+  so `device.partition({3,6,0,6}, HW_ROWS, HW_COLS)` with the macros in
+  `#include <x.h>` failed as "no device.partition(...) found", although the
+  call was there. Angle includes that resolve in the source directory are now
+  followed (`aiehlc.sh` puts that directory on the include path, so the
+  compile resolves them there too). An unresolved mesh now reports the cause:
+  either there is no partition call, or ROWS (or COLS) is not an integer
+  constant expression and has no `#define` in the source or in a header it
+  includes from its own directory.
+- **Window passed by value.** `aie::port<input_window_int8, ...>` traced fine
+  on x86 and failed only in xchesscc (`no matching function for call to
+  'aiehlc_load_buffer'`). `parsePort` now rejects it: `port a: the window type
+  must be a pointer`.
+
+- **Missing header.** `#include <aiehlcpm_gemm1——3.h>` (no such file) showed
+  only as the undefined-macro error above, because the source-text passes run
+  before Clang and skip headers they cannot open. `aiehlc.cc`
+  `checkSourceIncludes` now resolves every include outside `#if` against
+  Clang's search path first, and stops with Clang's `fatal error: '...' file
+  not found`.
+
+Cases: `kernel_trace_cases.py` "gemm: mesh ROWS/COLS from an #include
+<header> macro", "gemm: mesh ROWS is an undefined macro", "gemm: window passed
+by value". Skill **kernelanalysisdiagnostics**.
+
 ## `__global__(conv, map)` sources go through trace -> routing too (step 4)
 
 `verifyKernelBlocks` (the desugar path of `simpleconv2d_new_load.cc`) now also
