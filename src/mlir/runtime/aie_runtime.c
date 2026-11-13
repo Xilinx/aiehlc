@@ -2943,6 +2943,17 @@ static inline void rt_wait_hook_step(void) {
 #define RT_DSYNC_MAX 16
 #define RT_DSYNC_CHUNK 16384U /* bytes of maintenance per wait_io poll step */
 #define RT_DEVWR_MAX 8
+/* A78 D-cache line. A registered range must own every line it touches: if an
+ * edge shared a line with CPU data, a CPU write to the neighbour would dirty a
+ * line holding OLD range bytes and its later write-back (eviction, or the
+ * neighbour's own clean) would land on top of what the array wrote. So both
+ * registrations refuse ranges whose ptr or size is not line aligned; the range
+ * then keeps the conservative per-launch maintenance. __Runtime_alloc blocks
+ * are always line aligned (64 B base, size rounded to 64 B). */
+#define RT_CACHE_LINE 64u
+static int rt_line_aligned(uintptr_t lo, size_t size) {
+    return ((lo | (uintptr_t)size) & (RT_CACHE_LINE - 1u)) == 0;
+}
 typedef struct {
     XAie_DevInst *dev;
     uintptr_t cur, end;
@@ -2959,6 +2970,11 @@ void __Runtime_buffer_device_written(void *ptr, size_t size) {
     if (!ptr || !size)
         return;
     uintptr_t lo = (uintptr_t)ptr, hi = lo + size;
+    if (!rt_line_aligned(lo, size)) {
+        printf("[aie_runtime] buffer_device_written: %p+%zu not %u B aligned; keeps clean+invalidate\n", ptr, size,
+               RT_CACHE_LINE);
+        return;
+    }
     for (int i = 0; i < g_devwr_n; i++)
         if (g_devwr[i].lo == lo && g_devwr[i].hi == hi)
             return;
@@ -2992,6 +3008,11 @@ int __Runtime_buffer_device_only(void *ptr, size_t size) {
     uintptr_t lo = (uintptr_t)ptr, hi = lo + size;
     if (hi < lo)
         return -1;
+    if (!rt_line_aligned(lo, size)) {
+        printf("[aie_runtime] buffer_device_only: %p+%zu not %u B aligned; keeps per-launch clean\n", ptr, size,
+               RT_CACHE_LINE);
+        return -1;
+    }
     int i = 0;
     while (i < g_devonly_n && !(g_devonly[i].lo == lo && g_devonly[i].hi == hi))
         i++;

@@ -1004,7 +1004,7 @@ void __Runtime_dsync_drain(void);
 // Contract: the array writes [ptr, ptr+size) and the CPU does not write it
 // between launches (it only reads it after a launch returns). Flushes it once;
 // afterwards its deferred maintenance is invalidate-only and may overlap the
-// launch's own DMA.
+// launch's own DMA. ptr/size not 64 B aligned: ignored (keeps clean+invalidate).
 void __Runtime_buffer_device_written(void *ptr, size_t size);
 // Contract: after this call the CPU neither writes NOR reads [ptr, ptr+size)
 // until __Runtime_buffer_forget(ptr): the array is its only user (weights after
@@ -1013,7 +1013,11 @@ void __Runtime_buffer_device_written(void *ptr, size_t size);
 // all for a launch arg contained in it. Call AFTER the last CPU write (calling
 // it again on the same range = "I wrote it again", cleans again). Explicit
 // __Runtime_sync_for_dev/_for_cpu still do their work (debug reads, reloads).
-// Returns 0, or -1 (bad args / table full: the range keeps per-launch CIVAC).
+// ptr and size must be 64 B (cache-line) multiples -- a whole __Runtime_alloc
+// block is; a range sharing a line with CPU data could be overwritten by that
+// line's write-back.
+// Returns 0, or -1 (bad args / unaligned / table full: the range keeps
+// per-launch CIVAC).
 int __Runtime_buffer_device_only(void *ptr, size_t size);
 // Bytes of launch-arg maintenance skipped because of device_only (stats).
 unsigned long long __Runtime_buffer_device_only_skipped(void);
