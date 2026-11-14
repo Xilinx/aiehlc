@@ -630,3 +630,12 @@ The same header drives `simpleconv2ddebug/emu_conv2d_spatial.sh` (the
 generated kernel on x86, windows 32-byte aligned): the vector build passes
 802,816/802,816 with 0 block errors. `kernel_trace_cases.py` adds two vector
 cases (unshifted last K-block, aligned 64-byte load on a window).
+
+**On the board the dense output races (2026-11-14).** With a golden-checking
+host, `simpleconv2dkernel_port.cc` FAILS on palmyra (483,593 / 802,816) although
+the x86 emulation above passes: the vector kernel is fast enough to send an
+output block while the host re-programs the shim S2MM BDs between height slabs
+(skill **outputtilemajorrace**). `simpleconv2dkernel_port_vec_opts.cc` adds
+`#pragma output_tile_major` (host de-tiles) plus `{.resident}` / `{.depth = 2}`:
+PASS 3/3, 56.4 ms (scalar `_less` 93.8 ms). Walkthrough:
+`tutorial/aieprogram/04_conv2d_vector_scheduling.md`.

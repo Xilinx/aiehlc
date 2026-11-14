@@ -1,0 +1,76 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1010' height='520' viewBox='0 0 1010 520'>
+<defs><marker id='arr' markerUnits='userSpaceOnUse' markerWidth='12' markerHeight='10' refX='11' refY='5' orient='auto'><path d='M0,0 L12,5 L0,10 z' fill='#444'/></marker></defs>
+<rect width='100%' height='100%' fill='white'/>
+<text x='505.0' y='24.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='15' text-anchor='middle' fill='#222' font-weight='bold'>simpleconv2dkernel_port_less.cc: output 112 x 112 x 64, how pid and (i, j) pick a block</text>
+<text x='290.4' y='58.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>output plane  OH x OW = 112 x 112  (one OC group shown)</text>
+<rect x='100.0' y='70.0' width='380.8' height='95.2' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='92.0' y='121.6' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#333' font-weight='normal'>pid_h=0</text>
+<text x='92.0' y='135.6' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='end' fill='#666' font-weight='normal'>rows 0..27</text>
+<rect x='100.0' y='165.2' width='380.8' height='95.2' rx='0' fill='#cfe8c2' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='92.0' y='216.8' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#e63946' font-weight='normal'>pid_h=1</text>
+<text x='92.0' y='230.8' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='end' fill='#666' font-weight='normal'>rows 28..55</text>
+<rect x='100.0' y='260.4' width='380.8' height='95.2' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='92.0' y='312.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#333' font-weight='normal'>pid_h=2</text>
+<text x='92.0' y='326.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='end' fill='#666' font-weight='normal'>rows 56..83</text>
+<rect x='100.0' y='355.6' width='380.8' height='95.2' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='92.0' y='407.2' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#333' font-weight='normal'>pid_h=3</text>
+<text x='92.0' y='421.2' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='end' fill='#666' font-weight='normal'>rows 84..111</text>
+<rect x='100.0' y='165.2' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='147.6' y='181.1' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=0 j=0</text>
+<rect x='195.2' y='165.2' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='242.8' y='181.1' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=0 j=1</text>
+<rect x='290.4' y='165.2' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='338.0' y='181.1' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=0 j=2</text>
+<rect x='385.6' y='165.2' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='433.2' y='181.1' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=0 j=3</text>
+<rect x='100.0' y='189.0' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='147.6' y='204.9' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=1 j=0</text>
+<rect x='195.2' y='189.0' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='242.8' y='204.9' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=1 j=1</text>
+<rect x='290.4' y='189.0' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='338.0' y='204.9' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=1 j=2</text>
+<rect x='385.6' y='189.0' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='433.2' y='204.9' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=1 j=3</text>
+<rect x='100.0' y='212.8' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='147.6' y='228.7' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=2 j=0</text>
+<rect x='195.2' y='212.8' width='95.2' height='23.8' rx='0' fill='#e63946' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='242.8' y='228.7' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='white' font-weight='normal'>i=2 j=1</text>
+<rect x='290.4' y='212.8' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='338.0' y='228.7' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=2 j=2</text>
+<rect x='385.6' y='212.8' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='433.2' y='228.7' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=2 j=3</text>
+<rect x='100.0' y='236.6' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='147.6' y='252.5' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=3 j=0</text>
+<rect x='195.2' y='236.6' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='242.8' y='252.5' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=3 j=1</text>
+<rect x='290.4' y='236.6' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='338.0' y='252.5' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=3 j=2</text>
+<rect x='385.6' y='236.6' width='95.2' height='23.8' rx='0' fill='none' fill-opacity='0.6' stroke='#2d6a2d' stroke-width='1'/>
+<text x='433.2' y='252.5' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#2d6a2d' font-weight='normal'>i=3 j=3</text>
+<text x='290.4' y='470.8' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='normal'>each band: 4 x 4 blocks of 7 rows x 28 columns (i = row block, j = column block)</text>
+<text x='290.4' y='486.8' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#e63946' font-weight='normal'>red block: oh0 = pid_h*28 + i*7 = 42, ow0 = j*28 = 28</text>
+<text x='750.0' y='58.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>output channels OC = 64</text>
+<rect x='600.0' y='70.0' width='75.0' height='40.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='637.0' y='88.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>pid_c=0</text>
+<text x='637.0' y='103.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#333' font-weight='normal'>oc 0..15</text>
+<rect x='675.0' y='70.0' width='75.0' height='40.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='712.0' y='88.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>pid_c=1</text>
+<text x='712.0' y='103.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#333' font-weight='normal'>oc 16..31</text>
+<rect x='750.0' y='70.0' width='75.0' height='40.0' rx='0' fill='#6fa8dc' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='787.0' y='88.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#e63946' font-weight='normal'>pid_c=2</text>
+<text x='787.0' y='103.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#333' font-weight='normal'>oc 32..47</text>
+<rect x='825.0' y='70.0' width='75.0' height='40.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='862.0' y='88.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>pid_c=3</text>
+<text x='862.0' y='103.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#333' font-weight='normal'>oc 48..63</text>
+<text x='750.0' y='130.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='normal'>mesh column pid_c owns 16 output channels,</text>
+<text x='750.0' y='146.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='normal'>so it needs only filters 16*pid_c .. +16 (one weight block)</text>
+<rect x='585.0' y='190.0' width='330.0' height='150.0' rx='6' fill='#fafafa' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='750.0' y='212.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>core (pid_h, pid_c) = (1, 2), round (i, j) = (2, 1)</text>
+<text x='612.0' y='238.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#38761d' font-weight='normal'>y = store_buffer(win_c,</text>
+<text x='624.0' y='256.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#38761d' font-weight='normal'>{oh0, ow0, pid_c*16},  {7, 28, 16})</text>
+<text x='624.0' y='274.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#38761d' font-weight='normal'>= {42, 28, 32}, a 7 x 28 x 16 block (3136 B)</text>
+<text x='612.0' y='298.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='normal'>x = load_buffer(win_a,</text>
+<text x='624.0' y='316.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='normal'>{oh0*2, ow0*2, 0}, {19, 61, 4})</text>
+<text x='624.0' y='334.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='normal'>= {84, 56, 0}: its input footprint (4636 B)</text>
+<text x='750.0' y='370.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>16 cores x 16 rounds x 3136 B = all 802,816 outputs</text>
+</svg>
