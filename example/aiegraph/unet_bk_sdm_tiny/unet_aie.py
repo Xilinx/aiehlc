@@ -208,7 +208,7 @@ typedef struct {
 
 static float g_uc_acc[UC_MAX_ACC] __attribute__((aligned(64))); // .bss, never malloc
 static int32_t *g_uc_a = nullptr; // port a: bf16 [64][128]
-static int32_t *g_uc_b = nullptr; // port b: bf16 [64][128]
+static int32_t *g_uc_b = nullptr; // port b: bf16 [80][128] (4 x (16 weight rows + 4 zero rows), KTIMER layout)
 static int32_t *g_uc_c = nullptr; // port c: f32  [64][64]
 static int g_aie_launches = 0;    // every gemm_bf16 launch that ran
 static unsigned long long g_uc_macs = 0; // MACs of those launches (valid rows x cols x K)
@@ -259,12 +259,12 @@ static int uc_alloc(void) {
     if (g_uc_c)
         return 0;
     g_uc_a = (int32_t *)__Runtime_Alloc(64 * UC_KPORT * 2);
-    g_uc_b = (int32_t *)__Runtime_Alloc(64 * UC_KPORT * 2);
+    g_uc_b = (int32_t *)__Runtime_Alloc(80 * UC_KPORT * 2);
     g_uc_c = (int32_t *)__Runtime_Alloc(64 * UC_CW * 4);
     if (!g_uc_a || !g_uc_b || !g_uc_c)
         return -1;
     memset(g_uc_a, 0, 64 * UC_KPORT * 2); // cols 64..127 stay zero
-    memset(g_uc_b, 0, 64 * UC_KPORT * 2);
+    memset(g_uc_b, 0, 80 * UC_KPORT * 2); // rows 16..19 of each core group stay zero
     return 0;
 }
 
@@ -334,7 +334,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
                             const int c = k / KK, t = k % KK;
                             v = wbf[((((size_t)(n / ob) * (C / ib) + c / ib) * KK + t) * ib + c % ib) * ob + n % ob];
                         }
-                        B[r * UC_KPORT + kk] = v;
+                        B[((r >> 4) * 20 + (r & 15)) * UC_KPORT + kk] = v;
                     }
                 }
                 memset(g_uc_c, 0xff, 64 * UC_CW * 4); // sentinel: unwritten -> NaN -> counted
@@ -344,7 +344,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
                 unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
                 __Runtime_pm_warm_stats(&seg0, &cold0);
 #endif
-                Xil_DCacheFlushRange((UINTPTR)g_uc_b, 64 * UC_KPORT * 2);
+                Xil_DCacheFlushRange((UINTPTR)g_uc_b, 80 * UC_KPORT * 2);
                 Xil_DCacheFlushRange((UINTPTR)g_uc_c, 64 * UC_CW * 4);
                 gemm_bf16<<<mesh>>>(g_uc_a, g_uc_b, g_uc_c);
                 Xil_DCacheInvalidateRange((UINTPTR)g_uc_c, 64 * UC_CW * 4);
