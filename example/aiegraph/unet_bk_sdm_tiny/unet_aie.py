@@ -216,6 +216,37 @@ static int g_uc_calls = 0;        // unet_aie_conv calls
 static int g_uc_rc = 0;           // first nonzero rc
 static unsigned long long g_uc_aie_ticks = 0; // A78 XTime ticks spent in flush + launch + invalidate
 static int g_uc_kloads = 0;       // launches that (re)wrote the kernel's program memory
+/* P1 split: A78 pmccntr per launch region inside aie_wall. pre = B/C flush (host->DMA sync, -> startio),
+ * post = C invalidate + pm stats (DMA->host sync, -> wait_io), call = gemm_bf16; glue = call minus the
+ * runtime phase + wait_io cycles it accrued (48 lock-init writes, 60 createio, dev sync, sb commit in the
+ * generated host code -> bdcfg). */
+void __Runtime_phase_cycles(unsigned long long *cyc, unsigned int *calls); /* C++ linkage, aie_runtime.h */
+void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls);
+static inline unsigned long long uc_pmc(void) {
+    unsigned long long v;
+#if defined(__aarch64__)
+    __asm__ volatile("isb; mrs %0, pmccntr_el0" : "=r"(v));
+#else
+    v = 0ULL;
+#endif
+    return v;
+}
+static inline unsigned long long uc_rt_cyc(void) {
+    unsigned long long ph[4] = {0, 0, 0, 0}, w = 0;
+    unsigned int pn[4] = {0, 0, 0, 0}, wn = 0;
+    __Runtime_phase_cycles(ph, pn);
+    __Runtime_wait_io_cycles(&w, &wn);
+    return ph[0] + ph[1] + ph[2] + ph[3] + w;
+}
+static unsigned long long g_sp_pre = 0, g_sp_call = 0, g_sp_glue = 0, g_sp_post = 0;
+extern "C" int unet_aie_split_stats(unsigned long long *pre, unsigned long long *call, unsigned long long *glue,
+                                    unsigned long long *post) {
+    *pre = g_sp_pre;
+    *call = g_sp_call;
+    *glue = g_sp_glue;
+    *post = g_sp_post;
+    return 0;
+}
 static unsigned g_uc_cold_tiles = 0; // per-tile cold loads inside those launches
 
 extern "C" int unet_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles) {
@@ -340,13 +371,16 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
                 memset(g_uc_c, 0xff, 64 * UC_CW * 4); // sentinel: unwritten -> NaN -> counted
                 XTime lt0, lt1;
                 XTime_GetTime(&lt0);
+                const unsigned long long sp0 = uc_pmc();
 #if UC_WARM
                 unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
                 __Runtime_pm_warm_stats(&seg0, &cold0);
 #endif
                 Xil_DCacheFlushRange((UINTPTR)g_uc_b, 80 * UC_KPORT * 2);
                 Xil_DCacheFlushRange((UINTPTR)g_uc_c, 64 * UC_CW * 4);
+                const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
                 gemm_bf16<<<mesh>>>(g_uc_a, g_uc_b, g_uc_c);
+                const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();
                 Xil_DCacheInvalidateRange((UINTPTR)g_uc_c, 64 * UC_CW * 4);
 #if UC_WARM
                 __Runtime_pm_warm_stats(&seg1, &cold1);
@@ -355,7 +389,12 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
                     g_uc_cold_tiles += cold1 - cold0;
                 }
 #endif
+                const unsigned long long sp3 = uc_pmc();
                 XTime_GetTime(&lt1);
+                g_sp_pre += sp1 - sp0;
+                g_sp_call += sp2 - sp1;
+                g_sp_glue += (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL;
+                g_sp_post += sp3 - sp2;
                 g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
                 g_aie_launches++;
                 { // KTIMER: AIE core timer delta each core wrote into its block tail (row 0, words 16..18)
@@ -614,6 +653,8 @@ MAIN_EXTRA_DECL = (
     "int unet_aie_stats(int *launches, int *run_rc, int *calls, unsigned long long *macs);\n"
     "int unet_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles);\n"
     "int unet_aie_ktimer_stats(unsigned long long *max_sum, unsigned long long *all_sum, int *n, int *bad);\n"
+    "int unet_aie_split_stats(unsigned long long *pre, unsigned long long *call, unsigned long long *glue, "
+    "unsigned long long *post);\n"
     "/* the runtime is C++ (aie_runtime.o in the kernel archive): bind its mangled symbol */\n"
     "void __Runtime_phase_cycles(unsigned long long *cyc, unsigned int *calls) "
     "__asm__(\"_Z22__Runtime_phase_cyclesPyPj\");\n"
@@ -686,16 +727,28 @@ LAUNCH_LINE = r"""#ifdef UNET_LAUNCH_WARM
         const unsigned long long pmu_hz = g_s > 0.0 ? (unsigned long long)((double)(pmc1 - pmc0) / g_s + 0.5) : 0ULL;
         const double cms = pmu_hz ? 1000.0 / (double)pmu_hz : 0.0; /* ms per PMU cycle */
         const double nl = wl ? (double)wl : 1.0;
-        const double sum_ms = (double)(ph[0] + ph[1] + ph[2] + ph[3] + wio) * cms;
+        /* app-side launch regions (pmccntr, per launch, see unet_aie.py HOST_CC): host->DMA flush joins
+         * startio, DMA->host invalidate joins wait_io, the generated-host glue (lock init, createio, dev
+         * sync, commit: gemm_bf16 call minus runtime phases) joins bdcfg */
+        unsigned long long sp_pre = 0, sp_call = 0, sp_glue = 0, sp_post = 0;
+        unet_aie_split_stats(&sp_pre, &sp_call, &sp_glue, &sp_post);
+        const unsigned long long c_kl = ph[0], c_bd = ph[1] + sp_glue, c_si = ph[3] + sp_pre, c_ce = ph[2],
+                                 c_wi = wio + sp_post;
+        const double rt_ms = (double)(ph[0] + ph[1] + ph[2] + ph[3] + wio) * cms;
+        const double sum_ms = (double)(c_kl + c_bd + c_si + c_ce + c_wi) * cms;
         printf("LAUNCH split kload=%.3f bdcfg=%.3f startio=%.3f coreen=%.3f wait_io=%.3f core_reset=%.3f "
                "ms_per_launch=%.3f pmu_hz=%llu sum_vs_aie_wall=%.3f\n",
-               ph[0] * cms / nl, ph[1] * cms / nl, ph[3] * cms / nl, ph[2] * cms / nl, wio * cms / nl,
+               c_kl * cms / nl, c_bd * cms / nl, c_si * cms / nl, c_ce * cms / nl, c_wi * cms / nl,
                krst * cms / nl, aie_ms / nl, pmu_hz, aie_ms > 0.0 ? sum_ms / aie_ms : 0.0);
         printf("LAUNCH split_detail calls kload=%u bdcfg=%u startio=%u coreen=%u wait_io=%u core_reset=%u "
-               "kload_elf_ms=%.3f plan_ms=%.3f sync_ms=%.3f phase_sum_ms=%.3f aie_wall_ms=%.3f "
+               "kload_elf_ms=%.3f plan_ms=%.3f sync_ms=%.3f rt_bdcfg=%.4f rt_startio=%.4f rt_wait_io=%.4f "
+               "host_glue_bdcfg=%.4f host_flush_startio=%.4f host_inval_wait_io=%.4f gemm_call=%.4f "
+               "rt_phase_sum_ms=%.3f phase_sum_ms=%.3f aie_wall_ms=%.3f "
                "unattributed_ms_per_launch=%.4f pmc_delta=%llu xtime_s=%.3f\n",
                phn[0], phn[1], phn[3], phn[2], wion, krstn, kel * cms / nl, plan * cms / nl, sync * cms / nl,
-               sum_ms, aie_ms, (aie_ms - sum_ms) / nl, pmc1 - pmc0, g_s);
+               ph[1] * cms / nl, ph[3] * cms / nl, wio * cms / nl, sp_glue * cms / nl, sp_pre * cms / nl,
+               sp_post * cms / nl, sp_call * cms / nl, rt_ms, sum_ms, aie_ms, (aie_ms - sum_ms) / nl, pmc1 - pmc0,
+               g_s);
         fflush(stdout);
     }
 #endif
