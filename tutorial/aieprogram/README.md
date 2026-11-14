@@ -39,6 +39,13 @@ A launch re-loads the kernel and re-programs the array, so these times are
 mostly configuration, not compute (tutorial 3 explains why `.resident` still
 moves them).
 
+## Full listings
+
+Each tutorial opens with its example's complete source, copied from
+`example/tileprogram/ccode/`. After editing an example, refresh them:
+`python3 tutorial/aieprogram/sync_code.py` (`--check` exits 1 if a listing is
+stale).
+
 ## Figures
 
 The SVGs in `img/` come from `img/make_figures.py` (stdlib Python, numbers
