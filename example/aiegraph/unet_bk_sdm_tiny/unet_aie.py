@@ -27,7 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
-P2K = Path(__file__).resolve().parent / "bf16_gemm_convin.cc"
+P2K = Path(__file__).resolve().parent / "bf16_gemm_convin.cc"  # 64x64 ports (8e7254d, board PASS p0_board.log)
+P2K_KT = Path(__file__).resolve().parent / "bf16_gemm_convin_ktimer.cc"  # --ktimer: core timer tail, b 80x64 / c 64x80
 ENTRY = "aiek_unetconv"
 
 
@@ -180,8 +181,13 @@ static int g_uc_ht = 0;
 
 #define UC_MAX_ACC @MAXACC@ /* largest M*N of the partition layers (fp32 K-sum on the APU) */
 #define UC_KPORT 128        /* staged row: 64 bf16 + 64 bf16 zeros (int32 [64][64] port) */
+/*KT+*/#define UC_BR 80            /* port b rows: 4 core groups x (16 weight rows + 4 zero rows) */
 #define UC_CW 80            /* port c row: 4 core blocks x (16 results + 4 KTIMER tail words) */
-
+#define UC_GRP(i) ((((i) >> 4) * 20) + ((i) & 15)) /* row/col i of the 64 -> padded core-group layout */
+/*KT-*//*NK+*/#define UC_BR 64            /* port b rows */
+#define UC_CW 64            /* port c row */
+#define UC_GRP(i) (i)
+/*NK-*/
 static inline uint16_t uc_f2bf(float f) {
     uint32_t u;
     memcpy(&u, &f, 4);
@@ -208,8 +214,8 @@ typedef struct {
 
 static float g_uc_acc[UC_MAX_ACC] __attribute__((aligned(64))); // .bss, never malloc
 static int32_t *g_uc_a = nullptr; // port a: bf16 [64][128]
-static int32_t *g_uc_b = nullptr; // port b: bf16 [80][128] (4 x (16 weight rows + 4 zero rows), KTIMER layout)
-static int32_t *g_uc_c = nullptr; // port c: f32  [64][64]
+static int32_t *g_uc_b = nullptr; // port b: bf16 [UC_BR][128]
+static int32_t *g_uc_c = nullptr; // port c: f32  [64][UC_CW]
 static int g_aie_launches = 0;    // every gemm_bf16 launch that ran
 static unsigned long long g_uc_macs = 0; // MACs of those launches (valid rows x cols x K)
 static int g_uc_calls = 0;        // unet_aie_conv calls
@@ -259,7 +265,7 @@ extern "C" int unet_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold
     return 0;
 }
 
-static unsigned long long g_kt_max = 0, g_kt_all = 0; // KTIMER: sum over launches of max-core / all-core cycles
+/*KT+*/static unsigned long long g_kt_max = 0, g_kt_all = 0; // KTIMER: sum over launches of max-core / all-core cycles
 static int g_kt_n = 0, g_kt_bad = 0;                    // launches read, core tails without the magic word
 
 extern "C" int unet_aie_ktimer_stats(unsigned long long *max_sum, unsigned long long *all_sum, int *n, int *bad) {
@@ -274,7 +280,7 @@ extern "C" int unet_aie_ktimer_stats(unsigned long long *max_sum, unsigned long 
     return 0;
 }
 
-extern "C" int unet_aie_stats(int *launches, int *run_rc, int *calls, unsigned long long *macs) {
+/*KT-*/extern "C" int unet_aie_stats(int *launches, int *run_rc, int *calls, unsigned long long *macs) {
     if (launches)
         *launches = g_aie_launches;
     if (run_rc)
@@ -290,12 +296,12 @@ static int uc_alloc(void) {
     if (g_uc_c)
         return 0;
     g_uc_a = (int32_t *)__Runtime_Alloc(64 * UC_KPORT * 2);
-    g_uc_b = (int32_t *)__Runtime_Alloc(80 * UC_KPORT * 2);
+    g_uc_b = (int32_t *)__Runtime_Alloc(UC_BR * UC_KPORT * 2);
     g_uc_c = (int32_t *)__Runtime_Alloc(64 * UC_CW * 4);
     if (!g_uc_a || !g_uc_b || !g_uc_c)
         return -1;
     memset(g_uc_a, 0, 64 * UC_KPORT * 2); // cols 64..127 stay zero
-    memset(g_uc_b, 0, 80 * UC_KPORT * 2); // rows 16..19 of each core group stay zero
+    memset(g_uc_b, 0, UC_BR * UC_KPORT * 2); // --ktimer: rows 16..19 of each core group stay zero
     return 0;
 }
 
@@ -365,7 +371,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
                             const int c = k / KK, t = k % KK;
                             v = wbf[((((size_t)(n / ob) * (C / ib) + c / ib) * KK + t) * ib + c % ib) * ob + n % ob];
                         }
-                        B[((r >> 4) * 20 + (r & 15)) * UC_KPORT + kk] = v;
+                        B[UC_GRP(r) * UC_KPORT + kk] = v;
                     }
                 }
                 memset(g_uc_c, 0xff, 64 * UC_CW * 4); // sentinel: unwritten -> NaN -> counted
@@ -376,7 +382,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
                 unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
                 __Runtime_pm_warm_stats(&seg0, &cold0);
 #endif
-                Xil_DCacheFlushRange((UINTPTR)g_uc_b, 80 * UC_KPORT * 2);
+                Xil_DCacheFlushRange((UINTPTR)g_uc_b, UC_BR * UC_KPORT * 2);
                 Xil_DCacheFlushRange((UINTPTR)g_uc_c, 64 * UC_CW * 4);
                 const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
                 gemm_bf16<<<mesh>>>(g_uc_a, g_uc_b, g_uc_c);
@@ -397,7 +403,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
                 g_sp_post += sp3 - sp2;
                 g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
                 g_aie_launches++;
-                { // KTIMER: AIE core timer delta each core wrote into its block tail (row 0, words 16..18)
+/*KT+*/                { // KTIMER: AIE core timer delta each core wrote into its block tail (row 0, words 16..18)
                     const uint32_t *Cw = (const uint32_t *)g_uc_c;
                     unsigned long long mx = 0;
                     for (int q = 0; q < 16; q++) {
@@ -414,11 +420,11 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
                     g_kt_max += mx;
                     g_kt_n++;
                 }
-                const int mv = (M - mb * 64) < 64 ? (M - mb * 64) : 64, nv = (N - nb * 64) < 64 ? (N - nb * 64) : 64;
+/*KT-*/                const int mv = (M - mb * 64) < 64 ? (M - mb * 64) : 64, nv = (N - nb * 64) < 64 ? (N - nb * 64) : 64;
                 g_uc_macs += (unsigned long long)mv * nv * kv;
                 for (int r = 0; r < mv; r++)
                     for (int j = 0; j < nv; j++) {
-                        const float v = Cb[r * UC_CW + (j >> 4) * 20 + (j & 15)];
+                        const float v = Cb[r * UC_CW + UC_GRP(j)];
                         if (!(v == v) || v > 1e30f || v < -1e30f)
                             bad++;
                         g_uc_acc[(size_t)(mb * 64 + r) * N + nb * 64 + j] += uc_bf2f(uc_f2bf(v)); // bf16 slice out
@@ -488,10 +494,10 @@ AIEK_REFERENCE(@E@) {
 """
 
 
-def kernel_text() -> str:
-    src = P2K.read_text()
+def kernel_text(ktimer: bool = False) -> str:
+    src = (P2K_KT if ktimer else P2K).read_text()
     m = re.search(r"(__global__ void gemm_bf16\(.*?\n\})\s*\n\s*int main\(", src, re.S)
-    assert m, f"gemm_bf16 not found in {P2K}"
+    assert m, "gemm_bf16 not found"
     return m.group(1)
 
 
@@ -515,22 +521,33 @@ CTRLPKT_PRAGMAS = (  # --ctrlpkt aot (P2a): spelled as aiehlc prints them (src/l
 CTRLPKT_NPRAGMAS = CTRLPKT_PRAGMAS.count("#pragma")
 
 
-def write_kernel(kdst: Path, spec: str, maxacc: int, warm: bool = False, ctrlpkt: str = "off") -> Path:
+def kt_select(text: str, ktimer: bool) -> str:
+    """keep /*KT+*/../*KT-*/ spans with --ktimer, /*NK+*/../*NK-*/ spans without; drop the other"""
+    keep, drop = (("KT", "NK") if ktimer else ("NK", "KT"))
+    text = re.sub(r"/\*%s\+\*/.*?/\*%s-\*/" % (drop, drop), "", text, flags=re.S)
+    text = text.replace("/*%s+*/" % keep, "").replace("/*%s-*/" % keep, "")
+    assert "/*KT" not in text and "/*NK" not in text
+    return text
+
+
+def write_kernel(kdst: Path, spec: str, maxacc: int, warm: bool = False, ctrlpkt: str = "off",
+                 ktimer: bool = False) -> Path:
     spec = spec.replace('"out ', '"export    unet_aie_conv\\n"\n        "export    unet_aie_stats\\n"\n'
-                        '        "export    unet_aie_launch_stats\\n"\n        "export    unet_aie_ktimer_stats\\n"\n'
+                        '        "export    unet_aie_launch_stats\\n"\n' +
+                        ('        "export    unet_aie_ktimer_stats\\n"\n' if ktimer else '') +
                         '        "export    unet_aie_split_stats\\n"\n        "out ', 1)
     assert "export    unet_aie_conv" in spec, spec
     kdst.mkdir(parents=True, exist_ok=True)
     kcc = kdst / f"{ENTRY}.cc"
     head = ("// %s.cc -- generated by build_unet.py --aie conv (P35w). Kernel: gemm_bf16 from %s (verbatim).\n"
-            "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n" % (ENTRY, P2K))
+            "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n" % (ENTRY, P2K_KT if ktimer else P2K))
     if ctrlpkt == "aot":
         head = CTRLPKT_PRAGMAS + head
-    ktext = kernel_text()
+    ktext = kernel_text(ktimer)
     if warm:
         i = ktext.index(") {\n") + len(") {\n")
         ktext = ktext[:i] + SOFTFLOAT_RM + ktext[i:]
-    kcc.write_text(head + ktext + "\n" + HOST_CC.replace("@MAXACC@", str(maxacc)).replace("@WARM@", "1" if warm else "0")
+    kcc.write_text(head + ktext + "\n" + kt_select(HOST_CC, ktimer).replace("@MAXACC@", str(maxacc)).replace("@WARM@", "1" if warm else "0")
                    .replace("@CTRLPKT@", "1" if ctrlpkt == "aot" else "0")
                    .replace("@PART_C0@", "2" if ctrlpkt == "aot" else "3")
                    .replace("@E@", ENTRY).replace("@SPEC@", spec))
@@ -652,7 +669,7 @@ MAIN_EXTRA_DECL = (
     "void unet_prof_print(double graph_run_ms, double aie_wall_ms); /* graph_driver.c (P1 PROF) */\n"
     "int unet_aie_stats(int *launches, int *run_rc, int *calls, unsigned long long *macs);\n"
     "int unet_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles);\n"
-    "int unet_aie_ktimer_stats(unsigned long long *max_sum, unsigned long long *all_sum, int *n, int *bad);\n"
+    "/*KT+*/int unet_aie_ktimer_stats(unsigned long long *max_sum, unsigned long long *all_sum, int *n, int *bad);\n/*KT-*/"
     "int unet_aie_split_stats(unsigned long long *pre, unsigned long long *call, unsigned long long *glue, "
     "unsigned long long *post);\n"
     "/* the runtime is C++ (aie_runtime.o in the kernel archive): bind its mangled symbol */\n"
@@ -691,7 +708,7 @@ MAIN_CMP = r"""    int launches = 0, run_rc = -99, calls = 0;
     printf("AIE unet: unet_aie_conv calls=%d (planned %d) run_rc=%d aie_launches=%d (planned %d) "
            "PH_COREEN calls=%u cycles=%llu aie_macs=%llu aie_flop_frac=%.4f\n", calls, UNET_AIE_PLANNED_CALLS,
            run_rc, launches, UNET_AIE_PLANNED_LAUNCHES, ph_calls[2], ph_cyc[2], macs, frac);
-    {
+/*KT+*/    {
         unsigned long long kt_max = 0, kt_all = 0;
         int kt_n = 0, kt_bad = 0;
         unet_aie_ktimer_stats(&kt_max, &kt_all, &kt_n, &kt_bad);
@@ -700,7 +717,7 @@ MAIN_CMP = r"""    int launches = 0, run_rc = -99, calls = 0;
                "total_max_core_cycles=%llu\n", launches ? kt_max / (unsigned long long)launches : 0ULL, launches,
                kt_n, kt_bad, kt_n ? (double)kt_all / (16.0 * kt_n) : 0.0, kt_max);
     }
-    int rc = p1_cmp("unet", out, "bf16", launches, (int)ph_calls[2], run_rc, frac);
+/*KT-*/    int rc = p1_cmp("unet", out, "bf16", launches, (int)ph_calls[2], run_rc, frac);
 """
 
 
@@ -764,12 +781,12 @@ PROF_LINE = r"""    {
 """
 
 
-def main_c(base: str) -> str:
+def main_c(base: str, ktimer: bool = False) -> str:
     old = '    int rc = p1_cmp("unet-" UNET_AIE_MODE, out, UNET_WDTYPE "w/" UNET_AIE_MODE, 0, 0, 0, 0.0);\n'
     assert old in base
-    s = base.replace(old, MAIN_CMP)
+    s = base.replace(old, kt_select(MAIN_CMP, ktimer))
     s = s.replace("extern const uint8_t _binary_weights_bin_start[];\n",
-                  "extern const uint8_t _binary_weights_bin_start[];\n" + MAIN_EXTRA_DECL, 1)
+                  "extern const uint8_t _binary_weights_bin_start[];\n" + kt_select(MAIN_EXTRA_DECL, ktimer), 1)
     s = s.replace("init (aiegraph fp32 C on A78, weights=%s, aie=%s)",
                   "init (aiegraph C on A78 + conv on AIE gemm_bf16, weights=%s, aie=%s)")
     anchor = ' n, REF_UNET_OUT_N);\n'

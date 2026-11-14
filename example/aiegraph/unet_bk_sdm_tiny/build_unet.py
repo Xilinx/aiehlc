@@ -201,7 +201,7 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     log(f"carrier layer {lidx} ({car['func']}): aiegraph offload builds the gemm_bf16 archive on it")
     p = emod.offload_prototype(lidx, entry=ua.ENTRY)
     kcc = ua.write_kernel(out / "aiek_src", p.spec(), max(c["M"] * c["N"] for c in sel),
-                          warm=(a.launch_opt == "warm"), ctrlpkt=a.ctrlpkt)
+                          warm=(a.launch_opt == "warm"), ctrlpkt=a.ctrlpkt, ktimer=a.ktimer)
     if a.ctrlpkt == "aot":
         log(f"ctrlpkt=aot pragmas={ua.CTRLPKT_NPRAGMAS}")
     log(f"kernel source {kcc}")
@@ -235,7 +235,8 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     with open(hdr, "a") as f:
         f.write("#define UNET_AIE_PLANNED_LAUNCHES %d\n#define UNET_AIE_PLANNED_CALLS %d\n"
                 "#define UNET_TOTAL_GEMM_MACS %dULL\n" % (planned, len(sel), int(part["total_gemm_macs"])))
-    return ua.main_c(MAIN_C), len(sel)
+    log(f"ktimer={'on' if a.ktimer else 'off'}")
+    return ua.main_c(MAIN_C, ktimer=a.ktimer), len(sel)
 
 
 def main(argv=None) -> int:
@@ -256,6 +257,10 @@ def main(argv=None) -> int:
     ap.add_argument("--ctrlpkt", choices=("off", "aot"), default="off",
                     help="aot (P2a): control-packet plan pragmas in aiek_unetconv.cc + "
                          "__Runtime_ctrl_high_throughput_enable(1) before the first launch")
+    ap.add_argument("--ktimer", action="store_true",
+                    help="gemm_bf16 reads the AIE core timer at entry/exit into a 4-word tail per C block "
+                         "(ports b 80x64 / c 64x80, bf16_gemm_convin_ktimer.cc); main prints KTIMER. "
+                         "Default off: 64x64 ports, no timer reads")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
     if a.aie == "conv":
