@@ -148,6 +148,47 @@ against 31.47 ms for the scalar kernel, golden-exact on the board. Build with
 because aiehlc splices `.cc` includes before the preprocessor runs. See
 `doc/performance/conv2dstem_perf_review.md` §6.
 
+### `conv2dstem_new.cc` + `conv2dstem_uk_new.cc` — the same library, kernel-only block-load model
+
+`conv2dstem_new.cc` is `conv2dstem.cc` without the hand-written DMA description:
+no `RowBC_spatial` / `ColBC` / `LtoR_Merge` `GemmSpace`s and none of the
+mirrored tiling `#define`s (`SP_*`, `OH_T`, `TILE_*`, ...). The kernel's ports
+declare their tensors (`aie::shape<230,230,4>`, `<64,7,7,4>`, `<112,112,64>`)
+and the kernel states its blocks -- `aie::load_buffer(win_a, {oh0*2, ow0*2, 0},
+{19, 61, 4})`, `aie::store_buffer(win_c, {oh0, ow0, pid_c*16}, {7, 28, 16})`,
+`aie::program_id`, `aie::release` / `aie::commit` -- and aiehlc's kernel
+analysis traces them, recognizes the spatial-halo conv and derives + checks the
+DMA (`doc/design/op_mapping_programming_model.md` §5, §7). Everything else is
+the same: public API (`conv2dstem.h`), host staging / mmul-order weight packing
+with the quant params in the pad channel / tile-major collect, the
+`mmul<8,8,8>` + exact vector requantize, all eight pragmas (control plane, KCO,
+`output_tile_major`). Differences: the input window is the conv footprint,
+61 px (244-byte rows) instead of 64 px, so A-tiles are unaligned 64-byte loads
+and the last K-block starts 4 bytes early (no load leaves its row or block);
+the staging pitch is 230 px, not 232. Not yet measured on a board.
+
+`conv2dstem_uk_new.cc` (+ `conv2dstem_uk_new_ref.c`) is `conv2dstem_uk.cc` on
+top of it: `emod.offload("layer1", ".../conv2dstem_uk_new.cc")`.
+
+`test_conv2d_new.cc` is the standalone board app for it: `test_conv2d.cc` with
+the one kernel `#include` naming `conv2dstem_new.cc` (same data, qparam fold,
+golden check and PERF report). Committed, not generated like `--vec`'s entry.
+Build with `./buildtest.sh --new [--skip-trace]`; the log shows the kernel
+analysis (`[KernelAnalysis] conv2d_spatial: traced on the 4x4 mesh ... DMA
+derived and checked against every load/store`) and `[TilingLinalg]
+conv2d_spatial: derived tiling matches the kernel analysis (rounds 16, OFM
+3136 B, IFM 4636 B, WGT 3136 B)`. Builds (8 pragmas detected, `.TM` in
+`kernel.lst`, dedicated shim col 0); board run pending -- expect
+`GOLDEN PASS 802816/802816`.
+
+Checks (all on x86): `build/aiehlc-convtile trace conv2dstem_new.cc` (kernel
+analysis: vector kernel under ASan, every block vs the derived DMA);
+`emu/emu_conv2dstem_new.sh <aout/worklocal>` (the generated kernel + the
+library's real staging / packing / collect vs `scalar_conv2d_ref`, windows
+served by the derived descriptors, output tile-major): 802,816/802,816 on two
+quant-parameter ranges; `offload_check` READY (calibrate bit-exact, network
+logits identical); `aiehlc.sh` builds `libconv2dstem_uk_new.a`.
+
 ### `conv2dstem.h` — the library contract
 
 Geometry macros, the `conv2dstem_qparam` struct, the entry declarations and the

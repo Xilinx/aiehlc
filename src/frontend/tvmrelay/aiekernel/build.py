@@ -17,6 +17,9 @@ Compile only. Nothing here talks to a board.
    re-archive with ``hostcompile.sh`` (``aie_layer_lib.build_archive``).
    ``build/host.o`` is deleted first: ``hostcompile.sh`` skips any object that
    already exists, so the adapters would otherwise silently not be compiled.
+   ``build/kernel.o`` is KEPT: install changes only host.cc, and
+   ``compile_one_kernel`` reuses the object while ``build/kernel.stamp``
+   (kernel.cc, bcf, prx, kc.sh) matches -- no second xchesscc run.
 3. **isolate** -- merge the archive's own objects (``host.o``, ``routing.o``,
    ``kernel*.o``) with ``ld -r`` and make every global LOCAL except the
    adapters, the entry, the spec's ``export`` lines, and the RUNTIME HOOKS --
@@ -25,12 +28,16 @@ Compile only. Nothing here talks to a board.
    ``_binary_kernel_<func>_*`` and any public API of a wrapped library stop
    being able to collide with anything else in the ELF.
 
-   The hooks are deliberately left strong. ``__Runtime_routing_init`` calls
-   ONE global ``routing(dev)``, and partition init is cached per ``meshId``:
-   the runtime is one-aiehlc-library-per-ELF by design. Weakening ``routing``
-   would let a second library link cleanly and then run with the first one's
-   stream-switch configuration -- the worst possible failure. Kept strong, two
-   libraries collide, and :func:`link_collisions` reports it before ``make``.
+   Per-library routing: a library built by the current aiehlc passes its own
+   ``routing`` to ``__Runtime_init_mesh_partition_with`` (generated
+   ``aieArray::partition``), and the runtime re-initializes a partition another
+   library's routing set up. Its ``routing`` is therefore made LOCAL, and
+   several libraries share one ELF. A library built the old way (it calls
+   ``__Runtime_init_mesh_partition``, so the runtime uses the global, weak
+   ``routing``) keeps ``routing`` strong and global -- weakening it would let a
+   second library link cleanly and run with the first one's stream-switch
+   configuration; kept strong, two such libraries collide and
+   :func:`link_collisions` reports it before ``make``.
 4. **verify** -- ``nm``: every adapter is a defined ``T``; and across the
    archives the driver will actually call, no strong symbol is defined twice.
 """
@@ -79,6 +86,12 @@ def _stamp(spec) -> str:
         if p.stat().st_size < (1 << 20):          # skip multi-MB data dumps
             h.update(p.name.encode() + p.read_bytes())
     h.update((REPO / "include" / "aie_user_kernel.h").read_bytes())
+    # The generator itself: a rebuilt aiehlc may emit different host/kernel code
+    # (e.g. per-library routing), so a cached tree from an older one is stale.
+    exe = REPO / "build" / "aiehlc"
+    if exe.is_file():
+        st = exe.stat()
+        h.update(f"aiehlc {st.st_size} {st.st_mtime_ns}".encode())
     return h.hexdigest()
 
 
@@ -148,11 +161,18 @@ def isolate_archive(archive: Path, keep, verbose: bool = True) -> dict:
         subprocess.run([f"{CROSS}ld", "-r", "-o", str(merged), *own], cwd=tmp, check=True)
 
         strong = {n for n, t in _nm([merged], "-g", "--defined-only") if t in "TDBRAGSC"}
-        needed = {n for n, _ in _nm([tmp / m for m in runtime], "-u")}
+        # Only STRONG references from the runtime make a hook; its weak routing()
+        # reference is satisfied by the partition's own routing (see below).
+        needed = {n for n, t in _nm([tmp / m for m in runtime], "-u") if t == "U"}
         keep = set(keep)
-        # Runtime hooks stay STRONG and global: the runtime calls them by name
-        # (routing(dev) from __Runtime_routing_init). Weakening them would let
-        # a second library link "fine" and run with the first one's routing.
+        # Runtime hooks stay STRONG and global: the runtime calls them by name.
+        # routing() is one only for a library built before per-library routing
+        # (its host.cc still calls the old __Runtime_init_mesh_partition, so the
+        # runtime falls back to the global routing()); a current library passes
+        # its routing explicitly, so routing() is made local and several
+        # libraries coexist (doc/design/aiegraph_python_api.md, multi-library).
+        if not _multi_library_merged(merged) and ROUTING_SYMBOL in strong:
+            needed.add(ROUTING_SYMBOL)
         hooks = sorted((strong & needed) - keep)
         localize = sorted(strong - keep - set(hooks))
         (tmp / "loc.txt").write_text("\n".join(localize) + "\n")
@@ -177,8 +197,33 @@ def isolate_archive(archive: Path, keep, verbose: bool = True) -> dict:
 
 #: The runtime's link-time singleton: ``__Runtime_routing_init`` calls ONE
 #: global ``routing(XAie_DevInst*)``. Two aiehlc libraries whose host objects
-#: are both pulled into an ELF each define it.
+#: are both pulled into an ELF each define it -- unless they were built with
+#: per-library routing (:func:`multi_library`), where it is local to each.
 ROUTING_SYMBOL = "_Z7routingP12XAie_DevInst"
+#: What a per-library-routing host.cc calls (aiehlc's generated aieArray).
+MULTI_LIBRARY_API = "__Runtime_init_mesh_partition_with"
+
+
+def _multi_library_merged(obj: Path) -> bool:
+    return any(MULTI_LIBRARY_API in n for n, _ in _nm([obj], "-u"))
+
+
+def multi_library(archive) -> bool:
+    """True when *archive*'s own objects pass their routing to the runtime
+    (``__Runtime_init_mesh_partition_with``): such libraries can share an ELF."""
+    a = Path(archive)
+    if not a.is_file():
+        return False
+    members = subprocess.run([f"{CROSS}ar", "t", str(a)], capture_output=True, text=True).stdout.split()
+    own = [m for m in members if not m.startswith(_RUNTIME_PREFIXES)]
+    if not own:
+        return False
+    tmp = Path(tempfile.mkdtemp(prefix="aiek_ml_"))
+    try:
+        subprocess.run([f"{CROSS}ar", "x", str(a.resolve()), *own], cwd=tmp, check=True)
+        return any(_multi_library_merged(tmp / m) for m in own)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def link_collisions(archives) -> list:

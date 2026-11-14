@@ -3,7 +3,8 @@
 `aiegraph` turns an ONNX or PyTorch image classifier into int8 C for the
 Cortex-A78 (one C file per layer, plus a driver and Makefile), and moves the
 layers you choose onto your own AIE kernels after proving them on x86. It
-never runs anything on a board; it hands you `main.elf`.
+hands you `main.elf`, and `emod.run()` runs it on a lab board (palmyra by
+default, or `emod.run(ag.VEK385, "hostname")`) -- nothing else touches a board.
 
 Design and rationale: [doc/design/aiegraph_python_api.md](design/aiegraph_python_api.md).
 Writing an AIE kernel for it: [doc/tutorial_userkernel.md](tutorial_userkernel.md).
@@ -31,7 +32,7 @@ What pip cannot install, and how it is handled:
 |---|---|
 | TVM 0.16 (no wheel exists) | **automatic**: aiegraph attaches the build in `thirdparty/tvm-0.16`. If there is none, `aiegraph setup` builds it once (10–25 min) — or the first conversion does. |
 | Vitis (AIE compiler `xchesscc`, aarch64 cross gcc) | licensed, install it yourself and `source <Vitis>/settings64.sh`. Needed only for `offload` (the aiehlc build) and `build` (linking `main.elf`). Everything else works without it. |
-| a board | never used by aiegraph |
+| a board | only for `emod.run()`: `script/test/apppaltest.py` (palmyra: `USERNAME`/`PALIP`/`BOARDNAME`) or `appvek385.py` (VEK385: `USERNAME`/`VEK385IP`), from the env or `script/test/envlocal.sh`; `pexpect` |
 
 `aiegraph doctor` on a working machine:
 
@@ -198,25 +199,41 @@ emod = ag.compile(m, "aie", {"layer1": "a.cc"}, calib=["dog.jpg", "cat.jpg"], st
 `strict=True` (default) raises at the first failed gate; `strict=False` keeps
 failing layers on the A78 and leaves the report in `emod.offload_report`.
 
-## 4b. Before writing a kernel: what interface must it follow?
+## 4b. Before writing a kernel: a backbone for the layer
 
 ```python
-print(ag.offload_interface())                   # the file format: AIEK_ENTRY / AIEK_SPEC / reference / rules
-itf = emod.offload_interface("layer4")          # TVM layer 4 (or region="layer1.0.conv1")
-print(itf)                                      # args[] in call order, roles, value facts, AIEK_SPEC
-itf.write("my_kernels/")                        # aiek_layer04.cc (entry + spec) + aiek_layer04_ref.c
+print(ag.offload_prototype())                   # the file format and rules (no model needed)
+proto = emod.offload_prototype("layer4")        # TVM layer 4 (or region="layer1.0.conv1")
+print(proto)                                    # args[] in call order, roles, value facts, AIEK_SPEC
+proto.write("my_kernels/")                      # aiek_layer04.cc + aiek_layer04_ref.c
+# fill in the TODO(...)s, then
+print(emod.offload_check("layer4", "my_kernels/aiek_layer04.cc"))
 ```
 
-For each argument: `in` / `param` / `out`, dtype, shape, the role the layer's
-own TVM C gives it (weight, bias, zero-point, requant multiplier / shift,
-unused), and facts over every call of the layer (`all zero`, `values in
-[lo, hi]`). An all-zero constant gets `require=zero` -- the stem's second
-zero-point and its unused param, as `conv2dstem_uk.cc` writes by hand. The
-spec is not a guess: it is parsed with the real grammar and matched against
-every call (`verified: ... matches 2/2 call(s)`), so `detect` accepts the
-written file; other layers the same spec fits are listed. The templates
-compile and lint clean; the entry returns `AIEK_ERR_KERNEL` until you fill it.
-CLI: `aiegraph interface [layer1] [--region R] [--entry NAME] [--write DIR]`.
+`aiek_layer04.cc` is a **backbone** with the architecture of
+`src/aietensorop/conv2dstem/conv2dstem_uk.cc` (+ `conv2dstem.cc`), specialized
+to the layer -- what is the layer's is done, what is the algorithm's is yours:
+
+| part | done | TODO (yours) |
+|---|---|---|
+| `aiek_layer04_kernel` (the aiehlc kernel) | ports with the staged shapes (`aie::shape<58,58,64>`, ...), mesh split by `aie::program_id`, the block loop with `load_buffer` / `store_buffer` / `release` / `commit` on a tile the kernel analysis accepts (so aiehlc derives the DMA) | `TODO(compute)`: the MACs and the epilogue |
+| `aiek_layer04_run(...)` (`conv2d_stem_nchwc`'s role) | every TVM argument in call order, typed; staging buffers; mesh partition + launch | `TODO(stage input / weights / parameters)`, `TODO(unpack output)` |
+| `AIEK_ENTRY(aiek_layer04)` | all arguments -> `aiek_layer04_run` | -- |
+| `AIEK_SPEC(aiek_layer04, ...)` | proven against every call | -- |
+| `aiek_layer04_ref.c` | arguments, TVM layouts; for the conv + requantize layers of these int8 networks the **whole reference** (bit-exact) | the op, for any other layer |
+
+So `proto.write("./")` then `emod.offload_check("./aiek_layer04.cc")` is READY
+as written (calibrate BIT-EXACT, whole-network emulation identical): the
+reference is the layer's math, i.e. the spec of what your AIE code must
+compute. Until the `.cc` TODOs are filled `_run` returns -1 and the entry
+`AIEK_ERR_KERNEL`, so `offload` builds but the board run reports the error.
+The backbone builds as is (`aiehlc.sh` -> `libaiek_layer04.a`; verified for
+ResNet-18 layers 1 and 4) and lints clean. For each argument the report shows
+`in` / `param` / `out`, dtype, shape, the role the layer's own TVM C gives it
+(weight, bias, zero-point, requant multiplier / shift, unused) and facts over
+every call (`all zero` -> `require=zero`). Kernel frames exist for TVM NCHWc
+conv2d layers; any other op gets the entry + spec skeleton.
+CLI: `aiegraph prototype [layer1] [--region R] [--entry NAME] [--write DIR]`.
 
 ## 4a. When a check says NOT READY: let Claude port the kernel
 
@@ -257,16 +274,23 @@ any kernel; it does not prove that aiehlc compiles it for AIE2PS -- `offload()`
 | call | does |
 |---|---|
 | `ag.load(x)` / `ag.from_onnx(path)` / `ag.from_torch(module)` / `ag.download_model(name)` | get an fp32 `Model` (input must be `[1,3,224,224]`) |
-| `ag.embedded_convert(m, target="a78", calib=None, image=None, workdir=None)` | int8 + per-layer C + A78 driver; cached by model hash + options |
-| `ag.open(workdir)` | adopt an existing `deploy_flow.py` tree |
+| `ag.embedded_convert(m, target="a78", calib=None, image=None, workdir=None, force=False, keep_offloads=False)` | int8 + per-layer C + A78 driver; the conversion is cached by model hash + options, but it starts FRESH: earlier offloads go back to the CPU unless `keep_offloads=True`; `force=True` redoes the conversion |
+| `ag.open(workdir)` | adopt an existing `deploy_flow.py` tree as it is (earlier offloads included) |
+| `emod.offload_reset(layers=None)` / `ag.offload_reset(...)` | put offloaded layers (all, or `"layer4"` etc.) back on the CPU; driver regenerated |
+| `emod.offload("layer1", False)` | the same for one spec: undo `offload("layer1", k.cc)`, layer back on the CPU (returns the layers reset, `[]` if it was not on the AIE) |
 | `emod.layers`, `emod.layer(ref)`, `emod.resolve(ref)` | layers; `ref` = `"layer1"`, `1`, `"layer4-9"`, `"conv3x3*"`, `"call[08]"`, a list |
-| `ag.offload_interface()` | the kernel-file format and rules (no model needed) |
-| `emod.offload_interface(layer, region=None, entry=None)` | what a kernel for that layer must contain: args in TVM call order (kind, dtype, shape, role, value facts), an `AIEK_SPEC` proven against every call, `.spec()`, `.write(dir)` templates (section 4b) |
+| `print(emod.sources())` / `emod.source_path("layer1")` | the code each layer runs, as **absolute** paths: `layers/NN_*/NN_*.c` (TVM C) on the CPU, the user kernel source on the AIE (`sources(full=False)`: as partition.json records them -- workdir-relative when the file is inside the workdir, e.g. an `aiopt/` copy, else repo-relative); `print(emod)` also shows `aie:<kernel>  <- <source>` |
+| `ag.offload_prototype()` | the kernel-file format and rules (no model needed) |
+| `emod.offload_prototype(layer, region=None, entry=None)` | a kernel-file backbone for that layer: kernel frame + host run function + entry + proven `AIEK_SPEC`, reference frame; `.write(dir)` (section 4b) |
 | `emod.detect(kernel)` | which layers fit |
 | `emod.offload_check(spec)` | x86 gates; never writes outside `<workdir>/aiek/` |
 | `emod.offload(spec, build=True, make=False, force=False)` | + aiehlc build + link gate + driver swap |
 | `emod.offload_AI_proto(layers, kernel, rounds=3, model=None)` | NOT READY → `claude -p` ports a copy until `offload_check` is READY (section 4a) |
 | `emod.run_local()` | build and run `main_local.elf` on x86 |
+| `emod.run(board="palmyra", host=None, *, elf=None, build=True, profile=False, netload=None, reboot=None, timeout=1800)` | run `main.elf` on a lab board, (re)building it if missing or older than the driver / `partition.json` / AIE archives; returns a `RunReport` (`.ok`, `.top1`, `.top5`, `.inference_ms`, AIE `ENTER`/`EXIT` counts, `.log`). `emod.run(ag.VEK385, "crimini2")` for a VEK385; `host` overrides `$PALIP` / `$VEK385IP`. Palmyra defaults to `--netload` (a 12–16 MB ELF fails JTAG `dow`); VEK385 powers off afterwards (its `-nonreboot` holds the board until killed). Refuses while another run of the same board script of yours is active. CLI: `aiegraph run [palmyra\|vek385] [HOST]` |
+| `emod.profile(ag.ALL, *, by="call", top=None)` | each layer's time on the board from the last `run()`: one row per call (`by="layer"`: per layer, its calls summed), layer name, op, `cpu`/`aie`, mean ms per `graph_run()`, % of the total; `emod.profile("layer1")` / `top=5` filter. Needs `emod.run(profile=True)` (a `make PROFILE=1` ELF, two timer reads per call; the default `profile=False` builds a plain one, switching rebuilds); otherwise it prints `profiling not enabled` and returns `None`. Reads `last_run`, else the newest `arm_build/run_*.log`. CLI: `aiegraph profile [LAYER ...] [--by-layer] [--top N]` |
+| `report = emod.AI_perf_analysis("layer1", ai=True)` | why an offloaded layer is slow (skill **kernelperfcheck**): deterministic facts (measured ms of the last `run(profile=True)`, EXIT rc, pragmas, generated host.cc call counts, kernel ELF text/data/BSS, kernel.lst vector ops, aiehlc.log), a cost model (372 ns per config-bus word, 2.9 ns over control packets), the skill's rules, then `claude -p` read-only returns bottlenecks + ranked suggestions with predicted savings. `ai=False`: no AI. Saved to `<workdir>/aiperf/<layer>/report.{md,json}` |
+| `result = emod.AI_kernel_accelerate("layer1", report, rounds=2, board=None)` | `claude -p` applies the suggestions to a COPY of the kernel the layer runs NOW (`<workdir>/aiopt/layer<N>_<kernel>/`, `..._r2` when that kernel is itself an aiopt copy; an earlier copy is moved to `<dir>.prev-<time>`, never deleted; the original is never edited); every round is gated by our own `offload_check` + an aiehlc build of the copy (failures go back via `--resume`); the result compares facts/model of the old and NEW build: `result.saved_ms`, `result.predicted_ms`. `board=` also offloads the copy and measures it (`measured_after`). Path-like: `emod.offload(("layer1", result))` |
 | `ag.convert(m, target)` / `m.convert(target)` | `embedded_convert` by its short name |
 | `module.regions`, `module.regions.find(ref)` | model ops by name; `ref` = `"conv1"`, `"layer1.0.conv1"`, `"layer1"` (all under it), `"layer2.*.conv1"`, `"call[08]"` |
 | `module.register_kernel(name, source, op, target="aie", constraints=None)` | a named kernel contract (`op`: `conv2d`/`dense`; constraints: `input_layout`, `weight_layout`, `dtype`, `quantization`) |
@@ -299,8 +323,10 @@ aiegraph compile resnet18 aie "layer1=src/aietensorop/conv2dstem/conv2dstem_uk.c
 
 * Image classifiers with a `float32[1,3,224,224]` input (ImageNet preprocessing).
   Other inputs are refused at `load` with that reason.
-* One aiehlc library per ELF (the runtime has one `routing()`): offloading layers
-  to two different kernel *sources* is rejected at the link gate. Several layers
-  of one kernel are fine.
+* Several kernel *sources* in one ELF need libraries built by the current aiehlc
+  (per-library routing; `print(emod)` keeps both layers on `aie:`). A library
+  from an older aiehlc still owns the global `routing()` and is displaced by the
+  next offload. Switching between libraries re-initializes the partition per
+  launch.
 * PyTorch goes through ONNX export; the native PT2E → MLIR path is a later milestone.
 * Board runs are yours: copy `main.elf` over (`script/test/apppaltest.py`).

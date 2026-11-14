@@ -29,6 +29,9 @@
 #                                  # per-launch kload/bdcfg/coreen/startio split
 #   ./buildtest.sh --vec           # build the VECTORIZED kernel (conv2dstem_vec.cc)
 #                                  # via a generated test_conv2d_vec.cc entry
+#   ./buildtest.sh --new           # build test_conv2d_new.cc: the kernel-only
+#                                  # block-load kernel (conv2dstem_new.cc), DMA
+#                                  # derived from its load_buffer/store_buffer
 #   ./buildtest.sh -h
 #
 # Env overrides:
@@ -61,6 +64,7 @@ TRACE_HEX_PARAMS="${TRACE_HEX_PARAMS:-0}"
 SKIP_TRACE=0
 RUN_AIEHLC=1
 USE_VEC=0
+USE_NEW=0
 # Extra flags forwarded verbatim to script/aiehlc.sh at step 4. An array, not a
 # string, so an argument carrying a space survives the expansion below.
 AIEHLC_EXTRA=()
@@ -70,9 +74,10 @@ for arg in "$@"; do
     --no-aiehlc) RUN_AIEHLC=0 ;;
     --profiling) AIEHLC_EXTRA+=("--profiling") ;;
     --vec) USE_VEC=1 ;;
+    --new) USE_NEW=1 ;;
     --use-llvm-aie) AIEHLC_EXTRA+=("--use-llvm-aie") ;;
     -h | --help)
-        sed -n '7,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+        sed -n '7,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
         exit 0
         ;;
     *)
@@ -88,6 +93,10 @@ die() {
     exit 1
 }
 
+[ "${USE_VEC}" -eq 1 ] && [ "${USE_NEW}" -eq 1 ] && die "--vec and --new pick different kernels; give one"
+# --new: a committed entry (not generated like --vec's) -- its header documents
+# the kernel-only model, so it is a real source file, not a one-line swap.
+[ "${USE_NEW}" -eq 1 ] && ENTRY="${APP_DIR}/test_conv2d_new.cc"
 [ -f "${ENTRY}" ] || die "no ${ENTRY}"
 
 # --vec: same harness, vector kernel. aiehlc splices quoted .cc includes as TEXT

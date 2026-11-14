@@ -429,7 +429,7 @@ echo -e "    ${runtime_source_file}\n"
 #Convert the host&kernel merged source code
 # Add the source file's directory to include path so relative includes resolve
 SOURCE_DIR="$(cd "$(dirname "${runtime_source_file}")" && pwd)"
-AIEHLC_ERRLOG=$(mktemp /tmp/aiehlc_err.XXXXXX)
+AIEHLC_ERRLOG=$(mktemp "${TMPDIR:-/tmp}/aiehlc_err.XXXXXX")
 # Simulator builds need the __AIESIM__ define passed through to clang.
 AIEHLC_SIM_DEFINE=""
 if [[ "$platform" == "sim" ]]; then

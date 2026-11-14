@@ -14,6 +14,7 @@
 #include "netif/xemacpsif.h"
 #include "xil_cache.h"
 #include "xil_exception.h"
+#include "xil_mmu.h"
 #include "xil_printf.h"
 #include "xiltimer.h"
 #include "xparameters.h"
@@ -22,6 +23,8 @@
 struct nb_state g_nb;
 static struct netif s_netif;
 static XEmacPs *s_emacps; /* polled from the main loop: the supervisor takes no interrupts */
+static xemacpsif_s *s_emacpsif;
+static ip4_addr_t s_ip;
 
 uint64_t nb_now_ms(void) {
     XTime t;
@@ -166,6 +169,79 @@ int nb_admit(uint32_t cmd, uint32_t flags, struct netboot_ack *ack, char *msg, s
  * them before IP4_ADDR counts its arguments. */
 #define NB_IP4(dst, ...) IP4_ADDR(dst, __VA_ARGS__)
 
+/* NETBOOT_DMA_BASE (build.sh, VEK385): the GEM sits in the LPD, and on the
+ * vek385 base platform LPD_AXI_NOC0 only reaches DDR_CH1 (0xA_0000_0000) and
+ * DDR_CH2, not DDR_LOW0, so every buffer the GEM DMAs (lwIP heap and pools,
+ * BD ring) is linked there. The BSP table has no entry for that 1 GB block,
+ * so map it before lwIP touches its memory. Attribute = the BSP's own normal
+ * write-back, outer-shareable DDR descriptor (0x605). The BD block one GB up
+ * is mapped non-cacheable by the lwIP port itself. */
+static void dma_map(void) {
+#ifdef NETBOOT_DMA_BASE
+    Xil_SetTlbAttributes((UINTPTR)NETBOOT_DMA_BASE, 0x605ULL);
+    xil_printf("[netboot] GEM DMA memory at 0x%llx (LPD-reachable DDR)\r\n",
+               (unsigned long long)NETBOOT_DMA_BASE);
+#endif
+}
+
+/* Ethernet link (2026-11-10). The port's TI PHY setup gives up when
+ * autonegotiation takes over 5 s (PHY_AUTONEG_TIMEOUT_DEFAULT), and right after
+ * a power cycle the lab switch sometimes takes longer (1 of 3 bootstraps on 213:
+ * "Auto negotiation timeout", "Phy setup failure init_emacps"). The port then
+ * leaves the link DOWN for good -- its recovery, eth_link_detect(), runs from
+ * link_detect_thread, which NO_SYS does not have -- and "ready" was printed on a
+ * dead link. So the PHY setup is retried here, "ready" is printed only once the
+ * link is up, and the main loop polls the link. The port's own recovery is not
+ * reused: it applies phy_setup_emacps()'s result without checking XST_FAILURE. */
+#define NB_PHY_TRIES 6 /* PHY setups in net_init, up to ~5 s each */
+#define NB_BMSR 1      /* IEEE basic mode status register (xemac_ieee_reg.h is private to the port) */
+#define NB_BMSR_LINK 0x0004U
+#define NB_BMSR_ANEG_DONE 0x0020U
+extern u32_t phyaddrforemac; /* xadapter.c: the PHY address init_emacps found */
+
+static int link_up(void) {
+    return s_emacpsif->eth_link_status == ETH_LINK_UP || s_emacpsif->eth_link_status == ETH_LINK_UNDEFINED;
+}
+
+static int phy_setup(void) {
+    u32_t speed = phy_setup_emacps(s_emacps, phyaddrforemac);
+    if (speed == (u32_t)XST_FAILURE)
+        return 0;
+    XEmacPs_SetOperatingSpeed(s_emacps, (u16)speed);
+    s_emacpsif->eth_link_status = ETH_LINK_UP;
+    netif_set_link_up(&s_netif);
+    xil_printf("[netboot] Ethernet link up, %u Mb/s\r\n", (unsigned)speed);
+    return 1;
+}
+
+static void say_ready(void) {
+    static int said;
+    if (said++)
+        return;
+    xil_printf("[netboot] ready: %d.%d.%d.%d port %d\r\n", ip4_addr1(&s_ip), ip4_addr2(&s_ip), ip4_addr3(&s_ip),
+               ip4_addr4(&s_ip), NETBOOT_PORT);
+}
+
+/* Every second from the main loop: notice a lost link, and set the PHY up again
+ * once it reports link + autonegotiation complete. */
+static void link_poll(void) {
+    u16 st;
+    if (s_emacpsif->eth_link_status == ETH_LINK_UNDEFINED)
+        return;
+    XEmacPs_PhyRead(s_emacps, phyaddrforemac, NB_BMSR, &st);
+    XEmacPs_PhyRead(s_emacps, phyaddrforemac, NB_BMSR, &st); /* the link bit latches low: read twice */
+    if (link_up()) {
+        if (!(st & NB_BMSR_LINK)) {
+            s_emacpsif->eth_link_status = ETH_LINK_DOWN;
+            netif_set_link_down(&s_netif);
+            xil_printf("[netboot] Ethernet link lost; waiting for it to come back\r\n");
+        }
+        return;
+    }
+    if ((st & NB_BMSR_LINK) && (st & NB_BMSR_ANEG_DONE) && phy_setup())
+        say_ready();
+}
+
 static int net_init(void) {
     ip4_addr_t ip, mask, gw;
     NB_IP4(&ip, NETBOOT_IP);
@@ -173,6 +249,7 @@ static int net_init(void) {
     NB_IP4(&gw, NETBOOT_GW);
     /* Xilinx OUI; one board per lab segment. */
     unsigned char mac[6] = {0x00, 0x0a, 0x35, 0x00, 0x1b, 0x55};
+    dma_map();
     lwip_init();
     if (!xemac_add(&s_netif, &ip, &mask, &gw, mac, XPAR_XEMACPS_0_BASEADDR)) {
         xil_printf("[netboot] xemac_add failed\r\n");
@@ -185,15 +262,32 @@ static int net_init(void) {
      * xsdb `rst -proc` of the app core was seen to leave GICD_CTLR with both
      * groups disabled and the GEM interrupt off, which silenced an
      * interrupt-driven supervisor for good (RX ring full, no ARP reply). */
-    s_emacps = &((xemacpsif_s *)((struct xemac_s *)s_netif.state)->state)->emacps;
+    s_emacpsif = (xemacpsif_s *)((struct xemac_s *)s_netif.state)->state;
+    s_emacps = &s_emacpsif->emacps;
     Xil_ExceptionDisable();
     netif_set_up(&s_netif);
     if (server_init() != 0) {
         xil_printf("[netboot] TCP server init failed\r\n");
         return -2;
     }
-    xil_printf("[netboot] ready: %d.%d.%d.%d port %d\r\n", ip4_addr1(&ip), ip4_addr2(&ip), ip4_addr3(&ip),
-               ip4_addr4(&ip), NETBOOT_PORT);
+    s_ip = ip;
+    int tries = NB_PHY_TRIES;
+#ifdef NB_TEST_LINK_DOWN /* build.sh NETBOOT_TEST_LINK_DOWN: exercise the recovery on a good link */
+    s_emacpsif->eth_link_status = ETH_LINK_DOWN;
+    netif_set_link_down(&s_netif);
+    tries = NB_TEST_LINK_DOWN == 2 ? 0 : tries; /* 2: leave it to link_poll */
+    xil_printf("[netboot] TEST: Ethernet link forced down (NB_TEST_LINK_DOWN=%d)\r\n", NB_TEST_LINK_DOWN);
+#endif
+    for (int i = 1; !link_up() && i <= tries; i++) {
+        xil_printf("[netboot] Ethernet link down: PHY setup retry %d/%d\r\n", i, NB_PHY_TRIES);
+        phy_setup();
+    }
+    if (link_up())
+        say_ready();
+    else
+        xil_printf("[netboot] NOT ready: Ethernet link down after %d PHY setup retries; "
+                   "still polling it every second\r\n",
+                   tries);
     return 0;
 }
 
@@ -238,6 +332,7 @@ static void timers(uint64_t now) {
     }
     if (now - rxchk >= 1000U) { /* GEM RX-hang workaround, as in the reference platform */
         xemacpsif_resetrx_on_no_rxdata(&s_netif);
+        link_poll();
         rxchk = now;
     }
 }

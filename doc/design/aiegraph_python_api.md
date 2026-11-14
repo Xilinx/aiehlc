@@ -160,9 +160,15 @@ Model resnet18  (onnx, opset 13, fp32)  input data float32[1,3,224,224] -> outpu
   next: ag.embedded_convert(m, target="a78")
 ```
 
-`ag.download_model(name)` is an alias of `ag.load(name)` that only fetches
-(the user asked for `onnx.downloadmodel("resnet18")`; it lives in our namespace
-so it can carry the repo's cache and checksum).
+`ag.download_model(name)` fetches a zoo model (once) and returns a `Model`, so
+`m = ag.download_model("resnet18"); emod = m.convert("a78")` works (the user
+asked for `onnx.downloadmodel("resnet18")`; it lives in our namespace so it can
+carry the repo's cache and checksum). It is named by the file stem
+(`resnet18-v1-7`, not `resnet18` as `ag.load("resnet18")` names it), because
+that is what `ag.convert(<path>)` named it when `download_model` still returned
+the path -- the default workdir `worklocal/aiegraph/<name>` and its cached
+conversion stay where they were. A `Model` is path-like (`os.fspath(m)` is the
+ONNX file) for callers that used the old path result.
 
 **PyTorch path.** v1 exports to ONNX (`torch.onnx.export`, opset 13) and joins
 the ONNX path, because only that path reaches per-layer C today
@@ -212,7 +218,8 @@ EmbeddedModel resnet18 -> a78   int8 (onnx_ptq, 1 calib image)   workdir workloc
 
 Useful members: `emod.layers` (list of `Layer`), `emod.layer("layer1")`,
 `emod.layer(1).c_source` (path to the TVM C), `emod.network_md`,
-`emod.build()`, `emod.run_local()` (x86, returns top-k),
+`emod.build()`, `emod.run_local()` (x86, returns top-k), `emod.run(board, host)`
+(lab board, `board.py` over `script/test/apppaltest.py` / `appvek385.py`; `RunReport`),
 `emod.accuracy()`, `emod.export(dir)`.
 
 ### 4.3 Checking and offloading a layer
@@ -244,6 +251,7 @@ hint; `rep.raise_for_status()` turns it into an exception for scripts.
 emod.offload(("layer1", "./aie/conv2d_fuse.cc"))                 # one pair
 emod.offload({"layer1": "aie/stem.cc", "layer4": "aie/c3.cc"})  # a plan
 emod.offload("./aie/conv3x3.cc")                                 # every layer it fits ("auto")
+emod.offload("layer1", False)                                    # undo: layer1 back on the CPU
 emod.offload(("layer4-9", "./aie/conv3x3.cc"))                   # a range
 ag.offload(("layer1", "./aie/conv2d_fuse.cc"))                   # current model
 ```
@@ -254,9 +262,10 @@ new placement column (`cpu` / `aie:<kernel>`), and then `emod.build()` links
 `main.elf`. Rules the report states up front rather than at link time:
 
 * a layer offloads all of its calls (layer4 is called twice; both swap);
-* **one aiehlc library per ELF** (the runtime's single `routing()`): a plan
-  naming two different kernel *sources* is rejected at plan time with that
-  reason and the hint "put both kernels in one source";
+* several kernel *sources* share one ELF through per-library routing (each
+  library hands its `routing()` to `__Runtime_init_mesh_partition_with`, which
+  re-initializes a partition another library set up); a library from an older
+  aiehlc, which still owns the global `routing()`, is displaced instead;
 * without Vitis the build is skipped and the report says so; `offload_check`
   is still fully useful.
 
@@ -389,6 +398,9 @@ emod.detect / ag.lint                   aiekernel.match.detect_layers, aiekernel
 emod.offload_check                      aiekernel.flow.check
 emod.offload                            aiekernel.flow.offload
 emod.build / run_local                  arm_build.build_arm_elf(run_make=True) / build_local_elf
+emod.run                                board.run_on_board -> script/test/apppaltest.py | appvek385.py
+emod.profile                            the run's `PROF` rows (make PROFILE=1, graph_driver.c) mapped call -> layer
+emod.AI_perf_analysis / AI_kernel_accelerate  aiperf.py: facts + cost model + rules, claude -p with skill kernelperfcheck; gates offload_check + aiekernel.build.aiehlc_compile
 ```
 
 The facade is therefore thin: new code is the object model, name resolution,
@@ -504,17 +516,28 @@ part of starting a kernel (argument order, the two zero-points) is generated.
 * Never: anything that runs on a board.
 
 
-## Offload interface (`ag.offload_interface`, implemented)
+## Offload prototype (`ag.offload_prototype`, implemented)
 
-`src/aiegraph/interface.py`. No argument: the kernel-file format
-(`KernelFormat`). With a TVM layer or `region=`: an `OffloadInterface` built from
+`src/aiegraph/prototype.py`. No argument: the kernel-file format
+(`KernelFormat`). With a TVM layer or `region=`: an `OffloadPrototype` built from
 `aiekernel.graph` (args in call order), `network_md.param_role` (roles from the
 layer's generated C) and the constants (value facts over every call; all-zero
 -> `require=zero`). The generated `AIEK_SPEC` is parsed with
 `aiekernel.spec.parse_specs` and matched with `aiekernel.match.match_call`
 against every call before it is returned, and `detect_layers` lists the other
-layers it fits -- so interface and gates cannot disagree. `write(dir)` emits
-`<entry>.cc` (entry + spec; AIE kernel and launch left to the user, entry
-returns `AIEK_ERR_KERNEL` until filled) and `<entry>_ref.c`; it refuses to
-overwrite. Shapes are concrete (one TVM symbol = one geometry); a multi-layer
-kernel generalizes dims to NAMEs by hand. CLI: `aiegraph interface`.
+layers it fits -- so prototype and gates cannot disagree.
+
+`write(dir)` emits a **backbone** (refuses to overwrite): `<entry>.cc` with the
+`conv2dstem_uk.cc` architecture -- `<entry>_kernel` (kernel-only form: staged
+shapes, mesh split, block loop; compute TODO), `<entry>_run` (every TVM
+argument; buffers, partition, launch; staging / unpacking TODO), the entry and
+the spec -- and `<entry>_ref.c`: complete (int32 conv + TVM's requantize,
+bit-exact; `require=range(-30,32)` on the shift) when the layer has the fused
+conv + requantize signature, so `offload_check` is READY on the written files;
+otherwise a frame with the op as TODO. The tile
+is the fewest-rounds candidate that passes the core-memory rules
+(conv_autotiling.md "Legality") AND `build/aiehlc-convtile trace` on the
+generated file, so the DMA derivation is known to succeed; both ResNet-18
+layers tried (1 and 4) build to `libaiek_layerNN.a` as generated. Only a 4x4
+mesh: 4x8 crashes the pipeline (`DmapToDmaphop`). Shapes are concrete; a
+multi-layer kernel generalizes dims to NAMEs by hand. CLI: `aiegraph prototype`.

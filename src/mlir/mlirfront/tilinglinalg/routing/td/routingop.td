@@ -145,6 +145,7 @@ def routing_createscheduletensor :routingop<"routingcreatescheduletensor"> {
 		  shim_dma         -- user DmaTransform for the shim BD (#routing.shim_dma)
 		  layout_transform -- "dma_shuffle" | "core_shuffle"
 		  pp_depth         -- core buffer ping-pong depth
+		  kernel_block     -- the blocks a kernel-only kernel takes (#routing.kernel_block)
 		DmaphopTodfscheblueprintPass copies them onto the
 		dfscheblueprint.declare_data that replaces this op, prefixed `routing.`.
 	}];
@@ -156,7 +157,8 @@ def routing_createscheduletensor :routingop<"routingcreatescheduletensor"> {
 		OptionalAttr<HaloAttr>:$halo,
 		OptionalAttr<ShimDmaAttr>:$shim_dma,
 		OptionalAttr<StrAttr>:$layout_transform,
-		OptionalAttr<I64Attr>:$pp_depth
+		OptionalAttr<I64Attr>:$pp_depth,
+		OptionalAttr<KernelBlockAttr>:$kernel_block
 		);
 
 	let results = (outs

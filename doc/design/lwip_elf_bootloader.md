@@ -399,3 +399,55 @@ asks with `--wait 0 --force`; on `busy` it parks the app core over JTAG with the
 ack's `park_addr` -- the same path as `stuck` -- confirms `app core parked`
 with `status`, and resends; a failed park falls back to a re-bootstrap.
 `netload.py` prints `park_addr` for `busy` and `overtime` acks as well.
+
+**hw_server is checked only when JTAG is needed (2026-11-10).** The hws
+preflight (`script/test/hwspreflight.py`) used to run before every netload run:
+`hws status` (~5 s: two ssh round-trips plus a local xsdb `targets` with a 2 s
+settle) and the `nbspin5` smoke test (~5.3 s), i.e. ~10 s, and ~70 s when hws
+was down and had to be brought up. A resident supervisor needs none of it, so
+netload now defers the check: `Preflight.need_jtag(why)` runs `ensure_service`
+once, right before the first JTAG use in `netload_start` -- the park of a busy or
+stuck app core, or the supervisor bootstrap -- and a failure is remembered for the
+run, not retried. The run's own `load` is the smoke test. Measured on palmyra:
+preflight 10.3 s -> 0 s, `load rc=0` 0.35 s after start. `--hws-eager`
+restores the up-front check (status + smoke test); full and attach modes are
+unchanged.
+
+**Ethernet link after a bootstrap (2026-11-10).** The lwIP port gives the TI
+PHY 5 s to autonegotiate (`PHY_AUTONEG_TIMEOUT_DEFAULT`); right after the
+bootstrap's power cycle the lab switch sometimes takes longer (1 of 3 on 213),
+and the port's link recovery runs from `link_detect_thread`, which NO_SYS does
+not have. The supervisor then sat on a dead link -- yet printed `ready` -- and
+every load failed `No route to host`, so the next run bootstrapped again. Now
+`net_init` retries the PHY setup (6 x ~5 s), `ready` is printed only with the
+link up, `link_poll()` checks BMSR every second from the main loop (recovers a
+late or lost link), and `apppaltest` re-bootstraps once when `ready` never comes
+or a ready supervisor does not answer. Verified on 213 with test builds that
+force the link down (`NETBOOT_TEST_LINK_DOWN=1|2`): both recover to `Ethernet
+link up, 1000 Mb/s` and load.
+
+## 14. VEK385 (2026-11-04)
+
+`apppaltest.py -board vek385 -host gomphus3 [--netload]` runs the same flow on a
+VEK385 farm board (README "VEK385"). Verified on vek385-3: full JTAG boot,
+netload bootstrap (power cycle, `vek385_netboot.BIN`, supervisor, 2.8 MB app in
+~0.1 s on core 1, `Kernel test passed!`), fast path with a parked core, and
+palmyra unchanged. Board facts, each of which silently breaks a run:
+
+1. **GEM DMA cannot reach DDR_LOW0.** The GEM is an LPD master; on the vek385 base
+   platform LPD_AXI_NOC0 decodes only DDR_CH1 (0xA_0000_0000) and DDR_CH2. With the
+   palmyra layout TX reports HRESP, RX resource errors, the PLM logs NOCTYPE1_NCR and
+   ARP never answers. `NETBOOT_DMA_BASE=0xA00000000` links lwIP's heap/pools there,
+   the BD ring 1 GB above, maps the block at boot (`dma_map`) and builds
+   `-mcmodel=large` (Jane).
+2. **The A78 system counter is off after the PDI boot** (SCNTRS 0xEC920000 CNTCR = 0,
+   frequency 0). The BSP's own enable in `XTime_GetTime` does not take effect from
+   the A78; a debugger write does (~100 MHz). apppaltest enables it after
+   `device program`.
+3. **`rst -cores` on the APU suspends both A78 cores** (xsdb's default for
+   `-cores`), leaving #0.1 in Reset Catch, which the PLM then refuses to wake (PM
+   error ending `7D2`) or wakes into a halted core. `rst -processor` on #0.0 alone is
+   accepted after `device program` and leaves #0.1 in Power On Reset for the PLM.
+4. **The PLM denies `rst -proc` on a running app core** ("APU core power request
+   denied"), so the JTAG park is stop + `pc = nb_park` + `con`.
+

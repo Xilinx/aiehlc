@@ -125,6 +125,8 @@ under `AIEHLC_PROFILING` (baremetal only); before that, a `--profiling` build of
 `test_conv2d.cc` still read all zeros (skill **pmccntrnotenabled**).
 Machine-readable line: `PERF SUMMARY ... (ms)`.
 
+**`conv2dstem_new.cc` / `conv2dstem_uk_new.cc` are the stem in the kernel-only block-load model** (no GemmSpaces / mirrored tiling macros: `aie::shape` ports, `aie::load_buffer`/`store_buffer` blocks, DMA derived by the kernel analysis); same API, host code, vector compute and pragmas; 61-px window (244-B rows, unaligned A-tiles, last K-block shifted 4 B). x86 emulation `emu/emu_conv2dstem_new.sh` 802,816/802,816; builds; `offload_check` READY. Standalone app `test_conv2d_new.cc` (`./buildtest.sh --new`) builds the ELF with the DMA derived from the kernel blocks. Board not yet run. README "conv2dstem_new.cc".
+
 **`conv2dstem_vec.cc` is the vectorized kernel** (`./buildtest.sh --vec`): same host/DMA/pragmas, kernel on `aie::mmul<4,8,8,int8,int8>` + a bit-exact two-stage vector requantize; 1.77 ms vs 31.47 ms, GOLDEN PASS on the board. Host transforms (1.09 ms) now dominate. `conv2dstem.cc` stays the `--aie-offload` source. Details: `doc/performance/conv2dstem_perf_review.md` §6.
 
 **conv2d launch is 185 µs** (`test_conv2d.cc`, GOLDEN PASS): vector kernel now in
@@ -609,7 +611,7 @@ needs the BSP's `libxil.a` de-duplicated against `libxaienginea78.a`.
 `arm_build.build_arm_elf(run_make=False)` into `worklocal/aiegraph/<model>/`, cached by a
 model-hash stamp `aiegraph.json`) → `emod.detect / offload_check / offload / build /
 run_local` (all `aiekernel.flow` + `arm_build`), one-call `ag.compile(m, target, offload)`,
-`ag.open(workdir)` adopts any deploy tree, CLI `aiegraph …`, plus an `aiehlc` command
+`ag.open(workdir)` adopts any deploy tree, `emod.run()` / `emod.run(ag.VEK385, "host")` runs `main.elf` on a lab board (`board.py` over `script/test/apppaltest.py` / `appvek385.py`; palmyra defaults to `--netload`, VEK385 powers off after; refuses a second concurrent run; `emod.run(profile=True)` builds a `make PROFILE=1` ELF (default off; `emod.profile` otherwise prints `profiling not enabled`), so `emod.profile(ag.ALL)` then prints each call/layer's board time; `emod.AI_perf_analysis("layer1")` explains it (facts + cost model + rules + read-only `claude -p`, skill **kernelperfcheck**) and `emod.AI_kernel_accelerate("layer1", report)` lets Claude optimize a copy, gated by `offload_check` + aiehlc build, re-predicted from the new build (`aiperf.py`), `by="layer"`, `top=N` -- `arm_build.sync_make_vars` deletes `graph_driver.o`/`main.o`/`main.elf` when the make vars change, since objects don't depend on CFLAGS), CLI `aiegraph …`, plus an `aiehlc` command
 (`bash -c 'source script/aiehlc.sh "$@"'` in the caller's cwd). **One install command:**
 `pip install -e .` — verified in a fresh venv: no `PYTHONPATH`, no setup step, `doctor`
 green, quickstart converts/checks/offloads/links. Traps: **editable only** — the flow
@@ -647,11 +649,20 @@ dtype); and `partition()` is the **whole** placement — it resets every AIE row
 `partition.json` to CPU before offloading, and `optimize_for` has no cost model (it says
 so in the report). Skill **aiegraphregion**.
 
-`ag.offload_interface()` / `emod.offload_interface("layer1" | region=...)`
-(`src/aiegraph/interface.py`): the kernel-file format, or one layer's exact
-interface -- args in TVM call order with roles and value facts, an `AIEK_SPEC`
-proven against every call by `aiekernel.match`, `.write(dir)` entry + reference
-templates; CLI `aiegraph interface`.
+`ag.offload_prototype()` / `emod.offload_prototype("layer1" | region=...)`
+(`src/aiegraph/prototype.py`): the kernel-file format, or one layer's
+**backbone** -- args in TVM call order with roles and value facts, an
+`AIEK_SPEC` proven against every call by `aiekernel.match`, and `.write(dir)`
+`<entry>.cc` in the `conv2dstem_uk.cc` architecture (aiehlc kernel frame with
+the layer's ports, mesh split and DMA-legal block loop; host `<entry>_run` with
+every argument, buffers and launch; entry; spec) + `<entry>_ref.c`; compute,
+staging and parameters are `TODO`s for the user. It builds as generated
+(`libaiek_layer04.a`). CLI `aiegraph prototype`.
+
+`ag.convert` starts FRESH: a reused (cached) conversion gets every earlier
+offload reset to the CPU (`emod.offload_reset(layers=None)`, driver
+regenerated; `emod.offload("layer1", False)` resets just that spec); `keep_offloads=True` keeps them, `ag.open(workdir)` adopts a tree
+as it is, `force=True` re-converts.
 
 `emod.offload_AI_proto(layers, kernel, rounds=3)` (`src/aiegraph/aiproto.py`): when
 `offload_check` is NOT READY, `claude -p` ports a flat copy of the kernel dir in
@@ -681,12 +692,19 @@ skips existing objects), **link**. Then `partition.json` (`backend:
 aiehlc-user`) and `arm_build.aie_entries` swap the call, as for the stem.
 Verified: stem (`conv2dstem_uk.cc`) bit-exact + logits identical, built, isolated,
 `main.elf` linked; `example/userkernel/conv3x3_requant_ref.c` (reference-only)
-matches 7 layers / 8 calls, all bit-exact, logits identical. **One aiehlc
-library per ELF:** `__Runtime_routing_init` calls ONE global `routing()` and
-partition init is cached per `meshId`, so `isolate_archive` localizes everything
-except adapters, entry and the runtime hooks (kept *strong* so a second library
-collides instead of silently running with the first one's routing) and the link
-gate rejects later kernels. Tutorial: **[doc/tutorial_userkernel.md](doc/tutorial_userkernel.md)**;
+matches 7 layers / 8 calls, all bit-exact, logits identical. **Several aiehlc
+libraries per ELF (per-library routing):** the generated `aieArray::partition`
+passes the library's own `routing` to `__Runtime_init_mesh_partition_with`; the
+runtime's partition registry remembers which routing set up each `meshId` and
+tears down + re-initializes it when another library launches there (the global
+`routing()` reference is now weak). `isolate_archive` localizes `routing` for
+such libraries, so `offload("layer1", a.cc)` + `offload("layer4", b.cc)` keep
+both on the AIE and `main.elf` links both (verified: two local `routing`s).
+A library from an older aiehlc (calls the old `__Runtime_init_mesh_partition`)
+keeps a strong global `routing` and is displaced by the next offload, as
+before; `partition.json` says `superseded ...`. The aiehlc build cache is keyed
+on the `build/aiehlc` binary too, so such libraries rebuild. Not yet run on a
+board: switching libraries re-initializes the partition per launch. Tutorial: **[doc/tutorial_userkernel.md](doc/tutorial_userkernel.md)**;
 skill **aieuserkernel**.
 
 ### Pass Pipeline
@@ -697,6 +715,16 @@ skill **aieuserkernel**.
 2. `RoutingToDmapPass` — routing → logical dataflow
 3. `DmapToDmaphopPass` — logical → physical hops
 4. `DmaphopTodfscheblueprintPass` — hops → schedule blueprints
+
+**Routing IR re-entry (agents / tuners).** `AIEHLC_ROUTING_IR_IN=<file.mlir>` makes
+`runPipeline` read the routing IR (the `ir/dfschedule/0_initial.mlir` it dumps) from a
+file, so an edited IR continues through the whole pipeline; a round trip is
+byte-identical (`script/test/routing_ir_roundtrip.sh`, GEMM + conv). Python:
+`aiebackend.routing_ir.RoutingIR` (typed view, edits, `lint()`, in-process `check()`,
+`build()`). Gate on `lint()` too -- the pipeline accepts some illegal tilings
+silently -- and remember the kernel body is not in the IR. Design
+**[doc/design/routing_ir_reentry.md](doc/design/routing_ir_reentry.md)**; skill
+**routingirreentry**.
 
 **Routing module attributes are control switches only** (`routing.fullconnect_auto`,
 `routing.kernel_config_offload`, `routing.output_tile_major`, `routing.control_*`,
@@ -812,10 +840,10 @@ Each dialect has its own `unitest/` directory with independent CMake build:
 - **[doc/tutorial_aiegraph.md](doc/tutorial_aiegraph.md)** — `aiegraph` user guide: `pip install -e .`, `aiegraph doctor`, ONNX/PyTorch steps, `ag.compile`, API + CLI reference, limits
 - **[doc/design/aiegraph_python_api.md](doc/design/aiegraph_python_api.md)** — Design (M0–M3 implemented in `src/aiegraph/`): user-facing `import aiegraph as ag` facade — `ag.load` (ONNX/PyTorch) → `ag.convert(m, "a78")` (int8 + per-layer C) → `register_kernel` → `check_offload(region=, kernel=)` → `assign` → `partition` → `build(target=, output=)` (§4.8; the older `offload_check("layer1", k.cc)` → `offload(...)` remains), one-call `ag.compile(m, "aie", "layer1=k.cc")`; prior art (PyTorch/ExecuTorch, TVM BYOC, MLIR/IREE, Triton, ORT); maps onto `deploy_flow` + `aiekernel`; milestones M0–M5
 - **[doc/tutorial_userkernel.md](doc/tutorial_userkernel.md)** — Bring your own AIE kernel: `aie_user_kernel.h` contract (`AIEK_ENTRY/SPEC/REFERENCE`), lint → detect → calibrate → emulate → build → link, stem + 3×3 "bunch of layers" walkthroughs, one-library-per-ELF limit
-- **[doc/design/lwip_elf_bootloader.md](doc/design/lwip_elf_bootloader.md)** — netboot, **implemented** (`src/tool/netboot/`, `apppaltest.py --netload`): lwIP TCP supervisor resident on A78 core 0 at `0x7800_0000` runs each ELF on core 1 via xilpm; 15 MB ELF in ~0.2 s vs ~150 s JTAG; the target ELF is streamed from the dev box through `netboot_proxy.py` on PALIP over ssh (no scp), and a finished app parks core 1 (patched `_exit`) so the next run needs no bootstrap. Section 12 = board facts: `0x8_0000_0000` mirrors `0x0`; `Xil_SetTlbAttributes` >4 GB rewrites a 1 GB block; `p_memsz` includes the 1 GB heap; this PDI denies stopping core 1 (auto re-bootstrap). Section 13 = protocol v2: the board acks each request's header before the ELF is sent (`ok` / `busy` + time left / `overtime` / `stuck` / `serving`), per-run `max_run_ms` (default 60 s), `--force` preempts only an app past its max (on palmyra: `apppaltest` frees core 1 over JTAG -- `stop; rst -proc; pc=park_addr; con` -- ~17 s instead of a ~60 s re-bootstrap; the supervisor is polled, because that reset disables the GIC); `netload.py --wait/--force/--max-run-ms`, `apppaltest --netload-wait/--netload-max-run-ms/--netload-no-force`; `apppaltest --netload-force-now` takes over a run still within its max (JTAG park, re-bootstrap fallback; kills any running app)
+- **[doc/design/lwip_elf_bootloader.md](doc/design/lwip_elf_bootloader.md)** — netboot, **implemented** (`src/tool/netboot/`, `apppaltest.py --netload`): lwIP TCP supervisor resident on A78 core 0 at `0x7800_0000` runs each ELF on core 1 via xilpm; 15 MB ELF in ~0.2 s vs ~150 s JTAG; the target ELF is streamed from the dev box through `netboot_proxy.py` on PALIP over ssh (no scp), and a finished app parks core 1 (patched `_exit`) so the next run needs no bootstrap. Section 12 = board facts: `0x8_0000_0000` mirrors `0x0`; `Xil_SetTlbAttributes` >4 GB rewrites a 1 GB block; `p_memsz` includes the 1 GB heap; this PDI denies stopping core 1 (auto re-bootstrap). Section 13 = protocol v2: the board acks each request's header before the ELF is sent (`ok` / `busy` + time left / `overtime` / `stuck` / `serving`), per-run `max_run_ms` (default 60 s), `--force` preempts only an app past its max (on palmyra: `apppaltest` frees core 1 over JTAG -- `stop; rst -proc; pc=park_addr; con` -- ~17 s instead of a ~60 s re-bootstrap; the supervisor is polled, because that reset disables the GIC); `netload.py --wait/--force/--max-run-ms`, `apppaltest --netload-wait/--netload-max-run-ms/--netload-no-force`; `apppaltest --netload-force-now` takes over a run still within its max (JTAG park, re-bootstrap fallback; kills any running app). Section 14 = VEK385: `apppaltest.py -board vek385 -host gomphus3 [--netload]` (farm board: systest-client, the host's hw_server, `vek385_netboot.BIN`, com3; supervisor built with `NETBOOT_DMA_BASE=0xA00000000` because the LPD GEM cannot reach DDR_LOW0; apppaltest starts the A78 system counter, which is off after the PDI boot, and resets only A78 #0.0 since `rst -cores` leaves #0.1 in Reset Catch)
 - **[doc/resnetlaye1timeoutdebug.md](doc/resnetlaye1timeoutdebug.md)** — Step-by-step summary of the ResNet-18 layer-01 `--aie-offload` timeout debug: symptom, allconv review, source/pragma bisection, KCO absolute-column root cause + fix, `-O3` (2232 → 1282 ms), lessons
 - **[doc/debug/troubleshoot_aie_offload_timeout.md](doc/debug/troubleshoot_aie_offload_timeout.md)** — `--aie-offload` main.elf hangs (`ENTER` without `EXIT`, `wait_io TIMEOUT`): reading the deadlock, allconv review, HW bisection (committed stem passes, control-plane WIP hangs standalone too), `AIE_DEBUG_LOG`-gated timeout dump
-- **[doc/design/op_mapping_programming_model.md](doc/design/op_mapping_programming_model.md)** — Op + mapping model on top of convautotile: native-support plan (op/mapping in routing IR, `OpMappingToTilingPass`, more ops), evaluation, and §4 the Triton block-load kernel style (`aie::program_id`, `aie::load_buffer/store_buffer` in tensor coordinates, checked against the derived DMA by `aie_block_io.h`), its x86 emulator `simpleconv2ddebug/emu_conv2d_spatial.sh`, and why a load is an assertion, not a request, on a DMA-streamed array; §5 kernel analysis: kernel-only sources (`aie::shape` ports, no `conv`/`map`, `simpleconv2dkernel_port.cc`) whose DMA is inferred from the traced `load_buffer` calls and verified (too big/small, out of tensor, data used without load, use after release, never committed, loop order, data-dependent schedule, coverage); `aiehlc-convtile trace`; §6 tensor form (`simpleconv2dkernel.cc`: `aie::in<aie::tensor>`, `.pad` / `.reuse`, block views, `aie::autotune`; `kernel_front.cpp` lowers it via a logical trace + staged layout, `emu_conv2d_tensor.sh`); §7 vector kernels: `simpleconv2dkernel_port.cc` on `aie::mmul<8,8,8>`, traced via the AIE API x86 emulation `src/mlir/runtime/aie_api_x86emu.h` (ASan + vector alignment checks)
+- **[doc/design/op_mapping_programming_model.md](doc/design/op_mapping_programming_model.md)** — Op + mapping model on top of convautotile: native-support plan (op/mapping in routing IR, `OpMappingToTilingPass`, more ops), evaluation, and §4 the Triton block-load kernel style (`aie::program_id`, `aie::load_buffer/store_buffer` in tensor coordinates, checked against the derived DMA by `aie_block_io.h`), its x86 emulator `simpleconv2ddebug/emu_conv2d_spatial.sh`, and why a load is an assertion, not a request, on a DMA-streamed array; §5 kernel analysis: kernel-only sources (`aie::shape` ports, no `conv`/`map`, `simpleconv2dkernel_port.cc`) whose DMA is inferred from the traced `load_buffer` calls and verified (too big/small, out of tensor, data used without load, use after release, never committed, loop order, data-dependent schedule, coverage), plus static bounds (`kernel_static.cpp`: names the constant behind an out-of-block access, e.g. `oc_t = 15` -> fits with 16); `aiehlc-convtile trace`; §6 tensor form (`simpleconv2dkernel.cc`: `aie::in<aie::tensor>`, `.pad` / `.reuse`, block views, `aie::autotune`; `kernel_front.cpp` lowers it via a logical trace + staged layout, `emu_conv2d_tensor.sh`); §7 vector kernels: `simpleconv2dkernel_port.cc` on `aie::mmul<8,8,8>`, traced via the AIE API x86 emulation `src/mlir/runtime/aie_api_x86emu.h` (ASan + vector alignment checks)
 - **[doc/design/tile_dim_structured_design.md](doc/design/tile_dim_structured_design.md)** — Structured `tile_dim` for `aie::SpatialPolicy`
 - **[doc/design/spatial_space_composition.md](doc/design/spatial_space_composition.md)** — Composition-based spatial op spaces (GemmSpace, Conv2dSpace)
 - **[doc/design/conv_autotiling.md](doc/design/conv_autotiling.md)** — Declarative `aie::Conv2d` + `aie::Mapping`: derived d1/d2/d3 + halo, legality rules (incl. measured pipeline limits), `AIEHLC_CONV_TUNE`, AutoTVM/XGBoost tuner (`src/frontend/convtune`)
@@ -842,7 +870,9 @@ Read the matching skill when the task fits:
 | Core register write succeeds on-core but host reads 0 / DMA never starts (`ST` vs `ST.TM`) | coretmregisterwrite |
 | Shim BD stuck on wrong/locked BD (index overflow into channel-control regs) | shimbdindexoverflow |
 | Vector kernel (aie_api SRS/requantize) off by +1 / data-dependent rounding on HW but exact on host; `control_rnd`/`sync_buffer` at DMb 0x0 in kernel.map | bcfglobalplacement |
-| netboot (`src/tool/netboot`, `apppaltest --netload`): supervisor dies on LOAD_RUN, uploads crawl, "app core busy" / PLM 0x7DB 0x7D2, watchdog fires at launch; board busy / how long to wait / max run time / forcing an overdue app (netload exit 3/4/5); `0x8_0000_0000` mirrors `0x0` on palmyra | netbootsupervisor |
+| netboot (`src/tool/netboot`, `apppaltest --netload`): `[netboot] ready` but `No route to host` / `Auto negotiation timeout` (PHY link down after bootstrap); supervisor dies on LOAD_RUN, uploads crawl, "app core busy" / PLM 0x7DB 0x7D2, watchdog fires at launch; board busy / how long to wait / max run time / forcing an overdue app (netload exit 3/4/5); `0x8_0000_0000` mirrors `0x0` on palmyra | netbootsupervisor |
+| palmyra hws (hw_server service) gone again: `[hws] status DOWN` / `3121 closed` every hour, hws session ends with no `hws_down` log, hw_server killed when another systest exits; does hws detect "service up but board gone" | hwsservicedrops |
+| VEK385 run via `apppaltest -board vek385 -host <farm host>` (JTAG or `--netload`): no output / nbspin never ends (system counter off), supervisor never answers ARP (GEM DMA in DDR_LOW0), `wake of app core FAILED` / #0.1 in Reset Catch (`rst -cores`), `APU core power request denied`, systest-client `User signal 1` | vek385netboot |
 | `KERNELCONFIGOFFLOAD` + partition start col ≠ 0 hangs; high core columns' MM2S never armed (`get_coreid()` absolute vs plan relative) | kcocoreidpartition |
 | Print values from an AIE kernel (`klog`); klog output never appears; `aie::print_log` (does not exist) | kernelklog |
 | Sim PS.so load segfault | aiesimloaddebug |
@@ -855,7 +885,10 @@ Read the matching skill when the task fits:
 | Sim build (`pr_sim_test.sh`, `-D__AIESIM__`) fails in aie_runtime.c with "use of undeclared identifier" while the HW build is fine | aiesimguardedsymbol |
 | Build fails on missing snap cmake / libz.so / ZLIB::ZLIB; fast single-file compile check | mlirbuildsandbox |
 | Declarative conv2d (`aie::Conv2d`/`aie::Mapping`): `[ConvAutoTile] ERROR`, `MESH_ROW` unresolved, OFM chunked `numRounds=2 bufferSize=4096`, `M-tile mismatch` with `tile(OW, OW)`, tuning d1/d2/d3 (`AIEHLC_CONV_TUNE`, `frontend.convtune`) | convautotile |
-| Triton-style block-load kernel (`aie::program_id`, `aie::load_buffer` / `store_buffer` in tensor coordinates, `aie::release` / `commit`): `no member named 'program_id' in namespace 'aie'`, klog `BLKE`, wrong offsets but correct output, emulating the generated kernel on x86 | blockloadkernel |
+| GEMM / non-conv block-load kernel (kernel-only `aie::shape` or hand-written 2-D GemmSpace) builds and traces OK but hangs in `wait_io TIMEOUT ... dir=0`, or only mesh column 0 is right; `Tensor param: a [16x16]`; B offset `subview[16, 0] [64, 64]` | gemmblockloadhang |
+| Spatial-halo conv hangs (`wait_io TIMEOUT`) though kernel analysis passed: `out_rounds` ≠ kernel rounds (e.g. 98 for a 14x16x16 tile), tiny core output window; or `[TilingLinalg] ERROR: ... the kernel's blocks give ..` | convoutroundsdoublecount |
+| Triton-style block-load kernel (`aie::program_id`, `aie::load_buffer` / `store_buffer` in tensor coordinates, `aie::release` / `commit`): `no member named 'program_id' in namespace 'aie'`, klog `BLKE`, wrong offsets but correct output, emulating the generated kernel on x86; hand-written `aie::GemmSpace` ports + `load_buffer` (`(GemmSpace X) .d1... = A, the kernel's blocks give B`) | blockloadkernel |
+| Edit the routing IR and feed it back (`AIEHLC_ROUTING_IR_IN`, `aiebackend.routing_ir`: view / set_level / lint / check / build), round-trip test, an IR edit that does nothing or is silently accepted although illegal | routingirreentry |
 | Adding/reading tiling or per-tensor DMA info in routing IR (halo, shim_dma, pp_depth, kernel rounds); "where did `tensor_N.halo` / `routing.spatial_out_rounds` go"; value reads 0 inside a conversion pattern | routingirtilingcarriers |
 | A `#pragma` you added is never `Detected` in the aiehlc log and its feature silently does nothing (build still rc=0) — stale `aiehlc` binary | stalepragmabinary |
 | Gen2-only build break: missing `xpseudo_asm_armclang.h`, or `XPAR_CPU_TIMESTAMP_CLK_FREQ` undeclared | bspheadergen2 |
@@ -876,10 +909,16 @@ Read the matching skill when the task fits:
 | `Option '...' registered more than once` / `Option 'basic' already exists` when TVM flow loads `_aiebackend` (two LLVMs) | aiebackendtvmllvm |
 | `run_test.sh` check 3: no `aie/` under the offloaded layer; `--aiegraph` lifts 0 convs under int8 (`non-4D shapes`); may `--aie-offload` change `layers/` vs golden | aieoffloadaiegraph |
 | Frontend prints "OVER BUDGET" / gates offload on tile memory — don't; offload is blind, aiehlc tiles | aieoffloadblind |
+| Misspelled `#include` reported as `` `HW_ROWS` ... no #define `` instead of `file not found`; kernel-only kernel: `kernel analysis needs the launch mesh: no device.partition(...)` though the call exists (mesh macros behind `#include <x.h>`); xchesscc `no matching function for call to 'aiehlc_load_buffer'` (window port by value, missing `*`); adding an early source-level diagnostic | kernelanalysisdiagnostics |
+| `data used without being loaded` and WHICH constant causes it (`oc_t = 15` vs loops walking 16); `cause (static analysis)` / `out-of-block access (static analysis)` lines; extending `kernel_static.cpp` | blockstaticbounds |
 | `pip install -e .` / `import aiegraph`: TVM 0.16 not found or provisioning unexpectedly, `no aiehlc checkout`, `exists and was not written by aiegraph`, stale results after changing model/calib, packaging `frontend` namespace | aiegraphinstall |
 | `aiegraph` region API: `no region matches 'layer1.0.conv1'`, a region offloads its sibling too (`move together` / *dragged*), `region="layer1"` vs `offload_check("layer1")` mean different things, `partition` undid an earlier offload, `register_kernel` "contract contradicts" | aiegraphregion |
-| What a kernel file for a layer must contain: args in TVM call order, roles, AIEK_SPEC, templates (`ag.offload_interface`, `aiegraph interface`) | aiekernelinterface |
+| A kernel-file backbone for a layer: args in TVM call order, roles, AIEK_SPEC, kernel frame + host run + entry (`ag.offload_prototype`, `aiegraph prototype`) | aiekernelprototype |
+| Two user-kernel offloads and only the last stays on the AIE (`superseded ... one aiehlc library per ELF`), `routing` defined twice at link; several aiehlc libraries in one ELF | multiaiehlclibrary |
+| Kernel link fails `could not find free space for SpaceSymbol buf_in_ping_0 in memory DMb`; TilingLinalg `Memory budget exceeded! ... maxPingPongBytes` | dmbufferregion |
 | Plug a user-written kernel into a TVM layer (`AIEK_ENTRY`/`AIEK_SPEC`, `--aie-kernel`, `aiekernel check/offload`); an L0xx lint code, calibrate MISMATCH, emulate FAIL, or `rejected at link -- ... routing()` | aieuserkernel |
+| An offloaded layer is slow: attribute its measured ms (MMIO kernel+BSS load, config writes, teardown, console printf in the timed adapter, scalar compute) and rank fixes; `emod.AI_perf_analysis` / `AI_kernel_accelerate` | kernelperfcheck |
+| `AI_kernel_accelerate` / `offload_AI_proto` FileNotFoundError in `_stage` and an EMPTY `aiopt/` dir (kernel deleted); recovering it from Claude transcripts | aistagenodelete |
 | Run/extend the persistent ResNet-18 engine (`resnetengine`: gen_engine.py model mismatch, core memory overflow, ENG FAIL, new layer kind) | resnetengine |
 | resnetengine eager layer-major hangs ~1 run in 3 in a residual layer: `shim_bd_ctrl TIMEOUT ... owing an ack`, input shim with no task; or a few wrong logits | shimctrlpushloss |
 | AIE kernel: +1 errors / constant garbage right after ADDING a code path; statics above `DM_stack` overwritten | aiecorestackoverflow |
@@ -916,7 +955,7 @@ to reload the MCP server.
 ### Build notes
 
 - **[script/verify_env.sh](script/verify_env.sh)** — validate Vitis, LLVM, toolchain, board vars before build
-- **[script/hostcompile.sh](script/hostcompile.sh)** — kernel build via `compile_one_kernel()` → `kc.sh`; do not restore deleted `compile_kernel.sh` (skill: hostcompile-entrypoint). Picks `HOST_ENTRY_KIND` from the generated `host.cc`: `int main()` / `void main()` link an ELF, **no main() archives `lib<app>.a`** instead (skill: hostlibrarymode). The `return;`→`return 0;` fixup is main-only — it rewrites the *first* `return;` in the file and corrupts `host_canonicalized` if applied without a main.
+- **[script/hostcompile.sh](script/hostcompile.sh)** — kernel build via `compile_one_kernel()` → `kc.sh`; do not restore deleted `compile_kernel.sh` (skill: hostcompile-entrypoint). `compile_one_kernel` reuses `build/kernel.o` when `build/kernel.stamp` (sha256 of `kernel.cc`, `aieml.bcf`, `aieml.prx`, `kc.sh` + func/version/platform/llvm/debug knobs) matches -- aiekernel's install re-runs this script after editing only `host.cc` and used to recompile the identical kernel (~30 s per `offload`); `HOSTCOMPILE_KERNEL_REBUILD=1` forces it. Picks `HOST_ENTRY_KIND` from the generated `host.cc`: `int main()` / `void main()` link an ELF, **no main() archives `lib<app>.a`** instead (skill: hostlibrarymode). The `return;`→`return 0;` fixup is main-only — it rewrites the *first* `return;` in the file and corrupts `host_canonicalized` if applied without a main.
 - **[script/aiehlc.sh](script/aiehlc.sh)** — `--platform sim` is build-only; launch sim separately via `runsim.sh` or debug UI **Run** (skills: sim-build-run-separation, raw-xaie-sim-debug-bundle)
 - **`include/bspcompat/`** — shims for standalone-BSP headers present only on the armclang branch (`thirdparty/alib/include/` is a flattened copy of *one* BSP, picked by `--aie-version`, wiped every run, gitignored). `aiehlc.sh` appends `-I${AIEHLC_DIR}/include/bspcompat` **last** in `AIEHLC_ARGS` so the real Gen5 header still wins — add it to the **front-end only**, never to the host/kernel compiles. Details and the related `AIE_GEN > 2` XTime gate: skill **bspheadergen2**.
 - **[script/kc.sh](script/kc.sh)** — after linking the kernel ELF, `strip_kernel_debug_loc` drops `.debug_loc` + the `.debug_info` group via `llvm-objcopy` (13.7 MB → 82 KB on matmul; this is JTAG download time, since the kernel ELF is embedded into the host ELF and `dow -force`d). `.debug_line` is kept, so `kernel.linemap.json` / aiediag pc are unaffected; the full-DWARF original is parked at `<out>/kernel_debug`. `--keep-debug-loc` opts out. Must be `llvm-objcopy` — GNU binutils rejects the chess `e_machine 0x108`.

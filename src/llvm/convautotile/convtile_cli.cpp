@@ -81,8 +81,22 @@ static int traceCommand(std::string src, const std::string &path, const Override
             return 2;
         }
     }
+    std::vector<std::string> routed;
+    for (auto &kd : ko.tu_decls)
+        routed.push_back(kd.first);
+    KernelOnlyResult hs = verifySpaceKernels(src, dirOf(path), baseOf(path), routed);
+    if (hs.found) {
+        std::cout << hs.report;
+        for (auto &n : hs.notes)
+            std::cout << "note: " << n << "\n";
+        if (!hs.ok) {
+            for (auto &e : hs.errors.empty() ? std::vector<std::string>{hs.error} : hs.errors)
+                std::cout << "ERROR: " << e << "\n";
+            return 2;
+        }
+    }
     DesugarResult r = desugarConvMapping(src, dirOf(path), ov, tgt, baseOf(path));
-    if (!r.found && !ko.found && !tf.found) {
+    if (!r.found && !ko.found && !tf.found && !hs.found) {
         std::cerr << path << ": no block-load kernel to analyze\n";
         return 2;
     }

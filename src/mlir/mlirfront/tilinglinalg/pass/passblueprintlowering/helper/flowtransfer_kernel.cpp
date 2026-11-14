@@ -249,8 +249,23 @@ LogicalResult emitCoreTileParams(FlowLoweringCtx &c, CoreTileCtx &t, const CoreT
         }
     }
 
+    // Kernel-only input that follows its traced blocks: one window per kernel
+    // block, one DMA round per block (the shim side does the same, see
+    // applyKernelBlockShim). Must run after computeCoreIterations so the GEMM
+    // model's clamp / K-round scaling do not touch it.
+    if (c.kb.follow && c.isInput) {
+        t.pingPongBufferSize = c.kb.blockElems;
+        t.perCorePerKRound = c.kb.blockElems;
+        // The port's own buffer count ({.resident} / {.depth}); the input
+        // FlowConfig does not carry it.
+        const routing::TensorRoutingInfo *ti = routing::lookupTensorRoutingInfo(d.passState->tensorInfo, c.funcArgIdx);
+        if (ti && ti->ppDepth && *ti->ppDepth >= 1)
+            t.ppDepth = static_cast<int>(*ti->ppDepth);
+    }
     if (failed(computeCoreIterations(c, t, d)))
         return failure();
+    if (c.kb.follow && c.isInput)
+        t.numIterations = c.kb.rounds;
 
     // Compute lock IDs from dirIdx to match the kernel's window ordering.
     // The kernel allocates locks sequentially per sorted window:
@@ -280,7 +295,8 @@ LogicalResult computeCoreIterations(FlowLoweringCtx &c, CoreTileCtx &t, const Co
     // Clamp to d.maxPingPongBytes to prevent exceeding core tile memory.
     // Skip the clamp for the spatial-halo IFM slab (must stay contiguous) and
     // for the K-split per-round slab (must match the shim per-round len exactly).
-    if (!t.hostSpatialHaloPort && !t.kSplitSlabPort && d.maxPingPongBytes > 0 && t.elementSizeBytes > 0) {
+    if (!t.hostSpatialHaloPort && !t.kSplitSlabPort && !(c.kb.follow && c.isInput) && d.maxPingPongBytes > 0 &&
+        t.elementSizeBytes > 0) {
         int64_t maxElements = d.maxPingPongBytes / t.elementSizeBytes;
         if (maxElements > 0 && t.pingPongBufferSize > maxElements)
             t.pingPongBufferSize = maxElements;
@@ -295,7 +311,7 @@ LogicalResult computeCoreIterations(FlowLoweringCtx &c, CoreTileCtx &t, const Co
     // the DMA fires exactly once. If the kernel needs multiple
     // rounds (numIterations > 1), the DMA cannot re-arm and the
     // kernel will deadlock on the second acquire_window call.
-    if (t.ppDepth == 1 && t.numIterations > 1) {
+    if (t.ppDepth == 1 && t.numIterations > 1 && !(c.kb.follow && c.isInput)) {
         op.emitError("pp_depth=1 (single buffer) incompatible with "
                      "numIterations=")
             << t.numIterations << " (buffer_size=" << t.pingPongBufferSize
@@ -310,7 +326,7 @@ LogicalResult computeCoreIterations(FlowLoweringCtx &c, CoreTileCtx &t, const Co
     // kRounds iterations, each consuming numIterations DMA rounds.
     // The host must send numIterations * kRounds total BD iterations
     // for input flows to match the kernel's acquire/release pattern.
-    if (c.isInput) {
+    if (c.isInput && !c.kb.follow) {
         int64_t kRounds = d.passState->kRounds;
         if (kRounds > 1) {
             llvm::errs() << "[BlueprintToSchedule] K-round: input numIterations " << t.numIterations << " * kRounds "
@@ -802,7 +818,9 @@ void emitCoreSingleBufferBd(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEm
     Location loc = c.loc;
 
     // === Single buffer mode (pp_depth=1) ===
-    // One buffer, one BD, no next_bd chaining, no pong.
+    // One buffer, one BD, no pong. A port with several rounds (a kernel-only
+    // input with {.depth = 1}) chains the BD to itself: the locks still hand the
+    // one buffer back and forth, so the DMA refills it after each release.
     auto singleL1 = rewriter.create<dfschedule::BindCoreBufferOp>(
         loc, t.shapedPerTileType, t.perTileToken, t.coreTileOp.getTile(), rewriter.getI64IntegerAttr(t.pingL1Offset));
 
@@ -826,18 +844,18 @@ void emitCoreSingleBufferBd(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTileEm
     auto singleBdOp = rewriter.create<dfschedule::ConfigDmaBdOp>(
         loc, dfschedule::BdHandleType::get(rewriter.getContext()), singleL1.getBuffer(), t.coreTileOp.getTile(),
         singleBdIdConst.getResult(),
-        singleOffsetConst.getResult(),                 // offset
-        singlePktConst.getResult(),                    // packet_id
-        singleOooConst.getResult(),                    // out_of_order_bd_id
-        rewriter.getI32IntegerAttr(t.coreBdLen),       // len (bytes)
-        rewriter.getBoolAttr(t.coreBdEnablePacket),    // enable_packet
-        rewriter.getI32IntegerAttr(-1),                // next_bd = -1 (no chaining)
-        rewriter.getI32IntegerAttr(t.bdAcquireLockId), // acquire_lock_id
-        rewriter.getI32IntegerAttr(-1),                // acquire_lock_val
-        rewriter.getI32IntegerAttr(t.bdReleaseLockId), // release_lock_id
-        rewriter.getI32IntegerAttr(1),                 // release_lock_val
-        rewriter.getI32IntegerAttr(-1),                // data_id
-        Value(),                                       // linked_bd = none
+        singleOffsetConst.getResult(),                                     // offset
+        singlePktConst.getResult(),                                        // packet_id
+        singleOooConst.getResult(),                                        // out_of_order_bd_id
+        rewriter.getI32IntegerAttr(t.coreBdLen),                           // len (bytes)
+        rewriter.getBoolAttr(t.coreBdEnablePacket),                        // enable_packet
+        rewriter.getI32IntegerAttr(t.numIterations > 1 ? singleBdId : -1), // next_bd: self to re-arm
+        rewriter.getI32IntegerAttr(t.bdAcquireLockId),                     // acquire_lock_id
+        rewriter.getI32IntegerAttr(-1),                                    // acquire_lock_val
+        rewriter.getI32IntegerAttr(t.bdReleaseLockId),                     // release_lock_id
+        rewriter.getI32IntegerAttr(1),                                     // release_lock_val
+        rewriter.getI32IntegerAttr(-1),                                    // data_id
+        Value(),                                                           // linked_bd = none
         /*dim_strides=*/nullptr, /*dim_wraps=*/nullptr,
         rewriter.getI32IntegerAttr(0),  // iter_step_size (no iteration)
         rewriter.getI32IntegerAttr(0)); // iter_wrap (no iteration)

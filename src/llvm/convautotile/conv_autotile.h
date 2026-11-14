@@ -68,6 +68,14 @@ struct MappingSpec {
 // tilinglinalg pipeline targets ("Buffer memory check ... / 49152 bytes").
 struct Target {
     int data_mem_budget = 49152; // bytes of core data memory usable for port buffers
+    // Measured from the generated bcf: data memory = 32 KB stack (0x70000) + a
+    // 32 KB region for the port buffers (0x78000..0x80000), whose last 2 KB are
+    // the klog ring; kernel statics (block descriptors, cursors) share it. A
+    // buffer set past it fails at link: "could not find free space for
+    // SpaceSymbol buf_in_ping_0 in memory DMb". kernel.cc declares ping AND pong
+    // for every window, so this holds for 2 x (ifm + wgt + ofm) at any pp_depth.
+    int buffer_region = 32768;
+    int buffer_reserve = 3072;   // klog 2 KB + statics
     int channel_align = 4;       // int8 channel layout granularity (C=3 -> 4)
     int elem_bytes = 1;          // int8 activations / weights / outputs
     // Core stack (bcf `_stack DM_stack 0x70000 0x8000`). The reference kernels

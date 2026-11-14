@@ -3,6 +3,7 @@
 #
 #   src/tool/netboot/build.sh            # -> src/tool/netboot/build/netboot.elf
 #   NETBOOT_IP=10.10.70.50 NETBOOT_GW=10.10.70.101 src/tool/netboot/build.sh
+#   NETBOOT_DMA_BASE=0xA00000000 NETBOOT_OUT=src/tool/netboot/build/vek385 src/tool/netboot/build.sh  # VEK385
 #
 # lwIP 2.2 and its Xilinx port are compiled from the Vitis embeddedsw tree, the
 # same sources the aiebaremetal example_lwip_echo links (via libxtflwipall.a),
@@ -12,7 +13,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/../../.." && pwd)"
-OUT="${HERE}/build"
+# NETBOOT_OUT: output dir (apppaltest builds the VEK385 variant into build/vek385).
+OUT="${NETBOOT_OUT:-${HERE}/build}"
 VITIS="${VITIS:-/proj/custbuilds/SWIP/2026.1_0616_1700/installs/lin64/2026.1/Vitis}"
 LWIP="${LWIP_SRC:-${VITIS}/data/embeddedsw/ThirdParty/sw_services/lwip220_v1_4/src/lwip-2.2.0}"
 PORT="${LWIP}/contrib/ports/xilinx"
@@ -24,6 +26,10 @@ AR="${CROSS}ar"
 NETBOOT_IP="${NETBOOT_IP:-10.10.70.50}"
 NETBOOT_MASK="${NETBOOT_MASK:-255.255.255.0}"
 NETBOOT_GW="${NETBOOT_GW:-10.10.70.101}"
+# VEK385: GEM (LPD) cannot reach DDR_LOW0 there; put its DMA memory in DDR_CH1.
+#   NETBOOT_DMA_BASE=0xA00000000 src/tool/netboot/build.sh
+# lwIP heap+pools go at NETBOOT_DMA_BASE, the BD ring 1 GB above it. Empty = palmyra layout.
+NETBOOT_DMA_BASE="${NETBOOT_DMA_BASE:-}"
 
 die() { echo "[netboot] ERROR: $*" >&2; exit 1; }
 command -v "${CC}" >/dev/null || die "${CC} not on PATH (source Vitis settings64.sh)"
@@ -39,6 +45,8 @@ CFLAGS=(-O2 -g -mcpu=cortex-a78 -std=gnu11 -ffunction-sections -fdata-sections
     -DSDT -DPROCESSOR_LITTLE_ENDIAN
     -I"${HERE}" -I"${HERE}/lwip" -I"${PORT}/include" -I"${LWIP}/src/include"
     -I"${BSP}/include")
+# -mcmodel=large: ADRP reaches only +-4 GB, the DMA memory is ~38 GB above the image.
+[ -n "${NETBOOT_DMA_BASE}" ] && CFLAGS+=(-mcmodel=large -DNETBOOT_DMA_BASE="${NETBOOT_DMA_BASE}ULL")
 
 # ---------------------------------------------------------------- liblwip.a
 LWIP_SRCS=()
@@ -73,8 +81,9 @@ fi
 #                        that block non-cacheable with Xil_SetTlbAttributes)
 #   0x7A20_0000 .. 2 GB  staging for received ELFs    (netboot.h)
 LDS="${OUT}/lscript_netboot.ld"
-python3 - "${REPO}/thirdparty/arch/cortexa78_0/lscript.ld" "${LDS}" <<'PYEOF'
+python3 - "${REPO}/thirdparty/arch/cortexa78_0/lscript.ld" "${LDS}" "${NETBOOT_DMA_BASE}" <<'PYEOF'
 import re, sys
+dma = int(sys.argv[3], 0) if len(sys.argv) > 3 and sys.argv[3] else 0
 s = open(sys.argv[1]).read()
 s = re.sub(r"^_HEAP_SIZE = .*$", "_HEAP_SIZE = DEFINED(_HEAP_SIZE) ? _HEAP_SIZE : 0x1000000;", s, flags=re.M)
 s = re.sub(r"^_STACK_SIZE = .*$", "_STACK_SIZE = DEFINED(_STACK_SIZE) ? _STACK_SIZE : 0x100000;", s, flags=re.M)
@@ -82,14 +91,26 @@ s = s.replace("MEMORY\n{", "MEMORY\n{\n   netboot_ram : ORIGIN = 0x78000000, LEN
               "   netboot_bd_ram : ORIGIN = 0x7A000000, LENGTH = 0x200000", 1)
 s = s.replace("> noc_ddr4_C0_DDR_LOW0", "> netboot_ram")
 s = s.replace("SECTIONS\n{", "SECTIONS\n{\n.netboot_bd (NOLOAD) : {\n   KEEP (*(.bss.emac_bd_space))\n} > netboot_bd_ram\n", 1)
+if dma:
+    s = s.replace("ORIGIN = 0x7A000000, LENGTH = 0x200000",
+                  "ORIGIN = 0x%X, LENGTH = 0x200000\n   netboot_dma_ram : ORIGIN = 0x%X, LENGTH = 0x40000000"
+                  % (dma + 0x40000000, dma), 1)
+    s = s.replace("SECTIONS\n{", "SECTIONS\n{\n.netboot_dma (NOLOAD) : ALIGN(64) {\n   *(.bss.netboot_dma)\n} > netboot_dma_ram\n", 1)
 open(sys.argv[2], "w").write(s)
 PYEOF
 grep -q '> noc_ddr4_C0_DDR_LOW0' "${LDS}" && die "linker script still places sections in the app's DDR"
 grep -q 'netboot_bd_ram' "${LDS}" || die "could not add the BD-ring region to ${LDS}"
+if [ -n "${NETBOOT_DMA_BASE}" ]; then
+    grep -q 'netboot_dma_ram' "${LDS}" || die "could not add the DMA region to ${LDS}"
+fi
 
 APP_SRCS=("${HERE}"/supervisor/*.c "${HERE}"/supervisor/*.S)
 DEFS=(-DNETBOOT_IP="$(ipdef "${NETBOOT_IP}")" -DNETBOOT_MASK="$(ipdef "${NETBOOT_MASK}")"
     -DNETBOOT_GW="$(ipdef "${NETBOOT_GW}")")
+# NETBOOT_TEST_LINK_DOWN=1|2: test build that forces the Ethernet link down after
+# init, to exercise the PHY-setup retry (1) or the main-loop link poll (2) on a
+# board whose link always comes up. Never stage one for normal use.
+[ -n "${NETBOOT_TEST_LINK_DOWN:-}" ] && DEFS+=(-DNB_TEST_LINK_DOWN="${NETBOOT_TEST_LINK_DOWN}")
 OBJS=()
 for s in "${APP_SRCS[@]}"; do
     b="$(basename "$s")"; o="${OUT}/obj/${b%.*}.o"
@@ -108,7 +129,9 @@ done
 # Refuse an image that strays outside [0x7800_0000, 0x7A20_0000): below is the
 # app's, above is staging.
 "${CROSS}readelf" -lW "${OUT}/netboot.elf" |
-    awk '$1=="LOAD"{ lo=strtonum($3); hi=lo+strtonum($6); if (lo < 0x78000000 || hi > 0x7A200000) bad=1 } END{ exit bad }' ||
+    awk -v dma="${NETBOOT_DMA_BASE:-0}" '$1=="LOAD"{ lo=strtonum($3); hi=lo+strtonum($6)
+        d=strtonum(dma); if (d && strtonum($5)==0 && lo >= d && hi <= d + 0x80000000) next   # NOLOAD DMA/BD
+        if (lo < 0x78000000 || hi > 0x7A200000) bad=1 } END{ exit bad }' ||
     die "netboot.elf has a PT_LOAD outside 0x7800_0000..0x7A20_0000 (would collide with the app or staging)"
 "${CROSS}size" "${OUT}/netboot.elf"
-echo "[netboot] built ${OUT}/netboot.elf  (IP ${NETBOOT_IP}, port 5155)"
+echo "[netboot] built ${OUT}/netboot.elf  (IP ${NETBOOT_IP}, port 5155${NETBOOT_DMA_BASE:+, GEM DMA at ${NETBOOT_DMA_BASE}})"

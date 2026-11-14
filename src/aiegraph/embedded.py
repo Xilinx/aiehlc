@@ -27,7 +27,7 @@ from .model import Model, copy_into, load
 from .plan import group_by_source, parse_offload
 from .region import Regions, build_regions
 from .report import (AIProtoResult, BuildReport, CheckReport, DetectReport, PartitionPlan,
-                     RegionCheck)
+                     KernelOptResult, PerfReport, ProfileReport, RegionCheck, RunReport)
 
 __all__ = ["EmbeddedModel", "Layer", "embedded_convert", "convert", "open_workdir", "TARGETS"]
 
@@ -46,6 +46,7 @@ class Layer:
     label: str
     signature: str
     placement: str
+    source: str = ""       # the code this layer runs: its TVM C, or the user kernel source
 
     @property
     def name(self) -> str:
@@ -54,7 +55,15 @@ class Layer:
     def __repr__(self) -> str:
         return (f"Layer {self.name}: {self.label}  [{self.placement}]  calls "
                 f"{', '.join(f'[{c:02d}]' for c in self.calls)}\n  {self.signature}\n"
-                f"  TVM C: layers/{self.dir}/")
+                f"  TVM C: layers/{self.dir}/" +
+                (f"\n  runs:  {self.source}" if self.placement != "cpu" else ""))
+
+
+class _Text(str):
+    """A string that prints as itself at the prompt (no quotes)."""
+
+    def __repr__(self) -> str:
+        return str(self)
 
 
 def _label(call) -> str:
@@ -91,6 +100,7 @@ class EmbeddedModel:
         self.image = image
         self.state = state or {}
         self.last_build = None
+        self.last_run = None
         self._kernels = {}          # register_kernel: name -> KernelContract
         self._assign = {}           # assign: region name -> "cpu" | "aie:<kernel>"
         self._regions = None
@@ -103,13 +113,15 @@ class EmbeddedModel:
         return load_network(self.workdir)
 
     def _placement(self) -> dict:
+        """{symbol: (placement, source)} for the layers partition.json puts on the AIE."""
         part = self.workdir / "layers" / "partition.json"
         if not part.is_file():
             return {}
         out = {}
         for row in json.loads(part.read_text()).get("layers", []):
             if row.get("target") == "aie" and row.get("replaces"):
-                out[row["symbol"]] = f"aie:{row.get('user_kernel') or row.get('backend')}"
+                src = row.get("source") or row.get("aie_dir") or ""
+                out[row["symbol"]] = (f"aie:{row.get('user_kernel') or row.get('backend')}", src)
         return out
 
     @property
@@ -118,9 +130,42 @@ class EmbeddedModel:
         out = []
         for idx, calls in sorted(net.layers().items()):
             c = calls[0]
+            where, src = place.get(c.symbol, ("cpu", ""))
+            if where == "cpu":
+                src = f"layers/{c.dir}/{c.dir}.c" if c.dir else "resnet18.c"
             out.append(Layer(idx, c.symbol, c.dir, [x.call for x in calls], _label(c),
-                             _sig(c), place.get(c.symbol, "cpu")))
+                             _sig(c), where, src))
         return out
+
+    def recorded_path(self, p) -> Path:
+        """A path as partition.json records it, made absolute. aiekernel writes
+        it relative to the workdir when the file is inside it (TVM C, an
+        ``aiopt/`` copy) and to the repo otherwise (``aiekernel.flow._rel``) --
+        so the root depends on WHERE the file is, not on CPU vs AIE."""
+        p = Path(p)
+        if p.is_absolute():
+            return p
+        for base in (self.workdir, _env.repo_root()):
+            if (base / p).exists():
+                return (base / p).resolve()
+        return (self.workdir / p).resolve()
+
+    def source_path(self, layer) -> Path:
+        """Absolute path of the code *layer* runs: its TVM C file (CPU) or its
+        user kernel source (AIE)."""
+        l = layer if isinstance(layer, Layer) else self.layer(layer)
+        return self.recorded_path(l.source)
+
+    def sources(self, full: bool = True) -> str:
+        """Which code every layer runs: the TVM C file of a CPU layer, the user
+        kernel source of an AIE one. Absolute paths; ``full=False`` prints them
+        as partition.json records them (workdir- / repo-relative). A table."""
+        rows = [(l.name, l.placement, str(self.source_path(l)) if full else l.source)
+                for l in self.layers]
+        w = max(len(p) for _, p, _ in rows)
+        text = "\n".join([f"  {'layer':<8} {'on':<{w}}  source"] +
+                         [f"  {n:<8} {p:<{w}}  {s}" for n, p, s in rows])
+        return _Text(f"layer sources ({self.workdir}):\n" + text)
 
     def resolve(self, ref) -> list:
         """Any layer reference -> sorted layer indices (see the design doc §4.4)."""
@@ -179,14 +224,51 @@ class EmbeddedModel:
                 for src, layers in groups.items()]
         return groups, args
 
-    def offload_interface(self, layer=None, *, region=None, entry: str = None):
-        """What a kernel file must contain to replace a layer: its arguments in
-        TVM call order (kind, dtype, shape, role, value facts), a proven
-        ``AIEK_SPEC`` and templates (``.write(dir)``). ``layer`` uses the TVM
-        layer numbering of ``offload_check``; ``region=`` an ONNX region name.
-        No argument: the general kernel-file format."""
-        from .interface import interface_for
-        return interface_for(self, layer, region, entry)
+    def offload_prototype(self, layer=None, *, region=None, entry: str = None):
+        """A kernel-file backbone for a layer: its arguments in TVM call order
+        (kind, dtype, shape, role, value facts), a proven ``AIEK_SPEC``, and
+        ``.write(dir)`` -> ``<entry>.cc`` (aiehlc kernel frame + host run
+        function + entry, the conv2dstem_uk.cc architecture; compute and staging
+        are TODOs) and ``<entry>_ref.c``. ``layer`` uses the TVM layer numbering
+        of ``offload_check``; ``region=`` an ONNX region name. No argument: the
+        general kernel-file format."""
+        from .prototype import prototype_for
+        return prototype_for(self, layer, region, entry)
+
+    def offload_reset(self, layers=None, verbose: bool = False) -> list:
+        """Put offloaded layers back on the CPU: all of them, or *layers* (any
+        ``resolve`` reference). ``partition.json`` rows lose their AIE entry and
+        the driver is regenerated without the swap; the conversion and the built
+        libraries stay (an unreferenced archive links nothing). Returns the
+        layer names reset."""
+        part = self.workdir / "layers" / "partition.json"
+        if not part.is_file():
+            return []
+        want = None if layers is None else set(self.resolve(layers))
+        doc = json.loads(part.read_text())
+        reset = []
+        for row in doc.get("layers", []):
+            if row.get("target") != "aie" or (want is not None and row.get("index") not in want):
+                continue
+            row.update(target="cpu", entry=None, replaces=None, archive=None, aie_dir=None,
+                       backend=None, user_kernel=None, source=None,
+                       reason="offload reset (aiegraph): back on the APU")
+            if f"layer{row.get('index')}" not in reset:
+                reset.append(f"layer{row.get('index')}")
+        if not reset:
+            return []
+        targets = [r for r in doc["layers"] if r.get("target") == "aie"]
+        doc["aie_count"], doc["cpu_count"] = len(targets), len(doc["layers"]) - len(targets)
+        doc["aie_dirs"] = len({r["dir"] for r in targets})
+        doc["cpu_dirs"] = len({r["dir"] for r in doc["layers"] if r.get("target") != "aie"})
+        part.write_text(json.dumps(doc, indent=2) + "\n")
+        if (self.workdir / "arm_build").is_dir():
+            ab = _env.frontend("arm_build")
+            ab.build_arm_elf(self.workdir, c_name=f"{self._stem()}.c", run_make=False,
+                             image=self.image, verbose=verbose)
+        self.last_build = None
+        print(f"[aiegraph] offload reset: {', '.join(reset)} back on the CPU (driver regenerated)")
+        return reset
 
     def offload_check(self, spec, source=None, verbose: bool = False) -> CheckReport:
         """lint + detect + calibrate + whole-network emulate, all on x86.
@@ -201,7 +283,15 @@ class EmbeddedModel:
 
     def offload(self, spec, source=None, build: bool = True, make: bool = False,
                 force: bool = False, verbose: bool = False) -> CheckReport:
-        """``offload_check`` + aiehlc build + link gate + driver swap."""
+        """``offload_check`` + aiehlc build + link gate + driver swap.
+
+        ``offload("layer1", False)`` undoes it: the layer(s) go back on the CPU
+        (= ``offload_reset("layer1")``); returns the layer names reset."""
+        if source is False:
+            reset = self.offload_reset(spec, verbose=verbose)
+            if not reset:
+                print(f"[aiegraph] offload {spec!r} False: nothing to do, not on the AIE")
+            return reset
         _env.frontend("")
         from frontend.tvmrelay.aiekernel.flow import offload
         groups, args = self._kernel_args(spec, source)
@@ -222,6 +312,40 @@ class EmbeddedModel:
         return offload_ai_proto(self, spec, source, rounds=rounds, model=model, claude=claude,
                                 timeout_s=timeout_s, out_dir=out_dir, quiet=quiet,
                                 verbose=verbose)
+
+    def AI_perf_analysis(self, layer, *, ai: bool = True, model: str = None,
+                         claude: str = "claude", timeout_s: float = 900, out_dir=None,
+                         quiet: bool = False) -> PerfReport:
+        """Why an offloaded layer is slow, and what to change (skill kernelperfcheck).
+
+        Deterministic facts (measured ms from the last ``run(profile=True)``,
+        pragmas, generated host.cc, kernel ELF / kernel.lst, aiehlc.log), a cost
+        model and the skill's rules, then ``claude -p`` (read-only) reads it all
+        and returns bottlenecks + ranked suggestions with predicted savings.
+        ``ai=False``: facts, model and rules only. Saved to
+        ``<workdir>/aiperf/<layer>/report.{md,json}``."""
+        from .aiperf import perf_analysis
+        return perf_analysis(self, layer, ai=ai, model=model, claude=claude,
+                             timeout_s=timeout_s, out_dir=out_dir, quiet=quiet)
+
+    AI_perf_analaysis = AI_perf_analysis      # the spelling first asked for
+
+    def AI_kernel_accelerate(self, layer, report: PerfReport = None, *, rounds: int = 2,
+                             board: str = None, host: str = None, model: str = None,
+                             claude: str = "claude", timeout_s: float = 2400, out_dir=None,
+                             quiet: bool = False, verbose: bool = False) -> KernelOptResult:
+        """Let ``claude -p`` apply *report*'s suggestions to a copy of the layer's
+        kernel. *report*: a ``PerfReport``, a path to a saved one, or ``None`` = the
+        saved ``aiperf/<layer>/report.json`` (else a fresh ``AI_perf_analysis``).
+        The copy lives in ``<workdir>/aiopt/``; every round is gated by our own
+        ``offload_check`` + an aiehlc build of the copy. The result compares the
+        facts and cost model of the old and the NEW build (predicted ms). With
+        ``board=`` it also offloads the copy and measures it there
+        (``run(profile=True)``) -- that changes this model's placement."""
+        from .aiperf import kernel_accelerate
+        return kernel_accelerate(self, layer, report, rounds=rounds, board=board, host=host,
+                                 model=model, claude=claude, timeout_s=timeout_s, out_dir=out_dir,
+                                 quiet=quiet, verbose=verbose)
 
     # ── regions: register / check / assign / partition ───────────────────
 
@@ -287,10 +411,12 @@ class EmbeddedModel:
     # ── build / run ──────────────────────────────────────────────────────
 
     def build(self, target: str = "a78", output=None, *, local: bool = False,
-              verbose: bool = False) -> BuildReport:
+              profile: bool = False, verbose: bool = False) -> BuildReport:
         """Link ``main.elf`` (A78; needs the Vitis cross toolchain), or with
         ``target="x86"`` ``main_local.elf`` for this host. ``local=True`` builds
-        both. ``output=`` copies the ELF(s), ``partition.json`` and ``network.md``
+        both. ``profile=True`` links ``main.elf`` with ``make PROFILE=1`` (a
+        per-call time table after "inference", read by ``profile()``).
+        ``output=`` copies the ELF(s), ``partition.json`` and ``network.md``
         into that directory. Never runs anything on a board."""
         if target not in BUILD_TARGETS:
             raise AiegraphError("build", f"target={target!r}", hint=f"one of {', '.join(BUILD_TARGETS)}")
@@ -298,7 +424,7 @@ class EmbeddedModel:
         x86 = target == "x86"
         res = ab.build_arm_elf(self.workdir, c_name=f"{self._stem()}.c", run_make=not x86,
                                image=self.image, local=local or x86, local_run=False,
-                               verbose=verbose)
+                               verbose=verbose, make_vars={"PROFILE": 1} if profile else None)
         if x86:
             loc = res.get("local") or {}
             rep = BuildReport(bool(loc.get("ok")), loc.get("elf"), loc.get("reason", ""), loc)
@@ -331,6 +457,114 @@ class EmbeddedModel:
         return BuildReport(bool(local.get("ok")), local.get("elf"),
                            local.get("reason", ""), local)
 
+    def run(self, board: str = "palmyra", host: str = None, *, elf=None, build: bool = True,
+            profile: bool = False, netload: bool = None, reboot: bool = None,
+            timeout: float = 1800, log=None, args=(), verbose: bool = True) -> RunReport:
+        """Run ``main.elf`` on a lab board and parse what it printed.
+
+        ``emod.run()`` -- palmyra, host from ``$PALIP`` / ``script/test/envlocal.sh``;
+        ``emod.run(ag.VEK385, "hostname")`` -- a VEK385. ``main.elf`` is (re)built
+        first when missing or older than the driver / placement / AIE archives
+        (``build=False`` refuses instead). ``netload`` (palmyra default True) and
+        ``reboot`` (VEK385 default True) override the board defaults; ``args`` go
+        to the board script verbatim. Console log: ``arm_build/run_<board>.log``.
+        ``profile=True`` makes ``main.elf`` a ``make PROFILE=1`` build (two timer
+        reads per call), so ``emod.profile(ag.ALL)`` can show each layer's time
+        afterwards; ``profile=False`` (default) a plain one. Switching rebuilds.
+        """
+        from .board import run_on_board
+        path = Path(elf) if elf else self._board_elf(build, verbose, profile)
+        rep = run_on_board(path, board, host, netload=netload, reboot=reboot, timeout=timeout,
+                           log=log, args=args, verbose=verbose)
+        self.last_run = rep
+        return rep
+
+    def _board_elf(self, build: bool, verbose: bool, profile: bool = False) -> Path:
+        arm = self.workdir / "arm_build"
+        elf = arm / "main.elf"
+        inputs = [arm / "graph_driver.c", self.workdir / "layers" / "partition.json",
+                  *self.workdir.glob("layers/*/aie/build/*.a")]
+        newest = max((f.stat().st_mtime for f in inputs if f.is_file()), default=0)
+        ab = _env.frontend("arm_build")
+        profiled = ab.built_make_vars(arm).get("PROFILE") == "1"
+        if not elf.is_file():
+            why = "missing"
+        elif elf.stat().st_mtime < newest:
+            why = "older than its inputs"
+        elif profile != profiled:
+            why = "built with" + ("out" if profile else "") + " PROFILE=1"
+        else:
+            return elf
+        if not build:
+            raise AiegraphError("run", f"{elf} is {why}", hint="emod.build(target='a78'), or run(build=True)")
+        print(f"[aiegraph] run: main.elf {why}; building it first")
+        rep = self.build(target="a78", profile=profile, verbose=verbose)
+        if not rep.ok:
+            raise AiegraphError("run", f"main.elf did not link: {rep.reason}",
+                                hint="emod.build(target='a78', verbose=True)")
+        return Path(rep.elf)
+
+    def profile(self, which="all", *, by: str = "call", top: int = None,
+                run: RunReport = None) -> ProfileReport:
+        """Each layer's time on the board, from the last ``run(profile=True)``.
+        Without one (no run, or a run without profiling) it prints that
+        profiling is not enabled and returns ``None``.
+
+        ``which``: ``ag.ALL`` (every call), or layers (``"layer1"``, ``[1, 4]``,
+        any ``resolve`` reference). ``by="call"`` one row per call, ``"layer"``
+        one row per layer (its calls summed). ``top=N`` keeps the N slowest
+        rows. Reads ``run`` / ``last_run``, else the newest
+        ``arm_build/run_*.log`` (so it works after ``ag.open``)."""
+        from .board import parse_console
+        if by not in ("call", "layer"):
+            raise AiegraphError("profile", f"by={by!r}", hint="'call' or 'layer'")
+        rep = run or self.last_run
+        board = rep.board if rep else None
+        if rep is None:
+            logs = sorted((self.workdir / "arm_build").glob("run_*.log"),
+                          key=lambda f: f.stat().st_mtime)
+            if not logs:
+                print("[aiegraph] profile: profiling not enabled -- no board run yet; "
+                      "emod.run(profile=True), then emod.profile(ag.ALL)")
+                return None
+            got = parse_console(logs[-1].read_text(errors="replace"))
+            rep = RunReport(ok=True, board=logs[-1].stem[4:], host=None, elf=None,
+                            log=str(logs[-1]), inference_ms=got["inference_ms"],
+                            profile=got["profile"])
+            board = rep.board
+        if not rep.profile:
+            print(f"[aiegraph] profile: profiling not enabled -- the last run ({rep.log}) used a "
+                  "main.elf without PROFILE=1; emod.run(profile=True), then emod.profile(ag.ALL)")
+            return None
+        return self._profile_rows(rep, which, by, top, board)
+
+    def _profile_rows(self, rep: RunReport, which, by: str, top, board) -> ProfileReport:
+        of_call = {c: l for l in self.layers for c in l.calls}
+        want = None if which in (None, "all", "ALL") else set(self.resolve(which))
+        total = sum(ms for _, ms, _, _ in rep.profile) or 1.0
+        rows = []
+        for call, ms, where, op in rep.profile:
+            l = of_call.get(call)
+            if want is not None and (l is None or l.index not in want):
+                continue
+            rows.append({"call": call, "layer": l.name if l else "?",
+                         "op": l.label if l else op[:28], "where": where, "ms": ms})
+        if by == "layer":
+            agg = {}
+            for r in rows:
+                a = agg.setdefault(r["layer"], {"calls": [], "layer": r["layer"], "op": r["op"],
+                                                "where": r["where"], "ms": 0.0})
+                a["calls"].append(r["call"])
+                a["ms"] += r["ms"]
+                if r["where"] != a["where"]:
+                    a["where"] = "mix"
+            rows = list(agg.values())
+        for r in rows:
+            r["pct"] = 100.0 * r["ms"] / total
+        if top:
+            rows = sorted(rows, key=lambda r: -r["ms"])[:top]
+        return ProfileReport(rows, by, board, rep.inference_ms, total, rep.log)
+
     def _stem(self) -> str:
         g = next(self.workdir.glob("*_graph.json"), None)
         return g.name[:-len("_graph.json")] if g else "resnet18"
@@ -354,11 +588,13 @@ class EmbeddedModel:
         lines.append(f"  {'layer':<8} {'calls':<6} {'op':<{w}}  {'in -> out':<58} on")
         for l in layers:
             sig = l.signature if len(l.signature) <= 58 else l.signature[:55] + "..."
-            lines.append(f"  {l.name:<8} {len(l.calls):<6} {l.label:<{w}}  {sig:<58} {l.placement}")
+            src = f"  <- {l.source}" if l.placement != "cpu" else ""
+            lines.append(f"  {l.name:<8} {len(l.calls):<6} {l.label:<{w}}  {sig:<58} {l.placement}{src}")
         n_calls = sum(len(l.calls) for l in layers)
         aie = [l.name for l in layers if l.placement != "cpu"]
         lines.append(f"  {len(layers)} layers, {n_calls} calls" +
                      (f"; on AIE: {', '.join(aie)}" if aie else ""))
+        lines.append("  every layer's code: print(module.sources())")
         lines.append("  next: " + ("module.build(target='a78', output=...)" if aie else
                                    "print(module.regions)  /  module.register_kernel(name=..., "
                                    "source=..., op=...)"))
@@ -377,10 +613,15 @@ def _clean(workdir: Path) -> None:
 
 def embedded_convert(model, target: str = "a78", quantize: str = "int8", calib=None,
                      image=None, workdir=None, force: bool = False,
-                     verbose: bool = False, example_inputs=None) -> EmbeddedModel:
+                     verbose: bool = False, example_inputs=None,
+                     keep_offloads: bool = False) -> EmbeddedModel:
     """fp32 model -> int8 -> one C file per layer + A78 driver (no ``make``).
 
-    Cached: the same model + options into the same workdir returns at once.
+    Starts FRESH: every layer on the CPU. The conversion itself is cached -- the
+    same model + options into the same workdir reuses it at once -- but layers
+    offloaded by an earlier session are put back on the CPU unless
+    ``keep_offloads=True``. ``force=True`` redoes the conversion from scratch.
+    ``ag.open(workdir)`` adopts a tree as it is, offloads included.
     """
     if target not in TARGETS:
         raise AiegraphError("convert", f"unknown target {target!r}",
@@ -401,6 +642,8 @@ def embedded_convert(model, target: str = "a78", quantize: str = "int8", calib=N
         if {k: old.get(k) for k in state} == state:
             emod = EmbeddedModel(workdir, m, target, image, old)
             print(f"[aiegraph] reusing {workdir} (same model and options)")
+            if not keep_offloads:
+                emod.offload_reset(verbose=verbose)
             set_current(emod)
             return emod
     _clean(workdir)

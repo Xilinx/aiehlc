@@ -676,4 +676,61 @@ OutputTileDescriptor buildOutputTileDescriptor(const BlueprintPassState &passSta
     return desc;
 }
 
+// ---------------------------------------------------------------------------
+// Kernel-only ports (#routing.kernel_block): see flowtransfer_internal.h.
+// ---------------------------------------------------------------------------
+KernelBlockUse resolveKernelBlock(const routing::TensorRoutingInfoMap &info, int funcArgIdx, bool isInput,
+                                  bool fullConnect, int64_t elemBytes) {
+    KernelBlockUse u;
+    const routing::TensorRoutingInfo *ti = routing::lookupTensorRoutingInfo(info, funcArgIdx);
+    if (!ti || !ti->kernelBlock || ti->halo || !fullConnect)
+        return u;
+    routing::KernelBlockAttr kb = ti->kernelBlock;
+    ArrayRef<int64_t> shape = kb.getShape(), tensor = kb.getTensorShape();
+    if (shape.empty() || shape.size() != tensor.size())
+        return u;
+    u.attr = kb;
+    u.check = true;
+    u.blockElems = 1;
+    for (int64_t v : shape)
+        u.blockElems *= v;
+    u.roundsJ = std::max<int64_t>(kb.getRoundsJ(), 1);
+    u.rounds = std::max<int64_t>(kb.getRoundsI(), 1) * u.roundsJ;
+    // Row-major element strides of the DDR tensor.
+    SmallVector<int64_t> pitch(tensor.size(), 1);
+    for (int d = (int)tensor.size() - 2; d >= 0; --d)
+        pitch[d] = pitch[d + 1] * tensor[d + 1];
+    bool rowContiguous = true;
+    for (size_t d = 1; d < shape.size(); ++d)
+        rowContiguous &= shape[d] == tensor[d];
+    for (size_t d = 0; d < shape.size(); ++d) {
+        if (d < kb.getStepI().size())
+            u.strideIBytes += kb.getStepI()[d] * pitch[d] * elemBytes;
+        if (d < kb.getStepJ().size())
+            u.strideJBytes += kb.getStepJ()[d] * pitch[d] * elemBytes;
+    }
+    u.follow = isInput && rowContiguous;
+    // .tile = {tr, tc} on a [R, C] block: panel-major, 3 shim BD dims --
+    // d0 one tile row (tc elements, contiguous), d1 the R rows of the panel
+    // (row pitch), d2 the C / tc panels (tc elements apart).
+    const int64_t tr = kb.getTileR(), tc = kb.getTileC();
+    if (u.follow && tr > 0 && tc > 0 && shape.size() == 2) {
+        const int64_t rowBytes = tensor[1] * elemBytes, tileRowBytes = tc * elemBytes;
+        u.tileStrides = {4, (int32_t)rowBytes, (int32_t)tileRowBytes};
+        u.tileWraps = {(int32_t)(tileRowBytes / 4), (int32_t)shape[0], (int32_t)(shape[1] / tc)};
+    }
+    return u;
+}
+
+LogicalResult checkKernelBlock(Operation *op, const KernelBlockUse &u, int64_t windowElems, int64_t rounds,
+                               StringRef who) {
+    if (!u.check || (windowElems == u.blockElems && rounds == u.rounds))
+        return success();
+    op->emitError() << who << ": the core window is " << windowElems << " elements x " << rounds
+                    << " round(s) per launch, but the kernel's blocks (#routing.kernel_block) are " << u.blockElems
+                    << " elements x " << u.rounds
+                    << " -- the core and shim DMA would disagree (a wait_io hang on the board)";
+    return failure();
+}
+
 } // namespace blueprint_sched

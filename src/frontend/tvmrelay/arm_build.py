@@ -718,16 +718,21 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                   flow=flow)
         lines += _trace_lines(n_calls, fn, in_eids, out_eids, "in", **tl)
         lines.append(f"    GRAPH_PROF_BEGIN({n_calls});")
+        # The PROF tag says where the call RAN: an offloaded call is "aie" only
+        # in the build that defines GRAPH_AIE_OFFLOAD (the board Makefile);
+        # `make local` runs the CPU kernel and must say "cpu".
+        op = fn.replace("tvmgen_default_fused_", "")[:68]
         if fn in offload:
             lines += ["#ifdef GRAPH_AIE_OFFLOAD",
                       f"    {offload[fn]}(args, codes, {len(arg_eids)}, 0, 0, 0);",
+                      f'    GRAPH_PROF_END({n_calls}, "aie {op}");',
                       "#else",
                       f"    {fn}(args, codes, {len(arg_eids)}, 0, 0, 0);",
+                      f'    GRAPH_PROF_END({n_calls}, "cpu {op}");',
                       "#endif"]
         else:
             lines.append(f"    {fn}(args, codes, {len(arg_eids)}, 0, 0, 0);")
-        tag = ("aie " if fn in offload else "cpu ") + fn.replace("tvmgen_default_fused_", "")
-        lines.append(f'    GRAPH_PROF_END({n_calls}, "{tag[:72]}");')
+            lines.append(f'    GRAPH_PROF_END({n_calls}, "cpu {op}");')
         lines += _trace_lines(n_calls, fn, in_eids, out_eids, "out", **tl)
         lines.append("")
         n_calls += 1
@@ -2380,7 +2385,7 @@ def write_readme(build: Path, summary: dict, layers: int = 0,
 def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
                   run_make: bool = True, jobs: int = 0, image=None,
                   local: bool = False, local_run: bool = True,
-                  verbose: bool = True) -> dict:
+                  verbose: bool = True, make_vars: dict = None) -> dict:
     """Generate the sources + Makefile, then run ``make`` to link ``main.elf``.
 
     Python only *generates*; ``make`` does the building, so the same Makefile
@@ -2393,6 +2398,9 @@ def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
     host. It is deliberately **independent of the cross toolchain**: the whole
     value of a local ELF is on a box that has no Vitis install, so it is built
     before the cross-toolchain gate rather than after it.
+
+    ``make_vars`` (e.g. ``{"PROFILE": "1"}``) go on the ``make`` command line;
+    see ``sync_make_vars`` for why changing them forces the driver to rebuild.
 
     Returns ``{"ok", "elf"|"reason", "makefile", ...}``, with the local build
     under ``["local"]``. Never raises for a missing toolchain -- a box without
@@ -2467,6 +2475,7 @@ def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
     cmd = ["make", "-C", str(build)]
     if jobs:
         cmd.append(f"-j{jobs}")
+    cmd += sync_make_vars(build, make_vars)
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         summary.update({"ok": False, "reason": "make failed",
@@ -2478,6 +2487,34 @@ def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
     if verbose:
         print(f"  [arm] {elf} ({elf.stat().st_size:,} B)")
     return summary
+
+
+# Objects that read a make variable through -D (PROFILE -> GRAPH_PROFILE in
+# graph_driver.c and main.c). The Makefile's objects do not depend on CFLAGS,
+# so without this a PROFILE=1 make relinks the old untimed objects (no PROF
+# rows, no error) -- and the reverse leaves timing in a "plain" build.
+_MAKE_VAR_OBJECTS = ("graph_driver.o", "main.o", "main.elf")
+MAKE_VARS_STAMP = ".make_vars"
+
+
+def built_make_vars(build) -> dict:
+    """The make variables the current ``main.elf`` objects were built with."""
+    f = Path(build) / MAKE_VARS_STAMP
+    if not f.is_file():
+        return {}
+    return dict(l.split("=", 1) for l in f.read_text().split() if "=" in l)
+
+
+def sync_make_vars(build, make_vars: dict = None) -> list:
+    """``make`` arguments for *make_vars*; when they differ from the last build,
+    delete the objects that depend on them first (see _MAKE_VAR_OBJECTS)."""
+    build = Path(build)
+    want = {k: str(v) for k, v in (make_vars or {}).items()}
+    if want != built_make_vars(build):
+        for name in _MAKE_VAR_OBJECTS:
+            (build / name).unlink(missing_ok=True)
+        (build / MAKE_VARS_STAMP).write_text("".join(f"{k}={v}\n" for k, v in sorted(want.items())))
+    return [f"{k}={v}" for k, v in sorted(want.items())]
 
 
 def main(argv=None) -> int:

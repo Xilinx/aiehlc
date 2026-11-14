@@ -270,6 +270,20 @@ static Derived deriveFixed(const Conv2dSpec &c, const MappingSpec &m, const Targ
     if (tgt.require_width_split && d.w_rounds < 2)
         err("pipeline: the spatial-halo conv path needs tile(OW, n) with n < OW=" + std::to_string(d.ow) +
             " (>= 2 on-core width rounds); one width round hits 'conv spatial-halo M-tile mismatch'");
+    // The generated kernel.cc declares a ping AND a pong array for every window
+    // whatever pp_depth says, so the link needs both.
+    const long linkBytes = 2L * (d.ifm_round_bytes + d.wgt_bytes + d.ofm_round_bytes);
+    if (linkBytes + tgt.buffer_reserve > tgt.buffer_region)
+        err("link: 2 x (ifm+wgt+ofm) = " + std::to_string(linkBytes) + " B (ping + pong are always declared) + " +
+            std::to_string(tgt.buffer_reserve) + " B (klog, statics) exceeds the " + std::to_string(tgt.buffer_region) +
+            " B port-buffer region of the core (the rest is stack)");
+    // The pipeline's own check (TilingLinalg "Memory budget exceeded"): every
+    // tensor's ping-pong buffers are sized at hints.l1_budget.
+    const long pipeBytes = (long)h.pp_depth * h.l1_budget * 3;
+    if (pipeBytes > tgt.data_mem_budget)
+        err("pipeline: pp_depth x l1_budget x 3 tensors = " + std::to_string(pipeBytes) +
+            " B exceeds the core data budget " + std::to_string(tgt.data_mem_budget) +
+            " B (the pipeline sizes every buffer at l1_budget) -- smaller blocks or more mesh columns");
     if (tgt.non_halo_ports_fit_l1_budget) {
         if (d.ofm_round_bytes > h.l1_budget)
             err("pipeline: OFM tile " + std::to_string(d.ofm_round_bytes) +
@@ -522,9 +536,17 @@ std::string emitKernelDefines(const Derived &d, const std::vector<std::string> &
 static std::string jsonStr(const std::string &s) {
     std::string r = "\"";
     for (char ch : s) {
-        if (ch == '"' || ch == '\\')
-            r += '\\';
-        r += ch;
+        if (ch == '\n')
+            r += "\\n";
+        else if (ch == '\t')
+            r += "\\t";
+        else if ((unsigned char)ch < 0x20)
+            r += ' ';
+        else {
+            if (ch == '"' || ch == '\\')
+                r += '\\';
+            r += ch;
+        }
     }
     return r + "\"";
 }

@@ -74,4 +74,12 @@
 #define LWIP_ACD 0
 #define CONFIG_LINKSPEED_AUTODETECT 1
 
+
+/* VEK385: lwIP's heap and pools are DMA buffers for the GEM; build.sh links
+ * section .bss.netboot_dma into LPD-reachable DDR (see main.c dma_map). */
+#ifdef NETBOOT_DMA_BASE
+#define LWIP_DECLARE_MEMORY_ALIGNED(variable_name, size) \
+    u8_t variable_name[LWIP_MEM_ALIGN_BUFFER(size)] __attribute__((section(".bss.netboot_dma")))
+#endif
+
 #endif

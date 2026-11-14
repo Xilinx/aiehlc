@@ -290,6 +290,11 @@ void __Runtime_teardown_all(void);
 // If meshId is already initialized, returns the existing XAie_DevInst*.
 // Otherwise calls __Runtime_explicit_init_partition() and registers it.
 XAie_DevInst *__Runtime_init_mesh_partition(int meshId, int startCol, int numCols);
+// The same, with the calling library's own routing function (generated
+// aieArray::partition passes &routing). A meshId set up with a different
+// routing -- another aiehlc library in the same ELF -- is torn down and
+// re-initialized, so several user-kernel libraries can coexist in one ELF.
+XAie_DevInst *__Runtime_init_mesh_partition_with(int meshId, int startCol, int numCols, void (*route)(XAie_DevInst *));
 
 // DMA and data movement
 XAie_DmaDesc __Runtime_dma_bd_config(XAie_DevInst *dev, XAie_LocType tile, void *buffer, int32_t bd_id, int32_t len,

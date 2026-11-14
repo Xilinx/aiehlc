@@ -42,6 +42,11 @@
 #include "aiegraphmanager.h"
 
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/Verifier.h"
+#include "mlir/Parser/Parser.h"
+#include "mlir/Support/FileUtilities.h"
+#include <sstream>
+#include "llvm/Support/SourceMgr.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
@@ -240,8 +245,35 @@ static std::string setupPipelineIRDir(const std::string &subdir) {
 // coreRowBase / coreColBase are the absolute array row / column of mesh (0, 0)
 // (from the dmaphop placement); -1 leaves program_id unresolved, so a missing
 // placement is a kernel compile error rather than a silently wrong id.
-static std::string resolveBlockIoBuiltins(const std::string &body, int coreRowBase, int coreColBase) {
+// Drop the options argument of every `<call>(port, off, shape, {...})`: the
+// {.depth / .resident / .tile / .reuse / .pad} options configure the DMA and
+// the analysis at compile time; on the core a block is just the next window.
+static std::string dropBlockOptions(const std::string &body, const std::string &call) {
     std::string out = body;
+    for (size_t pos = 0; (pos = out.find(call, pos)) != std::string::npos;) {
+        size_t open = pos + call.size() - 1, i = open + 1;
+        int depth = 0;
+        std::vector<size_t> commas; // top-level argument separators
+        for (; i < out.size(); ++i) {
+            char ch = out[i];
+            if (ch == '(' || ch == '{' || ch == '[')
+                depth++;
+            else if (ch == ')' || ch == '}' || ch == ']') {
+                if (depth == 0)
+                    break;
+                depth--;
+            } else if (ch == ',' && depth == 0)
+                commas.push_back(i);
+        }
+        if (i < out.size() && commas.size() == 3)
+            out.erase(commas[2], i - commas[2]);
+        pos = open + 1;
+    }
+    return out;
+}
+
+static std::string resolveBlockIoBuiltins(const std::string &body, int coreRowBase, int coreColBase) {
+    std::string out = dropBlockOptions(dropBlockOptions(body, "aie::load_buffer("), "aie::store_buffer(");
     auto replaceAll = [&out](const std::string &from, const std::string &to) {
         for (size_t pos = 0; (pos = out.find(from, pos)) != std::string::npos; pos += to.size())
             out.replace(pos, from.size(), to);
@@ -542,6 +574,12 @@ static void attachTensorRoutingInfo(OpBuilder &builder, ArrayRef<routing::create
             decl.setShimDmaAttr(buildShimDmaAttr(builder, sd));
             llvm::outs() << "[TilingLinalg] tensor_" << i << " shim_dma=" << decl.getShimDmaAttr() << "\n";
         }
+        const KernelBlock &kb = tensors[i].kernelBlock;
+        if (!kb.empty()) {
+            decl.setKernelBlockAttr(routing::KernelBlockAttr::get(ctx, kb.tensorShape, kb.shape, kb.roundsI, kb.roundsJ,
+                                                                  kb.stepI, kb.stepJ, kb.resident, kb.tileR, kb.tileC));
+            llvm::outs() << "[TilingLinalg] tensor_" << i << " kernel_block=" << decl.getKernelBlockAttr() << "\n";
+        }
     }
 }
 
@@ -608,7 +646,7 @@ mlir::ModuleOp TilingLinalgPipeline::buildRoutingIR(mlir::MLIRContext &ctx, int 
 
         // Feed into createscheduletensor — same as before
         auto tensor = builder.create<createscheduletensor>(builder.getUnknownLoc(), tensorType, tensorValue.getResult(),
-                                                           vals, dimnum, nullptr, nullptr, nullptr, nullptr);
+                                                           vals, dimnum, nullptr, nullptr, nullptr, nullptr, nullptr);
         tensorDecls.push_back(tensor);
         tensorValues.push_back(tensor);
         isInputFlags.push_back(tp.isInput);
@@ -653,6 +691,69 @@ mlir::ModuleOp TilingLinalgPipeline::buildRoutingIR(mlir::MLIRContext &ctx, int 
     return m;
 }
 
+// Routing IR re-entry (AIEHLC_ROUTING_IR_IN). The routing IR handed to
+// runPipeline is the frontend's whole tiling decision (#routing.tiling /
+// partition / halo / pp_depth on the ops, control switches on the module) and
+// is dumped as ir/dfschedule/0_initial.mlir. Setting AIEHLC_ROUTING_IR_IN to a
+// .mlir file (`{kernel}` = the kernel name, for multi-kernel sources) replaces
+// the frontend's module with that file before anything reads it, so an agent or
+// a tuner can edit the IR and continue from there; the kernel body, port names
+// and tensors still come from the frontend. A round trip (0_initial.mlir fed
+// back unchanged) must reproduce the build byte for byte -- see
+// doc/design/routing_ir_reentry.md. Returns false on a parse / verify error.
+static bool readIROverride(mlir::MLIRContext &ctx, mlir::ModuleOp module, const std::string &kernelName,
+                           const char *envName, size_t *differOut = nullptr) {
+    const char *env = std::getenv(envName);
+    if (!env || !*env)
+        return true;
+    std::string path = env;
+    for (size_t p = path.find("{kernel}"); p != std::string::npos; p = path.find("{kernel}"))
+        path.replace(p, 8, kernelName);
+    std::string err;
+    auto file = mlir::openInputFile(path, &err);
+    if (!file) {
+        llvm::errs() << "[TilingLinalg] ERROR: " << envName << ": cannot open " << path << ": " << err << "\n";
+        return false;
+    }
+    llvm::SourceMgr sm;
+    sm.AddNewSourceBuffer(std::move(file), llvm::SMLoc());
+    mlir::OwningOpRef<mlir::ModuleOp> in = mlir::parseSourceFile<mlir::ModuleOp>(sm, &ctx);
+    if (!in || mlir::failed(mlir::verify(*in))) {
+        llvm::errs() << "[TilingLinalg] ERROR: " << envName << ": " << path << " does not parse / verify\n";
+        return false;
+    }
+    std::string before, after;
+    {
+        llvm::raw_string_ostream os(before);
+        module.print(os);
+    }
+    module->setAttrs(in.get()->getAttrDictionary());
+    module.getBody()->getOperations().clear();
+    module.getBody()->getOperations().splice(module.getBody()->end(), in.get().getBody()->getOperations());
+    {
+        llvm::raw_string_ostream os(after);
+        module.print(os);
+    }
+    size_t differ = 0;
+    {
+        std::istringstream a(before), b(after);
+        std::string la, lb;
+        while (true) {
+            bool ga = (bool)std::getline(a, la), gb = (bool)std::getline(b, lb);
+            if (!ga && !gb)
+                break;
+            differ += !(ga && gb && la == lb);
+        }
+    }
+    if (differOut)
+        *differOut = differ;
+    llvm::outs() << "[TilingLinalg] IR read from " << path << " (" << envName << "): "
+                 << (differ ? std::to_string(differ) + " line(s) differ from the generated IR"
+                            : std::string("identical to the generated IR"))
+                 << "\n";
+    return true;
+}
+
 bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp module, const std::string &outputDir,
                                        const std::string &userKernelBody, const std::string &userKernelFuncName,
                                        int runtimeDebugLevel, const std::string &userRewrittenSource,
@@ -663,6 +764,8 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
     // Mutable copy so the PARAMETER resolver (below) can stamp resolved dmaKind/
     // dmaCh back into the specs before CoreTraceInsertPass consumes them.
     std::vector<TraceTileSpec> traceTiles = traceTilesIn;
+    if (!readIROverride(ctx, module, userKernelFuncName, "AIEHLC_ROUTING_IR_IN"))
+        return false;
 
     // Extract partition bounds from createhwmesh op in the IR (if present)
     int partStartCol = -1, partEndCol = -1, partStartRow = -1, partEndRow = -1;
@@ -789,6 +892,25 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
         return false;
     if (!runPipelineSinglePass(ctx, module, std::make_unique<DmapToDmaphopPass>(rtopology), irDir, stage, "DmapToDmaphopPass"))
         return false;
+    // dmaphop re-entry (AIEHLC_DMAPHOP_IR_IN): everything below reads the
+    // dmaphop IR only (the blueprint pass takes no topology; the routing path
+    // rebuilds its resources from this IR with a fresh RoutingTopology; pkt ids
+    // and core placement are in the IR), so an edited dmaphop module continues
+    // from here. Phase 1 above still ran, keeping `rtopology` as a normal build
+    // leaves it. The one consumer of that state is the control-plane placement,
+    // which picks free shim channels around the data plane's: with the control
+    // plane on, only an unchanged file is accepted.
+    {
+        size_t dmaphopDiffer = 0;
+        if (!readIROverride(ctx, module, userKernelFuncName, "AIEHLC_DMAPHOP_IR_IN", &dmaphopDiffer))
+            return false;
+        if (dmaphopDiffer && reserveControlPlane) {
+            llvm::errs() << "[TilingLinalg] ERROR: AIEHLC_DMAPHOP_IR_IN: an edited dmaphop IR cannot be combined "
+                            "with the control-packet plane (its shim channels are chosen around the generated "
+                            "data plane); edit the routing IR or drop #pragma control_plan_op_control_packet\n";
+            return false;
+        }
+    }
     // Where mesh (0, 0) landed, for aie::program_id in the kernel body: the lowest
     // core tile row / column of the placement (columns are partition-relative).
     int coreRowBase = -1, coreColBase = -1;
@@ -892,6 +1014,13 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
             if (info && info->ppDepth)
                 ppDepth = static_cast<int>(*info->ppDepth);
             uint32_t bufSize = (maxPingPongBytes > 0) ? maxPingPongBytes : 4096;
+            // A kernel-only port's window is exactly the kernel's block.
+            if (!tp.kernelBlock.empty()) {
+                int64_t blockBytes = std::max(tp.elementBitWidth / 8, 1);
+                for (int64_t v : tp.kernelBlock.shape)
+                    blockBytes *= v;
+                bufSize = static_cast<uint32_t>(std::min<int64_t>(blockBytes, bufSize));
+            }
             totalBufferBytes += ppDepth * bufSize;
         }
 
@@ -1486,17 +1615,25 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
             stream << "    aiePartition partition;\n";
             stream << "    int meshId;\n";
             stream << "};\n";
+            // This library's stream-switch setup (routing.cc), passed to the runtime
+            // explicitly so several aiehlc libraries -- each with routing() made
+            // local by aiekernel's isolation -- share one ELF: the runtime
+            // re-initializes a partition another library's routing set up. Weak: a
+            // host-only build has no routing.cc and falls back to the global one.
+            stream << "void routing(XAie_DevInst* dev) __attribute__((weak));\n";
             stream << "struct aieArray {\n";
             stream << "    int nextMeshId = 0;\n";
             stream << "    XAie_DevInst* _dev = nullptr;\n";
             stream << "    aieMesh partition(aiePartition p, int rows, int cols) {\n";
             stream << "        int meshId = nextMeshId++;\n";
-            stream << "        _dev = __Runtime_init_mesh_partition(meshId, p.startCol, p.endCol - p.startCol + 1);\n";
+            stream
+                << "        _dev = __Runtime_init_mesh_partition_with(meshId, p.startCol, p.endCol - p.startCol + 1, "
+                   "routing);\n";
             stream << "        return aieMesh{rows, cols, p, meshId};\n";
             stream << "    }\n";
             stream << "    aieMesh partition(int rows, int cols) {\n";
             stream << "        int meshId = nextMeshId++;\n";
-            stream << "        _dev = __Runtime_init_mesh_partition(meshId, 0, cols);\n";
+            stream << "        _dev = __Runtime_init_mesh_partition_with(meshId, 0, cols, routing);\n";
             stream << "        return aieMesh{rows, cols, {0, cols - 1, 0, rows - 1}, meshId};\n";
             stream << "    }\n";
             stream << "    void* alloc(size_t size) { return __Runtime_alloc_buffer(_dev, size); }\n";

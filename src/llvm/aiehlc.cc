@@ -11,6 +11,7 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendAction.h"
+#include "clang/Lex/HeaderSearchOptions.h"
 #include "clang/Lex/MacroInfo.h"
 #include "clang/Lex/Pragma.h"
 #include "clang/Lex/Preprocessor.h"
@@ -19,6 +20,7 @@
 #include "clang/Tooling/Tooling.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 
 //#include "AieFrontEnd.h"
@@ -233,6 +235,74 @@ static std::vector<std::string> userMacroDefines; // #define lines from user sou
 // per-port block descriptors: convautotile::kernelTUDecls). Appended to
 // userMacroDefines after the #define scan, which rebuilds that list.
 static std::vector<std::string> convKernelDecls;
+// Per kernel: the conv auto-tiling result (for a kernel-only source, the one the
+// kernel analysis proved against the traced load_buffer / store_buffer blocks).
+// The authority for per-core rounds and per-round block bytes: the tiling
+// derivation below re-derives both through the GEMM model and must agree.
+static std::map<std::string, convautotile::Derived> convDerivedByKernel;
+// Per kernel-only kernel, per port variable: the blocks its traced
+// load_buffer / store_buffer calls take, and its {.depth / .resident / .tile}
+// options. Carried to the routing IR as #routing.kernel_block (the lowering
+// checks its core windows against it and follows it where needed).
+static std::map<std::string, std::map<std::string, convautotile::PortBlock>> kernelBlocksByKernel;
+
+// The #routing.kernel_block payload of one port, or an empty one.
+static KernelBlock kernelBlockFor(const std::string &kernel, const std::string &var) {
+    KernelBlock kb;
+    auto k = kernelBlocksByKernel.find(kernel);
+    if (k == kernelBlocksByKernel.end())
+        return kb;
+    auto p = k->second.find(var);
+    if (p == k->second.end())
+        return kb;
+    const convautotile::PortFit &f = p->second.fit;
+    kb.tensorShape.assign(p->second.tensor.begin(), p->second.tensor.end());
+    kb.shape.assign(f.shape.begin(), f.shape.end());
+    kb.stepI.assign(f.step_i.begin(), f.step_i.end());
+    kb.stepJ.assign(f.step_j.begin(), f.step_j.end());
+    kb.roundsI = f.rounds_i;
+    kb.roundsJ = f.rounds_j;
+    kb.resident = p->second.opts.resident;
+    kb.tileR = p->second.opts.tile[0];
+    kb.tileC = p->second.opts.tile[1];
+    return kb;
+}
+
+// Spatial-halo conv: the core windows and round count the GEMM-model derivation
+// produced must be the blocks the kernel loads / stores, as the conv auto-tiling
+// (kernel analysis) derived them. A mismatch means the core DMA and the shim DMA
+// disagree on the transfer count -- on the board a silent wait_io hang -- so it
+// is a build error. No entry (hand-written GemmSpace source): nothing to check.
+static bool checkConvTilingAgainstAnalysis(const std::string &kernel, const DerivedTilingParams &dp, int64_t tileM,
+                                           int64_t tileN, int64_t elemBytes) {
+    auto it = convDerivedByKernel.find(kernel);
+    if (it == convDerivedByKernel.end())
+        return true;
+    const convautotile::Derived &d = it->second;
+    struct Item {
+        const char *what;
+        int64_t pipeline, analysis;
+    } items[] = {
+        {"output rounds per core (out_rounds)", dp.spatialMRounds * dp.spatialNRounds, d.rounds},
+        {"output block bytes per round", tileM * tileN * elemBytes, d.ofm_round_bytes},
+        {"input slab bytes per round", dp.convHaloBufSize * elemBytes, d.ifm_round_bytes},
+        {"weight block bytes", dp.effectiveK * tileN * elemBytes, d.wgt_bytes},
+    };
+    bool ok = true;
+    for (const auto &i : items) {
+        if (i.pipeline == i.analysis)
+            continue;
+        llvm::errs() << "[TilingLinalg] ERROR: " << kernel << ": " << i.what << " = " << i.pipeline
+                     << " in the derived tiling, but the kernel's blocks give " << i.analysis
+                     << " (conv auto-tiling / kernel analysis); the core and shim DMA would disagree\n";
+        ok = false;
+    }
+    if (ok)
+        llvm::outs() << "[TilingLinalg] " << kernel << ": derived tiling matches the kernel analysis (rounds "
+                     << d.rounds << ", OFM " << d.ofm_round_bytes << " B, IFM " << d.ifm_round_bytes << " B, WGT "
+                     << d.wgt_bytes << " B)\n";
+    return ok;
+}
 
 // File-scope code the user wants carried verbatim into the generated kernel,
 // delimited in the source by:
@@ -253,6 +323,45 @@ static std::string userKernelPrologue;
 
 using namespace clang;
 using namespace clang::tooling;
+
+// GEMM M/N/K from the ports' own 2-D GemmSpaces, for a kernel whose launch
+// passes no M/N/K scalars and whose source defines no M/N/K macros -- e.g. a
+// kernel-only block-load GEMM routed by convautotile, whose ports carry the
+// tensor extents as d1/d2 fullsize. Without this every GEMM tensor fell back to
+// 16x16 and the DMA moved the wrong byte counts (simplegemm_kernel_port.cc hung
+// in wait_io). Roles as in the policy shape assignment below: row broadcast =
+// A[M, K], col broadcast = B[N, K], gather = C[M, N]. Leaves M/N/K untouched
+// unless exactly one port of each role is 2-D (no d3) and all three agree; on
+// success the ports get the GEMM shapes the launch-args path would give them.
+static bool gemmDimsFromSpaces(std::vector<ParsedTensorInfo> &tensors, int64_t &M, int64_t &N, int64_t &K) {
+    ParsedTensorInfo *a = nullptr, *b = nullptr, *c = nullptr;
+    for (auto &t : tensors) {
+        if (!t.policyResolved || !t.perPort2D || t.tdD1.base <= 0 || t.tdD2.base <= 0 || t.tdD3.base > 0)
+            return false;
+        ParsedTensorInfo *&slot = !t.isInput                              ? c
+                                  : t.pattern == 0 && t.distribution == 0 ? a
+                                  : t.pattern == 0 && t.distribution == 1 ? b
+                                                                          : c;
+        if (slot)
+            return false;
+        slot = &t;
+    }
+    if (!a || !b || !c)
+        return false;
+    if (a->tdD2.base != b->tdD2.base || a->tdD1.base != c->tdD1.base || b->tdD1.base != c->tdD2.base) {
+        llvm::errs() << "[TilingLinalg] WARNING: GEMM ports disagree (A " << a->tdD1.base << "x" << a->tdD2.base
+                     << ", B " << b->tdD1.base << "x" << b->tdD2.base << ", C " << c->tdD1.base << "x" << c->tdD2.base
+                     << "); not deriving M/N/K from them\n";
+        return false;
+    }
+    M = a->tdD1.base;
+    K = a->tdD2.base;
+    N = b->tdD1.base;
+    a->shape = {M, K};
+    b->shape = {K, N};
+    c->shape = {M, N};
+    return true;
+}
 
 // Populate SplitModel.tensorSplits[i].gemmTiling for the even-mesh GEMM path
 // (fullconnect_auto=1) from the derived M/N/K tiling. Each tensor gets one
@@ -2225,6 +2334,11 @@ public:
 						}
 					}
 
+                    if (macroDimM == 0 && macroDimN == 0 && macroDimK == 0 &&
+                        gemmDimsFromSpaces(parsedTensors, macroDimM, macroDimN, macroDimK))
+                        llvm::outs() << "[TilingLinalg] GEMM dims from the ports' GemmSpaces: M=" << macroDimM
+                                     << " N=" << macroDimN << " K=" << macroDimK << "\n";
+
                     // ---- Compute derived tiling parameters from M/K/N + per-port policy ----
                     int effectiveMeshRows = localMeshRows > 0 ? localMeshRows : tilingMeshRows;
                     int effectiveMeshCols = localMeshCols > 0 ? localMeshCols : tilingMeshCols;
@@ -2621,9 +2735,19 @@ public:
                                 // core (tileCols=16), NOT the C-port d2 transfer width
                                 // (OW_T*OC_PER_G=128) that inflated bufferSize/numRounds.
                                 tileN_eff = derivedTilingParams.tileCols;
-                                // N is not sub-tiled within a core for conv (one matmul N pass).
-                                derivedTilingParams.spatialNRounds = 1;
                             }
+                            // N is not sub-tiled within a core for conv (one matmul N pass).
+                            // Unconditional: spatialNRounds came from the C port's d2 groups,
+                            // which for a conv are the output WIDTH rounds -- already folded
+                            // into spatialMRounds (= w_rounds * l2_rounds). Gating this on the
+                            // tileN override above left it at w_rounds whenever ow_t happened
+                            // to equal the per-core channel count (14x16x16 tile: out_rounds
+                            // 14*7=98, a 512 B core output window, wait_io hang).
+                            if (derivedTilingParams.spatialNRounds != 1)
+                                llvm::outs() << "[TilingLinalg] Conv spatial-halo: spatialNRounds="
+                                             << derivedTilingParams.spatialNRounds
+                                             << " -> 1 (width rounds are in spatialMRounds)\n";
+                            derivedTilingParams.spatialNRounds = 1;
                         }
 
                         // ---- Compute per-port DMA round/buffer parameters ----
@@ -2793,6 +2917,10 @@ public:
                                     derivedTilingParams.spatialMRounds * derivedTilingParams.spatialNRounds;
                             derivedTilingParams.portParams.push_back(pp);
                         }
+                        if (isSpatialHaloConv &&
+                            !checkConvTilingAgainstAnalysis(currentLaunchKernel, derivedTilingParams, tileM_eff,
+                                                            tileN_eff, elementBytes))
+                            std::exit(1);
                         // Mark invalid if the spatial-halo M-round derivation found an
                         // inconsistency (see convHaloDeriveError above) so downstream passes do
                         // not act on a malformed tiling.
@@ -2900,7 +3028,8 @@ public:
                                 shimDma.iter_step = pt.shimDma.iter_step;
                                 shimDma.iter_wrap = pt.shimDma.iter_wrap;
                             }
-                            mkd.tensors.push_back({pt.shape, pt.elementBitWidth, pt.isInput, shimDma});
+                            mkd.tensors.push_back({pt.shape, pt.elementBitWidth, pt.isInput, shimDma,
+                                                   kernelBlockFor(currentLaunchKernel, pt.varName)});
                         }
                         // Store per-kernel body from globalKernelBodies map
                         auto bodyIt = globalKernelBodies.find(currentLaunchKernel);
@@ -2941,7 +3070,18 @@ public:
                             // tile for that dim (base=full extent, size=per-col slice)
                             // and stash it on the split desc; createroutingfuncBySplitModel
                             // emits the col=channel #routing.tiling dim from these.
-                            if (!pt.isInput && pt.meshTilingGroup2Dim > 0) {
+                            // group2 is the 3-D conv OUTPUT split (d1 rows over mesh rows, d3
+                            // channels over mesh cols, d2 = W on-core). A 2-D output (no d3)
+                            // with d1 / d2 over mesh rows / cols is the plain GEMM gather the
+                            // default path already builds; routed through group2 its per-tile
+                            // view was cut to one tile's block and then split again across
+                            // the row's tiles (C 16x16 -> 4x16 per core: wait_io hang).
+                            const bool output2D = pt.tdD3.base <= 0;
+                            if (!pt.isInput && pt.meshTilingGroup2Dim > 0 && output2D)
+                                llvm::outs() << "[TilingLinalg] output " << pt.varName
+                                             << ": 2-D, mesh_tiling_group2_dim=" << pt.meshTilingGroup2Dim
+                                             << " is the plain GEMM gather (no group2 split)\n";
+                            if (!pt.isInput && pt.meshTilingGroup2Dim > 0 && !output2D) {
                                 auto &ts = mkd.splitModel.tensorSplits.back();
                                 const ParsedTensorInfo::TileDim *g2 = nullptr;
                                 switch (pt.meshTilingGroup2Dim) {
@@ -3820,6 +3960,72 @@ public:
             }
         }
 
+        // An unconditional #include that Clang cannot resolve is fatal anyway, but
+        // the source-text passes (applyConvAutoTiling: KernelAnalysis, conv
+        // auto-tiling) run BEFORE Clang preprocesses, read macros straight from
+        // the headers, and silently skip one they cannot open -- so a misspelled
+        // header surfaced as "`HW_ROWS` ... no #define" and Clang's own "file not
+        // found" was never reached. Check every include outside #if/#ifdef
+        // against Clang's search path (the source dir + its -I/-isystem entries)
+        // and stop with Clang's message first. Conditional includes are left to
+        // Clang: they may belong to another platform.
+        void checkSourceIncludes(const std::string &src) {
+            const clang::HeaderSearchOptions &hs = getCompilerInstance().getHeaderSearchOpts();
+            std::vector<std::string> dirs{userSourceDir};
+            for (const auto &e : hs.UserEntries)
+                dirs.push_back(!e.Path.empty() && e.Path[0] == '=' ? hs.Sysroot + e.Path.substr(1) : e.Path);
+            if (!hs.ResourceDir.empty())
+                dirs.push_back(hs.ResourceDir + "/include");
+            auto found = [&](const std::string &name) {
+                if (!name.empty() && name[0] == '/')
+                    return llvm::sys::fs::exists(name);
+                for (auto &d : dirs)
+                    if (llvm::sys::fs::exists(d + "/" + name))
+                        return true;
+                return false;
+            };
+            std::istringstream is(src);
+            std::string line;
+            int lineNo = 0, depth = 0, missing = 0;
+            while (std::getline(is, line)) {
+                lineNo++;
+                size_t h = line.find_first_not_of(" \t");
+                if (h == std::string::npos || line[h] != '#')
+                    continue;
+                size_t q = line.find_first_not_of(" \t", h + 1);
+                if (q == std::string::npos)
+                    continue;
+                if (line.compare(q, 2, "if") == 0) { // #if / #ifdef / #ifndef
+                    depth++;
+                    continue;
+                }
+                if (line.compare(q, 5, "endif") == 0) {
+                    depth = std::max(0, depth - 1);
+                    continue;
+                }
+                if (depth > 0 || line.compare(q, 7, "include") != 0)
+                    continue;
+                size_t a = line.find_first_of("\"<", q + 7);
+                size_t b = a == std::string::npos ? a : line.find(line[a] == '<' ? '>' : '"', a + 1);
+                if (b == std::string::npos)
+                    continue;
+                std::string name = line.substr(a + 1, b - a - 1);
+                if (found(name))
+                    continue;
+                llvm::errs() << userSourceDir << "/" << userSourceName << ":" << lineNo << ":" << a + 1
+                             << ": fatal error: '" << name << "' file not found\n"
+                             << line << "\n"
+                             << std::string(a, ' ') << "^\n";
+                missing++;
+            }
+            if (missing) {
+                llvm::errs() << "[aiehlc] ERROR: " << missing << " #include(s) not found in " << userSourceDir
+                             << " or the " << dirs.size() - 1 << " include path(s) Clang searches; fix the "
+                             << "name, or add the header's directory with -I\n";
+                std::exit(1);
+            }
+        }
+
         // Lower the declarative conv2d model (aie::Conv2d + aie::Mapping +
         // aie::port<T, aie::IFM|WEIGHTS|OFM>) into the explicit GemmSpace form
         // before any other rewrite sees the text (src/llvm/convautotile/). The
@@ -3844,9 +4050,12 @@ public:
                     llvm::errs() << "[ConvAutoTile] WARNING: " << err << "\n";
             }
             convKernelDecls.clear();
+            convDerivedByKernel.clear();
+            kernelBlocksByKernel.clear();
             // Kernel-only sources (no aie::Conv2d / aie::Mapping; ports carry
-            // aie::shape): derive the DMA layout from the kernel's own
-            // load_buffer / store_buffer and rewrite into the (conv, map) form.
+            // aie::shape): map the kernel's traced load_buffer / store_buffer
+            // blocks onto the routing carriers (any operator) and rewrite into
+            // the explicit __global__(policy) + per-port GemmSpace form.
             {
                 // Tensor form (aie::in / aie::out of aie::tensor types): lower
                 // to the kernel-only form first (kernel_front.h).
@@ -3871,6 +4080,41 @@ public:
                             llvm::errs() << "[KernelAnalysis] ERROR: " << e << "\n";
                         std::exit(1);
                     }
+                    // Routed kernels: block descriptors for the kernel TU, and
+                    // (a recognized conv) the derivation the tiling must agree with.
+                    for (auto &kd : ko.tu_decls)
+                        for (auto &decl : kd.second)
+                            if (std::find(convKernelDecls.begin(), convKernelDecls.end(), decl) == convKernelDecls.end())
+                                convKernelDecls.push_back(decl);
+                    for (auto &kd : ko.derived)
+                        convDerivedByKernel[kd.first] = kd.second;
+                    for (auto &kb : ko.blocks)
+                        kernelBlocksByKernel[kb.first] = kb.second;
+                }
+                // Hand-written GemmSpaces + aie::load_buffer / store_buffer: the
+                // GemmSpaces stay the authority; the kernel's traced blocks must
+                // give the same DMA, and the loads get their block descriptors.
+                std::vector<std::string> routed;
+                for (auto &kd : ko.tu_decls)
+                    routed.push_back(kd.first);
+                convautotile::KernelOnlyResult hs =
+                    convautotile::verifySpaceKernels(src, userSourceDir, userSourceName, routed);
+                if (hs.found) {
+                    llvm::outs() << hs.report;
+                    for (auto &n : hs.notes)
+                        llvm::outs() << "[KernelAnalysis] note: " << n << "\n";
+                    if (!hs.ok) {
+                        for (auto &e : hs.errors.empty() ? std::vector<std::string>{hs.error} : hs.errors)
+                            llvm::errs() << "[KernelAnalysis] ERROR: " << e << "\n";
+                        std::exit(1);
+                    }
+                    for (auto &kd : hs.tu_decls)
+                        for (auto &decl : kd.second)
+                            if (std::find(convKernelDecls.begin(), convKernelDecls.end(), decl) ==
+                                convKernelDecls.end())
+                                convKernelDecls.push_back(decl);
+                    for (auto &kd : hs.derived)
+                        convDerivedByKernel[kd.first] = kd.second;
                 }
             }
             convautotile::DesugarResult r =
@@ -3895,6 +4139,7 @@ public:
                              << "x" << d.w_rounds << ", L1 " << d.l1_bytes << " B\n";
                 for (auto &n : d.notes)
                     llvm::outs() << "[ConvAutoTile]   note: " << n << "\n";
+                convDerivedByKernel[k.kernel] = d;
                 for (auto &decl : convautotile::kernelTUDecls(k))
                     if (std::find(convKernelDecls.begin(), convKernelDecls.end(), decl) == convKernelDecls.end())
                         convKernelDecls.push_back(decl);
@@ -3972,6 +4217,7 @@ public:
                 // aout/newfile.cpp, which is that buffer verbatim.
                 //
                 // Headers (`.h`) are left to Clang, as before.
+                checkSourceIncludes(SourceCodeString);
                 inlineSourceIncludes(SourceCodeString);
                 applyConvAutoTiling(SourceCodeString);
 
@@ -4546,6 +4792,13 @@ public:
                     ret += "struct XAie_DevInst;\n";
                     ret += "extern \"C\" XAie_DevInst *__Runtime_init_mesh_partition(int meshId, int startCol, int "
                            "numCols);\n";
+                    ret += "extern \"C\" XAie_DevInst *__Runtime_init_mesh_partition_with(int meshId, int startCol, "
+                           "int numCols, void (*route)(XAie_DevInst *));\n";
+                    // This library's stream-switch setup (routing.cc), passed to the runtime
+                    // explicitly so several aiehlc libraries -- each with routing() made local
+                    // by aiekernel's isolation -- can share one ELF. Weak: a host-only build
+                    // has no routing.cc; the runtime then uses the global routing().
+                    ret += "void routing(XAie_DevInst *dev) __attribute__((weak));\n";
                     ret += "extern \"C\" XAie_DevInst *__Runtime_get_partition_dev(int meshId);\n";
                     ret += "extern \"C\" void *__Runtime_alloc_buffer(XAie_DevInst *dev, __SIZE_TYPE__ size_bytes);\n";
                     ret += "extern \"C\" void __Runtime_free_buffer(XAie_DevInst *dev, void *ptr);\n";
@@ -4564,13 +4817,13 @@ public:
                     ret += "    XAie_DevInst* _dev = nullptr;\n";
                     ret += "    aieMesh partition(aiePartition p, int rows, int cols) {\n";
                     ret += "        int meshId = nextMeshId++;\n";
-                    ret += "        _dev = __Runtime_init_mesh_partition(meshId, p.startCol, p.endCol - p.startCol + "
-                           "1);\n";
+                    ret += "        _dev = __Runtime_init_mesh_partition_with(meshId, p.startCol, p.endCol - "
+                           "p.startCol + 1, routing);\n";
                     ret += "        return aieMesh{rows, cols, p, meshId};\n";
                     ret += "    }\n";
                     ret += "    aieMesh partition(int rows, int cols) {\n";
                     ret += "        int meshId = nextMeshId++;\n";
-                    ret += "        _dev = __Runtime_init_mesh_partition(meshId, 0, cols);\n";
+                    ret += "        _dev = __Runtime_init_mesh_partition_with(meshId, 0, cols, routing);\n";
                     ret += "        return aieMesh{rows, cols, {0, cols - 1, 0, rows - 1}, meshId};\n";
                     ret += "    }\n";
                     ret += "    void* alloc(__SIZE_TYPE__ size) { return __Runtime_alloc_buffer(_dev, size); }\n";
@@ -5328,18 +5581,23 @@ public:
                     stream << "    aiePartition partition;\n";
                     stream << "    int meshId;\n";
                     stream << "};\n";
+                    // This library's stream-switch setup (routing.cc), passed to the runtime
+                    // explicitly: with routing() made local per library (aiekernel isolation),
+                    // several aiehlc libraries can share one ELF. Weak: a host-only build has
+                    // no routing.cc, and the runtime then falls back to the global routing().
+                    stream << "void routing(XAie_DevInst* dev) __attribute__((weak));\n";
                     stream << "struct aieArray {\n";
                     stream << "    int nextMeshId = 0;\n";
                     stream << "    XAie_DevInst* _dev = nullptr;\n";
                     stream << "    aieMesh partition(aiePartition p, int rows, int cols) {\n";
                     stream << "        int meshId = nextMeshId++;\n";
-                    stream << "        _dev = __Runtime_init_mesh_partition(meshId, p.startCol, p.endCol - p.startCol "
-                              "+ 1);\n";
+                    stream << "        _dev = __Runtime_init_mesh_partition_with(meshId, p.startCol, p.endCol - "
+                              "p.startCol + 1, routing);\n";
                     stream << "        return aieMesh{rows, cols, p, meshId};\n";
                     stream << "    }\n";
                     stream << "    aieMesh partition(int rows, int cols) {\n";
                     stream << "        int meshId = nextMeshId++;\n";
-                    stream << "        _dev = __Runtime_init_mesh_partition(meshId, 0, cols);\n";
+                    stream << "        _dev = __Runtime_init_mesh_partition_with(meshId, 0, cols, routing);\n";
                     stream << "        return aieMesh{rows, cols, {0, cols - 1, 0, rows - 1}, meshId};\n";
                     stream << "    }\n";
                     stream << "    void* alloc(size_t size) { return __Runtime_alloc_buffer(_dev, size); }\n";
@@ -5493,7 +5751,8 @@ public:
                             shimDma.iter_step = pt.shimDma.iter_step;
                             shimDma.iter_wrap = pt.shimDma.iter_wrap;
                         }
-                        tensors.push_back({pt.shape, pt.elementBitWidth, pt.isInput, shimDma});
+                        tensors.push_back({pt.shape, pt.elementBitWidth, pt.isInput, shimDma,
+                                           kernelBlockFor(userKernelFuncName, pt.varName)});
                     }
                     splitModel = SplitModel::gemm();
                 }

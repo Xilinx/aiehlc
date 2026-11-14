@@ -47,6 +47,19 @@ OPT_FLAGS="-Os"
 
 KERNEL_FUNC_NAME="computekernel"   # default fallback; overridden by auto-detection below
 
+# Hash of everything build/kernel.o is made from: kernel.cc, the bcf/prx the
+# linker places it with, kc.sh itself, and the knobs that change its output.
+kernel_stamp() {
+    local f
+    {
+        for f in "${WORKLOCAL_DIR}/kernel.cc" "${WORKLOCAL_DIR}/aieml.bcf" "${WORKLOCAL_DIR}/aieml.prx" \
+                 "${AIEHLC_ROOT}/script/kc.sh"; do
+            [ -f "$f" ] && sha256sum < "$f"
+        done
+        echo "$1 ${AIE_VERSION:-5} ${PLATFORM:-baremetal} ${USE_LLVM_AIE:-false} ${DEBUG_SYMS:-0}"
+    } | sha256sum | cut -d' ' -f1
+}
+
 compile_one_kernel() {
     local kernel_func_name="${1:-compute_kernel}"
 
@@ -54,6 +67,19 @@ compile_one_kernel() {
         echo "Error: kernel.cc not found in ${WORKLOCAL_DIR}"
         exit 1
     fi
+
+    # Reuse kernel.o when nothing it is built from changed -- e.g. aiekernel's
+    # install, which re-runs this script after appending adapters to host.cc
+    # only (it used to recompile the identical kernel, ~30 s per offload).
+    # HOSTCOMPILE_KERNEL_REBUILD=1 forces the compile.
+    local kstamp
+    kstamp="$(kernel_stamp "${kernel_func_name}")"
+    if [ "${HOSTCOMPILE_KERNEL_REBUILD:-0}" != "1" ] && [ -f "${BUILD_DIR}/kernel.o" ] &&
+        [ "$(cat "${BUILD_DIR}/kernel.stamp" 2>/dev/null)" = "${kstamp}" ]; then
+        echo "[hostcompile] Reusing ${BUILD_DIR}/kernel.o (kernel.cc, bcf, prx, kc.sh unchanged)"
+        return 0
+    fi
+    rm -f "${BUILD_DIR}/kernel.stamp"
 
     if [ -f "${AIEHLC_ROOT}/script/setup.sh" ]; then
         local saved_pwd
@@ -99,6 +125,11 @@ compile_one_kernel() {
             --output-dir "${BUILD_DIR}" \
             --prx "${prx_file}"
     fi
+    local kc_rc=$?
+    if [ ${kc_rc} -eq 0 ] && [ -f "${BUILD_DIR}/kernel.o" ]; then
+        echo "${kstamp}" > "${BUILD_DIR}/kernel.stamp"
+    fi
+    return ${kc_rc}
 }
 
 if [ "${KERNEL_ONLY:-0}" = "1" ]; then

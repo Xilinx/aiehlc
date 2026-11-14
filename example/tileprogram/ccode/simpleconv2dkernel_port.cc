@@ -13,23 +13,8 @@ __global__ void conv2d_spatial(aie::port<input_window_int8 *, aie::IFM, aie::sha
     const int ROW = iw_t * C;                       // 244 bytes per slab row
     const int pid_h = aie::program_id(0);           // mesh row: which OH band
     const int pid_c = aie::program_id(1);           // mesh col: which OC group
-
-    // Vector compute: aie::mmul<8, 8, 8> (int8 x int8, 32-bit accumulators),
-    //   C [8 output cols x 8 channels] += A [8 output cols x 8 K] * B [8 K x 8 channels].
-    // Per kernel row kh, the 7 taps x 4 channels of output column ow are the 28
-    // CONTIGUOUS slab bytes at (oh*S + kh)*ROW + ow*S*C (stride 2 x 4 channels =
-    // 8 bytes per column), so the A tile of 8 consecutive columns and K-block kb
-    // is ONE 64-byte load and im2col costs nothing. K per kernel row = 4 blocks
-    // of 8: bytes 0-7, 8-15, 16-23 and 20-27 -- the last block starts 4 bytes
-    // early so no load runs past the 244-byte row (or the block); its first 4
-    // rows of B are zero, so taps 20-23 are not counted twice.
-    // Output columns per pass: M-blocks {0, 8} and {16, 20} (20-23 are written
-    // twice with identical values), times 2 N-blocks of 8 channels.
     using MM = aie::mmul<8, 8, 8, int8_t, int8_t>;
     aie::set_saturation(aie::saturation_mode::saturate); // int8 results clamp like the scalar reference
-
-    // This core's filters: output channels [pid_c*16, +16), all taps, packed
-    // once into B tiles Bp[kh][kb][nb] (8 K x 8 channels, row-major).
     const int8_t *w = aie::load_buffer(win_b, {pid_c * oc_t, 0, 0, 0}, {oc_t, KH, KW, C});
     // const int8_t *w = aie::load_buffer(win_b, {pid_c * oc_t*10, 0, 0, 0}, {oc_t, KH, KW, C});//for bug test
     alignas(64) int8_t Bp[7 * 4 * 2 * 64];

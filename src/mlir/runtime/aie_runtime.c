@@ -50,7 +50,13 @@ extern void ess_ReadGM(uint64_t addr, void *data, uint64_t size);
 
 // for cache disable case we need to do that at app construction beginning
 static void __Runtime_init(void) __attribute__((constructor));
-extern void routing(XAie_DevInst *dev);
+// The aiehlc app's stream-switch setup (its routing.cc). WEAK: a partition
+// initialized through __Runtime_init_mesh_partition_with() is given its
+// library's own routing function instead, so several aiehlc libraries -- each
+// with a routing() made local to it -- can share one ELF.
+extern void routing(XAie_DevInst *dev) __attribute__((weak));
+// Routing for the partition being initialized (NULL = the global routing()).
+static void (*g_pending_routing)(XAie_DevInst *) = NULL;
 // Device layout declare: config and instance (reference: aieml_perf.cc lines 292-300)
 static XAie_SetupConfig(g_Config, HW_GEN, XAIE_BASE_ADDR, XAIE_COL_SHIFT, XAIE_ROW_SHIFT, XAIE_NUM_COLS, XAIE_NUM_ROWS,
                         XAIE_SHIM_ROW, XAIE_RES_TILE_ROW_START, XAIE_RES_TILE_NUM_ROWS, XAIE_AIE_TILE_ROW_START,
@@ -3014,7 +3020,11 @@ void __Runtime_init(void) {
 void __Runtime_routing_init(XAie_DevInst *dev) {
     AIEHLC_LOG(printf("[aie_runtime] routing_init start\n"););
     g_RoutingInst = XAie_InitRoutingHandler(dev);
-    routing(dev);
+    void (*route)(XAie_DevInst *) = g_pending_routing ? g_pending_routing : routing;
+    if (route)
+        route(dev);
+    else
+        printf("[aie_runtime] ERROR: routing_init: no routing() linked and none passed for this partition\n");
 #ifdef AIE_HAVE_RESOURCE_MAP
     //__Runtime_print_resource_map();
 #endif
@@ -3341,6 +3351,7 @@ void __Runtime_explicit_teardown(XAie_DevInst *dev) {
 typedef struct {
     int meshId;
     XAie_DevInst *dev;
+    void (*route)(XAie_DevInst *); /* the routing it was set up with (NULL = global routing()) */
 } PartitionRegistryEntry;
 
 static PartitionRegistryEntry g_partition_registry[PARTITION_REGISTRY_MAX];
@@ -3370,23 +3381,44 @@ void __Runtime_register_partition(int meshId, XAie_DevInst *dev) {
     }
     g_partition_registry[g_partition_registry_count].meshId = meshId;
     g_partition_registry[g_partition_registry_count].dev = dev;
+    g_partition_registry[g_partition_registry_count].route = g_pending_routing;
     g_partition_registry_count++;
     AIEHLC_LOG(printf("[aie_runtime] register_partition meshId=%d dev=%p (total=%d)\n", meshId, (void *)dev,
                       g_partition_registry_count));
 }
 
-XAie_DevInst *__Runtime_init_mesh_partition(int meshId, int startCol, int numCols) {
-    if (__Runtime_partition_is_initialized(meshId)) {
-        return __Runtime_get_partition_dev(meshId);
+/* Init-once per meshId FOR ONE ROUTING: a partition is reused only by the
+ * library that set it up. Another aiehlc library launching on the same meshId
+ * (two user kernels in one ELF, each with its own routing) gets the partition
+ * torn down and re-initialized with its routing -- the same teardown + init the
+ * per-launch aieDim path does every time. */
+XAie_DevInst *__Runtime_init_mesh_partition_with(int meshId, int startCol, int numCols, void (*route)(XAie_DevInst *)) {
+    for (int i = 0; i < g_partition_registry_count; i++) {
+        if (g_partition_registry[i].meshId != meshId)
+            continue;
+        if (g_partition_registry[i].route == route)
+            return g_partition_registry[i].dev;
+        AIEHLC_LOG(
+            printf("[aie_runtime] meshId=%d: another library's routing -- re-initializing the partition\n", meshId););
+        __Runtime_explicit_teardown(g_partition_registry[i].dev);
+        g_partition_registry[i] = g_partition_registry[--g_partition_registry_count];
+        break;
     }
+    g_pending_routing = route;
     XAie_DevInst *dev = __Runtime_explicit_init_partition(startCol, numCols);
+    if (dev)
+        __Runtime_register_partition(meshId, dev);
+    g_pending_routing = NULL;
     if (!dev) {
         printf("[aie_runtime] ERROR: init_mesh_partition failed meshId=%d startCol=%d numCols=%d\n", meshId, startCol,
                numCols);
         return NULL;
     }
-    __Runtime_register_partition(meshId, dev);
     return dev;
+}
+
+XAie_DevInst *__Runtime_init_mesh_partition(int meshId, int startCol, int numCols) {
+    return __Runtime_init_mesh_partition_with(meshId, startCol, numCols, NULL);
 }
 
 void __Runtime_teardown_all(void) {

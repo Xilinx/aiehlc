@@ -16,8 +16,9 @@ Gates (each layer must pass every one, in this order; a failure names its gate):
                  the generated adapter: logits byte-identical (``emulate.py``)
 5     build      aiehlc + hostcompile + isolate (``build.py``) -- offload only;
                  needs Vitis, never a board
-6     link       one aiehlc library per ELF (the runtime's ``routing()``
-                 singleton) and no symbol collisions among called archives
+6     link       no symbol collisions among called archives (libraries with
+                 per-library routing share the ELF; an old-style library's
+                 global ``routing()`` still collides with another one)
 ====  =========  =============================================================
 
 ``check`` runs 1-4 and writes nothing outside ``<out>/aiek/``. ``offload`` runs
@@ -242,25 +243,16 @@ def _print_verdicts(report: dict) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _check_one_aie_library(plans, verbose: bool) -> None:
-    """Gate 6a. The runtime calls one global ``routing()`` and caches partition
-    init per meshId, so the ELF can hold ONE aiehlc library. The first kernel
-    (command-line order) with selected layers keeps them."""
-    owner = None
+    """Gate 6a. A reference-only source has nothing to build. Several kernels
+    in one call are fine: they are built now, with per-library routing (each
+    library passes its own routing() to the runtime, which re-initializes a
+    partition another library set up), so their libraries share the ELF. A
+    library built the old way is caught after the build (_write_partition) and
+    by the link gate (a second global routing())."""
     for kp in plans:
-        if not kp.selected:
-            continue
-        if not kp.lint.has_aie_kernel:
+        if kp.selected and not kp.lint.has_aie_kernel:
             for layer in list(kp.selected):
                 kp.reject(layer, "build", "reference-only source: no AIE kernel to build")
-            continue
-        if owner is None:
-            owner = kp
-            continue
-        for layer in list(kp.selected):
-            kp.reject(layer, "link", f"{owner.name} already owns this ELF's aiehlc "
-                                     f"library; the runtime has ONE routing() per ELF. "
-                                     f"Put both kernels in one source, or offload them "
-                                     f"in separate builds")
 
 
 def _build(net, plans, aie_version: int, verbose: bool) -> None:
@@ -322,11 +314,19 @@ def _write_partition(net, plans, verbose: bool) -> Path:
     # Only a user library that actually exists displaces another one; with no
     # archive the user kernel swaps nothing and the old offload must stand.
     users = [kp for kp in plans if kp.selected and (kp.build or {}).get("ok")]
+    from .build import multi_library
+    new_ok = all(multi_library(kp.build["archive"]) for kp in users)
     for row in doc["layers"]:
         hit = claimed.get(row.get("symbol"))
         if hit is None:
-            # Another aiehlc library still offloaded (the stem via --aie-offload)
-            # would be a second routing() in the ELF -- see gate 6a.
+            # Another aiehlc library still offloaded stays when both pass their
+            # routing to the runtime; one built the old way (a global routing(),
+            # e.g. an older build or the --aie-offload stem) would be a second
+            # routing() in the ELF -- that one is superseded.
+            old = row.get("archive")
+            if users and row.get("target") == "aie" and new_ok and old and \
+                    multi_library(net.out_dir / old):
+                continue
             if users and row.get("target") == "aie":
                 row.update(target="cpu", entry=None, replaces=None,
                            reason=f"superseded by user kernel {users[0].name}: one "

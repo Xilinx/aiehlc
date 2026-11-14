@@ -265,8 +265,9 @@ def test_parse_kernel_arg():
     assert parse_kernel_arg(("k.cc", [9])) == (Path("k.cc"), [9])
 
 
-def test_one_aie_library_per_elf():
-    """Gate 6a: the runtime calls ONE routing(); the first kernel keeps the ELF."""
+def test_gate_6a_keeps_several_libraries():
+    """Gate 6a: with per-library routing several kernel sources share the ELF;
+    only a reference-only source (nothing to build) is rejected."""
     from frontend.tvmrelay.aiekernel.flow import KernelPlan, _check_one_aie_library
 
     class _L:
@@ -283,7 +284,7 @@ def test_one_aie_library_per_elf():
     _check_one_aie_library([a, r, b], verbose=False)
     assert a.selected == [1]
     assert r.selected == [] and r.rejected[4][0] == "build"
-    assert b.selected == [] and "routing()" in b.rejected[14][1]
+    assert b.selected == [9, 14]
 
 
 # ═══════════════════════════════════════════════════════════════════════════

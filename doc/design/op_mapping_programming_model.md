@@ -327,6 +327,21 @@ __global__ void conv2d_spatial(
    there. For `simpleconv2dkernel_port.cc` the result is byte-identical to the
    hand-written `simpleconv2d.cc` (28/28 IR dumps, `kernel.cc`, `routing.cc`,
    bcf, prx, host DMA program); x86 emulation 802,816/802,816.
+6. **Cross-check the pipeline.** The shim DMA is built from the derived
+   descriptors, but the **core** windows (`window_init` size, core MM2S/S2MM BD
+   length) and the output round count (`out_rounds`) are re-derived later by
+   the GEMM-model tiling in aiehlc.cc. `checkConvTilingAgainstAnalysis` holds
+   that result to the analysis -- rounds per core, OFM / IFM / WGT block bytes
+   -- and a mismatch is a build error (`[TilingLinalg] ERROR: <k>: output rounds
+   per core (out_rounds) = 98 ... the kernel's blocks give 14`), because on the
+   board it is a silent `wait_io` hang. Success prints `derived tiling matches
+   the kernel analysis (rounds N, OFM .. B, IFM .. B, WGT .. B)`. The bug it
+   was added for: the C port's `d2` is the output **width** tile, the GEMM
+   model reads it as N, and `spatialNRounds` (= width rounds, already inside
+   `spatialMRounds`) was reset to 1 only when `ow_t != oc per core`; a
+   14x16x16 tile (ResNet-18 layer 1 prototype) got `out_rounds = 14*7 = 98`
+   and a 512 B core output window. It is now reset for every spatial-halo conv.
+   Skill **convoutroundsdoublecount**.
 
 `__global__(conv, map)` kernels that use `load_buffer` get the same trace,
 compared against their declared mapping (`verifyKernelBlocks`, from
@@ -335,7 +350,7 @@ compared against their declared mapping (`verifyKernelBlocks`, from
 ### What the verifier rejects
 
 `src/llvm/convautotile/unitest/kernel_trace_cases.py` mutates the example into
-each bug and checks the diagnostic (13 cases):
+each bug and checks the diagnostic:
 
 | Bug | Diagnostic |
 |---|---|
@@ -353,8 +368,65 @@ each bug and checks the diagnostic (13 cases):
 | store on an input port / load on an output | `aie::store_buffer on an input port` |
 | block over the core memory | `block is 211600 B, larger than the core data memory (49152 B)` |
 
+| block sized by a constant the compute ignores (`oc_t = 15`, loops walk 16 channels) | `cause (static analysis): \`oc_t = 15\` (case.cc:8) sizes the block of the access at line 29, whose index never reads oc_t -- with oc_t = 16 every analysed block access fits` |
+
 `aiehlc-convtile trace <src.cc> [--emit]` runs the analysis standalone
-(`AIEHLC_TRACE_KEEP=1` keeps the generated harness).
+(`AIEHLC_TRACE_KEEP=1` keeps the generated harness; the harness goes under
+`$TMPDIR`, default `/tmp`).
+
+### Why an access leaves its block: static bounds (`kernel_static.{h,cpp}`)
+
+ASan says *where* ("data used without being loaded at k.cc:29") and stops at
+the first fault. `staticBlockBounds()` says *why*, from the source alone, and
+runs inside `traceKernel` / `traceLogical` after every trace:
+
+- **Model.** The body's `const int` / `#define` constants, the op/mapping
+  struct members of a `__global__(conv, map)` kernel (`map.oh_t`, `conv.kh`,
+  from the prelude's `static constexpr aiehlc_kernel_view_t map = {...}`),
+  small const arrays (`const int owc[2] = {owA, owB}`), `for (int v = a; v < b;
+  v += s)` loops (extra `, kk++` increments allowed), `if` / `?:` guards, block
+  pointers (`T *p = aie::load_buffer(port, {off}, {shape})`), pointers derived
+  from them (`T *r = p + e`, `(T *)p + e`, `reinterpret_cast<T *>(p) + e`) and
+  local arrays. A name assigned after its declaration has no single value and
+  is dropped.
+- **Bytes, not elements.** Every pointer carries its pointee size, so an
+  `int8_t` view of an `int16` block or a cast in a derived pointer scales
+  correctly; messages switch from "element" to "byte" when the types differ.
+  An unknown pointee (`v16int8`, a struct) is a skip, never a guess.
+- **Accesses.** `p[e]`, `aie::load_v<N>(p + e)`, `aie::load_unaligned_v<N>(p + e, ..)`,
+  `aie::store_v(p + e, v)` (N from `extract<N>` or an `aie::vector<T, N>`).
+- **Exact, not intervals.** Every loop variable the index needs (and
+  `program_id`) is *enumerated*. Interval arithmetic gives `owB = pass * 16 +
+  (pass ? 4 : 8)` the range [4, 24] and reports a false overflow; the real
+  values are {8, 20}. An index that cannot be evaluated is skipped and counted
+  (`note: static bounds analysis: 11 block access(es) checked`). Each skip is
+  a note with its reason: `` `kk` is reassigned at line 67 ``, `` `helper()` is a
+  function call ``, a loop not of the `for (v = a; v < b; v += s)` form, the
+  4M-iteration budget, an unknown pointee size. A block pointer used where no
+  modelled access accounts for it (`use(w)`, `&w`, `*(w + e)`) is reported as
+  `used in a form the analysis does not model`. On `simpleconv2d_new_load.cc`
+  2 of 3 accesses are checked; the third indexes by the running counter `kk`.
+- **Attribution.** The worst element is decomposed into block coordinates
+  (`element 3135 is (15,6,6,3), dim 0 (output channels) index 15 is past its
+  extent 15`), the loops that move it are named (`nb < 2` (line 23), `n < 8`
+  (line 25)), and each literal constant is varied alone. A constant is a
+  **cause** only if it sizes the block while the overflowing index (and its
+  loops) never read it, *and* changing it makes every access fit. A constant
+  read by both (`ow_t`: block width and row pitch) would only add slack, so it
+  is not reported. When nothing qualifies, no cause line is printed; the
+  finding points at the index arithmetic.
+- **Cross-check with the trace.** A trace fault at line L with no static
+  finding at L is classified, not left bare: `static analysis: cannot explain
+  line L: <reason>` (it skipped the access), `no block access recognized at
+  line L`, or `static analysis DISAGREES: it evaluated ... at line L and found
+  it inside its block`. The last one means the static model is wrong for this
+  kernel, e.g. `w` moved through an alias (`const int8_t **pw = &w; *pw +=
+  2940;`). It tests the analysis against the compiled code on every fault.
+- **Merging.** A trace fault at line L gets the static finding for L appended.
+  Static findings the trace never reached (`store_v` at line 74 in the
+  `oc_t = 15` case) become errors too. Without a trace fault they are only
+  notes (`possible out-of-block access`): a guard the model misses may keep the
+  access from running.
 
 ### Limits
 
@@ -366,6 +438,74 @@ each bug and checks the diagnostic (13 cases):
 - The schedule must not depend on data (checked).
 - The input tensor is the DDR buffer as the kernel reads it (pre-padded);
   `load_opts{.pad}` from the proposal is not implemented.
+
+### Hand-written GemmSpaces with block loads (2026-11-10)
+
+The explicit form -- one `constexpr aie::GemmSpace` per port, `__global__(policy)`,
+`aie::port<T, Space>` -- can now be combined with `aie::load_buffer` /
+`store_buffer` in the body (`example/tileprogram/ccode/simpleconv2dkernel_space.cc`:
+`simpleconv2dkernel_port.cc`'s body under hand-written `RowBC_halo` / `ColBC` /
+`LtoR_Merge`). Before, this did not build: the pipeline rewrites every
+`aie::load_buffer(P, ...)` to reference `aiehlc_desc_P` (`tilinglinalg_pipeline.cpp`,
+`resolveBlockIoBuiltins`), and those descriptors were only emitted for kernels
+whose GemmSpaces convautotile had derived itself.
+
+`verifySpaceKernels` (`kernel_trace.cpp`) handles such a kernel. **The GemmSpaces
+stay the authority and are not rewritten**:
+
+1. each port's GemmSpace is parsed (`sourceGemmSpace`, `conv_desugar.cpp`; the
+   designated-initializer parser of the `aie::Conv2d` path, plus the file's
+   `constexpr int` names) with aiehlc's defaults for omitted fields (act / wgt
+   Broadcast, layout Row, merge Default, im2col None, an omitted `.stride` is 0).
+   It fails closed: `.m/.n/.k`, an unknown or positional field, or a value that
+   is not a constant is an error. The tensor (shape, padsize, role) comes from
+   d1..d4;
+2. the body is traced exactly as for a kernel-only kernel and routed
+   (`planRouting`);
+3. **the routed plan, rendered through `routingSpaces`, must equal every
+   hand-written GemmSpace** (`spaceDiff`, `trace_routing.cpp`), field by field:
+   the map (layout, act / wgt, merge order, mesh groups), im2col and d1..d4 with
+   their slice_tiling. `pad`, `pp_depth` and `l1_budget` are the user's
+   scheduling choices and are not compared (the trace uses the smallest
+   `pp_depth` for its held-blocks check);
+4. on success the kernel gets `aiehlc_desc_<port>` from the traced fits and
+   `aie::num_programs` is resolved; a recognized conv also feeds the pipeline's
+   `checkConvTilingAgainstAnalysis`.
+
+**Why compare forward instead of inverting the GemmSpace.** The GemmSpace ->
+block mapping is ambiguous for inputs: `tile_round` marks a mesh split or an
+on-core loop depending on the dim, and a row-broadcast `A[M, K]` with "d1 split
+over 4 mesh rows, d2 walked in 4 rounds" renders to the same GemmSpace as "d1
+walked in 4 rounds, d2 split over 4 mesh rows". An inverse would have to guess.
+Comparing in GemmSpace space needs no guess: equal GemmSpaces give the pipeline
+the same input as the kernel-only build of the same kernel, so the DMA delivers
+exactly the traced blocks -- the same soundness argument the kernel-only path
+rests on.
+
+A conflict is a build error naming the field, from either side:
+
+```
+win_a (GemmSpace RowBC_halo) .d1.slice_tiling.stride = 13, the kernel's blocks give 14
+win_c (GemmSpace LtoR_Merge) .d1.slice_tiling.tile_size = 7, the kernel's blocks give 14   <- kernel's oh_t changed
+win_a (GemmSpace RowBC_halo) .policy.map.layout = Col, the kernel's blocks give Row
+win_c block 0 on core (0,0): offset has 3 and shape 3 dims, but the tensor has 2           <- GemmSpace lost a dim
+```
+
+Verified: `simpleconv2dkernel_space.cc` builds with `kernel.cc`, `routing.cc`,
+`aieml.bcf/.prx` and the AIE kernel ELF **byte-identical** to
+`simpleconv2dkernel_port.cc`'s build, and `host.cc` identical outside the copied
+user source; a conflicting GemmSpace stops aiehlc with rc 1 before any ELF.
+Unit tests: `unitest/test_trace_routing.cpp` (parse / defaults / errors, spaceDiff,
+render -> parse round trip for conv, GEMM and eltwise plans, descriptors equal to
+the kernel-only build), `unitest/kernel_trace_cases.py` `SPACE_CASES` (10).
+
+**Open, not caused by this:** on the board (palmyra 213) the example's output
+does **not** match `verify_conv2d` -- 128+ mismatches starting in the output
+channels of the last two mesh columns (first at f=32 or f=48, varying run to
+run). `simpleconv2dkernel_port.cc` gives the same failure (its `main()` never
+called `verify_conv2d`, so it went unnoticed); the two builds run identical
+kernel and DMA code. `simpleconv2dkernel_space.cc` calls the check and returns
+non-zero, so the failure stays visible.
 
 ## 6. Tensor form: typed tensors, `.pad` / `.reuse`, block views, autotune
 

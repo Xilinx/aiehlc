@@ -209,6 +209,38 @@ SmallVector<OpFoldResult> toOpFoldResult(ArrayRef<int64_t> values, OpBuilder &b)
 LogicalResult preprocessConstantToMemref(Operation *topLevel, std::shared_ptr<BlueprintPassState> state);
 Value resolveMemrefForView(Value viewValue, const BlueprintPassState &state);
 bool isFullConnectAuto(ModuleOp moduleOp);
+
+// === Kernel-only ports: the kernel's own traced blocks (#routing.kernel_block) ===
+// Resolved identically by the host (flowtransfer_*) and kernel
+// (passblueprinttoschedulekernel) lowerings, from the attribute alone, so the
+// two always make the same decision.
+//   check:  a GEMM-schedule (fullconnect_auto = 1, no halo) port of a
+//           kernel-only kernel: its final core window and round count must be
+//           the kernel's block and block count, else the build fails (the core
+//           and shim DMA would otherwise disagree -- a silent wait_io hang).
+//   follow: an INPUT among those whose blocks are row-contiguous (cover every
+//           trailing dim: full-K GEMM strips, a whole B block): the window,
+//           rounds, per-round DDR offset and (.tile) shim addressing are taken
+//           from the kernel instead of the GEMM model, which can express
+//           neither an input taken once while other ports loop nor full-K strips.
+struct KernelBlockUse {
+    routing::KernelBlockAttr attr; // null: not a traced kernel-only port
+    bool check = false;
+    bool follow = false;
+    int64_t blockElems = 0;           // core window, elements
+    int64_t rounds = 1;               // blocks per core per launch
+    int64_t roundsJ = 1;              // inner-loop rounds (offset decode)
+    int64_t strideIBytes = 0;         // DDR offset per outer round
+    int64_t strideJBytes = 0;         // DDR offset per inner round
+    SmallVector<int32_t> tileStrides; // .tile: shim BD dims (bytes), innermost first
+    SmallVector<int32_t> tileWraps;   // .tile: wraps (d0 in 32-bit words)
+};
+KernelBlockUse resolveKernelBlock(const routing::TensorRoutingInfoMap &info, int funcArgIdx, bool isInput,
+                                  bool fullConnect, int64_t elemBytes);
+// The core window / round count a lowering computed against the kernel's
+// blocks; emits an error on `op` and returns failure on a mismatch.
+LogicalResult checkKernelBlock(Operation *op, const KernelBlockUse &u, int64_t windowElems, int64_t rounds,
+                               StringRef who);
 TilingClassification classifyTiling(const routing::GemmTilingScalars &t);
 bool isNOuterPolicy(ModuleOp moduleOp);
 
@@ -300,6 +332,8 @@ struct FlowLoweringCtx {
     int64_t perRoundBytes = 0;
     int32_t shimIterStepSize = 0;
     int32_t shimIterWrap = 0;
+    // Kernel-only input whose traced blocks this flow follows (resolveKernelBlock).
+    KernelBlockUse kb;
     bool usedMRounds3D = false;
     int64_t oooMRounds = 1;
     int32_t oooIterStepSize = 0;
@@ -466,6 +500,8 @@ struct FlowTransferConversion : public OpConversionPattern<dfscheblueprint::Flow
     // --- host helpers (flowtransfer_host.cpp) ---
     void emitShimTileAndParams(FlowLoweringCtx &c) const;
     LogicalResult computeShimBdParams(FlowLoweringCtx &c) const;
+    // Kernel-only input: shim BD length / addressing from the kernel's blocks.
+    void applyKernelBlockShim(FlowLoweringCtx &c) const;
     void emitShimBdOoo(FlowLoweringCtx &c) const;
     void emitShimBdNonOoo(FlowLoweringCtx &c) const;
     void classifyScheduleMode(FlowLoweringCtx &c) const;

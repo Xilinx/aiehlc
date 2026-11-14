@@ -114,6 +114,35 @@ over at once -- the app core is parked over JTAG (stop, `rst -proc`, pc =
 park fails it falls back to a re-bootstrap. It kills whatever is running,
 including another user's run.
 
+## VEK385 (`-board vek385 -host <farm host>`)
+
+```bash
+python3 script/test/apppaltest.py -board vek385 -host gomphus3 -y --netload aout/main.elf   # netboot
+python3 script/test/apppaltest.py -board vek385 -host gomphus3 -y aout/main.elf             # full JTAG boot
+```
+
+`-board`/`-host`/`-board-rev` override `BOARDNAME`/`PALIP`/`VEK385_REV`. Same
+flow, same IP 10.10.70.50 (the farm host's eth1 is laid out like palmyra's), with
+these board differences, each learned on vek385-3 (skill **vek385netboot**):
+
+| | palmyra | VEK385 |
+|---|---|---|
+| systest | `/bin/systest` + `become` | `systest-client` only, prompt must be `[vek385-N]` |
+| JTAG | `conn` | the farm host's running hw_server, `connect -url TCP:<host>:3121` |
+| boot image | `~/palboard/BOOT.BIN` | `~/aiehlc/netboot/vek385_netboot.BIN` (rev A), or boot + PLD PDI (`-board-rev b`) |
+| console | com0 | com3 |
+| supervisor | `build/netboot.elf` | `build/vek385/netboot.elf`, `NETBOOT_DMA_BASE=0xA00000000`, staged as `netboot_vek385.elf` |
+| reset before `device program` | power cycle | power cycle, then PMC `rst -system` (`targets -filter {name =~ "PMC"}` -- exact: `*PMC*` also matches the ASU target) |
+| reset before `dow` | `rst -proc` on A78 #0.0 | same (`rst -processor`), **not** the APU `rst -cores` |
+| system counter | running | **off after the PDI boot**: apppaltest writes SCNTRS `0xEC920020` = freq, `0xEC920000` = 1 |
+| JTAG park | `rst -proc` | `catch {rst -proc}` (PLM denies it), then pc = `nb_park`, `con` |
+
+Why: the GEM is an LPD master and LPD_AXI_NOC0 reaches only DDR_CH1/DDR_CH2, so
+lwIP's DMA memory must live at 0xA_0000_0000; `rst -cores` leaves A78 #0.1 in the
+debugger's Reset Catch, so the supervisor's wake of it fails (PM `0x...7D2`) or
+the woken core never runs; and with the counter off every `XTime`/`usleep` wait
+spins forever, with no output.
+
 ## Busy board, max run time, forced runs (protocol v2)
 
 The supervisor answers every request's header with an **ack** before the ELF is
@@ -215,3 +244,12 @@ device_teardown done
 
 On a fault the supervisor prints `[netboot] FATAL ...: ESR_EL3 .. FAR_EL3 .. ELR_EL3 ..`
 instead of hanging silently.
+
+`[netboot] ready` means the Ethernet link is up. When the PHY's autonegotiation
+times out after a power cycle (the port gives it 5 s), the supervisor prints
+`Ethernet link down: PHY setup retry N/6`, then `Ethernet link up, 1000 Mb/s` and
+`ready`; if it is still down it prints `NOT ready: Ethernet link down ...` and
+keeps polling the link every second (`ready` follows when it comes up). A link
+lost later prints `Ethernet link lost` and recovers the same way. `apppaltest
+--netload` re-bootstraps once if `ready` never comes. Test builds that force the
+link down: `NETBOOT_TEST_LINK_DOWN=1|2` (see `build.sh`).
