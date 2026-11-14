@@ -155,6 +155,17 @@ if [ ${#MULTI_KERNEL_FILES[@]} -gt 0 ]; then
         kname="${kfname#kernel_}"
         kname="${kname%.cc}"
         echo "[Multi-kernel] Compiling kernel: ${kname} (${kfname})"
+        # Reuse kernel_<name>.o when it is newer than everything it is built from (aiekernel install
+        # re-runs this script on aiehlc's own worklocal copy; the single-kernel path reuses kernel.o
+        # by kernel.stamp, which the rename below defeats). HOSTCOMPILE_KERNEL_REBUILD=1 forces it.
+        if [ "${HOSTCOMPILE_KERNEL_REBUILD:-0}" != "1" ] && [ -f "${BUILD_DIR}/kernel_${kname}.o" ] &&
+            [ "${BUILD_DIR}/kernel_${kname}.o" -nt "$kf" ] &&
+            { [ ! -f "${WORKLOCAL_DIR}/aieml_${kname}.prx" ] || [ "${BUILD_DIR}/kernel_${kname}.o" -nt "${WORKLOCAL_DIR}/aieml_${kname}.prx" ]; } &&
+            { [ ! -f "${WORKLOCAL_DIR}/aieml_${kname}.bcf" ] || [ "${BUILD_DIR}/kernel_${kname}.o" -nt "${WORKLOCAL_DIR}/aieml_${kname}.bcf" ]; }; then
+            echo "[Multi-kernel] Reusing ${BUILD_DIR}/kernel_${kname}.o (newer than ${kfname}, prx, bcf)"
+            KERNEL_OBJ_LIST="${KERNEL_OBJ_LIST} ${BUILD_DIR}/kernel_${kname}.o"
+            continue
+        fi
 
         # Use per-kernel PRX if available, fall back to aieml.prx
         KPRX=""

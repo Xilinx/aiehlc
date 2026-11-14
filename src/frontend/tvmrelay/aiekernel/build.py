@@ -119,7 +119,9 @@ def aiehlc_compile(spec, out_dir, aie_version: int = 5, verbose: bool = True) ->
             rc = subprocess.run(["bash", "-c", cmd], cwd=str(scratch),
                                 stdout=fh, stderr=subprocess.STDOUT).returncode
         src = scratch / "aout" / "worklocal"
-        if rc != 0 or not (src / "host.cc").is_file() or not (src / "kernel.cc").is_file():
+        # one kernel -> kernel.cc; several __global__ kernels -> kernel_<name>.cc each (hostcompile.sh multi-kernel)
+        has_kernel = (src / "kernel.cc").is_file() or any(src.glob("kernel_*.cc"))
+        if rc != 0 or not (src / "host.cc").is_file() or not has_kernel:
             return {"ok": False, "log": str(log),
                     "reason": f"aiehlc.sh rc={rc}, no host.cc/kernel.cc; see {log}"}
         if dest.exists():
