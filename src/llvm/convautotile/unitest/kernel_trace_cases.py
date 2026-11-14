@@ -7,8 +7,9 @@
 bug and checks `aiehlc-convtile trace` rejects it with the expected diagnostic.
 CASES use the kernel-only port form (simpleconv2dkernel_port.cc), TENSOR_CASES
 the tensor form (simpleconv2dkernel.cc: aie::in / aie::out, .pad, .reuse,
-block views, aie::autotune), SPACE_CASES hand-written GemmSpaces + block loads
-(simpleconv2dkernel_space.cc: a GemmSpace and the kernel's blocks must agree).
+block views, aie::autotune), DATAFLOW_CASES the {.depth / .resident / .tile}
+options (simplegemm_dataflow.cc), SPACE_CASES hand-written GemmSpaces + block
+loads (simpleconv2dkernel_space.cc: a GemmSpace and the kernel's blocks must agree).
 
     python3 src/llvm/convautotile/unitest/kernel_trace_cases.py [build/aiehlc-convtile]
 """
@@ -152,6 +153,9 @@ TENSOR_CASES = [
 LOAD_B = "aie::load_buffer(b, {pn * 16, j * 64}, {16, 64})"
 GEMM_CASES = [
     ("gemm: baseline (routed)", [], None),
+    ("gemm: role tags omitted (aie::port<T, aie::shape<...>>)",
+     [("aie::IFM, ", ""), ("aie::WEIGHTS, ", ""), ("aie::OFM, ", "")],
+     None),
     ("gemm: input block unique per core",
      [(LOAD_B, "aie::load_buffer(b, {pn * 16, pm * 64}, {16, 64})")],
      "unique per core"),
@@ -169,6 +173,34 @@ GEMM_CASES = [
      "port a: the window type must be a pointer"),
 ]
 
+
+# Dataflow options on a kernel-only GEMM (simplegemm_dataflow.cc): each one
+# must be something the DMA can do for that port's blocks.
+DATAFLOW_BASE = CCODE / "simplegemm_dataflow.cc"
+OPT_A = "{.depth = 2, .tile = {8, 8}}"
+DATAFLOW_CASES = [
+    ("dataflow: baseline (.resident / .depth / .tile)", [], None),
+    ("dataflow: no options (still a legal DMA; the compute would then read row-major A)",
+     [(", " + OPT_A, ""), ("{cn, GD_K}, {.resident = true}", "{cn, GD_K}")],
+     None),
+    ("dataflow: .depth = 1 on a 32-strip input (single buffer, re-armed)",
+     [(OPT_A, "{.depth = 1, .tile = {8, 8}}")],
+     None),
+    ("dataflow: .resident on a port loaded every round",
+     [(OPT_A, "{.resident = true, .tile = {8, 8}}")],
+     "a resident block is loaded once"),
+    ("dataflow: .resident with .depth = 2",
+     [("{cn, GD_K}, {.resident = true}", "{cn, GD_K}, {.depth = 2, .resident = true}")],
+     "contradicts it"),
+    ("dataflow: .depth out of range", [(OPT_A, "{.depth = 3, .tile = {8, 8}}")], "single (1) or ping-pong (2)"),
+    ("dataflow: .tile that does not divide the block", [(OPT_A, "{.depth = 2, .tile = {8, 7}}")],
+     "does not divide the block (16,256)"),
+    ("dataflow: .tile row below a 32-bit word", [(OPT_A, "{.depth = 2, .tile = {8, 2}}")],
+     "must be multiples of 4 bytes"),
+    ("dataflow: .tile on a store",
+     [("{GD_TS, cn});", "{GD_TS, cn}, {.tile = {8, 8}});")],
+     "aie::store_buffer takes only {.depth}"),
+]
 
 # Hand-written GemmSpaces + block loads (verifySpaceKernels): each side may be
 # wrong, and the conflict names the GemmSpace field.
@@ -229,6 +261,7 @@ def main():
     failed = 0
     cases = [(n, e, x, BASE) for n, e, x in CASES] + [(n, e, x, TENSOR_BASE) for n, e, x in TENSOR_CASES]
     cases += [(n, e, x, GEMM_BASE) for n, e, x in GEMM_CASES]
+    cases += [(n, e, x, DATAFLOW_BASE) for n, e, x in DATAFLOW_CASES]
     cases += [(n, e, x, SPACE_BASE) for n, e, x in SPACE_CASES]
     if len(sys.argv) > 2:  # a name filter
         cases = [c for c in cases if sys.argv[2] in c[0]]

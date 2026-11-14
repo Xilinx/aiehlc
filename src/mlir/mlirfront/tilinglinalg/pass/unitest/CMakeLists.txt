@@ -128,6 +128,7 @@ set(SOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passdfscheduletoapi/passdfscheduletoapi.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passdfscheduletokernelapi/passdfscheduletokernelapi.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passcoretraceinsert/passcoretraceinsert.cpp
+                ${CMAKE_CURRENT_SOURCE_DIR}/../passstartiointerleave/passstartiointerleave.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passdmaphopprovenancemap/passdmaphopprovenancemap.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passdfscheduleprovenancemap/passdfscheduleprovenancemap.cpp
                 ${CMAKE_CURRENT_SOURCE_DIR}/../passroutingprovenancemap/passroutingprovenancemap.cpp

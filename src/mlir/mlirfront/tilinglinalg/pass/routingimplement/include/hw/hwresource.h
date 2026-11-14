@@ -214,6 +214,8 @@ public:
     virtual std::string name() const = 0;
 };
 
+void setResourcePartitionStartCol(int absStartCol);
+
 /* ---------- factory (implementation inside .cpp) ---------- */
 std::unique_ptr<IHwResource>
 makeResource(const std::string& generation,

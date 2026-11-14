@@ -56,11 +56,25 @@ struct DmaAddressing {
     bool empty() const { return dims.empty() && mode == 0; }
 };
 
+// The blocks a kernel-only kernel takes on one port, from its traced
+// aie::load_buffer / store_buffer calls (-> #routing.kernel_block).
+struct KernelBlock {
+    std::vector<int64_t> tensorShape;  // the tensor as the KERNEL declares it (the GEMM
+                                       // path relabels B as [K, N]; the bytes are [N, K])
+    std::vector<int64_t> shape;        // block extent per dim, elements; empty = none
+    std::vector<int64_t> stepI, stepJ; // offset per outer / inner round, per dim
+    int64_t roundsI = 1, roundsJ = 1;  // blocks per core = roundsI * roundsJ
+    bool resident = false;             // {.resident = true}
+    int64_t tileR = 0, tileC = 0;      // {.tile = {tileR, tileC}}, 0 = none
+    bool empty() const { return shape.empty(); }
+};
+
 struct TensorParam {
     std::vector<int64_t> shape;  // e.g. {16, 16}
     int elementBitWidth;         // e.g. 32 for int32_t, 8 for int8_t
     bool isInput;                // true = input, false = output
     DmaAddressing shimDma;       // optional: non-flat DMA addressing for shim
+    KernelBlock kernelBlock;     // optional: the kernel's traced blocks (kernel-only sources)
 };
 
 /// Per-tensor split descriptor — maps to partitiontensor op attributes.

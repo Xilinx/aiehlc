@@ -15,6 +15,9 @@ namespace {
 
 // AIE-ML core data memory every port buffer shares (bytes).
 constexpr long kCoreDataBytes = 49152;
+// What the port buffers actually get (dmbufferregion): the bcf's 32 KB buffer
+// region at 0x78000 (0x70000.. is DM_stack), less ~3 KB of klog ring and statics.
+constexpr long kPortBufferBytes = 32768 - 3072;
 
 std::string vec(const std::vector<int> &v) {
     std::string s = "(";
@@ -106,6 +109,20 @@ bool RoutingPort::dependsOn(int axis) const {
     return false;
 }
 
+bool RoutingPort::rowContiguous() const {
+    for (size_t d = 1; d < dims.size(); d++)
+        if (dims[d].block != dims[d].fullsize)
+            return false;
+    return !dims.empty();
+}
+
+long RoutingPort::declaredBytes(int pp) const {
+    // kernel.cc declares a ping AND a pong array for every window, except a
+    // single-buffered input the lowering follows (#routing.kernel_block).
+    const bool single = pp == 1 && !output && rowContiguous();
+    return blockBytes() * (single ? 1 : 2);
+}
+
 long RoutingPort::blockBytes() const {
     long b = elem_bytes;
     for (auto &d : dims)
@@ -114,7 +131,7 @@ long RoutingPort::blockBytes() const {
 }
 
 RoutingPlan planRouting(const std::vector<TracePort> &ports, const std::map<std::string, PortFit> &fits, int rows,
-                        int cols) {
+                        int cols, const std::map<std::string, BlockOpts> &opts) {
     RoutingPlan plan;
     plan.rows = rows;
     plan.cols = cols;
@@ -126,6 +143,9 @@ RoutingPlan planRouting(const std::vector<TracePort> &ports, const std::map<std:
         }
         RoutingPort rp;
         planPort(p, it->second, rows, cols, rp, plan.errors);
+        auto o = opts.find(p.var);
+        if (o != opts.end())
+            rp.opts = o->second;
         for (auto &d : rp.dims)
             plan.halo = plan.halo || d.halo() || d.meshHalo();
         if (!rp.output && rp.dependsOn(0) && rp.dependsOn(1))
@@ -144,7 +164,7 @@ std::vector<PortSpace> routingSpaces(const RoutingPlan &plan, const RoutingHints
         PortSpace s;
         s.role = rp.role;
         s.pad = hints.pad;
-        s.pp_depth = hints.pp_depth;
+        s.pp_depth = rp.ppDepth(hints.pp_depth);
         s.l1_budget = hints.l1_budget;
         // Halo plans read the activation through the DMA im2col path.
         s.im2col = (!rp.output && plan.halo) ? 1 : 0;
@@ -171,7 +191,17 @@ std::vector<PortSpace> routingSpaces(const RoutingPlan &plan, const RoutingHints
             t.used = true;
             t.fullsize = r.fullsize;
             t.padsize = r.padsize;
-            if (r.mesh_axis >= 0) {
+            if (r.mesh_axis >= 0 && !plan.halo && r.flatLoop()) {
+                // Mesh split whose on-core loop walks the core's slice in
+                // back-to-back blocks (GEMM M strips): one flat tile list over
+                // the whole dim, which aiehlc splits across the mesh (global
+                // groups / mesh parts = rounds per core). The GEMM schedule
+                // reads only this form; slice_tiling is the halo path's.
+                t.tile_round = r.mesh_parts * r.rounds;
+                t.tile_size = r.block;
+                t.stride = r.step;
+                t.has_stride = !(rp.output && r.mesh_axis == 1);
+            } else if (r.mesh_axis >= 0) {
                 // Mesh split; an on-core loop on the same dim tiles the core's slice.
                 t.tile_round = r.mesh_parts;
                 t.tile_size = r.coreSlice();
@@ -295,10 +325,41 @@ RoutingHints routingHints(const RoutingPlan &plan) {
     }
     if (need > h.l1_budget)
         h.l1_budget = (int)((need + 255) / 256 * 256);
-    const long n = (long)plan.ports.size();
-    if ((long)h.pp_depth * h.l1_budget * n > kCoreDataBytes && (long)h.l1_budget * n <= kCoreDataBytes)
+    if (plan.halo) {
+        const long n = (long)plan.ports.size();
+        if ((long)h.pp_depth * h.l1_budget * n > kCoreDataBytes && (long)h.l1_budget * n <= kCoreDataBytes)
+            h.pp_depth = 1;
+        return h;
+    }
+    // Non-halo: each port's window is its own block, in the buffers kernel.cc
+    // declares for it; ports without {.depth / .resident} drop to one buffer
+    // when that is what makes the set fit.
+    if (portBufferBytes(plan, h.pp_depth) > kPortBufferBytes && portBufferBytes(plan, 1) <= kPortBufferBytes)
         h.pp_depth = 1;
     return h;
+}
+
+long portBufferBytes(const RoutingPlan &plan, int pp_depth) {
+    long t = 0;
+    for (auto &rp : plan.ports)
+        t += rp.declaredBytes(rp.ppDepth(pp_depth));
+    return t;
+}
+
+std::string checkPortBuffers(const RoutingPlan &plan, const RoutingHints &hints) {
+    const long total = portBufferBytes(plan, hints.pp_depth);
+    if (plan.halo || total <= kPortBufferBytes)
+        return "";
+    std::ostringstream os;
+    os << "the port buffers take " << total << " B of core memory (";
+    for (size_t i = 0; i < plan.ports.size(); i++) {
+        const RoutingPort &rp = plan.ports[i];
+        const int pp = rp.ppDepth(hints.pp_depth);
+        os << (i ? ", " : "") << rp.var << " " << rp.declaredBytes(pp) / rp.blockBytes() << " x " << rp.blockBytes();
+    }
+    os << "), more than the " << kPortBufferBytes << " B the kernel's buffer region holds; take smaller blocks, or "
+       << "load an input that is taken once with {.resident = true} (one buffer)";
+    return os.str();
 }
 
 double routingEstMs(const RoutingPlan &plan, const RoutingHints &hints, const Target &tgt) {

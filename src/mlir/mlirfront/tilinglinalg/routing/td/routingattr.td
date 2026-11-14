@@ -105,6 +105,32 @@ def ShimDmaAttr : routingattr<"ShimDma"> {
   let assemblyFormat = "`<` struct(params) `>`";
 }
 
+// The blocks a kernel-only kernel takes on ONE port, as its traced
+// aie::load_buffer / store_buffer calls give them (convautotile kernel
+// analysis): per core `rounds_i * rounds_j` blocks of `shape` elements, block
+// (i, j) at the core's base + step_i * i + step_j * j (i outer). `pp_depth` and
+// `tile` are the kernel's {.depth} / {.resident} / {.tile} options (0 = not
+// given). The lowering checks its core windows against this and follows it
+// where the GEMM schedule cannot express the kernel (an input taken once while
+// other ports loop, full-K strips, a panel-major .tile).
+def KernelBlockAttr : routingattr<"KernelBlock"> {
+  let mnemonic = "kernel_block";
+  let summary = "per-core block sequence a kernel-only kernel takes on one port";
+  let cppNamespace = "routing";
+  let parameters = (ins
+    ArrayRefParameter<"int64_t">:$tensor_shape, // the whole tensor, elements (row-major in DDR)
+    ArrayRefParameter<"int64_t">:$shape,   // block extent per tensor dim, elements
+    "int64_t":$rounds_i,                    // outer loop rounds
+    "int64_t":$rounds_j,                    // inner loop rounds
+    ArrayRefParameter<"int64_t">:$step_i,  // offset per outer round, per dim
+    ArrayRefParameter<"int64_t">:$step_j,  // offset per inner round, per dim
+    DefaultValuedParameter<"bool", "false">:$resident,
+    DefaultValuedParameter<"int64_t", "0">:$tile_r,
+    DefaultValuedParameter<"int64_t", "0">:$tile_c
+  );
+  let assemblyFormat = "`<` struct(params) `>`";
+}
+
 // Kernel-level on-core round schedule that is not a property of any single
 // tensor. Carried on the routing func (`routing.kernel_tiling`), which lives
 // through every stage. Replaces the flat `routing.{tile_m,tile_rows,m_rounds,

@@ -54,6 +54,11 @@ struct RoutingDim {
     // Consecutive blocks overlap (a halo): the DMA re-reads block - step.
     bool halo() const { return loop >= 0 && rounds > 1 && block > step; }
     bool meshHalo() const { return mesh_axis >= 0 && coreSlice() > mesh_step; }
+    // Mesh split + an on-core loop of back-to-back blocks that exactly tile
+    // the core's slice (no overlap, no gap): rounds * step == mesh_step.
+    bool flatLoop() const {
+        return mesh_axis >= 0 && loop >= 0 && rounds > 1 && step == block && rounds * step == mesh_step;
+    }
 };
 
 struct RoutingPort {
@@ -62,9 +67,16 @@ struct RoutingPort {
     int elem_bytes = 1;
     std::vector<RoutingDim> dims;
     int rounds_i = 1, rounds_j = 1; // blocks per core = rounds_i * rounds_j
+    BlockOpts opts;                 // the kernel's {.depth / .resident / .tile}
+    // This port's core buffer count: .resident = 1, else .depth, else `dflt`.
+    int ppDepth(int dflt) const { return opts.resident ? 1 : opts.depth > 0 ? opts.depth : dflt; }
     // Which mesh axes the port's blocks depend on (any dim).
     bool dependsOn(int axis) const;
     long blockBytes() const;
+    // Every block dim after the first is the whole tensor dim (a contiguous run).
+    bool rowContiguous() const;
+    // Bytes kernel.cc declares for this port at `pp` buffers.
+    long declaredBytes(int pp) const;
 };
 
 struct RoutingPlan {
@@ -78,7 +90,7 @@ struct RoutingPlan {
 // Per-dim routing plan of a traced kernel. `ports` / `fits` as kernel_trace
 // produced them (fits by port variable).
 RoutingPlan planRouting(const std::vector<TracePort> &ports, const std::map<std::string, PortFit> &fits, int rows,
-                        int cols);
+                        int cols, const std::map<std::string, BlockOpts> &opts = {});
 
 // Scheduling hints for the carriers (defaults = the GemmSpace defaults the
 // conv derivation uses).
@@ -107,8 +119,16 @@ std::string planText(const RoutingPlan &plan);
 
 // Hints for a plan: the non-halo port buffers (sized by l1_budget) get room
 // for the largest block the kernel holds; single-buffer (pp_depth 1) when all
-// ports double-buffered at that budget overflow the 48 KB core data memory.
+// ports double-buffered overflow the 48 KB core data memory -- for a halo
+// plan with every port at that budget, otherwise with each port's own block
+// and its own {.depth} / {.resident} (only ports without one drop to 1).
 RoutingHints routingHints(const RoutingPlan &plan);
+
+// Bytes of core memory the ports' buffers take with `pp_depth` as the default
+// buffer count, and (non-halo plans) an error when they overflow the kernel's
+// buffer region -- else the kernel link fails ("no free space ... DMb").
+long portBufferBytes(const RoutingPlan &plan, int pp_depth);
+std::string checkPortBuffers(const RoutingPlan &plan, const RoutingHints &hints);
 
 // Operator-agnostic cost of a plan (ms): the per-core DMA traffic of every
 // port, plus the core's window copies and per-round bookkeeping. Used to rank

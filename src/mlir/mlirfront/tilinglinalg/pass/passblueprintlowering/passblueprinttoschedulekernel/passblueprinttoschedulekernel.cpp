@@ -305,6 +305,7 @@ struct KernelParamInfo {
     uint32_t pingAddress = 0;   // BCF symbol address for ping buffer (from CoreMemAllocator)
     uint32_t pongAddress = 0;   // BCF symbol address for pong buffer (from CoreMemAllocator)
     int funcArgIndex = -1;      // Function argument index (0=A, 1=B, 2=C)
+    bool kernelBlockMismatch = false; // window != the kernel's #routing.kernel_block (build error)
     bool singleBuffer = false;  // Single-buffer (no pong) mode, e.g. spatial-halo IFM slab
                                 // that is received once per invocation (numRounds==1).
     int32_t channel = 0;        // Core-tile DMA channel (S2MM for input, MM2S for output).
@@ -676,6 +677,10 @@ static void generateKernelModule(ConversionPatternRewriter &rewriter, Location l
 
 // Forward declarations for functions used in generateDSKernelReceiver
 static dfscheblueprint::FlowConfigOp lookupFlowConfig(Operation *rootOp, SymbolRefAttr target);
+// Set when a kernel-only port's window disagrees with its #routing.kernel_block
+// (the error is already emitted on the op); runOnOperation fails the pass.
+static bool g_kernelBlockMismatch = false;
+
 static SmallVector<KernelParamInfo>
 analyzeKernelParams(Operation *rootOp, KernelResourceManager &resourceMgr, Type defaultElementType,
                     int64_t defaultBufferSize, int32_t defaultVectorWidth, double bufferRatio, int64_t maxPingPongBytes,
@@ -1149,6 +1154,32 @@ analyzeKernelParams(Operation *rootOp, KernelResourceManager &resourceMgr, Type 
                         paramInfo.numRounds *= static_cast<int32_t>(mRounds);
                     }
                 }
+
+                // Kernel-only port (#routing.kernel_block): an input that follows
+                // its traced blocks takes the kernel's window and block count (in
+                // lockstep with the host, flowtransfer_kernel.cpp / _host.cpp);
+                // every such port must end up with exactly the kernel's blocks.
+                {
+                    const int64_t eb = paramInfo.elementType.isIntOrFloat()
+                                           ? std::max<int64_t>(paramInfo.elementType.getIntOrFloatBitWidth() / 8, 1)
+                                           : 1;
+                    blueprint_sched::KernelBlockUse kbu = blueprint_sched::resolveKernelBlock(
+                        tensorInfo, paramInfo.funcArgIndex, paramInfo.isInput,
+                        blueprint_sched::isFullConnectAuto(declareDataOp->getParentOfType<ModuleOp>()), eb);
+                    if (kbu.follow) {
+                        paramInfo.bufferSize = kbu.blockElems / defaultVectorWidth;
+                        paramInfo.numRounds = static_cast<int32_t>(kbu.rounds);
+                        const routing::TensorRoutingInfo *ti =
+                            routing::lookupTensorRoutingInfo(tensorInfo, paramInfo.funcArgIndex);
+                        paramInfo.singleBuffer = ti && ti->ppDepth && *ti->ppDepth == 1;
+                        llvm::errs() << "[KernelBlock] kernel window follows the kernel's blocks: " << kbu.blockElems
+                                     << " elements x " << kbu.rounds << " round(s)\n";
+                    }
+                    if (failed(blueprint_sched::checkKernelBlock(
+                            declareDataOp, kbu, paramInfo.bufferSize * defaultVectorWidth, paramInfo.numRounds,
+                            paramInfo.isInput ? "input" : "output")))
+                        paramInfo.kernelBlockMismatch = g_kernelBlockMismatch = true;
+                }
             } else {
                 // Fallback: try declare_data operand
                 Value srcValue = declareDataOp.getOperand();
@@ -1597,7 +1628,8 @@ void BlueprintToScheduleKernelPass::runOnOperation() {
     // patterns.add<EraseOpPattern<dfscheblueprint::DeclareDataOp>>(context);
     // patterns.add<EraseOpPattern<dfscheblueprint::TransferManifestOp>>(context);
 
-    if (failed(applyPartialConversion(getOperation(), target, std::move(patterns)))) {
+    g_kernelBlockMismatch = false;
+    if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))) || g_kernelBlockMismatch) {
         signalPassFailure();
         return;
     }

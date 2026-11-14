@@ -144,8 +144,8 @@ template<> struct GenTraits<2>
               {PortDirection::West, PortRole::Master, 4},
               {PortDirection::DMA, PortRole::Master, 4},
               {PortDirection::North, PortRole::Slave, 4},
-              {PortDirection::South, PortRole::Slave, 2, {1, 3}}, // demux - XAie_EnableAieToShimDmaStrmPort on AIE2PS
-                                                                  // accepts 1,3
+              {PortDirection::South, PortRole::Slave, 2, {2, 3}}, // demux - XAie_EnableAieToShimDmaStrmPort on AIE-ML
+                                                                  // accepts 2,3 (1,3 is AIE2PS)
               {PortDirection::East, PortRole::Slave, 4},
               {PortDirection::West, PortRole::Slave, 4},
               {PortDirection::DMA, PortRole::Slave, 4}}},
@@ -167,7 +167,7 @@ template<> struct GenTraits<2>
               {PortDirection::West, PortRole::Master, 4},
               {PortDirection::DMA, PortRole::Master, 4},
               {PortDirection::North, PortRole::Slave, 4},
-              {PortDirection::South, PortRole::Slave, 2, {1, 3}}, // demux - XAie_EnableAieToShimDmaStrmPort on AIE2PS
+              {PortDirection::South, PortRole::Slave, 2, {2, 3}}, // demux - XAie_EnableAieToShimDmaStrmPort on AIE-ML
               {PortDirection::East, PortRole::Slave, 4},
               {PortDirection::West, PortRole::Slave, 4},
               {PortDirection::DMA, PortRole::Slave, 4}}}};
@@ -200,7 +200,7 @@ template<> struct GenTraits<2>
                  },
                  {2, 3, 6, 7, 14, 15, 22, 23, 30, 31, 34, 35}, // noc shim support
                  {3, 7},                                       // mux (ext→AIE) - AIE2PS: ports 3,7
-                 {1, 3},                                       // demux (AIE→ext) - AIE2PS: ports 1,3
+                 {2, 3},                                       // demux (AIE→ext) - AIE-ML: ports 2,3
                  defaultPortTemplates(),
                  defaultDmaLimits(),
                  65536, // tileMemoryBytes (64KB)
@@ -334,6 +334,8 @@ template <> struct GenTraits<5> {
     }
 };
 
+static int g_partitionStartCol = 0;
+
 /*-------------------- concrete hidden resource --------------*/
 template<int GEN>
 class GenResource final : public IHwResource
@@ -347,6 +349,13 @@ public:
         if (it == db.end()) throw std::runtime_error("Unknown variant: "+var);
         layout_  = it->second;
         variant_ = var;
+        if (g_partitionStartCol > 0) {
+            std::unordered_set<uint32_t> rel;
+            for (uint32_t c : layout_.nocShimCols)
+                if (c >= static_cast<uint32_t>(g_partitionStartCol))
+                    rel.insert(c - g_partitionStartCol);
+            layout_.nocShimCols = std::move(rel);
+        }
     }
 
     /* interface impl. ------------------*/
@@ -399,6 +408,8 @@ private:
     std::unordered_map<int,int> shimNoc;
 };
 } // namespace detail
+
+void setResourcePartitionStartCol(int absStartCol) { detail::g_partitionStartCol = absStartCol < 0 ? 0 : absStartCol; }
 
 /*-------------------- public factory ------------------------*/
 std::unique_ptr<IHwResource>
