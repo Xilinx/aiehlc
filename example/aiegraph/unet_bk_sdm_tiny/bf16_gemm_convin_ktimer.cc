@@ -23,7 +23,9 @@ __global__ void gemm_bf16(aie::port<input_window_int32 *, aie::IFM, aie::shape<6
     int32_t *y = (int32_t *)aie::store_buffer(c, {pm * tm, pn * tnw}, {tm, tnw});
     // P4a: bf16 vector MAC (aie::mmul 8x8x8 bf16 x bf16 -> accfloat), fp32 result written once at the end.
     // A tiles = x rows (M x K, row-major 8x8); B tiles = w rows transposed to K x N (8x8) while packing.
+#if defined(__chess__)
     using MM = aie::mmul<8, 8, 8, bfloat16, bfloat16, accfloat>;
+#endif
     alignas(64) uint16_t apk[2 * 8 * 64]; // [m block][k block][8x8 M x K]
     alignas(64) uint16_t bpk[2 * 8 * 64]; // [n block][k block][8x8 K x N]
     alignas(64) float ob[64];
@@ -38,6 +40,7 @@ __global__ void gemm_bf16(aie::port<input_window_int32 *, aie::IFM, aie::shape<6
             for (int n = 0; n < tn; n++)
                 for (int k = 0; k < 2 * tkw; k++)
                     bpk[((n >> 3) * 8 + (k >> 3)) * 64 + (k & 7) * 8 + (n & 7)] = ws[n * 2 * tkw + k];
+#if defined(__chess__)
             for (int mi = 0; mi < 2; mi++)
                 for (int ni = 0; ni < 2; ni++) {
                     const bfloat16 *at = (const bfloat16 *)(apk + mi * 8 * 64);
@@ -57,6 +60,27 @@ __global__ void gemm_bf16(aie::port<input_window_int32 *, aie::IFM, aie::shape<6
                             y[(mi * 8 + r) * tnw + ni * 8 + cc] = (int32_t)o.u;
                         }
                 }
+#else // x86 kernel-analysis trace (aie_api_x86emu.h has no bfloat16/accfloat): same result, scalar
+            for (int m = 0; m < tm; m++)
+                for (int n = 0; n < tn; n++) {
+                    float s = 0.0f;
+                    for (int k = 0; k < 2 * tkw; k++) {
+                        union {
+                            uint32_t u;
+                            float f;
+                        } xa, wb;
+                        xa.u = (uint32_t)xs[m * 2 * tkw + k] << 16;
+                        wb.u = (uint32_t)ws[n * 2 * tkw + k] << 16;
+                        s += xa.f * wb.f;
+                    }
+                    union {
+                        uint32_t u;
+                        float f;
+                    } o;
+                    o.f = s;
+                    y[m * tnw + n] = (int32_t)o.u;
+                }
+#endif
         }
         aie::release(a);
         aie::release(b);
