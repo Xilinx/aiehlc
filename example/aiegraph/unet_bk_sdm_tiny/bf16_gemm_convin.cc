@@ -7,12 +7,20 @@
 #include "convin_data.h"
 __global__ void gemm_bf16(aie::port<input_window_int32 *, aie::IFM, aie::shape<64, 64>> a,
                           aie::port<input_window_int32 *, aie::WEIGHTS, aie::shape<64, 64>> b,
-                          aie::port<output_window_int32 *, aie::OFM, aie::shape<64, 64>> c) {
+                          aie::port<output_window_int32 *, aie::OFM, aie::shape<64, 80>> c) {
     // ports are int32 words: a/b word k holds bf16 elements 2k (low half) and 2k+1 (high half)
     const int tm = 16, tn = 16, tkw = 32; // C block per core, K chunk per round (32 words = 64 bf16)
     const int pm = aie::program_id(0);
     const int pn = aie::program_id(1);
-    int32_t *y = (int32_t *)aie::store_buffer(c, {pm * tm, pn * tn}, {tm, tn});
+    // KTIMER: AIE core timer at entry/exit; the delta goes to this core's C block tail
+    // (C block = 16 rows x (16 results + 4 tail words); row 0 words 16..18 = delta lo, magic, delta hi)
+    const int tnw = tn + 4;
+#if defined(__chess__)
+    const unsigned long long kt0 = get_cycles();
+#else
+    const unsigned long long kt0 = 0;
+#endif
+    int32_t *y = (int32_t *)aie::store_buffer(c, {pm * tm, pn * tnw}, {tm, tnw});
     float acc[tm * tn];
     for (int i = 0; i < tm * tn; i++)
         acc[i] = 0.0f;
@@ -45,8 +53,19 @@ __global__ void gemm_bf16(aie::port<input_window_int32 *, aie::IFM, aie::shape<6
             float f;
         } o;
         o.f = acc[i];
-        y[i] = (int32_t)o.u;
+        y[(i / tn) * tnw + i % tn] = (int32_t)o.u;
     }
+#if defined(__chess__)
+    const unsigned long long kt1 = get_cycles();
+#else
+    const unsigned long long kt1 = 0;
+#endif
+    for (int m = 0; m < tm; m++)
+        for (int t = tn; t < tnw; t++)
+            y[m * tnw + t] = 0;
+    y[tn] = (int32_t)(uint32_t)(kt1 - kt0);
+    y[tn + 1] = (int32_t)0x4B54494D; // "KTIM"
+    y[tn + 2] = (int32_t)(uint32_t)((kt1 - kt0) >> 32);
     aie::commit(c);
 }
 
@@ -66,7 +85,7 @@ int main() {
     int32_t *B = (int32_t *)__Runtime_Alloc(CI_BN * CI_KPORT * 2);
     memset(A, 0, CI_BM * CI_KPORT * 2);
     memset(B, 0, CI_BN * CI_KPORT * 2);
-    int32_t *C = (int32_t *)__Runtime_Alloc(CI_BM * CI_BN * 4);
+    int32_t *C = (int32_t *)__Runtime_Alloc(CI_BM * 80 * 4); /* 64 x (4 x (16 + 4 KTIMER tail)) */
     int launches = 0;
     XTime t0, t1;
     XTime_GetTime(&t0);
@@ -76,17 +95,17 @@ int main() {
                 memcpy((uint16_t *)A + r * CI_KPORT, Afull + (mb * CI_BM + r) * CI_K, CI_K * 2);
             for (int r = 0; r < CI_BN; r++)
                 memcpy((uint16_t *)B + r * CI_KPORT, Bfull + (nb * CI_BN + r) * CI_K, CI_K * 2);
-            memset(C, 0xff, CI_BM * CI_BN * 4); /* sentinel: an unwritten element shows up as nonfinite */
+            memset(C, 0xff, CI_BM * 80 * 4); /* sentinel: an unwritten element shows up as nonfinite */
             Xil_DCacheFlushRange((UINTPTR)A, CI_BM * CI_KPORT * 2);
             Xil_DCacheFlushRange((UINTPTR)B, CI_BN * CI_KPORT * 2);
-            Xil_DCacheFlushRange((UINTPTR)C, CI_BM * CI_BN * 4);
+            Xil_DCacheFlushRange((UINTPTR)C, CI_BM * 80 * 4);
             gemm_bf16<<<mesh>>>(A, B, C);
-            Xil_DCacheInvalidateRange((UINTPTR)C, CI_BM * CI_BN * 4);
+            Xil_DCacheInvalidateRange((UINTPTR)C, CI_BM * 80 * 4);
             launches++;
             for (int m = 0; m < CI_BM; m++)
                 for (int n = 0; n < CI_BN; n++) {
                     float f;
-                    memcpy(&f, &C[m * CI_BN + n], 4);
+                    memcpy(&f, &C[m * 80 + (n >> 4) * 20 + (n & 15)], 4);
                     out[(nb * CI_BN + n) * CI_M + mb * CI_BM + m] = f; /* NCHW */
                 }
         }
