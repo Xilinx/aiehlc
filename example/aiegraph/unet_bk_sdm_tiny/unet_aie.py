@@ -681,6 +681,8 @@ MAIN_EXTRA_DECL = (
     "unsigned int *rst_n) __asm__(\"_Z28__Runtime_kload_split_cyclesPyPjS_S0_\");\n"
     "void __Runtime_setup_split_cycles(unsigned long long *plan_cyc, unsigned int *plan_n, unsigned long long *sync_cyc, "
     "unsigned int *sync_n) __asm__(\"_Z28__Runtime_setup_split_cyclesPyPjS_S0_\");\n"
+    "unsigned long long __Runtime_ctrl_aot_fallbacks(void) __asm__(\"_Z28__Runtime_ctrl_aot_fallbacksv\");\n"
+    "void __Runtime_ctrl_shim_bd_ctrl_stats_print(void) __asm__(\"_Z39__Runtime_ctrl_shim_bd_ctrl_stats_printv\");\n"
     "/* A78 PMU cycle counter (the runtime's RT_PROF_* clock): enabled here without the C reset, read\n"
     " * around graph_run with XTime so the PMU rate is measured, not assumed */\n"
     "static inline unsigned long long unet_pmc(void) {\n"
@@ -717,7 +719,8 @@ MAIN_CMP = r"""    int launches = 0, run_rc = -99, calls = 0;
                "total_max_core_cycles=%llu\n", launches ? kt_max / (unsigned long long)launches : 0ULL, launches,
                kt_n, kt_bad, kt_n ? (double)kt_all / (16.0 * kt_n) : 0.0, kt_max);
     }
-/*KT-*/    int rc = p1_cmp("unet", out, "bf16", launches, (int)ph_calls[2], run_rc, frac);
+/*KT-*/    __Runtime_ctrl_shim_bd_ctrl_stats_print(); /* [SHIM_BD_CTRL] + [CTRLPKT_AOT] in every build */
+    int rc = p1_cmp("unet", out, "bf16", launches, (int)ph_calls[2], run_rc, frac);
 """
 
 
@@ -729,8 +732,10 @@ LAUNCH_LINE = r"""#ifdef UNET_LAUNCH_WARM
         int wl = 0;
         unet_aie_stats(&wl, 0, 0, 0);
         unet_aie_launch_stats(&aie_ms, &kloads, &cold_tiles);
-        printf("LAUNCH warm ms_per_launch=%.3f launches=%d aie_wall_ms=%.3f kloads=%d opts=%s,cold_tile_loads=%u\n",
-               wl ? aie_ms / wl : 0.0, wl, aie_ms, kloads, UNET_LAUNCH_OPTS, cold_tiles);
+        printf("LAUNCH warm ms_per_launch=%.3f launches=%d aie_wall_ms=%.3f kloads=%d opts=%s,cold_tile_loads=%u"
+               " ctrlpkt=%s aot_fallbacks=%llu\n",
+               wl ? aie_ms / wl : 0.0, wl, aie_ms, kloads, UNET_LAUNCH_OPTS, cold_tiles, UNET_CTRLPKT,
+               __Runtime_ctrl_aot_fallbacks());
         /* P1: per-launch split of aie_wall_ms by runtime phase (A78 pmccntr, AIEHLC_PROFILING=1 runtime).
          * PH_COREEN is the A78 cost of the core-enable writes, not AIE compute: the AIE compute is
          * inside wait_io (completion = output-DMA drain). core_reset is part of kload. */

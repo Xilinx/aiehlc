@@ -939,6 +939,8 @@ void __Runtime_ctrl_shim_bd_begin(__Runtime_CtrlRowFabric *f);
 void __Runtime_ctrl_shim_bd_commit(void);
 int __Runtime_ctrl_shim_bd_sync(void);
 void __Runtime_ctrl_shim_bd_ctrl_stats_print(void);
+/* AOT shim-BD calls that fell back to JIT since boot (= [SHIM_BD_CTRL] aot_fallbacks) */
+unsigned long long __Runtime_ctrl_aot_fallbacks(void);
 
 // Poll the shim S2MM drain until the response lands, sync it for the CPU, and
 // return the first response word. Uses @inst->token armed by

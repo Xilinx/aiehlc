@@ -6037,6 +6037,10 @@ void __Runtime_ctrl_shim_bd_ctrl_stats_print(void) {
            g_sb_stats.aot_win_commit_cyc, g_sb_stats.aot_win_addr_cyc);
 }
 
+/* AOT shim-BD control-packet calls that fell back to the JIT encoder since boot (0 = every call hit the
+ * AOT table). Read-only; the same counter [SHIM_BD_CTRL] prints as aot_fallbacks. */
+unsigned long long __Runtime_ctrl_aot_fallbacks(void) { return g_sb_stats.aot_fallbacks; }
+
 static uint32_t *rt_sb_seg_base(uint32_t k) { return g_sb.pkt + k * RT_SB_SEG_WORDS; }
 
 static void rt_sb_reset_segs(void) {
