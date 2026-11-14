@@ -201,7 +201,9 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     log(f"carrier layer {lidx} ({car['func']}): aiegraph offload builds the gemm_bf16 archive on it")
     p = emod.offload_prototype(lidx, entry=ua.ENTRY)
     kcc = ua.write_kernel(out / "aiek_src", p.spec(), max(c["M"] * c["N"] for c in sel),
-                          warm=(a.launch_opt == "warm"))
+                          warm=(a.launch_opt == "warm"), ctrlpkt=a.ctrlpkt)
+    if a.ctrlpkt == "aot":
+        log(f"ctrlpkt=aot pragmas={ua.CTRLPKT_NPRAGMAS}")
     log(f"kernel source {kcc}")
 
     # calibrate/emulate would run the whole UNet twice on x86; force=True ignores their
@@ -229,6 +231,8 @@ def aie_conv(a, emod, out: Path, hdr: Path):
         with open(hdr, "a") as f:
             f.write('#define UNET_LAUNCH_WARM 1\n#define UNET_LAUNCH_OPTS "%s"\n' % LAUNCH_OPTS_WARM)
     with open(hdr, "a") as f:
+        f.write('#define UNET_CTRLPKT "%s"\n' % a.ctrlpkt)
+    with open(hdr, "a") as f:
         f.write("#define UNET_AIE_PLANNED_LAUNCHES %d\n#define UNET_AIE_PLANNED_CALLS %d\n"
                 "#define UNET_TOTAL_GEMM_MACS %dULL\n" % (planned, len(sel), int(part["total_gemm_macs"])))
     return ua.main_c(MAIN_C), len(sel)
@@ -249,6 +253,9 @@ def main(argv=None) -> int:
                     help="warm (P5): aiehlc --skip-bss + ZFILL_WIDE/PMLOAD_WIDE/PM_WARM_SKIP: the conv "
                          "kernel is loaded once, later launches only reset the cores (CoreReset+Unreset), "
                          "rewrite .data/BDs/locks, enable and wait")
+    ap.add_argument("--ctrlpkt", choices=("off", "aot"), default="off",
+                    help="aot (P2a): control-packet plan pragmas in aiek_unetconv.cc + "
+                         "__Runtime_ctrl_high_throughput_enable(1) before the first launch")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
     if a.aie == "conv":
@@ -258,6 +265,9 @@ def main(argv=None) -> int:
         # PH_COREEN is counted only by a runtime built with -DAIEHLC_PROFILING=1 (as P2/P3)
         os.environ["AIEHLC_PROFILING"] = "1"
         os.environ["EXTRA_DEFS"] = (os.environ.get("EXTRA_DEFS", "") + " -DAIEHLC_PROFILING=1").strip()
+    if a.ctrlpkt == "aot" and a.aie != "conv":
+        log("--ctrlpkt aot needs --aie conv")
+        return 2
     if a.launch_opt == "warm":
         if a.aie != "conv":
             log("--launch-opt warm needs --aie conv")
