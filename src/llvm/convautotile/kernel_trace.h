@@ -58,6 +58,12 @@ struct TracePort {
     std::vector<int> extent;
     int elem_bytes = 1;
     bool output = false;
+    // The role tag was omitted (`aie::port<T, aie::shape<...>>`): `role` is
+    // inferred -- OFM for an output window, else IFM, refined to WEIGHTS once the
+    // trace shows the blocks broadcast along a mesh column. The role only names
+    // the routed GemmSpace and lets a conv be recognized; the DMA comes from the
+    // traced blocks either way.
+    bool roleInferred = false;
 };
 
 struct TraceKernel {
@@ -76,11 +82,31 @@ struct PortFit {
     int rounds_i = 1, rounds_j = 1;
 };
 
+// Dataflow options of one port, from its load_buffer / store_buffer calls
+// (every block of a port must pass the same). All optional; 0 / false = the
+// compiler's default.
+//   .depth    the port's core buffers: 1 single, 2 ping-pong
+//   .resident one block per core, held for the whole launch, one buffer
+//   .tile     {tr, tc} (2-D loads): the DMA delivers the block panel-major --
+//             tc-wide column panels one after another, each with all rows --
+//             so every tr x tc tile is contiguous (tile (a, b) starts at
+//             (b * rows / tr + a) * tr * tc elements)
+struct BlockOpts {
+    int depth = 0;
+    bool resident = false;
+    int tile[2] = {0, 0};
+    bool any() const { return depth || resident || tile[0] || tile[1]; }
+    bool operator==(const BlockOpts &o) const {
+        return depth == o.depth && resident == o.resident && tile[0] == o.tile[0] && tile[1] == o.tile[1];
+    }
+};
+
 struct KernelTraceResult {
     bool ok = true;
     std::vector<std::string> errors;
     std::vector<std::string> notes;
-    std::map<std::string, PortFit> fits; // by port variable
+    std::map<std::string, PortFit> fits;   // by port variable
+    std::map<std::string, BlockOpts> opts; // by port variable, ports that pass options
 };
 
 // Trace + check one kernel on a rows x cols mesh. `prelude` is extra C++ the
@@ -111,6 +137,14 @@ const char *traceDimName(const std::string &role, int d);
 // The object-like #define lines of a source (what its kernel TU sees).
 std::string traceDefines(const std::string &src);
 
+// One routed port's traced blocks: what the kernel loads / stores per core
+// (the routing IR's #routing.kernel_block of that tensor).
+struct PortBlock {
+    std::vector<int> tensor; // the port's tensor as the kernel declares it (aie::shape)
+    PortFit fit;
+    BlockOpts opts;
+};
+
 struct KernelOnlyResult {
     bool found = false; // the source has a kernel-only __global__ with aie::shape ports
     bool ok = true;
@@ -127,6 +161,8 @@ struct KernelOnlyResult {
     // Per routed kernel: the estimated time (ms) -- the conv derivation's when
     // `derived` has the kernel, else the routing cost (routingEstMs).
     std::map<std::string, double> est_ms;
+    // Per routed kernel, per port variable: the traced blocks and options.
+    std::map<std::string, std::map<std::string, PortBlock>> blocks;
 };
 
 // Kernel-only sources: analyze, derive, verify, and rewrite `src` into the

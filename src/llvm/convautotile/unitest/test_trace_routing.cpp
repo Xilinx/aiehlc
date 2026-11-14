@@ -204,6 +204,63 @@ static void testGemm() {
     CHECK(routedDeclsText("k", plan, sp).find("fullconnect_auto = 1") != std::string::npos);
 }
 
+// GEMM in full-K strips with dataflow options (simplegemm_dataflow.cc):
+// C[2048,256] = A[2048,256] * B[256,256]^T; A / C walk 32 strips of 16 rows
+// inside the core's 512-row slice, B is one {.resident} block per core.
+static void testGemmStripsOptions() {
+    std::vector<TracePort> ports = {port("a", "IFM", {2048, 256}, false), port("b", "WEIGHTS", {256, 256}, false),
+                                    port("c", "OFM", {2048, 256}, true)};
+    std::map<std::string, PortFit> fits;
+    fits["a"] = fit({16, 256}, {512, 0}, {0, 0}, 1, {0, 0}, 32, {16, 0});
+    fits["b"] = fit({64, 256}, {0, 0}, {64, 0}, 1, {0, 0}, 1, {0, 0});
+    fits["c"] = fit({16, 64}, {512, 0}, {0, 64}, 1, {0, 0}, 32, {16, 0});
+    std::map<std::string, BlockOpts> opts;
+    opts["a"].depth = 2;
+    opts["a"].tile[0] = opts["a"].tile[1] = 8;
+    opts["b"].resident = true;
+    RoutingPlan plan = planRouting(ports, fits, 4, 4, opts);
+    CHECK(plan.ok);
+    CHECK(!plan.halo);
+    CHECK(plan.ports[0].dims[0].flatLoop());
+    CHECK(!plan.ports[1].dims[0].flatLoop());
+    RoutingHints h = routingHints(plan);
+    CHECK_EQ(h.l1_budget, 16384); // room for the B block
+    CHECK_EQ(h.pp_depth, 2);      // 16 KB (B, one buffer) + 2x4 KB + 2x1 KB fits per port
+    std::vector<PortSpace> sp = routingSpaces(plan, h);
+    CHECK_EQ(sp.size(), 3);
+    if (sp.size() != 3)
+        return;
+    // Mesh split + back-to-back strips: one flat tile list (the GEMM form), no slice_tiling.
+    CHECK_EQ(sp[0].d[0].tile_round, 4 * 32);
+    CHECK_EQ(sp[0].d[0].tile_size, 16);
+    CHECK_EQ(sp[0].d[0].stride, 16);
+    CHECK_EQ(sp[0].d[0].l2_rounds, 0);
+    CHECK_EQ(sp[2].d[0].tile_round, 4 * 32);
+    CHECK_EQ(sp[2].d[0].l2_rounds, 0);
+    CHECK_EQ(sp[1].d[0].tile_round, 4);
+    CHECK_EQ(sp[1].d[0].tile_size, 64);
+    // Per-port buffers: .resident = 1, .depth = 2, the rest the hint.
+    CHECK_EQ(sp[0].pp_depth, 2);
+    CHECK_EQ(sp[1].pp_depth, 1);
+    CHECK_EQ(sp[2].pp_depth, 2);
+    checkRoundTrip(sp);
+    CHECK_EQ(portBufferBytes(plan, h.pp_depth), 16384 + 2 * 4096 + 2 * 1024);
+    CHECK(checkPortBuffers(plan, h).empty());
+    // Without options B is double-buffered: 2x16 + 2x4 + 2x1 = 42 KB overflows the
+    // 29.7 KB buffer region, so the ports drop to one buffer (the output keeps
+    // its pong array: kernel.cc declares it whatever the depth).
+    RoutingPlan bare = planRouting(ports, fits, 4, 4);
+    RoutingHints hb = routingHints(bare);
+    CHECK_EQ(hb.pp_depth, 1);
+    CHECK_EQ(routingSpaces(bare, hb)[1].pp_depth, 1);
+    CHECK_EQ(portBufferBytes(bare, 1), 4096 + 16384 + 2 * 1024);
+    // .depth = 2 on that B as well: nothing fits any more.
+    std::map<std::string, BlockOpts> o2;
+    o2["b"].depth = 2;
+    RoutingPlan two = planRouting(ports, fits, 4, 4, o2);
+    CHECK(checkPortBuffers(two, routingHints(two)).find("more than the 29696 B") != std::string::npos);
+}
+
 // Eltwise on a 4x1 mesh: rows split, 4 column chunks per core, no halo.
 static void testEltwise() {
     std::vector<TracePort> ports = {port("x", "IFM", {64, 128}, false), port("y", "OFM", {64, 128}, true)};
@@ -385,6 +442,38 @@ static void testSpaceKernel(const std::string &repo) {
     CHECK(!verifySpaceKernels(port, dir, "port.cc", {"conv2d_spatial"}).found);
 }
 
+// The role tag is optional: `aie::port<T, aie::shape<...>>` routes exactly like
+// the tagged form, with IFM / WEIGHTS / OFM inferred (outputs, col broadcast).
+static void testUntaggedPorts(const std::string &repo) {
+    const std::string dir = repo + "/example/tileprogram/ccode";
+    std::ifstream in(dir + "/simpleconv2dkernel_port.cc");
+    std::stringstream ss;
+    ss << in.rdbuf();
+    std::string tagged = ss.str(), untagged = tagged;
+    for (const char *t : {"aie::IFM, ", "aie::WEIGHTS, ", "aie::OFM, "})
+        for (size_t p; (p = untagged.find(t)) != std::string::npos;)
+            untagged.erase(p, std::string(t).size());
+    CHECK(untagged != tagged);
+    std::string err;
+    auto ks = findPlainKernels(untagged, dir, err);
+    CHECK(err.empty() && ks.size() == 1);
+    if (ks.size() == 1) {
+        CHECK_EQ(ks[0].ports.size(), 3);
+        for (auto &p : ks[0].ports)
+            CHECK(p.roleInferred);
+        CHECK_EQ(ks[0].ports[0].shape.size(), 3);
+    }
+    KernelOnlyResult a = inferKernelOnly(tagged, dir, "tagged.cc");
+    KernelOnlyResult b = inferKernelOnly(untagged, dir, "untagged.cc");
+    CHECK(a.ok && b.ok);
+    CHECK(a.tu_decls == b.tu_decls);
+    CHECK(b.derived.count("conv2d_spatial") == 1); // still recognized as the conv (roles inferred)
+    CHECK(tagged == untagged);                     // both rewritten to the same routed source
+    // A non-shape second argument is still not a kernel-only port.
+    std::string bad = "__global__ void k(aie::port<input_window_int8 *, aie::Nope> a) { }\n";
+    CHECK(findPlainKernels(bad, dir, err).empty() || findPlainKernels(bad, dir, err)[0].ports.empty());
+}
+
 int main(int argc, char **argv) {
     std::string repo = argc > 1 ? argv[1] : AIEHLC_SOURCE_DIR;
     testConvEquivalence(7, 28);
@@ -393,12 +482,14 @@ int main(int argc, char **argv) {
     testConvEquivalence(7, 28, 3);
     testConvEquivalence(14, 16, 3);
     testGemm();
+    testGemmStripsOptions();
     testEltwise();
     testRejects();
     testTraceExample(repo);
     testSpaceParse();
     testSpaceDiff();
     testSpaceKernel(repo);
+    testUntaggedPorts(repo);
     std::printf("trace_routing: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

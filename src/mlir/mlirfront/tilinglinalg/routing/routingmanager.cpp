@@ -452,7 +452,7 @@ ModuleOp routingmanager::ops_testNew(MLIRContext *ctx, int totalN, std::string r
         auto initConstant = builder.create<arith::ConstantOp>(builder.getUnknownLoc(), tensorType, denseAttr);
         auto tensor =
             builder.create<createscheduletensor>(builder.getUnknownLoc(), tensorType, initConstant.getResult(), vals,
-                                                 dimnum, nullptr, nullptr, nullptr, nullptr);
+                                                 dimnum, nullptr, nullptr, nullptr, nullptr, nullptr);
         return tensor;
     };
 
@@ -675,6 +675,7 @@ routing::TensorRoutingInfoMap routing::collectTensorRoutingInfo(mlir::ModuleOp m
                 info.layoutTransform = lt.getValue();
             if (auto pp = decl.getPpDepthAttr())
                 info.ppDepth = pp.getInt();
+            info.kernelBlock = decl.getKernelBlockAttr();
         } else if (op->getName().getStringRef() == "dfscheblueprint.declare_data" && op->getNumOperands() == 1) {
             // Matched by name: the routing library does not link the
             // dfscheblueprint dialect.
@@ -685,6 +686,7 @@ routing::TensorRoutingInfoMap routing::collectTensorRoutingInfo(mlir::ModuleOp m
                 info.layoutTransform = lt.getValue();
             if (auto pp = op->getAttrOfType<IntegerAttr>(kDeclPpDepthAttr))
                 info.ppDepth = pp.getInt();
+            info.kernelBlock = op->getAttrOfType<KernelBlockAttr>(kDeclKernelBlockAttr);
         } else {
             return;
         }
@@ -746,6 +748,8 @@ void routing::copyTensorRoutingInfo(routing::createscheduletensor from, mlir::Op
         to->setAttr(kDeclLayoutTransformAttr, a);
     if (auto a = from.getPpDepthAttr())
         to->setAttr(kDeclPpDepthAttr, a);
+    if (auto a = from.getKernelBlockAttr())
+        to->setAttr(kDeclKernelBlockAttr, a);
 }
 
 // The routing func is the module's func.func (@main, or @routing on the
@@ -843,7 +847,7 @@ mlir::func::FuncOp routingmanager::createroutingfunc(MLIRContext* ctx, int total
             // 3) I64Attr ($dim).
             IntegerAttr dimnum = builder.getI64IntegerAttr(2);
             auto tensor = builder.create<createscheduletensor>(builder.getUnknownLoc(),  subview, vals, dimnum, nullptr,
-                                                               nullptr, nullptr, nullptr);
+                                                               nullptr, nullptr, nullptr, nullptr);
             //
             auto hw_row_number = rnum_i32;
             IntegerAttr splitdim = builder.getI64IntegerAttr(0);//dim 0 is

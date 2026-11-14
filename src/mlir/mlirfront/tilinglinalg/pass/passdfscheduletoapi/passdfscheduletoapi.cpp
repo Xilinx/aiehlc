@@ -103,6 +103,15 @@ static std::string buildInitializerString(DenseElementsAttr denseAttr, Type elem
     return initStream.str();
 }
 
+// The BD id of a dma_bd when it is a constant, else -2 (never a next_bd value):
+// a BD whose next_bd is itself re-arms ONE buffer (single-buffer, lock init 1).
+static int64_t constBdId(dfschedule::ConfigDmaBdOp op) {
+    if (auto c = op.getBdId().getDefiningOp<arith::ConstantOp>())
+        if (auto a = mlir::dyn_cast<IntegerAttr>(c.getValue()))
+            return a.getInt();
+    return -2;
+}
+
 static int64_t getElemSize(Type elemType) {
     if (elemType.isInteger(8)) return 1;
     if (elemType.isInteger(16)) return 2;
@@ -1570,7 +1579,7 @@ struct ConfigDmaBdInnerPattern : public OpConversionPattern<dfschedule::ConfigDm
                     // Detect single-buffer mode by checking next_bd: if next_bd==-1 (no chaining),
                     // and there's no linked_bd, it's a single-buffer flow.
                     int32_t nextBdVal = static_cast<int32_t>(op.getNextBd());
-                    bool isSingleBuffer = (nextBdVal == -1) && !op.getLinkedBd();
+                    bool isSingleBuffer = (nextBdVal == -1 || nextBdVal == constBdId(op)) && !op.getLinkedBd();
                     int32_t lockInitValue = isSingleBuffer ? 1 : 2;
 
                     if (isOutput) {
@@ -3593,7 +3602,7 @@ void DfscheduleToApiPass::runOnOperation() {
             }
 
             int32_t nextBdVal = static_cast<int32_t>(bdOp.getNextBd());
-            bool isSingleBuffer = (nextBdVal == -1) && !bdOp.getLinkedBd();
+            bool isSingleBuffer = (nextBdVal == -1 || nextBdVal == constBdId(bdOp)) && !bdOp.getLinkedBd();
             int32_t lockInitValue = isSingleBuffer ? 1 : 2;
 
             auto emitLock = [&](int32_t lockId, int32_t initVal, const std::string &note) {

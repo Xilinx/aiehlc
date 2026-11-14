@@ -109,6 +109,7 @@ GemmTilingScalars readGemmTilingScalars(mlir::ModuleOp moduleOp);
 // ---------------------------------------------------------------------------
 inline constexpr llvm::StringLiteral kDeclHaloAttr = "routing.halo";
 inline constexpr llvm::StringLiteral kDeclShimDmaAttr = "routing.shim_dma";
+inline constexpr llvm::StringLiteral kDeclKernelBlockAttr = "routing.kernel_block";
 inline constexpr llvm::StringLiteral kDeclLayoutTransformAttr = "routing.layout_transform";
 inline constexpr llvm::StringLiteral kDeclPpDepthAttr = "routing.pp_depth";
 // Kernel round schedule on the routing func.func (see KernelTilingAttr).
@@ -119,6 +120,7 @@ struct TensorRoutingInfo {
     ShimDmaAttr shimDma;             // null: no user DmaTransform
     llvm::StringRef layoutTransform; // "" when unset
     std::optional<int64_t> ppDepth;  // unset when absent
+    KernelBlockAttr kernelBlock;     // null: not a kernel-only (traced) port
 };
 using TensorRoutingInfoMap = llvm::DenseMap<int, TensorRoutingInfo>;
 

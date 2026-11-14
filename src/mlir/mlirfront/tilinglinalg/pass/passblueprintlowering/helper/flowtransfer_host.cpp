@@ -272,6 +272,31 @@ LogicalResult FlowTransferConversion::computeShimBdParams(FlowLoweringCtx &c) co
 }
 
 // ---------------------------------------------------------------------------
+// applyKernelBlockShim — a kernel-only input that follows its traced blocks
+// (resolveKernelBlock): one shim BD per kernel block, block-sized, with the
+// .tile panel-major dims when asked; no K-round iteration.
+// ---------------------------------------------------------------------------
+void FlowTransferConversion::applyKernelBlockShim(FlowLoweringCtx &c) const {
+    if (!c.shimIsSender || c.isHaloSlab)
+        return;
+    int64_t elemBytes = 1;
+    if (c.memrefType.getElementType().isIntOrFloat())
+        elemBytes = std::max<int64_t>(c.memrefType.getElementTypeBitWidth() / 8, 1);
+    c.kb = resolveKernelBlock(passState->tensorInfo, traceFlowConfigToFuncArgIndex(c.shimFlowConfig), true,
+                              isFullConnectAuto(c.op->getParentOfType<ModuleOp>()), elemBytes);
+    if (!c.kb.follow)
+        return;
+    c.perTileShimLen = c.kb.blockElems * elemBytes;
+    c.shimIterStepSize = 0;
+    c.shimIterWrap = 0;
+    c.shimDimStrides = c.kb.tileStrides.empty() ? ArrayAttr() : c.rewriter.getI32ArrayAttr(c.kb.tileStrides);
+    c.shimDimWraps = c.kb.tileWraps.empty() ? ArrayAttr() : c.rewriter.getI32ArrayAttr(c.kb.tileWraps);
+    llvm::errs() << "[KernelBlock] flowIdx=" << c.flowIndex << " input follows the kernel's blocks: " << c.kb.rounds
+                 << " x " << c.perTileShimLen << " B per core, round stride " << c.kb.strideIBytes << "/"
+                 << c.kb.strideJBytes << " B" << (c.kb.tileStrides.empty() ? "" : ", .tile panel-major") << "\n";
+}
+
+// ---------------------------------------------------------------------------
 // emitShimBdOoo — OOO path: N per-tile shim BDs (orig 1175-1358).
 // ---------------------------------------------------------------------------
 void FlowTransferConversion::emitShimBdOoo(FlowLoweringCtx &c) const {
@@ -460,7 +485,7 @@ void FlowTransferConversion::emitShimBdNonOoo(FlowLoweringCtx &c) const {
                          << " row_pitch=" << c.kAccumRowPitchElems << " l2_rounds=" << c.kAccumL2Rounds << "\n";
         }
     }
-    if (c.shimIsSender && !c.isHaloSlab) {
+    if (c.shimIsSender && !c.isHaloSlab && !c.kb.follow) {
         auto moduleOp = op->getParentOfType<ModuleOp>();
         if (moduleOp) {
             // Tiling scalars from passState (entry-read #routing.tiling op, flat-attr
@@ -638,6 +663,10 @@ void FlowTransferConversion::classifyScheduleMode(FlowLoweringCtx &c) const {
                          << "M×N round loop (needsOuterLoop -> false)\n";
         c.needsOuterLoop = false;
     }
+    // A kernel-only input that follows its blocks loops once per kernel block
+    // (an input the kernel takes once is sent once, outside any round loop).
+    if (c.kb.follow)
+        c.needsOuterLoop = c.kb.rounds > 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +802,16 @@ void FlowTransferConversion::computeMultipleInputOffsetParams(FlowLoweringCtx &c
         subTileStride = tileNVal * fullKVal * elemBytes;
     }
 
+    if (c.kb.follow) {
+        // One iteration per kernel block, at the block's own DDR offset.
+        p.outerRounds = c.kb.rounds;
+        perIterRepeat = 1;
+        subTileStride = c.kb.roundsJ > 1 ? c.kb.strideJBytes : c.kb.strideIBytes;
+        halo2D = c.kb.roundsJ > 1 && c.kb.rounds > c.kb.roundsJ;
+        haloHStrideBytes = c.kb.strideIBytes;
+        haloWStrideBytes = c.kb.strideJBytes;
+        haloWRoundsVal = c.kb.roundsJ;
+    }
     p.perIterRepeat = perIterRepeat;
     p.subTileStride = subTileStride;
     p.halo2D = halo2D;

@@ -184,6 +184,7 @@ LogicalResult FlowTransferConversion::matchAndRewrite(dfscheblueprint::FlowTrans
     emitShimTileAndParams(c);
     if (failed(computeShimBdParams(c)))
         return failure();
+    applyKernelBlockShim(c);
 
     if (c.useOOO && c.numCoreTiles > 1) {
         emitShimBdOoo(c);
