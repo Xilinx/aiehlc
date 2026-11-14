@@ -954,7 +954,10 @@ static int uc_kalloc(void) {
     return (g_kw && g_kx && g_ky) ? 0 : -1;
 }
 /* one launch of the layer's gemm_kacc instance (ports W [N][K/2], X [M][K/2], Y f32 [N][M]) */
-static int uc_kacc_launch(aieMesh &mesh, int N, int K, int M) {
+static int uc_kacc_launch(int N, int K, int M) {
+    aieSetDevice(0);
+    aieArray device;
+    aieMesh mesh = device.partition({@PART_C0@, 6, 0, 6}, 4, 4); // aiegraph lint L015: the mesh VarDecl in the launching function
 @DISPATCH@
     return -6;
 }
@@ -1013,9 +1016,6 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     }
     const size_t wbytes = (size_t)N * K * 2, xbytes = (size_t)M * K * 2;
     (void)kc;
-    aieSetDevice(0);
-    aieArray device;
-    aieMesh mesh = device.partition({@PART_C0@, 6, 0, 6}, 4, 4);
     memset(g_ky, 0xff, (size_t)M * N * 4); // sentinel: unwritten -> NaN -> counted
     XTime lt0, lt1;
     XTime_GetTime(&lt0);
@@ -1028,7 +1028,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     Xil_DCacheFlushRange((UINTPTR)g_kx, xbytes);
     Xil_DCacheFlushRange((UINTPTR)g_ky, (size_t)M * N * 4);
     const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
-    const int lrc = uc_kacc_launch(mesh, N, K, M); // ONE launch: the whole layer, K summed in the cores
+    const int lrc = uc_kacc_launch(N, K, M); // ONE launch: the whole layer, K summed in the cores
     const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();
     Xil_DCacheInvalidateRange((UINTPTR)g_ky, (size_t)M * N * 4);
 #if UC_WARM
