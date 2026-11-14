@@ -966,6 +966,8 @@ static int uc_kacc_launch(int N, int K, int M) {
 }
 
 static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, int sw, int ph, int pw) {
+    XTime ut0; /* [UCL] per-layer split: host pre-tiling (W re-tile + im2col) | AIE window | host post */
+    XTime_GetTime(&ut0);
     if (nargs < 4)
         return -2;
     const uc_dlt *x = (const uc_dlt *)argv[0], *w = (const uc_dlt *)argv[1], *y = (const uc_dlt *)argv[nargs - 1];
@@ -1065,6 +1067,13 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     if (bad) {
         printf("[unet_aie_conv] %d nonfinite AIE outputs\n", bad);
         return -4;
+    }
+    {
+        XTime ut3;
+        XTime_GetTime(&ut3);
+        const double us = 1e6 / (double)COUNTS_PER_SECOND;
+        printf("[UCL] l=%d M=%d N=%d K=%d pre_us=%.0f aie_us=%.0f post_us=%.0f\n", g_aie_launches - 1, M, N, K,
+               (double)(lt0 - ut0) * us, (double)(lt1 - lt0) * us, (double)(ut3 - lt1) * us);
     }
 """
 
