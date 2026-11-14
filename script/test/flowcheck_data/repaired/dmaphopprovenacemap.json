@@ -1,0 +1,1191 @@
+{
+  "version": 1,
+  "startcol": 3,
+  "aie_gen": "Gen5",
+  "module_attrs": 
+  {
+    "tile_m": 16,
+    "tile_n": 16,
+    "tile_rows": 16,
+    "tile_cols": 16,
+    "effective_k": 64,
+    "full_k": 256,
+    "k_rounds": 4,
+    "m_rounds": 4,
+    "n_rounds": 4
+  },
+  "communication_paths": [
+    {
+      "id": "push_0",
+      "direction": "push",
+      "data": 
+      {
+        "tensor_shape": [
+          64,
+          64
+        ],
+        "element_type": "i8",
+        "element_bytes": 1,
+        "total_bytes": 4096
+      },
+      "stages": [
+        {
+          "role": "producer",
+          "tile": 
+          {
+            "col": 1,
+            "row": 0,
+            "type": "shim"
+          },
+          "port_sym": "f0_shimPortIn",
+          "channel": 0,
+          "contract": "produce via MM2S from DDR",
+          "config_ref": "dmaphop.port @f0_shimPortIn"
+        },
+        {
+          "role": "channel",
+          "hops": [
+            {
+              "from": "f0_shimPortOut(1,0)",
+              "to": "f0_corePortIn0(0,3)"
+            },
+            {
+              "from": "f0_corePortOut0(0,3)",
+              "to": "f0_corePortIn1(0,4)"
+            },
+            {
+              "from": "f0_corePortOut1(0,4)",
+              "to": "f0_corePortIn2(0,5)"
+            },
+            {
+              "from": "f0_corePortOut2(0,5)",
+              "to": "f0_corePortIn3(0,6)"
+            }
+          ],
+          "contract": "lossless delivery via 4-hop chain",
+          "config_ref": "dmaphop.create_path"
+        },
+        {
+          "role": "consumer",
+          "tiles": [
+            {
+              "col": 0,
+              "row": 3,
+              "type": "core",
+              "port_sym": "f0_corePortIn0",
+              "consumer_sym": "f0_consumer0",
+              "dma_port": 1
+            },
+            {
+              "col": 0,
+              "row": 4,
+              "type": "core",
+              "port_sym": "f0_corePortIn1",
+              "consumer_sym": "f0_consumer1",
+              "dma_port": 1
+            },
+            {
+              "col": 0,
+              "row": 5,
+              "type": "core",
+              "port_sym": "f0_corePortIn2",
+              "consumer_sym": "f0_consumer2",
+              "dma_port": 1
+            },
+            {
+              "col": 0,
+              "row": 6,
+              "type": "core",
+              "port_sym": "f0_corePortIn3",
+              "consumer_sym": "f0_consumer3",
+              "dma_port": 1
+            }
+          ],
+          "contract": "receive via S2MM, consume in compute kernel",
+          "config_ref": "dmaphop.consumer @f0_consumer0..f0_consumer3"
+        }
+      ],
+      "invariants": [
+        "producer total bytes (4096) broadcast to 4 consumers",
+        "all consumer dma_ports match (1)",
+        "hop chain length: 4"
+      ]
+    },
+    {
+      "id": "push_1",
+      "direction": "push",
+      "data": 
+      {
+        "tensor_shape": [
+          64,
+          64
+        ],
+        "element_type": "i8",
+        "element_bytes": 1,
+        "total_bytes": 4096
+      },
+      "stages": [
+        {
+          "role": "producer",
+          "tile": 
+          {
+            "col": 0,
+            "row": 0,
+            "type": "shim"
+          },
+          "port_sym": "f1_shimPortIn",
+          "channel": 0,
+          "contract": "produce via MM2S from DDR",
+          "config_ref": "dmaphop.port @f1_shimPortIn"
+        },
+        {
+          "role": "channel",
+          "hops": [
+            {
+              "from": "f1_shimPortOut(0,0)",
+              "to": "f1_corePortIn0(1,3)"
+            },
+            {
+              "from": "f1_corePortOut0(1,3)",
+              "to": "f1_corePortIn1(1,4)"
+            },
+            {
+              "from": "f1_corePortOut1(1,4)",
+              "to": "f1_corePortIn2(1,5)"
+            },
+            {
+              "from": "f1_corePortOut2(1,5)",
+              "to": "f1_corePortIn3(1,6)"
+            }
+          ],
+          "contract": "lossless delivery via 4-hop chain",
+          "config_ref": "dmaphop.create_path"
+        },
+        {
+          "role": "consumer",
+          "tiles": [
+            {
+              "col": 1,
+              "row": 3,
+              "type": "core",
+              "port_sym": "f1_corePortIn0",
+              "consumer_sym": "f1_consumer0",
+              "dma_port": 1
+            },
+            {
+              "col": 1,
+              "row": 4,
+              "type": "core",
+              "port_sym": "f1_corePortIn1",
+              "consumer_sym": "f1_consumer1",
+              "dma_port": 1
+            },
+            {
+              "col": 1,
+              "row": 5,
+              "type": "core",
+              "port_sym": "f1_corePortIn2",
+              "consumer_sym": "f1_consumer2",
+              "dma_port": 1
+            },
+            {
+              "col": 1,
+              "row": 6,
+              "type": "core",
+              "port_sym": "f1_corePortIn3",
+              "consumer_sym": "f1_consumer3",
+              "dma_port": 1
+            }
+          ],
+          "contract": "receive via S2MM, consume in compute kernel",
+          "config_ref": "dmaphop.consumer @f1_consumer0..f1_consumer3"
+        }
+      ],
+      "invariants": [
+        "producer total bytes (4096) broadcast to 4 consumers",
+        "all consumer dma_ports match (1)",
+        "hop chain length: 4"
+      ]
+    },
+    {
+      "id": "push_2",
+      "direction": "push",
+      "data": 
+      {
+        "tensor_shape": [
+          64,
+          64
+        ],
+        "element_type": "i8",
+        "element_bytes": 1,
+        "total_bytes": 4096
+      },
+      "stages": [
+        {
+          "role": "producer",
+          "tile": 
+          {
+            "col": 2,
+            "row": 0,
+            "type": "shim"
+          },
+          "port_sym": "f2_shimPortIn",
+          "channel": 0,
+          "contract": "produce via MM2S from DDR",
+          "config_ref": "dmaphop.port @f2_shimPortIn"
+        },
+        {
+          "role": "channel",
+          "hops": [
+            {
+              "from": "f2_shimPortOut(2,0)",
+              "to": "f2_corePortIn0(2,3)"
+            },
+            {
+              "from": "f2_corePortOut0(2,3)",
+              "to": "f2_corePortIn1(2,4)"
+            },
+            {
+              "from": "f2_corePortOut1(2,4)",
+              "to": "f2_corePortIn2(2,5)"
+            },
+            {
+              "from": "f2_corePortOut2(2,5)",
+              "to": "f2_corePortIn3(2,6)"
+            }
+          ],
+          "contract": "lossless delivery via 4-hop chain",
+          "config_ref": "dmaphop.create_path"
+        },
+        {
+          "role": "consumer",
+          "tiles": [
+            {
+              "col": 2,
+              "row": 3,
+              "type": "core",
+              "port_sym": "f2_corePortIn0",
+              "consumer_sym": "f2_consumer0",
+              "dma_port": 1
+            },
+            {
+              "col": 2,
+              "row": 4,
+              "type": "core",
+              "port_sym": "f2_corePortIn1",
+              "consumer_sym": "f2_consumer1",
+              "dma_port": 1
+            },
+            {
+              "col": 2,
+              "row": 5,
+              "type": "core",
+              "port_sym": "f2_corePortIn2",
+              "consumer_sym": "f2_consumer2",
+              "dma_port": 1
+            },
+            {
+              "col": 2,
+              "row": 6,
+              "type": "core",
+              "port_sym": "f2_corePortIn3",
+              "consumer_sym": "f2_consumer3",
+              "dma_port": 1
+            }
+          ],
+          "contract": "receive via S2MM, consume in compute kernel",
+          "config_ref": "dmaphop.consumer @f2_consumer0..f2_consumer3"
+        }
+      ],
+      "invariants": [
+        "producer total bytes (4096) broadcast to 4 consumers",
+        "all consumer dma_ports match (1)",
+        "hop chain length: 4"
+      ]
+    },
+    {
+      "id": "push_3",
+      "direction": "push",
+      "data": 
+      {
+        "tensor_shape": [
+          64,
+          64
+        ],
+        "element_type": "i8",
+        "element_bytes": 1,
+        "total_bytes": 4096
+      },
+      "stages": [
+        {
+          "role": "producer",
+          "tile": 
+          {
+            "col": 3,
+            "row": 0,
+            "type": "shim"
+          },
+          "port_sym": "f3_shimPortIn",
+          "channel": 0,
+          "contract": "produce via MM2S from DDR",
+          "config_ref": "dmaphop.port @f3_shimPortIn"
+        },
+        {
+          "role": "channel",
+          "hops": [
+            {
+              "from": "f3_shimPortOut(3,0)",
+              "to": "f3_corePortIn0(3,3)"
+            },
+            {
+              "from": "f3_corePortOut0(3,3)",
+              "to": "f3_corePortIn1(3,4)"
+            },
+            {
+              "from": "f3_corePortOut1(3,4)",
+              "to": "f3_corePortIn2(3,5)"
+            },
+            {
+              "from": "f3_corePortOut2(3,5)",
+              "to": "f3_corePortIn3(3,6)"
+            }
+          ],
+          "contract": "lossless delivery via 4-hop chain",
+          "config_ref": "dmaphop.create_path"
+        },
+        {
+          "role": "consumer",
+          "tiles": [
+            {
+              "col": 3,
+              "row": 3,
+              "type": "core",
+              "port_sym": "f3_corePortIn0",
+              "consumer_sym": "f3_consumer0",
+              "dma_port": 1
+            },
+            {
+              "col": 3,
+              "row": 4,
+              "type": "core",
+              "port_sym": "f3_corePortIn1",
+              "consumer_sym": "f3_consumer1",
+              "dma_port": 1
+            },
+            {
+              "col": 3,
+              "row": 5,
+              "type": "core",
+              "port_sym": "f3_corePortIn2",
+              "consumer_sym": "f3_consumer2",
+              "dma_port": 1
+            },
+            {
+              "col": 3,
+              "row": 6,
+              "type": "core",
+              "port_sym": "f3_corePortIn3",
+              "consumer_sym": "f3_consumer3",
+              "dma_port": 1
+            }
+          ],
+          "contract": "receive via S2MM, consume in compute kernel",
+          "config_ref": "dmaphop.consumer @f3_consumer0..f3_consumer3"
+        }
+      ],
+      "invariants": [
+        "producer total bytes (4096) broadcast to 4 consumers",
+        "all consumer dma_ports match (1)",
+        "hop chain length: 4"
+      ]
+    },
+    {
+      "id": "push_4",
+      "direction": "push",
+      "data": 
+      {
+        "tensor_shape": [
+          16,
+          256
+        ],
+        "element_type": "i8",
+        "element_bytes": 1,
+        "total_bytes": 4096
+      },
+      "stages": [
+        {
+          "role": "producer",
+          "tile": 
+          {
+            "col": 0,
+            "row": 0,
+            "type": "shim"
+          },
+          "port_sym": "f4_shimPortIn",
+          "channel": 1,
+          "contract": "produce via MM2S from DDR",
+          "config_ref": "dmaphop.port @f4_shimPortIn"
+        },
+        {
+          "role": "channel",
+          "hops": [
+            {
+              "from": "f4_shimPortOut(0,0)",
+              "to": "f4_corePortIn0(0,3)"
+            },
+            {
+              "from": "f4_corePortOut0(0,3)",
+              "to": "f4_corePortIn1(1,3)"
+            },
+            {
+              "from": "f4_corePortOut1(1,3)",
+              "to": "f4_corePortIn2(2,3)"
+            },
+            {
+              "from": "f4_corePortOut2(2,3)",
+              "to": "f4_corePortIn3(3,3)"
+            }
+          ],
+          "contract": "lossless delivery via 4-hop chain",
+          "config_ref": "dmaphop.create_path"
+        },
+        {
+          "role": "consumer",
+          "tiles": [
+            {
+              "col": 0,
+              "row": 3,
+              "type": "core",
+              "port_sym": "f4_corePortIn0",
+              "consumer_sym": "f4_consumer0",
+              "dma_port": 0
+            },
+            {
+              "col": 1,
+              "row": 3,
+              "type": "core",
+              "port_sym": "f4_corePortIn1",
+              "consumer_sym": "f4_consumer1",
+              "dma_port": 0
+            },
+            {
+              "col": 2,
+              "row": 3,
+              "type": "core",
+              "port_sym": "f4_corePortIn2",
+              "consumer_sym": "f4_consumer2",
+              "dma_port": 0
+            },
+            {
+              "col": 3,
+              "row": 3,
+              "type": "core",
+              "port_sym": "f4_corePortIn3",
+              "consumer_sym": "f4_consumer3",
+              "dma_port": 0
+            }
+          ],
+          "contract": "receive via S2MM, consume in compute kernel",
+          "config_ref": "dmaphop.consumer @f4_consumer0..f4_consumer3"
+        }
+      ],
+      "invariants": [
+        "producer total bytes (4096) broadcast to 4 consumers",
+        "all consumer dma_ports match (0)",
+        "hop chain length: 4"
+      ]
+    },
+    {
+      "id": "push_5",
+      "direction": "push",
+      "data": 
+      {
+        "tensor_shape": [
+          16,
+          256
+        ],
+        "element_type": "i8",
+        "element_bytes": 1,
+        "total_bytes": 4096
+      },
+      "stages": [
+        {
+          "role": "producer",
+          "tile": 
+          {
+            "col": 1,
+            "row": 0,
+            "type": "shim"
+          },
+          "port_sym": "f6_shimPortIn",
+          "channel": 1,
+          "contract": "produce via MM2S from DDR",
+          "config_ref": "dmaphop.port @f6_shimPortIn"
+        },
+        {
+          "role": "channel",
+          "hops": [
+            {
+              "from": "f6_shimPortOut(1,0)",
+              "to": "f6_corePortIn0(0,4)"
+            },
+            {
+              "from": "f6_corePortOut0(0,4)",
+              "to": "f6_corePortIn1(1,4)"
+            },
+            {
+              "from": "f6_corePortOut1(1,4)",
+              "to": "f6_corePortIn2(2,4)"
+            },
+            {
+              "from": "f6_corePortOut2(2,4)",
+              "to": "f6_corePortIn3(3,4)"
+            }
+          ],
+          "contract": "lossless delivery via 4-hop chain",
+          "config_ref": "dmaphop.create_path"
+        },
+        {
+          "role": "consumer",
+          "tiles": [
+            {
+              "col": 0,
+              "row": 4,
+              "type": "core",
+              "port_sym": "f6_corePortIn0",
+              "consumer_sym": "f6_consumer0",
+              "dma_port": 0
+            },
+            {
+              "col": 1,
+              "row": 4,
+              "type": "core",
+              "port_sym": "f6_corePortIn1",
+              "consumer_sym": "f6_consumer1",
+              "dma_port": 0
+            },
+            {
+              "col": 2,
+              "row": 4,
+              "type": "core",
+              "port_sym": "f6_corePortIn2",
+              "consumer_sym": "f6_consumer2",
+              "dma_port": 0
+            },
+            {
+              "col": 3,
+              "row": 4,
+              "type": "core",
+              "port_sym": "f6_corePortIn3",
+              "consumer_sym": "f6_consumer3",
+              "dma_port": 0
+            }
+          ],
+          "contract": "receive via S2MM, consume in compute kernel",
+          "config_ref": "dmaphop.consumer @f6_consumer0..f6_consumer3"
+        }
+      ],
+      "invariants": [
+        "producer total bytes (4096) broadcast to 4 consumers",
+        "all consumer dma_ports match (0)",
+        "hop chain length: 4"
+      ]
+    },
+    {
+      "id": "push_6",
+      "direction": "push",
+      "data": 
+      {
+        "tensor_shape": [
+          16,
+          256
+        ],
+        "element_type": "i8",
+        "element_bytes": 1,
+        "total_bytes": 4096
+      },
+      "stages": [
+        {
+          "role": "producer",
+          "tile": 
+          {
+            "col": 2,
+            "row": 0,
+            "type": "shim"
+          },
+          "port_sym": "f8_shimPortIn",
+          "channel": 1,
+          "contract": "produce via MM2S from DDR",
+          "config_ref": "dmaphop.port @f8_shimPortIn"
+        },
+        {
+          "role": "channel",
+          "hops": [
+            {
+              "from": "f8_shimPortOut(2,0)",
+              "to": "f8_corePortIn0(0,5)"
+            },
+            {
+              "from": "f8_corePortOut0(0,5)",
+              "to": "f8_corePortIn1(1,5)"
+            },
+            {
+              "from": "f8_corePortOut1(1,5)",
+              "to": "f8_corePortIn2(2,5)"
+            },
+            {
+              "from": "f8_corePortOut2(2,5)",
+              "to": "f8_corePortIn3(3,5)"
+            }
+          ],
+          "contract": "lossless delivery via 4-hop chain",
+          "config_ref": "dmaphop.create_path"
+        },
+        {
+          "role": "consumer",
+          "tiles": [
+            {
+              "col": 0,
+              "row": 5,
+              "type": "core",
+              "port_sym": "f8_corePortIn0",
+              "consumer_sym": "f8_consumer0",
+              "dma_port": 0
+            },
+            {
+              "col": 1,
+              "row": 5,
+              "type": "core",
+              "port_sym": "f8_corePortIn1",
+              "consumer_sym": "f8_consumer1",
+              "dma_port": 0
+            },
+            {
+              "col": 2,
+              "row": 5,
+              "type": "core",
+              "port_sym": "f8_corePortIn2",
+              "consumer_sym": "f8_consumer2",
+              "dma_port": 0
+            },
+            {
+              "col": 3,
+              "row": 5,
+              "type": "core",
+              "port_sym": "f8_corePortIn3",
+              "consumer_sym": "f8_consumer3",
+              "dma_port": 0
+            }
+          ],
+          "contract": "receive via S2MM, consume in compute kernel",
+          "config_ref": "dmaphop.consumer @f8_consumer0..f8_consumer3"
+        }
+      ],
+      "invariants": [
+        "producer total bytes (4096) broadcast to 4 consumers",
+        "all consumer dma_ports match (0)",
+        "hop chain length: 4"
+      ]
+    },
+    {
+      "id": "push_7",
+      "direction": "push",
+      "data": 
+      {
+        "tensor_shape": [
+          16,
+          256
+        ],
+        "element_type": "i8",
+        "element_bytes": 1,
+        "total_bytes": 4096
+      },
+      "stages": [
+        {
+          "role": "producer",
+          "tile": 
+          {
+            "col": 3,
+            "row": 0,
+            "type": "shim"
+          },
+          "port_sym": "f10_shimPortIn",
+          "channel": 1,
+          "contract": "produce via MM2S from DDR",
+          "config_ref": "dmaphop.port @f10_shimPortIn"
+        },
+        {
+          "role": "channel",
+          "hops": [
+            {
+              "from": "f10_shimPortOut(3,0)",
+              "to": "f10_corePortIn0(0,6)"
+            },
+            {
+              "from": "f10_corePortOut0(0,6)",
+              "to": "f10_corePortIn1(1,6)"
+            },
+            {
+              "from": "f10_corePortOut1(1,6)",
+              "to": "f10_corePortIn2(2,6)"
+            },
+            {
+              "from": "f10_corePortOut2(2,6)",
+              "to": "f10_corePortIn3(3,6)"
+            }
+          ],
+          "contract": "lossless delivery via 4-hop chain",
+          "config_ref": "dmaphop.create_path"
+        },
+        {
+          "role": "consumer",
+          "tiles": [
+            {
+              "col": 0,
+              "row": 6,
+              "type": "core",
+              "port_sym": "f10_corePortIn0",
+              "consumer_sym": "f10_consumer0",
+              "dma_port": 0
+            },
+            {
+              "col": 1,
+              "row": 6,
+              "type": "core",
+              "port_sym": "f10_corePortIn1",
+              "consumer_sym": "f10_consumer1",
+              "dma_port": 0
+            },
+            {
+              "col": 2,
+              "row": 6,
+              "type": "core",
+              "port_sym": "f10_corePortIn2",
+              "consumer_sym": "f10_consumer2",
+              "dma_port": 0
+            },
+            {
+              "col": 3,
+              "row": 6,
+              "type": "core",
+              "port_sym": "f10_corePortIn3",
+              "consumer_sym": "f10_consumer3",
+              "dma_port": 0
+            }
+          ],
+          "contract": "receive via S2MM, consume in compute kernel",
+          "config_ref": "dmaphop.consumer @f10_consumer0..f10_consumer3"
+        }
+      ],
+      "invariants": [
+        "producer total bytes (4096) broadcast to 4 consumers",
+        "all consumer dma_ports match (0)",
+        "hop chain length: 4"
+      ]
+    },
+    {
+      "id": "pull_0",
+      "direction": "pull",
+      "data": 
+      {
+        "tensor_shape": [
+          16,
+          64
+        ],
+        "element_type": "i8",
+        "element_bytes": 1,
+        "total_bytes": 1024
+      },
+      "stages": [
+        {
+          "role": "producer",
+          "tiles": [
+            {
+              "col": 0,
+              "row": 3,
+              "type": "core",
+              "port_sym": "f5_corePortOut0",
+              "producer_sym": "f5_producer0",
+              "dma_port": 0,
+              "pkt_id": 1
+            },
+            {
+              "col": 1,
+              "row": 3,
+              "type": "core",
+              "port_sym": "f5_corePortOut1",
+              "producer_sym": "f5_producer1",
+              "dma_port": 0,
+              "pkt_id": 2
+            },
+            {
+              "col": 2,
+              "row": 3,
+              "type": "core",
+              "port_sym": "f5_corePortOut2",
+              "producer_sym": "f5_producer2",
+              "dma_port": 0,
+              "pkt_id": 3
+            },
+            {
+              "col": 3,
+              "row": 3,
+              "type": "core",
+              "port_sym": "f5_corePortOut3",
+              "producer_sym": "f5_producer3",
+              "dma_port": 0,
+              "pkt_id": 4
+            }
+          ],
+          "contract": "each core produces partial output via MM2S",
+          "config_ref": "dmaphop.producer @f5_producer0..f5_producer3"
+        },
+        {
+          "role": "channel",
+          "hops": [
+            {
+              "from": "f5_corePortOut3(3,3)",
+              "to": "f5_shimPortIn(3,0)"
+            },
+            {
+              "from": "f5_corePortOut2(2,3)",
+              "to": "f5_corePortIn3(3,3)"
+            },
+            {
+              "from": "f5_corePortOut1(1,3)",
+              "to": "f5_corePortIn2(2,3)"
+            },
+            {
+              "from": "f5_corePortOut0(0,3)",
+              "to": "f5_corePortIn1(1,3)"
+            }
+          ],
+          "contract": "gather via 4-hop chain",
+          "config_ref": "dmaphop.create_path"
+        },
+        {
+          "role": "consumer",
+          "tile": 
+          {
+            "col": 3,
+            "row": 0,
+            "type": "shim"
+          },
+          "port_sym": "f5_shimPortOut",
+          "channel": 0,
+          "contract": "receive gathered output via S2MM to DDR",
+          "config_ref": "dmaphop.port @f5_shimPortOut"
+        }
+      ],
+      "invariants": [
+        "sum of producer buffer bytes (1024) gathered into total (1024)",
+        "all producer dma_ports match (0)",
+        "packet IDs: [1, 2, 3, 4]",
+        "hop chain length: 4"
+      ]
+    },
+    {
+      "id": "pull_1",
+      "direction": "pull",
+      "data": 
+      {
+        "tensor_shape": [
+          16,
+          64
+        ],
+        "element_type": "i8",
+        "element_bytes": 1,
+        "total_bytes": 1024
+      },
+      "stages": [
+        {
+          "role": "producer",
+          "tiles": [
+            {
+              "col": 0,
+              "row": 4,
+              "type": "core",
+              "port_sym": "f7_corePortOut0",
+              "producer_sym": "f7_producer0",
+              "dma_port": 0,
+              "pkt_id": 5
+            },
+            {
+              "col": 1,
+              "row": 4,
+              "type": "core",
+              "port_sym": "f7_corePortOut1",
+              "producer_sym": "f7_producer1",
+              "dma_port": 0,
+              "pkt_id": 6
+            },
+            {
+              "col": 2,
+              "row": 4,
+              "type": "core",
+              "port_sym": "f7_corePortOut2",
+              "producer_sym": "f7_producer2",
+              "dma_port": 0,
+              "pkt_id": 7
+            },
+            {
+              "col": 3,
+              "row": 4,
+              "type": "core",
+              "port_sym": "f7_corePortOut3",
+              "producer_sym": "f7_producer3",
+              "dma_port": 0,
+              "pkt_id": 8
+            }
+          ],
+          "contract": "each core produces partial output via MM2S",
+          "config_ref": "dmaphop.producer @f7_producer0..f7_producer3"
+        },
+        {
+          "role": "channel",
+          "hops": [
+            {
+              "from": "f7_corePortOut3(3,4)",
+              "to": "f7_shimPortIn(3,0)"
+            },
+            {
+              "from": "f7_corePortOut2(2,4)",
+              "to": "f7_corePortIn3(3,4)"
+            },
+            {
+              "from": "f7_corePortOut1(1,4)",
+              "to": "f7_corePortIn2(2,4)"
+            },
+            {
+              "from": "f7_corePortOut0(0,4)",
+              "to": "f7_corePortIn1(1,4)"
+            }
+          ],
+          "contract": "gather via 4-hop chain",
+          "config_ref": "dmaphop.create_path"
+        },
+        {
+          "role": "consumer",
+          "tile": 
+          {
+            "col": 3,
+            "row": 0,
+            "type": "shim"
+          },
+          "port_sym": "f7_shimPortOut",
+          "channel": 1,
+          "contract": "receive gathered output via S2MM to DDR",
+          "config_ref": "dmaphop.port @f7_shimPortOut"
+        }
+      ],
+      "invariants": [
+        "sum of producer buffer bytes (1024) gathered into total (1024)",
+        "all producer dma_ports match (0)",
+        "packet IDs: [5, 6, 7, 8]",
+        "hop chain length: 4"
+      ]
+    },
+    {
+      "id": "pull_2",
+      "direction": "pull",
+      "data": 
+      {
+        "tensor_shape": [
+          16,
+          64
+        ],
+        "element_type": "i8",
+        "element_bytes": 1,
+        "total_bytes": 1024
+      },
+      "stages": [
+        {
+          "role": "producer",
+          "tiles": [
+            {
+              "col": 0,
+              "row": 5,
+              "type": "core",
+              "port_sym": "f9_corePortOut0",
+              "producer_sym": "f9_producer0",
+              "dma_port": 0,
+              "pkt_id": 9
+            },
+            {
+              "col": 1,
+              "row": 5,
+              "type": "core",
+              "port_sym": "f9_corePortOut1",
+              "producer_sym": "f9_producer1",
+              "dma_port": 0,
+              "pkt_id": 10
+            },
+            {
+              "col": 2,
+              "row": 5,
+              "type": "core",
+              "port_sym": "f9_corePortOut2",
+              "producer_sym": "f9_producer2",
+              "dma_port": 0,
+              "pkt_id": 11
+            },
+            {
+              "col": 3,
+              "row": 5,
+              "type": "core",
+              "port_sym": "f9_corePortOut3",
+              "producer_sym": "f9_producer3",
+              "dma_port": 0,
+              "pkt_id": 12
+            }
+          ],
+          "contract": "each core produces partial output via MM2S",
+          "config_ref": "dmaphop.producer @f9_producer0..f9_producer3"
+        },
+        {
+          "role": "channel",
+          "hops": [
+            {
+              "from": "f9_corePortOut3(3,5)",
+              "to": "f9_shimPortIn(2,0)"
+            },
+            {
+              "from": "f9_corePortOut2(2,5)",
+              "to": "f9_corePortIn3(3,5)"
+            },
+            {
+              "from": "f9_corePortOut1(1,5)",
+              "to": "f9_corePortIn2(2,5)"
+            },
+            {
+              "from": "f9_corePortOut0(0,5)",
+              "to": "f9_corePortIn1(1,5)"
+            }
+          ],
+          "contract": "gather via 4-hop chain",
+          "config_ref": "dmaphop.create_path"
+        },
+        {
+          "role": "consumer",
+          "tile": 
+          {
+            "col": 2,
+            "row": 0,
+            "type": "shim"
+          },
+          "port_sym": "f9_shimPortOut",
+          "channel": 0,
+          "contract": "receive gathered output via S2MM to DDR",
+          "config_ref": "dmaphop.port @f9_shimPortOut"
+        }
+      ],
+      "invariants": [
+        "sum of producer buffer bytes (1024) gathered into total (1024)",
+        "all producer dma_ports match (0)",
+        "packet IDs: [9, 10, 11, 12]",
+        "hop chain length: 4"
+      ]
+    },
+    {
+      "id": "pull_3",
+      "direction": "pull",
+      "data": 
+      {
+        "tensor_shape": [
+          16,
+          64
+        ],
+        "element_type": "i8",
+        "element_bytes": 1,
+        "total_bytes": 1024
+      },
+      "stages": [
+        {
+          "role": "producer",
+          "tiles": [
+            {
+              "col": 0,
+              "row": 6,
+              "type": "core",
+              "port_sym": "f11_corePortOut0",
+              "producer_sym": "f11_producer0",
+              "dma_port": 0,
+              "pkt_id": 13
+            },
+            {
+              "col": 1,
+              "row": 6,
+              "type": "core",
+              "port_sym": "f11_corePortOut1",
+              "producer_sym": "f11_producer1",
+              "dma_port": 0,
+              "pkt_id": 14
+            },
+            {
+              "col": 2,
+              "row": 6,
+              "type": "core",
+              "port_sym": "f11_corePortOut2",
+              "producer_sym": "f11_producer2",
+              "dma_port": 0,
+              "pkt_id": 15
+            },
+            {
+              "col": 3,
+              "row": 6,
+              "type": "core",
+              "port_sym": "f11_corePortOut3",
+              "producer_sym": "f11_producer3",
+              "dma_port": 0,
+              "pkt_id": 16
+            }
+          ],
+          "contract": "each core produces partial output via MM2S",
+          "config_ref": "dmaphop.producer @f11_producer0..f11_producer3"
+        },
+        {
+          "role": "channel",
+          "hops": [
+            {
+              "from": "f11_corePortOut3(3,6)",
+              "to": "f11_shimPortIn(2,0)"
+            },
+            {
+              "from": "f11_corePortOut2(2,6)",
+              "to": "f11_corePortIn3(3,6)"
+            },
+            {
+              "from": "f11_corePortOut1(1,6)",
+              "to": "f11_corePortIn2(2,6)"
+            },
+            {
+              "from": "f11_corePortOut0(0,6)",
+              "to": "f11_corePortIn1(1,6)"
+            }
+          ],
+          "contract": "gather via 4-hop chain",
+          "config_ref": "dmaphop.create_path"
+        },
+        {
+          "role": "consumer",
+          "tile": 
+          {
+            "col": 2,
+            "row": 0,
+            "type": "shim"
+          },
+          "port_sym": "f11_shimPortOut",
+          "channel": 1,
+          "contract": "receive gathered output via S2MM to DDR",
+          "config_ref": "dmaphop.port @f11_shimPortOut"
+        }
+      ],
+      "invariants": [
+        "sum of producer buffer bytes (1024) gathered into total (1024)",
+        "all producer dma_ports match (0)",
+        "packet IDs: [13, 14, 15, 16]",
+        "hop chain length: 4"
+      ]
+    }
+  ]
+}

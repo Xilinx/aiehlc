@@ -69,6 +69,24 @@ from the traced fit (`routedTUDecls`). `routingHints` sizes `l1_budget` for
 the largest non-halo block and drops to `pp_depth = 1` when double buffering
 would overflow 48 KB (the rule the conv recognizer used, now per plan).
 
+**The role tag is optional.** `aie::port<T, aie::shape<...>> x` (no `aie::IFM` /
+`aie::WEIGHTS` / `aie::OFM`) is accepted next to the tagged form. The DMA never
+came from the tag -- input vs output is the window type, broadcast direction is
+how the traced blocks move with `program_id` -- so the tag only names the routed
+GemmSpace (`__aie_k_IFM`) and lets `recognizeConv` find the conv's three roles.
+Untagged ports get it inferred (`TracePort::roleInferred`): an output window is
+OFM, an input is IFM, and `inferRoles()` (after the trace, before planning)
+turns an input whose blocks move with `program_id(1)` only -- broadcast along a
+mesh column, the B / filter side -- into WEIGHTS. `rewriteKernelRouted` finds a
+port by its parameter name and replaces `[aie::ROLE, ]aie::shape<...>`. Checked:
+`simpleconv2dkernel_port.cc` and `simplegemm_kernel_port.cc` with the tags
+stripped give byte-identical GemmSpaces, policy and signature, and the conv is
+still recognized (`test_trace_routing` `testUntaggedPorts`, `kernel_trace_cases.py`
+"role tags omitted"). Write the tag when the inference would guess wrong -- an
+input that is broadcast along a mesh row but is not the IFM side, or a kernel
+with two inputs that both move with `program_id(1)`; tagged ports are never
+re-inferred.
+
 Conv recognition survives only as a cross-check: when the blocks also form a
 spatial-halo conv whose derivation reproduces them, its carriers must equal
 the routed ones (`emitGemmSpace` text) and its `Derived` feeds the pipeline's

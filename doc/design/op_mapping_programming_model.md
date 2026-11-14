@@ -284,7 +284,9 @@ humans and debugging, but not a second source of truth.
 `aie::Conv2d` / `aie::Mapping`. The ports declare only their tensors and the
 kernel states its own tiling (`simpleconv2dkernel_port_less.cc` is the same kernel
 with scalar MACs instead of `aie::mmul`, 59 lines incl. a golden-checking host (test data from `init_conv2d_test_data()` in `simpleconv2d_new_load.h`);
-identical derived DMA, x86 emulation 802,816/802,816):
+identical derived DMA, x86 emulation 802,816/802,816; the role tag is optional:
+`aie::port<T, aie::shape<...>>` infers IFM / WEIGHTS / OFM from the trace --
+`trace_to_routing.md`):
 
 ```cpp
 __global__ void conv2d_spatial(
