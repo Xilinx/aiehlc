@@ -938,6 +938,7 @@ analyzeKernelParams(Operation *rootOp, KernelResourceManager &resourceMgr, Type 
                 for (int64_t dim : tensorType.getShape()) {
                     partitionSize *= dim;
                 }
+                const int64_t viewRows = tensorType.getShape().empty() ? 0 : tensorType.getShape()[0];
                 // Get number of core tiles from the core TileGroup
                 int64_t numCoreTiles = 1;
                 if (auto coreTG = lookupTileGroup(coreFlowConfig.getOperation(), coreFlowConfig.getTarget())) {
@@ -999,7 +1000,12 @@ analyzeKernelParams(Operation *rootOp, KernelResourceManager &resourceMgr, Type 
                         int64_t tileRows = tiling.tileRows;
                         if (tileM > 0 && tileM < tileRows) {
                             int64_t mRounds = tileRows / tileM;
-                            perCoreSizeForBuf = perCoreSizeForBuf / mRounds;
+                            // Only the M-side input (A, view [tileRows, K]) holds mRounds tile_m strips.
+                            // B's view is its tile_cols x K block, sent whole in every m-round: dividing
+                            // it gave a window of tile_cols*effK/mRounds (24 elements instead of 512 for
+                            // the P4bk c013 kernel) and a core/shim mismatch.
+                            if (viewRows <= 0 || viewRows == tileRows)
+                                perCoreSizeForBuf = perCoreSizeForBuf / mRounds;
                         }
                     }
                 }

@@ -55,7 +55,7 @@ Wt = Bb.reshape(N // 16, 2, 8, kc, 8, 8).transpose(0, 3, 1, 4, 2, 5).reshape(N /
 Xt = Ab.reshape(M // 16, 2, 8, kc, 8, 8).transpose(0, 3, 1, 4, 5, 2).reshape(M // 16, kc, 16, 64)
 # laid back as rows of K so the DMA block {16 rows, 64 bf16} at chunk j carries the pre-tiled chunk
 Wp = Wt.transpose(0, 2, 1, 3).reshape(N, K)
-Xp = Xt.reshape(M // 16 * kc * 16, 64)  # row-contiguous chunks: rows (pn, j, i)
+Xp = Xt.transpose(0, 2, 1, 3).reshape(M, K)
 Wp.astype("<u2").tofile(f"{out}/kacc_w.bin"); Xp.astype("<u2").tofile(f"{out}/kacc_x.bin")
 bias.astype("<f4").tofile(f"{out}/kacc_bias.bin"); y.astype("<f4").reshape(-1).tofile(f"{out}/kacc_y.bin")
 data = "op_golden/" + "/".join(g.rstrip("/").split("/")[-2:])

@@ -12,11 +12,8 @@
  *
  * Ports (int32 words, 2 bf16 per word, low half first), laid out by kacc_bench.sh:
  *   a  IFM      [1280][11520]  W rows (row broadcast)
- *   b  WEIGHTS  [23040][32]    X chunks, row-contiguous: rows (pn, j, i) = chunk j of pixels 16 pn + i
- *               (col broadcast). A row-contiguous block makes the core window and the shim DMA follow
- *               the kernel's own blocks (#routing.kernel_block follow): as a [64][11520] block the
- *               M-round path sized X's window by tile_m rows (24 elements instead of 512).
- *   M/N/K below: the GEMM the pipeline tiles (X declared [23040][32] no longer spells N x K itself).
+ *   b  WEIGHTS  [64][11520]    X rows (col broadcast; re-sent in every m-round)
+ *               (needs aiehlc with the P4bk M-round fix: B's window was divided by m_rounds too)
  *   c  OFM      [1280][64]     fp32 Y, one 16x16 block per tile, written once after its last K chunk
  * Every 16-row x 64-bf16 chunk is pre-tiled by the host, so the core does no repacking:
  *   a chunk = [mi 2][kb 8][8x8 M x K row-major],  b chunk = [ni 2][kb 8][8x8 K x N row-major]
@@ -26,14 +23,9 @@
  ******************************************************************************/
 #define UNET_KACC_KERNEL 1
 #include "kacc_data.h"
-#define M 1280
-#define N 64
-#define K 11520
 
-// b before a: aiehlc's two-level tiling takes the K-chunk hints from the LAST input port it sees, and
-// only a (W, [1280][11520]) carries the 360 K chunks; b's row-contiguous [23040][32] has K = one block.
-__global__ void gemm_kacc(aie::port<input_window_int32 *, aie::WEIGHTS, aie::shape<23040, 32>> b,
-                          aie::port<input_window_int32 *, aie::IFM, aie::shape<1280, 11520>> a,
+__global__ void gemm_kacc(aie::port<input_window_int32 *, aie::IFM, aie::shape<1280, 11520>> a,
+                          aie::port<input_window_int32 *, aie::WEIGHTS, aie::shape<64, 11520>> b,
                           aie::port<output_window_int32 *, aie::OFM, aie::shape<1280, 64>> c) {
     const int tm = 16, tn = 16, tkw = 32; // tile; K chunk = 32 words = 64 bf16
     const int nkc = 360;                  // K chunks per tile (23040 / 64)
@@ -53,7 +45,7 @@ __global__ void gemm_kacc(aie::port<input_window_int32 *, aie::WEIGHTS, aie::sha
 #endif
         for (int j = 0; j < nkc; j++) {
             const int32_t *x = (const int32_t *)aie::load_buffer(a, {m0, j * tkw}, {tm, tkw});
-            const int32_t *w = (const int32_t *)aie::load_buffer(b, {(pn * nkc + j) * tn, 0}, {tn, tkw});
+            const int32_t *w = (const int32_t *)aie::load_buffer(b, {pn * tn, j * tkw}, {tn, tkw});
 #if defined(__chess__)
             const bfloat16 *a0 = (const bfloat16 *)x, *a1 = a0 + 8 * 64;
             const bfloat16 *b0 = (const bfloat16 *)w, *b1 = b0 + 8 * 64;
@@ -146,7 +138,7 @@ int main() {
     int launches = 0;
     XTime t0, t1;
     XTime_GetTime(&t0);
-    gemm_kacc<<<mesh>>>(Xd, Wd, Yd);
+    gemm_kacc<<<mesh>>>(Wd, Xd, Yd);
     XTime_GetTime(&t1);
     launches++;
     Xil_DCacheInvalidateRange((UINTPTR)Yd, ybytes);
