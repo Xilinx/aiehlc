@@ -518,7 +518,7 @@ CTRLPKT_NPRAGMAS = CTRLPKT_PRAGMAS.count("#pragma")
 def write_kernel(kdst: Path, spec: str, maxacc: int, warm: bool = False, ctrlpkt: str = "off") -> Path:
     spec = spec.replace('"out ', '"export    unet_aie_conv\\n"\n        "export    unet_aie_stats\\n"\n'
                         '        "export    unet_aie_launch_stats\\n"\n        "export    unet_aie_ktimer_stats\\n"\n'
-                        '        "out ', 1)
+                        '        "export    unet_aie_split_stats\\n"\n        "out ', 1)
     assert "export    unet_aie_conv" in spec, spec
     kdst.mkdir(parents=True, exist_ok=True)
     kcc = kdst / f"{ENTRY}.cc"
