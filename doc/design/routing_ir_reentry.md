@@ -34,6 +34,10 @@ Round trip (`script/test/routing_ir_roundtrip.sh <src.cc>`: build, feed
 host.cc / aieml.bcf / aieml.prx and all 28 IR stage dumps for
 `simplegemm_kernel_port.cc` and `simpleconv2dkernel_port.cc` -- the routing IR holds
 the whole tiling decision for both; no frontend state outside it changed the result.
+A normal build never parses its own dump, so every attribute must be covered by a
+round trip: `#routing.kernel_block` (kernel-only ports) first printed its arrays
+unbracketed and re-entry failed to parse it (skill **mlirattrarrayroundtrip**);
+`simplegemm_dataflow.cc` exercises it with `.resident` / `.tile`.
 
 Edits that take effect, board-verified (palmyra 213): output C `pp_depth` 2 -> 1
 (host.cc + aieml.bcf change, `PASS: all 4096 output elements match`).
