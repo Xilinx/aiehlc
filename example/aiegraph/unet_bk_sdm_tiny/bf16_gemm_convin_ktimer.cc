@@ -21,39 +21,45 @@ __global__ void gemm_bf16(aie::port<input_window_int32 *, aie::IFM, aie::shape<6
     const unsigned long long kt0 = 0;
 #endif
     int32_t *y = (int32_t *)aie::store_buffer(c, {pm * tm, pn * tnw}, {tm, tnw});
-    float acc[tm * tn];
-    for (int i = 0; i < tm * tn; i++)
-        acc[i] = 0.0f;
+    // P4a: bf16 vector MAC (aie::mmul 8x8x8 bf16 x bf16 -> accfloat), fp32 result written once at the end.
+    // A tiles = x rows (M x K, row-major 8x8); B tiles = w rows transposed to K x N (8x8) while packing.
+    using MM = aie::mmul<8, 8, 8, bfloat16, bfloat16, accfloat>;
+    alignas(64) uint16_t apk[2 * 8 * 64]; // [m block][k block][8x8 M x K]
+    alignas(64) uint16_t bpk[2 * 8 * 64]; // [n block][k block][8x8 K x N]
+    alignas(64) float ob[64];
     for (int j = 0; j < 64 / tkw; j++) { // chunk 1 = K padding (zeros): loaded, not computed
         const int32_t *x = (const int32_t *)aie::load_buffer(a, {pm * tm, j * tkw}, {tm, tkw});
-        const int32_t *w = (const int32_t *)aie::load_buffer(b, {pn * tnw, j * tkw}, {tnw, tkw}); // rows 16..19 zero, not computed
-        for (int m = 0; m < tm && j == 0; m++)
-            for (int n = 0; n < tn; n++) {
-                float s = 0.0f;
-                for (int k = 0; k < tkw; k++) {
-                    const uint32_t xu = (uint32_t)x[m * tkw + k], wu = (uint32_t)w[n * tkw + k];
-                    union {
-                        uint32_t u;
-                        float f;
-                    } x0, x1, w0, w1;
-                    x0.u = xu << 16;
-                    x1.u = xu & 0xffff0000u;
-                    w0.u = wu << 16;
-                    w1.u = wu & 0xffff0000u;
-                    s += x0.f * w0.f + x1.f * w1.f;
+        const int32_t *w = (const int32_t *)aie::load_buffer(b, {pn * tnw, j * tkw}, {tnw, tkw});
+        if (j == 0) {
+            const uint16_t *xs = (const uint16_t *)x, *ws = (const uint16_t *)w; // row r: 64 bf16 (2 per word)
+            for (int m = 0; m < tm; m++)
+                for (int k = 0; k < 2 * tkw; k++)
+                    apk[((m >> 3) * 8 + (k >> 3)) * 64 + (m & 7) * 8 + (k & 7)] = xs[m * 2 * tkw + k];
+            for (int n = 0; n < tn; n++)
+                for (int k = 0; k < 2 * tkw; k++)
+                    bpk[((n >> 3) * 8 + (k >> 3)) * 64 + (k & 7) * 8 + (n & 7)] = ws[n * 2 * tkw + k];
+            for (int mi = 0; mi < 2; mi++)
+                for (int ni = 0; ni < 2; ni++) {
+                    const bfloat16 *at = (const bfloat16 *)(apk + mi * 8 * 64);
+                    const bfloat16 *bt = (const bfloat16 *)(bpk + ni * 8 * 64);
+                    MM blk;
+                    blk.mul(aie::load_v<64>(at), aie::load_v<64>(bt));
+                    for (int kb = 1; kb < 8; kb++)
+                        blk.mac(aie::load_v<64>(at + kb * 64), aie::load_v<64>(bt + kb * 64));
+                    aie::store_v(ob, blk.to_vector<float>());
+                    for (int r = 0; r < 8; r++)
+                        for (int cc = 0; cc < 8; cc++) {
+                            union {
+                                uint32_t u;
+                                float f;
+                            } o;
+                            o.f = ob[r * 8 + cc];
+                            y[(mi * 8 + r) * tnw + ni * 8 + cc] = (int32_t)o.u;
+                        }
                 }
-                acc[m * tn + n] += s;
-            }
+        }
         aie::release(a);
         aie::release(b);
-    }
-    for (int i = 0; i < tm * tn; i++) {
-        union {
-            uint32_t u;
-            float f;
-        } o;
-        o.f = acc[i];
-        y[(i / tn) * tnw + i % tn] = (int32_t)o.u;
     }
 #if defined(__chess__)
     const unsigned long long kt1 = get_cycles();
