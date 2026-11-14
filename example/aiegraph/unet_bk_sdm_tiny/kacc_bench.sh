@@ -2,7 +2,7 @@
 # P4bk: build the one-launch K-in-core bench (bf16_gemm_kacc.cc) for one conv layer from an op_golden dir.
 #   kacc_bench.sh --golden <op_golden/.../cNNN_conv_...> --out <dir>   ->  <dir>/main.elf
 # The golden dir holds a.npy (1xCxHxW f32), b.npy (OxCx3x3 f32), c.npy (O f32), y.npy (1xOxHxW f32), meta.json.
-# Writes into <dir>: kacc_{a,b,bias,y}.bin (A/B as pre-tiled bf16, see bf16_gemm_kacc.cc), kacc_data.h
+# Writes into <dir>: kacc_{w,x,bias,y}.bin (W/X im2col as pre-tiled bf16, see bf16_gemm_kacc.cc), kacc_data.h
 # (.incbin of those files, host side only), then runs script/aiehlc.sh --aie-version 5 in <dir>.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,13 +48,15 @@ yr = y.reshape(N, M).T.astype(np.float64)
 cos = (ref * yr).sum() / np.sqrt((ref * ref).sum() * (yr * yr).sum())
 print(f"[kacc_bench] M={M} K={K} N={N} bf16-gemm vs golden cos={cos:.6f} y_sha256={ysha}")
 kc = K // 64
-# A chunk (16 rows, 64 k) -> [mi][kb][mm][kk]; laid back as 16 x 64 so the DMA slab carries it
-At = Ab.reshape(M // 16, 2, 8, kc, 8, 8).transpose(0, 3, 1, 4, 2, 5).reshape(M // 16, kc, 16, 64)
-Ap = At.transpose(0, 2, 1, 3).reshape(M, K)
-# B chunk (16 rows n, 64 k) -> [ni][kb][kk][nn]
-Bt = Bb.reshape(N // 16, 2, 8, kc, 8, 8).transpose(0, 3, 1, 4, 5, 2).reshape(N // 16, kc, 16, 64)
-Bp = Bt.transpose(0, 2, 1, 3).reshape(N, K)
-Ap.astype("<u2").tofile(f"{out}/kacc_a.bin"); Bp.astype("<u2").tofile(f"{out}/kacc_b.bin")
+# the kernel runs Y^T = W . X^T: W is the M side (a), X the N side (b)
+# a chunk (16 channels, 64 k) -> [mi][kb][mm][kk]   (8x8 M x K tiles)
+Wt = Bb.reshape(N // 16, 2, 8, kc, 8, 8).transpose(0, 3, 1, 4, 2, 5).reshape(N // 16, kc, 16, 64)
+# b chunk (16 pixels, 64 k)   -> [ni][kb][kk][nn]   (8x8 K x N tiles)
+Xt = Ab.reshape(M // 16, 2, 8, kc, 8, 8).transpose(0, 3, 1, 4, 5, 2).reshape(M // 16, kc, 16, 64)
+# laid back as rows of K so the DMA block {16 rows, 64 bf16} at chunk j carries the pre-tiled chunk
+Wp = Wt.transpose(0, 2, 1, 3).reshape(N, K)
+Xp = Xt.reshape(M // 16 * kc * 16, 64)  # row-contiguous chunks: rows (pn, j, i)
+Wp.astype("<u2").tofile(f"{out}/kacc_w.bin"); Xp.astype("<u2").tofile(f"{out}/kacc_x.bin")
 bias.astype("<f4").tofile(f"{out}/kacc_bias.bin"); y.astype("<f4").reshape(-1).tofile(f"{out}/kacc_y.bin")
 data = "op_golden/" + "/".join(g.rstrip("/").split("/")[-2:])
 data = data[:data.rindex("/") + 5]  # op_golden/<set>/cNNN
@@ -82,10 +84,10 @@ with open(f"{out}/kacc_data.h", "w") as f:
 #define KACC_Y_SHA "{ysha}"
 #if defined(__aarch64__)
 __asm__(".section .rodata.kacc,\\"a\\"\\n"
-{inc("kacc_a_bin")}{inc("kacc_b_bin")}{inc("kacc_bias_bin")}{inc("kacc_y_bin")}    ".previous\\n");
-extern "C" const uint8_t kacc_a_bin[], kacc_b_bin[], kacc_bias_bin[], kacc_y_bin[];
+{inc("kacc_w_bin")}{inc("kacc_x_bin")}{inc("kacc_bias_bin")}{inc("kacc_y_bin")}    ".previous\\n");
+extern "C" const uint8_t kacc_w_bin[], kacc_x_bin[], kacc_bias_bin[], kacc_y_bin[];
 #else
-static const uint8_t kacc_a_bin[64] = {{0}}, kacc_b_bin[64] = {{0}}, kacc_bias_bin[64] = {{0}}, kacc_y_bin[64] = {{0}};
+static const uint8_t kacc_w_bin[64] = {{0}}, kacc_x_bin[64] = {{0}}, kacc_bias_bin[64] = {{0}}, kacc_y_bin[64] = {{0}};
 #endif
 #endif
 """)
