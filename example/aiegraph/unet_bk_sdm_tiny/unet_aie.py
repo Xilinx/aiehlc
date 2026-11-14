@@ -803,3 +803,302 @@ def main_c(base: str, ktimer: bool = False) -> str:
         "    XTime_GetTime(&t1);\n", "    XTime_GetTime(&t1);\n    unsigned long long pmc1 = unet_pmc();\n"), 1)
     assert "unet_aie_stats(&launches" in s and "_Z22__Runtime_phase_cyclesPyPj" in s
     return s
+
+
+# ─────────────────────────────── --kincore (P4bg) ───────────────────────────────
+# One launch per conv layer, K accumulated in the core: Maxwell's gemm_kacc (bf16_gemm_kacc.cc,
+# P4bk) instantiated per distinct layer GEMM shape. The kernel runs the transposed GEMM
+# Y[ch][px] = W[ch,:] . X[px,:]; Maxwell's c013 kernel walks 16-row channel tiles on each core
+# (px = 64 = 4 mesh cols x 16); here each core also walks px/64 16-wide pixel tiles (kplan's
+# per-layer walk of 64x64 output macro tiles). Host: im2col + pre-tiling (bf16) only; NO K-sum.
+KACC_CC = Path(__file__).resolve().parent / "bf16_gemm_kacc.cc"
+
+
+def kacc_name(ch: int, k: int, px: int) -> str:
+    return f"gemm_kacc_{ch}x{k}x{px}"
+
+
+def kacc_geom(ch: int, k: int, px: int) -> dict:
+    """walk of one layer on the 4x4 mesh (aiehlc's trace fitter takes a 2-level affine walk per port):
+    core (pm, pn) owns ch/4 channels (ntile tiles of 16) x px/4 pixels (S sub-tiles of 16);
+      a (W)  [ch][k/2]  block {16, tkw}      rounds (t, j)  -- Maxwell's c013 walk
+      b (X)  [px][k/2]  block {px/4, tkw}    rounds (t, j), step_i 0 -- the core's whole pixel range per chunk
+      c (Y)  [ch][px]   block {16, 16} fp32  rounds (t, s) -- written once per output tile after the last chunk
+    S fp32 16x16 accumulators per core live in L1 (kacc); K chunk kch = 2*tkw bf16, tkw = min(32, 4096/px)
+    so the b block stays <= 4 KiB (aiehlc's maxBufferBytes). px == 64: Maxwell's c013 kernel exactly."""
+    assert ch % 64 == 0 and px % 64 == 0 and k % 64 == 0, (ch, k, px)
+    tkw = min(32, 4096 // px)
+    assert tkw >= 4 and (k // 2) % tkw == 0, (ch, k, px, tkw)
+    return dict(ntile=ch // 64, S=px // 64, tkw=tkw, kch=2 * tkw, nkc=(k // 2) // tkw,
+                l1=2 * (16 * tkw * 4 + (px // 4) * tkw * 4 + 1024) + (px // 64) * 1024)
+
+
+KACC_KERNEL = r"""__global__ void @NAME@(aie::port<input_window_int32 *, aie::IFM, aie::shape<@CH@, @KW@>> a_@SID@,
+                          aie::port<input_window_int32 *, aie::WEIGHTS, aie::shape<@PX@, @KW@>> b_@SID@,
+                          aie::port<output_window_int32 *, aie::OFM, aie::shape<@CH@, @PX@>> c_@SID@) {
+    // ports named per instance: aiehlc's block descriptors (aiehlc_desc_<port>) are file-scope statics
+    // P4bg: gemm_kacc (bf16_gemm_kacc.cc, Maxwell P4bk) for ch=@CH@ K=@K@ px=@PX@ -- see unet_aie.kacc_geom
+    const int tm = 16, tn = 16, tkw = @TKW@, kch = @KCH@; // tile; K chunk = tkw words = kch bf16
+    const int nkc = @NKC@;   // K chunks per tile
+    const int ntile = @NT@;  // channel tiles per core
+    const int ns = @S@;      // 16-pixel sub-tiles per core (its px/4 pixels)
+    static float kacc[@S@ * 256] __attribute__((aligned(64))); // ns fp32 16x16 accumulators, [s][mi][ni][8x8]
+    const int pm = aie::program_id(0);
+    const int pn = aie::program_id(1);
+    for (int t = 0; t < ntile; t++) {
+        const int m0 = pm * (ntile * tm) + t * tm;
+        for (int i = 0; i < ns * 256; i++)
+            kacc[i] = 0.0f;
+        for (int j = 0; j < nkc; j++) {
+            const int32_t *x = (const int32_t *)aie::load_buffer(a_@SID@, {m0, j * tkw}, {tm, tkw});
+            const int32_t *w = (const int32_t *)aie::load_buffer(b_@SID@, {pn * (ns * tn), j * tkw}, {ns * tn, tkw});
+            for (int s = 0; s < ns; s++) {
+                float *ac = kacc + s * 256;
+#if defined(__chess__)
+                using MM = aie::mmul<8, 8, 8, bfloat16, bfloat16, accfloat>;
+                aie::accum<accfloat, 64> q00, q01, q10, q11;
+                q00.from_vector(aie::load_v<64>(ac));
+                q01.from_vector(aie::load_v<64>(ac + 64));
+                q10.from_vector(aie::load_v<64>(ac + 128));
+                q11.from_vector(aie::load_v<64>(ac + 192));
+                MM c00(q00), c01(q01), c10(q10), c11(q11);
+                const bfloat16 *a0 = (const bfloat16 *)x, *a1 = a0 + 8 * kch;
+                const bfloat16 *b0 = (const bfloat16 *)w + s * 16 * kch, *b1 = b0 + 8 * kch;
+                for (int kb = 0; kb < kch / 8; kb++) {
+                    auto va0 = aie::load_v<64>(a0 + kb * 64);
+                    auto va1 = aie::load_v<64>(a1 + kb * 64);
+                    auto vb0 = aie::load_v<64>(b0 + kb * 64);
+                    auto vb1 = aie::load_v<64>(b1 + kb * 64);
+                    c00.mac(va0, vb0);
+                    c01.mac(va0, vb1);
+                    c10.mac(va1, vb0);
+                    c11.mac(va1, vb1);
+                }
+                aie::store_v(ac, c00.to_vector<float>());
+                aie::store_v(ac + 64, c01.to_vector<float>());
+                aie::store_v(ac + 128, c10.to_vector<float>());
+                aie::store_v(ac + 192, c11.to_vector<float>());
+#else // scalar, same pre-tiled layout (chunk = [mi 2][kb kch/8][8x8])
+                const uint16_t *xs = (const uint16_t *)x, *ws = (const uint16_t *)w + s * 16 * kch;
+                for (int m = 0; m < tm; m++)
+                    for (int n = 0; n < tn; n++) {
+                        float sum = 0.0f;
+                        for (int k = 0; k < kch; k++) {
+                            union {
+                                uint32_t u;
+                                float f;
+                            } xa, wb;
+                            xa.u = (uint32_t)xs[((m >> 3) * (kch / 8) + (k >> 3)) * 64 + (m & 7) * 8 + (k & 7)] << 16;
+                            wb.u = (uint32_t)ws[((n >> 3) * (kch / 8) + (k >> 3)) * 64 + (k & 7) * 8 + (n & 7)] << 16;
+                            sum += xa.f * wb.f;
+                        }
+                        ac[((m >> 3) * 2 + (n >> 3)) * 64 + (m & 7) * 8 + (n & 7)] += sum;
+                    }
+#endif
+            }
+            aie::release(a_@SID@);
+            aie::release(b_@SID@);
+        }
+        // tile done: one fp32 write-back per 16x16 output tile
+        for (int s = 0; s < ns; s++) {
+            int32_t *y = (int32_t *)aie::store_buffer(c_@SID@, {m0, pn * (ns * tn) + s * tn}, {tm, tn});
+            const float *ac = kacc + s * 256;
+            for (int r = 0; r < tm; r++)
+                for (int cc = 0; cc < tn; cc++) {
+                    union {
+                        uint32_t u;
+                        float f;
+                    } o;
+                    o.f = ac[((r >> 3) * 2 + (cc >> 3)) * 64 + (r & 7) * 8 + (cc & 7)];
+                    y[r * tn + cc] = (int32_t)o.u;
+                }
+            aie::commit(c_@SID@);
+        }
+    }
+}
+"""
+
+
+def kacc_kernel_text(ch: int, k: int, px: int) -> str:
+    g = kacc_geom(ch, k, px)
+    t = KACC_KERNEL
+    for key, v in (("@NAME@", kacc_name(ch, k, px)), ("@SID@", f"{ch}x{k}x{px}"), ("@CH@", ch), ("@KW@", k // 2), ("@PX@", px), ("@K@", k),
+                   ("@TKW@", g["tkw"]), ("@KCH@", g["kch"]), ("@NKC@", g["nkc"]), ("@NT@", g["ntile"]),
+                   ("@S@", g["S"])):
+        t = t.replace(key, str(v))
+    assert "@" not in t
+    return t
+
+
+def kacc_host(shapes: list) -> str:
+    """host part of the --kincore aiek source: uc_conv with ONE gemm_kacc launch per layer (no host K-sum)"""
+    sw = "\n".join("    if (N == %d && K == %d && M == %d) {\n        %s<<<mesh>>>(g_kw, g_kx, g_ky);\n        return 0;\n    }"
+                   % (ch, k, px, kacc_name(ch, k, px)) for ch, k, px in shapes)
+    return KACC_HOST.replace("@DISPATCH@", sw) \
+        .replace("@MAXW@", str(max(ch * k for ch, k, px in shapes))) \
+        .replace("@MAXX@", str(max(px * k for ch, k, px in shapes))) \
+        .replace("@MAXY@", str(max(ch * px for ch, k, px in shapes)))
+
+
+KACC_HOST = r"""
+#define UC_KW_ELEMS @MAXW@ /* largest ch*K (bf16) */
+#define UC_KX_ELEMS @MAXX@ /* largest px*K (bf16) */
+#define UC_KY_ELEMS @MAXY@ /* largest ch*px (fp32) */
+static int32_t *g_kw = nullptr, *g_kx = nullptr, *g_ky = nullptr;
+static int uc_kalloc(void) {
+    if (g_ky)
+        return 0;
+    g_kw = (int32_t *)__Runtime_Alloc((size_t)UC_KW_ELEMS * 2);
+    g_kx = (int32_t *)__Runtime_Alloc((size_t)UC_KX_ELEMS * 2);
+    g_ky = (int32_t *)__Runtime_Alloc((size_t)UC_KY_ELEMS * 4);
+    return (g_kw && g_kx && g_ky) ? 0 : -1;
+}
+/* one launch of the layer's gemm_kacc instance (ports W [N][K/2], X [M][K/2], Y f32 [N][M]) */
+static int uc_kacc_launch(aieMesh &mesh, int N, int K, int M) {
+@DISPATCH@
+    return -6;
+}
+
+static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, int sw, int ph, int pw) {
+    if (nargs < 4)
+        return -2;
+    const uc_dlt *x = (const uc_dlt *)argv[0], *w = (const uc_dlt *)argv[1], *y = (const uc_dlt *)argv[nargs - 1];
+    if (x->ndim != 5 || w->ndim != 6 || y->ndim != 5 || x->shape[0] != 1 || y->shape[0] != 1)
+        return -2;
+    const int cb = (int)x->shape[4], C = (int)x->shape[1] * cb, H = (int)x->shape[2], W = (int)x->shape[3];
+    const int ib = (int)w->shape[4], ob = (int)w->shape[5], CI = (int)w->shape[1] * ib;
+    const int O = (int)w->shape[0] * ob, KH = (int)w->shape[2], KW = (int)w->shape[3];
+    const int yb = (int)y->shape[4], OH = (int)y->shape[2], OW = (int)y->shape[3];
+    if (CI != C || (int)y->shape[1] * yb != O || OH != (H + 2 * ph - KH) / sh + 1 || OW != (W + 2 * pw - KW) / sw + 1)
+        return -3;
+    const int M = OH * OW, N = O, K = C * KH * KW, KK = KH * KW, kc = K / 64;
+    if ((M | N | K) & 63 || (long)N * K > UC_KW_ELEMS || (long)M * K > UC_KX_ELEMS || (long)M * N > UC_KY_ELEMS)
+        return -3;
+    const float *xin = (const float *)x->data;
+    float *yout = (float *)y->data;
+    if (uc_kalloc() != 0)
+        return -1;
+#if UC_CTRLPKT
+    if (!g_uc_ht) { // once, before the first launch
+        __Runtime_ctrl_high_throughput_enable(1);
+        g_uc_ht = 1;
+    }
+#endif
+    /* natural layout (unet_aie.kacc_geom): W [N][K], X [M][K], each 16-row block pre-tiled per K chunk of
+     * kch bf16 as bf16_gemm_kacc.cc: W chunk = [mi 2][kb kch/8][8x8 ch x k], X chunk = [ni 2][kb][8x8 k x px] */
+    const int kch = 2 * (4096 / M < 32 ? 4096 / M : 32); /* = 2 * kacc_geom tkw */
+    if (K % kch)
+        return -3;
+    uint16_t *Wd = (uint16_t *)g_kw, *Xd = (uint16_t *)g_kx;
+    for (int n = 0; n < N; n++) {
+        const int mi = (n >> 3) & 1, mm = n & 7;
+        uint16_t *dst = Wd + (size_t)(n >> 4) * 16 * K;
+        for (int k = 0; k < K; k++) {
+            const int c = k / KK, t = k % KK, j = k / kch, kr = k % kch, kb = kr >> 3, kk = kr & 7;
+            const int f = mi * 8 * kch + kb * 64 + mm * 8 + kk;
+            dst[(size_t)(f / kch) * K + j * kch + f % kch] =
+                wbf[((((size_t)(n / ob) * (C / ib) + c / ib) * KK + t) * ib + c % ib) * ob + n % ob];
+        }
+    }
+    for (int m = 0; m < M; m++) { /* im2col of the activation, fp32 -> bf16 RNE */
+        const int oh = m / OW, ow = m % OW, ni = (m >> 3) & 1, nn = m & 7;
+        uint16_t *dst = Xd + (size_t)(m >> 4) * 16 * K;
+        for (int k = 0; k < K; k++) {
+            const int c = k / KK, t = k % KK, ih = oh * sh + t / KW - ph, iw = ow * sw + t % KW - pw;
+            const float v = (ih >= 0 && ih < H && iw >= 0 && iw < W)
+                                ? xin[(((size_t)(c / cb) * H + ih) * W + iw) * cb + c % cb] : 0.0f;
+            const int j = k / kch, kr = k % kch, kb = kr >> 3, kk = kr & 7, f = ni * 8 * kch + kb * 64 + kk * 8 + nn;
+            dst[(size_t)(f / kch) * K + j * kch + f % kch] = uc_f2bf(v);
+        }
+    }
+    const size_t wbytes = (size_t)N * K * 2, xbytes = (size_t)M * K * 2;
+    (void)kc;
+    aieSetDevice(0);
+    aieArray device;
+    aieMesh mesh = device.partition({@PART_C0@, 6, 0, 6}, 4, 4);
+    memset(g_ky, 0xff, (size_t)M * N * 4); // sentinel: unwritten -> NaN -> counted
+    XTime lt0, lt1;
+    XTime_GetTime(&lt0);
+    const unsigned long long sp0 = uc_pmc();
+#if UC_WARM
+    unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
+    __Runtime_pm_warm_stats(&seg0, &cold0);
+#endif
+    Xil_DCacheFlushRange((UINTPTR)g_kw, wbytes);
+    Xil_DCacheFlushRange((UINTPTR)g_kx, xbytes);
+    Xil_DCacheFlushRange((UINTPTR)g_ky, (size_t)M * N * 4);
+    const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
+    const int lrc = uc_kacc_launch(mesh, N, K, M); // ONE launch: the whole layer, K summed in the cores
+    const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();
+    Xil_DCacheInvalidateRange((UINTPTR)g_ky, (size_t)M * N * 4);
+#if UC_WARM
+    __Runtime_pm_warm_stats(&seg1, &cold1);
+    if (cold1 != cold0) {
+        g_uc_kloads++;
+        g_uc_cold_tiles += cold1 - cold0;
+    }
+#endif
+    const unsigned long long sp3 = uc_pmc();
+    XTime_GetTime(&lt1);
+    if (lrc != 0)
+        return lrc;
+    g_sp_pre += sp1 - sp0;
+    g_sp_call += sp2 - sp1;
+    g_sp_glue += (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL;
+    g_sp_post += sp3 - sp2;
+    g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
+    g_aie_launches++;
+    g_uc_macs += (unsigned long long)M * N * K;
+    const float *Y = (const float *)g_ky; // [N][M] fp32 (NCHW)
+    int bad = 0;
+    for (int n = 0; n < N; n++)
+        for (int m = 0; m < M; m++) {
+            const float v = Y[(size_t)n * M + m];
+            if (!(v == v) || v > 1e30f || v < -1e30f)
+                bad++;
+            yout[((size_t)(n / yb) * M + m) * yb + n % yb] = v;
+        }
+    if (bad) {
+        printf("[unet_aie_conv] %d nonfinite AIE outputs\n", bad);
+        return -4;
+    }
+"""
+
+
+def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, ctrlpkt: str = "off") -> Path:
+    """--kincore: aiek_unetconv.cc = one gemm_kacc instance per distinct (ch, K, px) + host unet_aie_conv"""
+    spec = spec.replace('"out ', '"export    unet_aie_conv\\n"\n        "export    unet_aie_stats\\n"\n'
+                        '        "export    unet_aie_launch_stats\\n"\n'
+                        '        "export    unet_aie_split_stats\\n"\n        "out ', 1)
+    assert "export    unet_aie_conv" in spec, spec
+    kdst.mkdir(parents=True, exist_ok=True)
+    kcc = kdst / f"{ENTRY}.cc"
+    head = ("// %s.cc -- generated by build_unet.py --aie conv --kincore (P4bg). Kernels: gemm_kacc of %s,\n"
+            "// one instance per layer shape (%d), one launch per conv layer, K accumulated in the core.\n"
+            "#define UNET_KACC_KERNEL 1\n"
+            "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n"
+            % (ENTRY, KACC_CC, len(shapes)))
+    if ctrlpkt == "aot":
+        head = CTRLPKT_PRAGMAS + head
+    ktext = "\n\n".join(kacc_kernel_text(*s) for s in shapes)
+    host = kt_select(HOST_CC, False)
+    # replace the 64x64-tile uc_conv (host K-sum) by the one-launch version up to its epilogue
+    i0 = host.index("static int uc_conv(")
+    i1 = host.index("    for (int i = 2; i < nargs - 1; i++) { // epilogue")
+    host = host[:i0] + kacc_host(shapes) + host[i1:]
+    # drop the 64x64-port state the one-launch path does not use (no unused-static warnings)
+    a0, a1 = host.index("static int uc_alloc(void) {"), host.index("static long uc_numel(")
+    host = host[:a0] + host[a1:]
+    for dead in ("static float g_uc_acc[UC_MAX_ACC] __attribute__((aligned(64))); // .bss, never malloc\n",
+                 "static int32_t *g_uc_a = nullptr; // port a: bf16 [64][128]\n",
+                 "static int32_t *g_uc_b = nullptr; // port b: bf16 [UC_BR][128]\n",
+                 "static int32_t *g_uc_c = nullptr; // port c: f32  [64][UC_CW]\n"):
+        assert host.count(dead) == 1, dead
+        host = host.replace(dead, "")
+    assert "gemm_bf16<<<" not in host and "g_uc_acc[(size_t)(mb" not in host
+    kcc.write_text(head + ktext + "\n" + host.replace("@MAXACC@", "1").replace("@WARM@", "1" if warm else "0")
+                   .replace("@CTRLPKT@", "1" if ctrlpkt == "aot" else "0")
+                   .replace("@PART_C0@", "2" if ctrlpkt == "aot" else "3")
+                   .replace("@E@", ENTRY).replace("@SPEC@", spec))
+    (kdst / f"{ENTRY}_ref.c").write_text(REF_C.replace("@E@", ENTRY))
+    return kcc
