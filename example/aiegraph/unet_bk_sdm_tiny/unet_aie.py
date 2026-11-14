@@ -823,35 +823,54 @@ def kacc_geom(ch: int, k: int, px: int) -> dict:
     core (pm, pn) owns ch/4 channels (ntile tiles of 16) x px/4 pixels (S sub-tiles of 16);
       a (W)  [ch][k/2]  block {16, tkw}      rounds (t, j)  -- Maxwell's c013 walk
       b (X)  [px][k/2]  block {px/4, tkw}    rounds (t, j), step_i 0 -- the core's whole pixel range per chunk
-      c (Y)  [ch][px]   block {16, 16} fp32  rounds (t, s) -- written once per output tile after the last chunk
-    S fp32 16x16 accumulators per core live in L1 (kacc); K chunk kch = 2*tkw bf16, tkw = min(32, 4096/px)
-    so the b block stays <= 4 KiB (aiehlc's maxBufferBytes). px == 64: Maxwell's c013 kernel exactly."""
+      c (Y)  [ch][px]   block {16, px/4} fp32  rounds (t) -- the core's whole pixel range, held over the K walk
+    P4bx: the c window IS the fp32 accumulator (S 16x16 tiles, [s][mi][ni][8x8] order; the host un-tiles it).
+    A {16, 16} c block with a {px/4, tkw} b block made aiehlc take tileN=16 < tileCols=px/4 (the C port's d2
+    overrides B's) and emit the N-sub-tiled walk: A re-sent nRounds=px/64 times per K walk, the core takes it
+    once -> the px=1024 layer hung (P4bq probe_0). With c = {16, px/4}, tileN == tileCols: the "no N sub-tiling"
+    walk of the board-proven px=64 layers (P4bq probe_16). K chunk kch = 2*tkw bf16, tkw = min(32, 4096/px)
+    so the b block stays <= 4 KiB. px == 64: Maxwell's c013 walk."""
     assert ch % 64 == 0 and px % 64 == 0 and k % 64 == 0, (ch, k, px)
     tkw = min(32, 4096 // px)
+    # aiehlc's port-buffer region is 29696 B (trace_routing kPortBufferBytes) and an output window is always
+    # ping-pong: px=1024 (c block {16,256} fp32 = 16 KiB) cannot fit. Those layers run TRANSPOSED (tr=1):
+    # a = X [px][k/2] block {16, tkw} walked over px tiles, b = W [ch][k/2] block {ch/4, tkw}, c = Y^T [px][ch]
+    # block {16, ch/4}; same kernel walk, same host pre-tiling (W stays the mmul's left operand).
+    tr = 2 * (16 * tkw * 4 + (px // 4) * tkw * 4 + 16 * (px // 4) * 4) > 29696
+    if tr:
+        tkw = 32
+        while (ch // 4) * tkw > 1024 or (k // 2) % tkw:
+            tkw //= 2
     assert tkw >= 4 and (k // 2) % tkw == 0, (ch, k, px, tkw)
     # K padded by one zero chunk when the W port would be square (ch == k/2 words): aiehlc's GemmSpace
     # derivation then mis-sizes the A window (gemm_kacc_1280x2560x64: 24 elements instead of 512)
     kp = k + 2 * tkw if ch == k // 2 else k
-    return dict(ntile=ch // 64, S=px // 64, tkw=tkw, kch=2 * tkw, nkc=(kp // 2) // tkw, kp=kp,
-                l1=2 * (16 * tkw * 4 + (px // 4) * tkw * 4 + 1024) + (px // 64) * 1024)
+    rows, cols = (px, ch) if tr else (ch, px)   # a-port rows (walked by t) / b-port rows (whole range per core)
+    l1 = 2 * (16 * tkw * 4 + (cols // 4) * tkw * 4 + 16 * (cols // 4) * 4)
+    assert l1 <= 29696, (ch, k, px, l1)
+    return dict(ntile=rows // 64, S=cols // 64, tkw=tkw, kch=2 * tkw, nkc=(kp // 2) // tkw, kp=kp, tr=int(tr),
+                arows=rows, brows=cols, l1=l1)
 
 
-KACC_KERNEL = r"""__global__ void @NAME@(aie::port<input_window_int32 *, aie::IFM, aie::shape<@CH@, @KW@>> a_@SID@,
-                          aie::port<input_window_int32 *, aie::WEIGHTS, aie::shape<@PX@, @KW@>> b_@SID@,
-                          aie::port<output_window_int32 *, aie::OFM, aie::shape<@CH@, @PX@>> c_@SID@) {
+KACC_KERNEL = r"""__global__ void @NAME@(aie::port<input_window_int32 *, aie::IFM, aie::shape<@AROWS@, @KW@>> a_@SID@,
+                          aie::port<input_window_int32 *, aie::WEIGHTS, aie::shape<@BROWS@, @KW@>> b_@SID@,
+                          aie::port<output_window_int32 *, aie::OFM, aie::shape<@AROWS@, @BROWS@>> c_@SID@) {
     // ports named per instance: aiehlc's block descriptors (aiehlc_desc_<port>) are file-scope statics
     // P4bg: gemm_kacc (bf16_gemm_kacc.cc, Maxwell P4bk) for ch=@CH@ K=@K@ px=@PX@ -- see unet_aie.kacc_geom
     const int tm = 16, tn = 16, tkw = @TKW@, kch = @KCH@; // tile; K chunk = tkw words = kch bf16
     const int nkc = @NKC@;   // K chunks per tile
-    const int ntile = @NT@;  // channel tiles per core
-    const int ns = @S@;      // 16-pixel sub-tiles per core (its px/4 pixels)
-    static float kacc[@S@ * 256] __attribute__((aligned(64))); // ns fp32 16x16 accumulators, [s][mi][ni][8x8]
+    const int ntile = @NT@;  // a-port 16-row tiles per core (channels; pixels when transposed)
+    const int ns = @S@;      // 16-row sub-tiles of the core's b block (pixels; channels when transposed)
+    // transposed=@TR@: the mmul's left operand is always W (pre-tiled [mi][kb][8x8 ch x k]), right is X
     const int pm = aie::program_id(0);
     const int pn = aie::program_id(1);
     for (int t = 0; t < ntile; t++) {
         const int m0 = pm * (ntile * tm) + t * tm;
+        // P4bx: the c window {16, ns*16} fp32 is the accumulator: ns 16x16 tiles in [s][mi][ni][8x8] order
+        int32_t *y = (int32_t *)aie::store_buffer(c_@SID@, {m0, pn * (ns * tn)}, {tm, ns * tn});
+        float *const kacc = (float *)y;
         for (int i = 0; i < ns * 256; i++)
-            kacc[i] = 0.0f;
+            y[i] = 0;
         for (int j = 0; j < nkc; j++) {
             const int32_t *x = (const int32_t *)aie::load_buffer(a_@SID@, {m0, j * tkw}, {tm, tkw});
             const int32_t *w = (const int32_t *)aie::load_buffer(b_@SID@, {pn * (ns * tn), j * tkw}, {ns * tn, tkw});
@@ -865,8 +884,8 @@ KACC_KERNEL = r"""__global__ void @NAME@(aie::port<input_window_int32 *, aie::IF
                 q10.from_vector(aie::load_v<64>(ac + 128));
                 q11.from_vector(aie::load_v<64>(ac + 192));
                 MM c00(q00), c01(q01), c10(q10), c11(q11);
-                const bfloat16 *a0 = (const bfloat16 *)x, *a1 = a0 + 8 * kch;
-                const bfloat16 *b0 = (const bfloat16 *)w + s * 16 * kch, *b1 = b0 + 8 * kch;
+                const bfloat16 *a0 = (const bfloat16 *)(@LHS@), *a1 = a0 + 8 * kch;
+                const bfloat16 *b0 = (const bfloat16 *)(@RHS@), *b1 = b0 + 8 * kch;
                 for (int kb = 0; kb < kch / 8; kb++) {
                     auto va0 = aie::load_v<64>(a0 + kb * 64);
                     auto va1 = aie::load_v<64>(a1 + kb * 64);
@@ -882,7 +901,7 @@ KACC_KERNEL = r"""__global__ void @NAME@(aie::port<input_window_int32 *, aie::IF
                 aie::store_v(ac + 128, c10.to_vector<float>());
                 aie::store_v(ac + 192, c11.to_vector<float>());
 #else // scalar, same pre-tiled layout (chunk = [mi 2][kb kch/8][8x8])
-                const uint16_t *xs = (const uint16_t *)x, *ws = (const uint16_t *)w + s * 16 * kch;
+                const uint16_t *xs = (const uint16_t *)(@LHS@), *ws = (const uint16_t *)(@RHS@);
                 for (int m = 0; m < tm; m++)
                     for (int n = 0; n < tn; n++) {
                         float sum = 0.0f;
@@ -902,21 +921,7 @@ KACC_KERNEL = r"""__global__ void @NAME@(aie::port<input_window_int32 *, aie::IF
             aie::release(a_@SID@);
             aie::release(b_@SID@);
         }
-        // tile done: one fp32 write-back per 16x16 output tile
-        for (int s = 0; s < ns; s++) {
-            int32_t *y = (int32_t *)aie::store_buffer(c_@SID@, {m0, pn * (ns * tn) + s * tn}, {tm, tn});
-            const float *ac = kacc + s * 256;
-            for (int r = 0; r < tm; r++)
-                for (int cc = 0; cc < tn; cc++) {
-                    union {
-                        uint32_t u;
-                        float f;
-                    } o;
-                    o.f = ac[((r >> 3) * 2 + (cc >> 3)) * 64 + (r & 7) * 8 + (cc & 7)];
-                    y[r * tn + cc] = (int32_t)o.u;
-                }
-            aie::commit(c_@SID@);
-        }
+        aie::commit(c_@SID@); // one fp32 write-back of the core's 16 x px/4 block after the last chunk
     }
 }
 """
@@ -927,7 +932,9 @@ def kacc_kernel_text(ch: int, k: int, px: int) -> str:
     t = KACC_KERNEL
     for key, v in (("@NAME@", kacc_name(ch, k, px)), ("@SID@", f"{ch}x{k}x{px}"), ("@CH@", ch), ("@KW@", g["kp"] // 2), ("@PX@", px), ("@K@", k),
                    ("@TKW@", g["tkw"]), ("@KCH@", g["kch"]), ("@NKC@", g["nkc"]), ("@NT@", g["ntile"]),
-                   ("@S@", g["S"])):
+                   ("@S@", g["S"]), ("@AROWS@", g["arows"]), ("@BROWS@", g["brows"]), ("@TR@", g["tr"]),
+                   ("@LHS@", "(const uint16_t *)w + s * 16 * kch" if g["tr"] else "x"),
+                   ("@RHS@", "x" if g["tr"] else "(const uint16_t *)w + s * 16 * kch")):
         t = t.replace(key, str(v))
     assert "@" not in t
     return t
@@ -935,8 +942,9 @@ def kacc_kernel_text(ch: int, k: int, px: int) -> str:
 
 def kacc_host(shapes: list) -> str:
     """host part of the --kincore aiek source: uc_conv with ONE gemm_kacc launch per layer (no host K-sum)"""
-    sw = "\n".join("    if (N == %d && K == %d && M == %d) {\n        %s<<<mesh>>>(g_kw, g_kx, g_ky);\n        return 0;\n    }"
-                   % (ch, k, px, kacc_name(ch, k, px)) for ch, k, px in shapes)
+    sw = "\n".join("    if (N == %d && K == %d && M == %d) {\n        %s<<<mesh>>>(%s, g_ky);\n        return 0;\n    }"
+                   % (ch, k, px, kacc_name(ch, k, px), "g_kx, g_kw" if kacc_geom(ch, k, px)["tr"] else "g_kw, g_kx")
+                   for ch, k, px in shapes)
     return KACC_HOST.replace("@DISPATCH@", sw) \
         .replace("@MAXW@", str(max(sh[0] * kacc_geom(*sh)["kp"] for sh in shapes))) \
         .replace("@MAXX@", str(max(sh[2] * kacc_geom(*sh)["kp"] for sh in shapes))) \
@@ -994,7 +1002,12 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
 #endif
     /* natural layout (unet_aie.kacc_geom): W [N][K], X [M][K], each 16-row block pre-tiled per K chunk of
      * kch bf16 as bf16_gemm_kacc.cc: W chunk = [mi 2][kb kch/8][8x8 ch x k], X chunk = [ni 2][kb][8x8 k x px] */
-    const int kch = 2 * (4096 / M < 32 ? 4096 / M : 32); /* = 2 * kacc_geom tkw */
+    int tkw = 4096 / M < 32 ? 4096 / M : 32; /* = kacc_geom tkw */
+    const int tr = 2 * (16 * tkw * 4 + (M / 4) * tkw * 4 + 16 * (M / 4) * 4) > 29696; /* = kacc_geom tr: Y^T walk */
+    if (tr)
+        for (tkw = 32; (N / 4) * tkw > 1024 || (K / 2) % tkw; tkw /= 2)
+            ;
+    const int kch = 2 * tkw;
     const int Kp = (N == K / 2) ? K + kch : K; /* = kacc_geom kp: zero chunk when the W port would be square */
     if (K % kch || (long)N * Kp > UC_KW_ELEMS || (long)M * Kp > UC_KX_ELEMS)
         return -3;
@@ -1061,7 +1074,20 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     int bad = 0;
     for (int n = 0; n < N; n++)
         for (int m = 0; m < M; m++) {
-            const float v = Y[(size_t)n * M + m];
+            /* P4bx: each core's c block holds 16x16 tiles (ch r, px c) in [s][mi][ni][8x8] order. Normal: block
+             * (n/16, m/(M/4)) of Y [N][M], s = px sub-tile. Transposed: block (m/16, n/(N/4)) of Y^T [M][N],
+             * s = ch sub-tile. */
+            const int r = n & 15, c = m & 15;
+            float v;
+            if (!tr) {
+                const int q = M / 4, cc = m % q;
+                const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8 + (c & 7);
+                v = Y[(size_t)((n & ~15) + wi / q) * M + (m - cc) + wi % q];
+            } else {
+                const int q = N / 4, cc = n % q;
+                const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8 + (c & 7);
+                v = Y[(size_t)((m & ~15) + wi / q) * N + (n - cc) + wi % q];
+            }
             if (!(v == v) || v > 1e30f || v < -1e30f)
                 bad++;
             yout[((size_t)(n / yb) * M + m) * yb + n % yb] = v;
