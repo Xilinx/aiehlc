@@ -488,7 +488,29 @@ MAIN_EXTRA_DECL = (
     "int unet_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles);\n"
     "/* the runtime is C++ (aie_runtime.o in the kernel archive): bind its mangled symbol */\n"
     "void __Runtime_phase_cycles(unsigned long long *cyc, unsigned int *calls) "
-    "__asm__(\"_Z22__Runtime_phase_cyclesPyPj\");\n")
+    "__asm__(\"_Z22__Runtime_phase_cyclesPyPj\");\n"
+    "void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls) "
+    "__asm__(\"_Z24__Runtime_wait_io_cyclesPyPj\");\n"
+    "void __Runtime_kload_split_cycles(unsigned long long *elf_cyc, unsigned int *elf_n, unsigned long long *rst_cyc, "
+    "unsigned int *rst_n) __asm__(\"_Z28__Runtime_kload_split_cyclesPyPjS_S0_\");\n"
+    "void __Runtime_setup_split_cycles(unsigned long long *plan_cyc, unsigned int *plan_n, unsigned long long *sync_cyc, "
+    "unsigned int *sync_n) __asm__(\"_Z28__Runtime_setup_split_cyclesPyPjS_S0_\");\n"
+    "/* A78 PMU cycle counter (the runtime's RT_PROF_* clock): enabled here without the C reset, read\n"
+    " * around graph_run with XTime so the PMU rate is measured, not assumed */\n"
+    "static inline unsigned long long unet_pmc(void) {\n"
+    "    unsigned long long v;\n"
+    "    __asm__ volatile(\"isb; mrs %0, pmccntr_el0\" : \"=r\"(v));\n"
+    "    return v;\n"
+    "}\n"
+    "static inline void unet_pmc_enable(void) {\n"
+    "    unsigned long long v;\n"
+    "    __asm__ volatile(\"mrs %0, pmcr_el0\" : \"=r\"(v));\n"
+    "    v |= 1ULL;\n"
+    "    v &= ~(1ULL << 3);\n"
+    "    __asm__ volatile(\"msr pmcr_el0, %0\" : : \"r\"(v));\n"
+    "    __asm__ volatile(\"msr pmcntenset_el0, %0\" : : \"r\"(1ULL << 31));\n"
+    "    __asm__ volatile(\"isb\");\n"
+    "}\n")
 
 MAIN_CMP = r"""    int launches = 0, run_rc = -99, calls = 0;
     unsigned long long macs = 0;
@@ -514,6 +536,29 @@ LAUNCH_LINE = r"""#ifdef UNET_LAUNCH_WARM
         unet_aie_launch_stats(&aie_ms, &kloads, &cold_tiles);
         printf("LAUNCH warm ms_per_launch=%.3f launches=%d aie_wall_ms=%.3f kloads=%d opts=%s,cold_tile_loads=%u\n",
                wl ? aie_ms / wl : 0.0, wl, aie_ms, kloads, UNET_LAUNCH_OPTS, cold_tiles);
+        /* P1: per-launch split of aie_wall_ms by runtime phase (A78 pmccntr, AIEHLC_PROFILING=1 runtime).
+         * PH_COREEN is the A78 cost of the core-enable writes, not AIE compute: the AIE compute is
+         * inside wait_io (completion = output-DMA drain). core_reset is part of kload. */
+        unsigned long long ph[4] = {0, 0, 0, 0}, wio = 0, kel = 0, krst = 0, plan = 0, sync = 0;
+        unsigned int phn[4] = {0, 0, 0, 0}, wion = 0, keln = 0, krstn = 0, plann = 0, syncn = 0;
+        __Runtime_phase_cycles(ph, phn); /* PH_KLOAD=0 PH_BDCFG=1 PH_COREEN=2 PH_STARTIO=3 */
+        __Runtime_wait_io_cycles(&wio, &wion);
+        __Runtime_kload_split_cycles(&kel, &keln, &krst, &krstn);
+        __Runtime_setup_split_cycles(&plan, &plann, &sync, &syncn);
+        const double g_s = (double)(t1 - t0) / (double)COUNTS_PER_SECOND;
+        const unsigned long long pmu_hz = g_s > 0.0 ? (unsigned long long)((double)(pmc1 - pmc0) / g_s + 0.5) : 0ULL;
+        const double cms = pmu_hz ? 1000.0 / (double)pmu_hz : 0.0; /* ms per PMU cycle */
+        const double nl = wl ? (double)wl : 1.0;
+        const double sum_ms = (double)(ph[0] + ph[1] + ph[2] + ph[3] + wio) * cms;
+        printf("LAUNCH split kload=%.3f bdcfg=%.3f startio=%.3f coreen=%.3f wait_io=%.3f core_reset=%.3f "
+               "ms_per_launch=%.3f pmu_hz=%llu sum_vs_aie_wall=%.3f\n",
+               ph[0] * cms / nl, ph[1] * cms / nl, ph[3] * cms / nl, ph[2] * cms / nl, wio * cms / nl,
+               krst * cms / nl, aie_ms / nl, pmu_hz, aie_ms > 0.0 ? sum_ms / aie_ms : 0.0);
+        printf("LAUNCH split_detail calls kload=%u bdcfg=%u startio=%u coreen=%u wait_io=%u core_reset=%u "
+               "kload_elf_ms=%.3f plan_ms=%.3f sync_ms=%.3f phase_sum_ms=%.3f aie_wall_ms=%.3f "
+               "unattributed_ms_per_launch=%.4f pmc_delta=%llu xtime_s=%.3f\n",
+               phn[0], phn[1], phn[3], phn[2], wion, krstn, kel * cms / nl, plan * cms / nl, sync * cms / nl,
+               sum_ms, aie_ms, (aie_ms - sum_ms) / nl, pmc1 - pmc0, g_s);
         fflush(stdout);
     }
 #endif
@@ -531,5 +576,9 @@ def main_c(base: str) -> str:
     anchor = ' n, REF_UNET_OUT_N);\n'
     assert s.count(anchor) == 1
     s = s.replace(anchor, anchor + LAUNCH_LINE, 1)
+    run = ("    XTime_GetTime(&t0);\n    float *out = graph_run();\n    XTime_GetTime(&t1);\n")
+    assert s.count(run) == 1
+    s = s.replace(run, "    unet_pmc_enable();\n    unsigned long long pmc0 = unet_pmc();\n" + run.replace(
+        "    XTime_GetTime(&t1);\n", "    XTime_GetTime(&t1);\n    unsigned long long pmc1 = unet_pmc();\n"), 1)
     assert "unet_aie_stats(&launches" in s and "_Z22__Runtime_phase_cyclesPyPj" in s
     return s
