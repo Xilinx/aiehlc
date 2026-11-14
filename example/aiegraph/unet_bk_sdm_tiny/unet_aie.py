@@ -829,7 +829,10 @@ def kacc_geom(ch: int, k: int, px: int) -> dict:
     assert ch % 64 == 0 and px % 64 == 0 and k % 64 == 0, (ch, k, px)
     tkw = min(32, 4096 // px)
     assert tkw >= 4 and (k // 2) % tkw == 0, (ch, k, px, tkw)
-    return dict(ntile=ch // 64, S=px // 64, tkw=tkw, kch=2 * tkw, nkc=(k // 2) // tkw,
+    # K padded by one zero chunk when the W port would be square (ch == k/2 words): aiehlc's GemmSpace
+    # derivation then mis-sizes the A window (gemm_kacc_1280x2560x64: 24 elements instead of 512)
+    kp = k + 2 * tkw if ch == k // 2 else k
+    return dict(ntile=ch // 64, S=px // 64, tkw=tkw, kch=2 * tkw, nkc=(kp // 2) // tkw, kp=kp,
                 l1=2 * (16 * tkw * 4 + (px // 4) * tkw * 4 + 1024) + (px // 64) * 1024)
 
 
@@ -922,7 +925,7 @@ KACC_KERNEL = r"""__global__ void @NAME@(aie::port<input_window_int32 *, aie::IF
 def kacc_kernel_text(ch: int, k: int, px: int) -> str:
     g = kacc_geom(ch, k, px)
     t = KACC_KERNEL
-    for key, v in (("@NAME@", kacc_name(ch, k, px)), ("@SID@", f"{ch}x{k}x{px}"), ("@CH@", ch), ("@KW@", k // 2), ("@PX@", px), ("@K@", k),
+    for key, v in (("@NAME@", kacc_name(ch, k, px)), ("@SID@", f"{ch}x{k}x{px}"), ("@CH@", ch), ("@KW@", g["kp"] // 2), ("@PX@", px), ("@K@", k),
                    ("@TKW@", g["tkw"]), ("@KCH@", g["kch"]), ("@NKC@", g["nkc"]), ("@NT@", g["ntile"]),
                    ("@S@", g["S"])):
         t = t.replace(key, str(v))
@@ -935,8 +938,8 @@ def kacc_host(shapes: list) -> str:
     sw = "\n".join("    if (N == %d && K == %d && M == %d) {\n        %s<<<mesh>>>(g_kw, g_kx, g_ky);\n        return 0;\n    }"
                    % (ch, k, px, kacc_name(ch, k, px)) for ch, k, px in shapes)
     return KACC_HOST.replace("@DISPATCH@", sw) \
-        .replace("@MAXW@", str(max(ch * k for ch, k, px in shapes))) \
-        .replace("@MAXX@", str(max(px * k for ch, k, px in shapes))) \
+        .replace("@MAXW@", str(max(sh[0] * kacc_geom(*sh)["kp"] for sh in shapes))) \
+        .replace("@MAXX@", str(max(sh[2] * kacc_geom(*sh)["kp"] for sh in shapes))) \
         .replace("@MAXY@", str(max(ch * px for ch, k, px in shapes)))
 
 
@@ -990,31 +993,32 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     /* natural layout (unet_aie.kacc_geom): W [N][K], X [M][K], each 16-row block pre-tiled per K chunk of
      * kch bf16 as bf16_gemm_kacc.cc: W chunk = [mi 2][kb kch/8][8x8 ch x k], X chunk = [ni 2][kb][8x8 k x px] */
     const int kch = 2 * (4096 / M < 32 ? 4096 / M : 32); /* = 2 * kacc_geom tkw */
-    if (K % kch)
+    const int Kp = (N == K / 2) ? K + kch : K; /* = kacc_geom kp: zero chunk when the W port would be square */
+    if (K % kch || (long)N * Kp > UC_KW_ELEMS || (long)M * Kp > UC_KX_ELEMS)
         return -3;
     uint16_t *Wd = (uint16_t *)g_kw, *Xd = (uint16_t *)g_kx;
     for (int n = 0; n < N; n++) {
         const int mi = (n >> 3) & 1, mm = n & 7;
-        uint16_t *dst = Wd + (size_t)(n >> 4) * 16 * K;
-        for (int k = 0; k < K; k++) {
+        uint16_t *dst = Wd + (size_t)(n >> 4) * 16 * Kp;
+        for (int k = 0; k < Kp; k++) {
             const int c = k / KK, t = k % KK, j = k / kch, kr = k % kch, kb = kr >> 3, kk = kr & 7;
             const int f = mi * 8 * kch + kb * 64 + mm * 8 + kk;
-            dst[(size_t)(f / kch) * K + j * kch + f % kch] =
-                wbf[((((size_t)(n / ob) * (C / ib) + c / ib) * KK + t) * ib + c % ib) * ob + n % ob];
+            dst[(size_t)(f / kch) * Kp + j * kch + f % kch] =
+                k < K ? wbf[((((size_t)(n / ob) * (C / ib) + c / ib) * KK + t) * ib + c % ib) * ob + n % ob] : 0;
         }
     }
     for (int m = 0; m < M; m++) { /* im2col of the activation, fp32 -> bf16 RNE */
         const int oh = m / OW, ow = m % OW, ni = (m >> 3) & 1, nn = m & 7;
-        uint16_t *dst = Xd + (size_t)(m >> 4) * 16 * K;
-        for (int k = 0; k < K; k++) {
+        uint16_t *dst = Xd + (size_t)(m >> 4) * 16 * Kp;
+        for (int k = 0; k < Kp; k++) {
             const int c = k / KK, t = k % KK, ih = oh * sh + t / KW - ph, iw = ow * sw + t % KW - pw;
-            const float v = (ih >= 0 && ih < H && iw >= 0 && iw < W)
+            const float v = (k < K && ih >= 0 && ih < H && iw >= 0 && iw < W)
                                 ? xin[(((size_t)(c / cb) * H + ih) * W + iw) * cb + c % cb] : 0.0f;
             const int j = k / kch, kr = k % kch, kb = kr >> 3, kk = kr & 7, f = ni * 8 * kch + kb * 64 + kk * 8 + nn;
-            dst[(size_t)(f / kch) * K + j * kch + f % kch] = uc_f2bf(v);
+            dst[(size_t)(f / kch) * Kp + j * kch + f % kch] = uc_f2bf(v);
         }
     }
-    const size_t wbytes = (size_t)N * K * 2, xbytes = (size_t)M * K * 2;
+    const size_t wbytes = (size_t)N * Kp * 2, xbytes = (size_t)M * Kp * 2;
     (void)kc;
     memset(g_ky, 0xff, (size_t)M * N * 4); // sentinel: unwritten -> NaN -> counted
     XTime lt0, lt1;
