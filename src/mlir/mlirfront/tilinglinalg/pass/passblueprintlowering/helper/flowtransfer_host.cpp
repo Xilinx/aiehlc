@@ -895,6 +895,33 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
             offset = rewriter.create<arith::MulIOp>(loc, ivI32, strideConst);
         }
 
+        // A 3-D K-tiling shim BD (d2 wrap == k_rounds) already walks every k-round of this
+        // round's strip: send it as ONE task (len = whole walk, no BD iteration, repeat 1).
+        // The per-k-round form (one chunk per task + BD iteration + repeat k_rounds) is only
+        // legal for k_rounds <= 64 (aie2ps BD iteration wrap; start-queue repeat <= 256), and
+        // the M-round strip BD was started k_rounds times with an element-count len.
+        // P4bk c013: k_rounds 360 -> "Iteration parameters exceed ... Wrap:360" / "Invalid Repeat
+        // Count: 360" on palmyra213, inputs never started.
+        int64_t loopLen = c.perTileShimLen;
+        int32_t loopIterStep = c.shimIterStepSize, loopIterWrap = c.shimIterWrap, loopRepeat = perIterRepeat;
+        {
+            const int64_t kR = passState->kRounds;
+            ArrayAttr wr = c.shimDimWraps;
+            ArrayAttr st = c.shimDimStrides;
+            if (kR > 1 && wr && st && wr.size() == 3 && st.size() == 3 && cast<IntegerAttr>(wr[2]).getInt() == kR &&
+                cast<IntegerAttr>(st[0]).getInt() == 4) {
+                int64_t full = 4;
+                for (Attribute a : wr)
+                    full *= cast<IntegerAttr>(a).getInt();
+                loopLen = full;
+                loopIterStep = 0;
+                loopIterWrap = 0;
+                loopRepeat = 1;
+                llvm::errs() << "[BlueprintToSchedule] 3D K BD covers all " << kR << " k-rounds: len=" << full
+                             << " B, repeat 1, no BD iteration (was len=" << c.perTileShimLen
+                             << " iter_wrap=" << c.shimIterWrap << " repeat=" << perIterRepeat << ")\n";
+            }
+        }
         auto loopPktConst =
             rewriter.create<arith::ConstantOp>(loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
         auto loopOooConst =
@@ -907,7 +934,7 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
             offset,                                       // offset (dynamic)
             loopPktConst.getResult(),                     // packet_id
             loopOooConst.getResult(),                     // out_of_order_bd_id
-            rewriter.getI32IntegerAttr(c.perTileShimLen), // len
+            rewriter.getI32IntegerAttr(loopLen),          // len
             rewriter.getBoolAttr(false),                  // enable_packet
             rewriter.getI32IntegerAttr(4294967295),       // next_bd = none
             rewriter.getI32IntegerAttr(0),                // acquire_lock_id
@@ -917,8 +944,8 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
             rewriter.getI32IntegerAttr(dataId),           // data_id
             Value(),                                      // linked_bd = none
             c.shimDimStrides, c.shimDimWraps,
-            rewriter.getI32IntegerAttr(c.shimIterStepSize), // iter_step_size (K-round)
-            rewriter.getI32IntegerAttr(c.shimIterWrap));    // iter_wrap (kRounds)
+            rewriter.getI32IntegerAttr(loopIterStep),      // iter_step_size (K-round)
+            rewriter.getI32IntegerAttr(loopIterWrap));     // iter_wrap (kRounds)
 
         auto loopCreateIo = rewriter.create<dfschedule::ConfigCreateIoOp>(
             loc, dfschedule::IoHandleType::get(rewriter.getContext()), loopBd.getBdHandle(), c.shimTileOp.getTile(),
@@ -928,7 +955,7 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
         auto loopGetBdId = rewriter.create<dfschedule::GetBdIdOp>(loc, rewriter.getI32Type(), c.shimTileOp.getTile());
         auto loopStartIo = rewriter.create<dfschedule::StartIoOp>(
             loc, dfschedule::EventType::get(rewriter.getContext()), loopCreateIo.getIoHandle(), loopGetBdId.getBdId(),
-            rewriter.getI32IntegerAttr(c.flowIndex), rewriter.getI32IntegerAttr(perIterRepeat));
+            rewriter.getI32IntegerAttr(c.flowIndex), rewriter.getI32IntegerAttr(loopRepeat));
 
         SmallVector<Value> loopWaitEvents;
         loopWaitEvents.push_back(loopStartIo.getEvent());
