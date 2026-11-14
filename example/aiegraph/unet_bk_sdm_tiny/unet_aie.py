@@ -450,7 +450,14 @@ def patch_driver(text: str, sel: list) -> tuple:
     if "unet_aie_conv(int cid" in text:
         raise RuntimeError("driver already patched")
     i = text.index("static uint8_t kernel_ws[")
-    text = text[:i] + DECL + "\n" + text[i:]
+    text = text[:i] + DECL + PROF_C + "\n" + text[i:]
+    exp_body = "    for (uint64_t i = 0; i < n; ++i) d[i] = (uint32_t)src[i] << 16;\n}\n"
+    assert text.count(exp_body) == 1, text.count(exp_body)
+    text = text.replace(exp_body, "    XTime e0_, e1_;\n    XTime_GetTime(&e0_);\n" + exp_body[:-2] +
+                        "    XTime_GetTime(&e1_);\n    up_pending_exp += e1_ - e0_;\n    up_exp_calls++;\n}\n", 1)
+    run = "float *graph_run(void) {\n"
+    assert text.count(run) == 1
+    text = text.replace(run, run + "    up_pending_exp = 0; /* P1 PROF: expands before graph_run are not graph_run time */\n", 1)
     n = 0
     for c in sel:
         m = re.search(r"    tensors\[(\d+)\]\.data = 0;   /\* %s: bf16 @(\d+)\+(\d+) B" % re.escape(c["wname"]), text)
@@ -474,16 +481,76 @@ def patch_driver(text: str, sel: list) -> tuple:
         assert cm and (nxt < 0 or cm.start() < nxt), c["wname"]
         calls = re.findall(r"(?:aie_)?(tvmgen_\w+)\(args, codes, (\d+), 0, 0, 0\);", cm.group(2))
         assert calls and all(s == c["symbol"] and int(k) == c["nargs"] for s, k in calls), (calls, c["symbol"])
-        rep = ("    GRAPH_PROF_BEGIN(%s);\n    unet_aie_conv(%d, args, %d, (const uint16_t *)(g_params + %d), %d, %d, %d, %d);\n"
-               "    GRAPH_PROF_END(%s, \"aie unet_aie_conv %d\");\n"
-               % (cm.group(1), c["cid"], c["nargs"], off, c["sh"], c["sw"], c["ph"], c["pw"], cm.group(1), c["cid"]))
+        rep = ("    GRAPH_PROF_BEGIN(%s);\n    UP_AIE_BEGIN(%s);\n"
+               "    unet_aie_conv(%d, args, %d, (const uint16_t *)(g_params + %d), %d, %d, %d, %d);\n"
+               "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie unet_aie_conv %d\");\n"
+               % (cm.group(1), cm.group(1), c["cid"], c["nargs"], off, c["sh"], c["sw"], c["ph"], c["pw"],
+                  cm.group(1), cm.group(1), c["cid"]))
         text = text[:cm.start()] + rep + text[cm.end():]
         n += 1
     assert text.count("    unet_aie_conv(") == len(sel)
     return text, n
 
 
+# P1 (b) per-call-site A78 time: inserted into graph_driver.c by patch_driver
+PROF_C = r"""
+/* P1 (b), build_unet.py --aie conv: A78 wall time of every call site in graph_run (XTime),
+ * always on. AIE sites count only their A78 part (site time - aie_wall of their launches);
+ * graph_bf16_expand time goes to the site that follows it. unet_prof_print() from main.c. */
+#include "aie_timer.h"
+int unet_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles);
+#define UP_MAX 1024
+static unsigned long long up_ticks[UP_MAX], up_exp_ticks[UP_MAX], up_pending_exp;
+static double up_aie_ms[UP_MAX];
+static const char *up_tag[UP_MAX];
+static unsigned up_n, up_exp_calls;
+#undef GRAPH_PROF_BEGIN
+#undef GRAPH_PROF_END
+#define GRAPH_PROF_BEGIN(i) XTime graph_prof_t0_##i; up_exp_ticks[i] += up_pending_exp; up_pending_exp = 0; \
+    XTime_GetTime(&graph_prof_t0_##i)
+#define GRAPH_PROF_END(i, tag) do { XTime t1_; XTime_GetTime(&t1_);                      \
+        up_ticks[i] += t1_ - graph_prof_t0_##i; up_tag[i] = (tag);                        \
+        if ((unsigned)(i) + 1U > up_n) up_n = (unsigned)(i) + 1U; } while (0)
+#define UP_AIE_BEGIN(i) double up_a0_##i = 0.0; unet_aie_launch_stats(&up_a0_##i, 0, 0)
+#define UP_AIE_END(i) do { double a1_ = 0.0; unet_aie_launch_stats(&a1_, 0, 0); up_aie_ms[i] += a1_ - up_a0_##i; } while (0)
+void unet_prof_print(double graph_run_ms, double aie_wall_ms) {
+    const double tk = 1000.0 / (double)COUNTS_PER_SECOND;
+    double tot = 0.0, cpu = 0.0, aieh = 0.0, exp_ms = 0.0, aie_in = 0.0;
+    unsigned ns = 0;
+    for (unsigned i = 0; i < up_n; i++) {
+        if (!up_tag[i])
+            continue;
+        const int is_aie = strncmp(up_tag[i], "aie ", 4) == 0;
+        const double site = (double)up_ticks[i] * tk, e = (double)up_exp_ticks[i] * tk;
+        const double a78 = is_aie ? site - up_aie_ms[i] : site;
+        const char *op = strncmp(up_tag[i], "cpu ", 4) == 0 ? up_tag[i] + 4 : up_tag[i];
+        if (is_aie)
+            printf("PROF part=%u op=aie_host_conv%s ms=%.3f bf16_expand_ms=%.3f site_ms=%.3f aie_ms=%.3f\n", i,
+                   up_tag[i] + 18, a78 + e, e, site, up_aie_ms[i]);
+        else
+            printf("PROF part=%u op=%s ms=%.3f bf16_expand_ms=%.3f\n", i, op, a78 + e, e);
+        tot += a78 + e;
+        exp_ms += e;
+        aie_in += is_aie ? up_aie_ms[i] : 0.0;
+        if (is_aie)
+            aieh += a78;
+        else
+            cpu += a78;
+        ns++;
+    }
+    const double tail = (double)up_pending_exp * tk;
+    tot += tail;
+    exp_ms += tail;
+    const double den = graph_run_ms - aie_wall_ms;
+    printf("PROF total_nonaie_ms=%.3f vs_graph_minus_aie=%.4f graph_run_ms=%.3f aie_wall_ms=%.3f sites=%u "
+           "cpu_ms=%.3f aie_host_ms=%.3f bf16_expand_ms=%.3f (calls=%u tail=%.3f) aie_ms_in_sites=%.3f\n",
+           tot, den > 0.0 ? tot / den : 0.0, graph_run_ms, aie_wall_ms, ns, cpu, aieh, exp_ms, up_exp_calls, tail,
+           aie_in);
+}
+"""
+
 MAIN_EXTRA_DECL = (
+    "void unet_prof_print(double graph_run_ms, double aie_wall_ms); /* graph_driver.c (P1 PROF) */\n"
     "int unet_aie_stats(int *launches, int *run_rc, int *calls, unsigned long long *macs);\n"
     "int unet_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles);\n"
     "/* the runtime is C++ (aie_runtime.o in the kernel archive): bind its mangled symbol */\n"
@@ -565,6 +632,15 @@ LAUNCH_LINE = r"""#ifdef UNET_LAUNCH_WARM
 """
 
 
+PROF_LINE = r"""    {
+        double aie_ms_p = 0.0;
+        unet_aie_launch_stats(&aie_ms_p, 0, 0);
+        unet_prof_print(1000.0 * (double)(t1 - t0) / (double)COUNTS_PER_SECOND, aie_ms_p);
+        fflush(stdout);
+    }
+"""
+
+
 def main_c(base: str) -> str:
     old = '    int rc = p1_cmp("unet-" UNET_AIE_MODE, out, UNET_WDTYPE "w/" UNET_AIE_MODE, 0, 0, 0, 0.0);\n'
     assert old in base
@@ -575,7 +651,7 @@ def main_c(base: str) -> str:
                   "init (aiegraph C on A78 + conv on AIE gemm_bf16, weights=%s, aie=%s)")
     anchor = ' n, REF_UNET_OUT_N);\n'
     assert s.count(anchor) == 1
-    s = s.replace(anchor, anchor + LAUNCH_LINE, 1)
+    s = s.replace(anchor, anchor + LAUNCH_LINE + PROF_LINE, 1)
     run = ("    XTime_GetTime(&t0);\n    float *out = graph_run();\n    XTime_GetTime(&t1);\n")
     assert s.count(run) == 1
     s = s.replace(run, "    unet_pmc_enable();\n    unsigned long long pmc0 = unet_pmc();\n" + run.replace(
