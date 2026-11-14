@@ -1034,6 +1034,8 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     Xil_DCacheFlushRange((UINTPTR)g_kx, xbytes);
     Xil_DCacheFlushRange((UINTPTR)g_ky, (size_t)M * N * 4);
     const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
+    printf("[UCS] l=%d M=%d N=%d K=%d tkw=%d\n", g_aie_launches, M, N, K, kch / 2); /* P4bp: names a hanging launch */
+    fflush(stdout);
     const int lrc = uc_kacc_launch(N, K, M); // ONE launch: the whole layer, K summed in the cores
     const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();
     Xil_DCacheInvalidateRange((UINTPTR)g_ky, (size_t)M * N * 4);

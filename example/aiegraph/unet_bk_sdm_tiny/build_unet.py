@@ -193,6 +193,14 @@ def aie_conv(a, emod, out: Path, hdr: Path):
         # P4bg: one launch per layer from kplan.py (K in the core) -- the partition.json N (64x64x64
         # tile launches) does not apply on this path
         import kplan
+        if a.kincore_layers != "all":
+            # P4bp: probe subset -- unselected layers keep their TVM C call site (patch_driver skips them)
+            want = sorted({int(x) for x in a.kincore_layers.split(",") if x.strip()})
+            bad = [i for i in want if not 0 <= i < len(sel)]
+            if not want or bad:
+                raise SystemExit(f"--kincore-layers {a.kincore_layers}: indices must be in 0..{len(sel) - 1}")
+            sel = [sel[i] for i in want]
+            log(f"KINCORE subset --kincore-layers {','.join(map(str, want))} -> cids {[c['cid'] for c in sel]}")
         for c in sel:
             kp = kplan.plan(c["M"], c["K"], c["N"])
             if not kp["legal"] or kp["launches"] != 1:
@@ -285,6 +293,9 @@ def main(argv=None) -> int:
                     help="P4bg: one launch per conv layer (kplan.py), Maxwell's K-accumulating gemm_kacc "
                          "(bf16_gemm_kacc.cc) instantiated per layer shape; host does im2col + pre-tiling, "
                          "no host K sum. Default off: 64x64x64 gemm_bf16 tiles (partition.json N launches)")
+    ap.add_argument("--kincore-layers", default="all",
+                    help="P4bp: --kincore only -- comma-separated partition layer indices (0..36) put on the AIE; "
+                         "the others keep their TVM C call site. Default all")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
     if a.aie == "conv":
@@ -294,6 +305,9 @@ def main(argv=None) -> int:
         # PH_COREEN is counted only by a runtime built with -DAIEHLC_PROFILING=1 (as P2/P3)
         os.environ["AIEHLC_PROFILING"] = "1"
         os.environ["EXTRA_DEFS"] = (os.environ.get("EXTRA_DEFS", "") + " -DAIEHLC_PROFILING=1").strip()
+    if a.kincore_layers != "all" and not a.kincore:
+        log("--kincore-layers needs --kincore")
+        return 2
     if a.kincore and (a.aie != "conv" or a.ktimer):
         log("--kincore needs --aie conv and no --ktimer")
         return 2
