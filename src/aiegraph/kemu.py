@@ -65,7 +65,10 @@ struct AnyPtr { void *p; template <class T> operator T *() const { return (T *)p
 namespace aie {
 enum role_t { IFM, WEIGHTS, OFM };
 enum class pad_value { none, zero };
-struct load_opts { int reuse = 0; pad_value pad = pad_value::none; };
+// Block options, as the kernel analysis takes them (kernel_trace.cpp); .tile re-lays out the block.
+struct load_opts { int reuse = 0; pad_value pad = pad_value::none; int depth = 0; bool resident = false;
+                   int tile[2] = {0, 0}; };
+using store_opts = load_opts;
 template <int... D> struct shape { static constexpr int rank = sizeof...(D); };
 template <class W, role_t R, class S = shape<>> struct port;
 template <class W, role_t R, int... D> struct port<W, R, shape<D...>> {
@@ -88,6 +91,7 @@ KEMU_WIN(input_window_int8, 1, 0) KEMU_WIN(input_window_uint8, 1, 0) KEMU_WIN(in
 KEMU_WIN(input_window_uint16, 2, 0) KEMU_WIN(input_window_int32, 4, 0) KEMU_WIN(input_window_float, 4, 0)
 KEMU_WIN(output_window_int8, 1, 1) KEMU_WIN(output_window_uint8, 1, 1) KEMU_WIN(output_window_int16, 2, 1)
 KEMU_WIN(output_window_uint16, 2, 1) KEMU_WIN(output_window_int32, 4, 1) KEMU_WIN(output_window_float, 4, 1)
+KEMU_WIN(input_window_bfloat16, 2, 0) KEMU_WIN(output_window_bfloat16, 2, 1)
 namespace kemu {
 // Walk every element of block (o, s) of a [dim] tensor: f(tensor offset or -1 if outside, block offset).
 template <class P, class F> void walk(const int *o, const int *s, F f) {
@@ -128,6 +132,15 @@ template <class P> AnyPtr block(P &p, std::initializer_list<int> off, std::initi
         memset(b.m, 0xA5, bytes);
     else
         walk<P>(b.o, b.s, [&](long t, long i) { if (t >= 0) memcpy(b.m + i, p.base + t, P::eb); else memset(b.m + i, 0, P::eb); });
+    if (!st && opt.tile[1] > 0 && P::rank == 2) { // .tile: panel-major (tc-wide panels of all rows), as the DMA delivers it
+        const int R = b.s[0], Cc = b.s[1], tc = opt.tile[1];
+        unsigned char *t = (unsigned char *)malloc(bytes);
+        for (int r = 0; r < R; r++)
+            for (int c = 0; c < Cc; c++)
+                memcpy(t + ((long)(c / tc) * R * tc + (long)r * tc + c % tc) * P::eb, b.m + ((long)r * Cc + c) * P::eb, P::eb);
+        memcpy(b.m, t, bytes);
+        free(t);
+    }
     p.live.push_back(b);
     return {b.m};
 }
@@ -145,7 +158,7 @@ namespace aie {
 template <class P> kemu::AnyPtr load_buffer(P &p, std::initializer_list<int> o, std::initializer_list<int> s, load_opts opt = {}) {
     return kemu::block(p, o, s, 0, opt);
 }
-template <class P> kemu::AnyPtr store_buffer(P &p, std::initializer_list<int> o, std::initializer_list<int> s) {
+template <class P> kemu::AnyPtr store_buffer(P &p, std::initializer_list<int> o, std::initializer_list<int> s, store_opts = {}) {
     return kemu::block(p, o, s, 1, {});
 }
 template <class P> void release(P &p) { kemu::unblock(p, 0); }

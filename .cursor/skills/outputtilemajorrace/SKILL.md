@@ -56,4 +56,6 @@ Tutorial: `tutorial/aieprogram/04_conv2d_vector_scheduling.md` section 5.
 Telling it apart from the intermittent post-DMA stale-cache issue: the race is
 **reproducible** (hundreds of thousands of mismatches every run, values from
 another round); the cache issue is a few hundred outputs reading as the host's
-`memset` value, on one run in several (`jane/post-dma-inval`).
+`memset` value, on one run in several (`jane/post-dma-inval`). Seen again on
+`simpleconv2dkernel_port_bf16.cc` (2026-11-14): 191 outputs = 0 on 1 of 6 runs,
+12/12 bit-exact with `Xil_DCacheInvalidateRange(output)` after the launch.

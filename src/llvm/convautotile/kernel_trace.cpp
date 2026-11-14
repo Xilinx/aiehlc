@@ -59,7 +59,7 @@ std::vector<std::string> splitTop(const std::string &s) {
 }
 
 int elemBytesOf(const std::string &windowType) {
-    if (windowType.find("int16") != std::string::npos)
+    if (windowType.find("int16") != std::string::npos || windowType.find("bfloat16") != std::string::npos)
         return 2;
     if (windowType.find("int32") != std::string::npos || windowType.find("float") != std::string::npos ||
         windowType.find("cint16") != std::string::npos)
@@ -1154,7 +1154,9 @@ Derived convCrossCheck(const TraceKernel &k, KernelTraceResult &tr, const std::v
         !recognizeConv(*ifm, *wgt, *ofm, tr.fits[ifm->var], tr.fits[wgt->var], tr.fits[ofm->var], rows, cols, c, m,
                        err))
         return none;
-    Derived d = derive(c, m);
+    Target tgt; // the conv derivation's byte sizes in the ports' element size (bfloat16 = 2)
+    tgt.elem_bytes = ifm->elem_bytes;
+    Derived d = derive(c, m, tgt);
     if (!d.ok)
         return none;
     std::vector<std::string> diff;

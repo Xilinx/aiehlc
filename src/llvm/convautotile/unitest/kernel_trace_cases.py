@@ -211,6 +211,18 @@ CONVOPTS_CASES = [
      "is not supported on a spatial-halo (conv) kernel yet"),
 ]
 
+# bfloat16 ports (simpleconv2dkernel_port_bf16.cc): 2-byte blocks through the
+# trace (elemBytesOf), the x86 `bfloat16` (aie_api_x86emu.h) and the conv
+# cross-check with the ports' element size.
+BF16_BASE = CCODE / "simpleconv2dkernel_port_bf16.cc"
+BF16_CASES = [
+    ("bf16: baseline (bf16 in / out, fp32 accumulate)", [], None),
+    ("bf16: data used past the bf16 block (an int8-sized index)",
+     [("(float)x[((oh * S + kh) * iw_t + ow * S + kw) * C + c]",
+       "(float)x[((oh * S + kh) * iw_t + ow * S + kw) * C + c + 2 * iw_t * C]")],
+     "data used without being loaded"),
+]
+
 # Hand-written GemmSpaces + block loads (verifySpaceKernels): each side may be
 # wrong, and the conflict names the GemmSpace field.
 SLICE = ".slice_tiling = {.tile_size = 19, .stride = 14, .rounds = 4}"
@@ -272,6 +284,7 @@ def main():
     cases += [(n, e, x, GEMM_BASE) for n, e, x in GEMM_CASES]
     cases += [(n, e, x, DATAFLOW_BASE) for n, e, x in DATAFLOW_CASES]
     cases += [(n, e, x, CONVOPTS_BASE) for n, e, x in CONVOPTS_CASES]
+    cases += [(n, e, x, BF16_BASE) for n, e, x in BF16_CASES]
     cases += [(n, e, x, SPACE_BASE) for n, e, x in SPACE_CASES]
     if len(sys.argv) > 2:  # a name filter
         cases = [c for c in cases if sys.argv[2] in c[0]]

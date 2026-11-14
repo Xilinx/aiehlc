@@ -535,6 +535,20 @@ the dataflow. Port buffers get **32 KB**, not 48
 (`checkPortBuffers`). Design: `doc/design/trace_to_routing.md` "Dataflow
 options"; skill **gemmdataflowoptions**.
 
+### bfloat16 ports (`input_window_bfloat16`)
+
+A kernel-only kernel can take / produce bf16 tensors
+(`example/tileprogram/ccode/simpleconv2dkernel_port_bf16.cc`, the bf16 twin of
+`_less.cc`). Carried as **16-bit storage** (pipeline `i16`, `v4int16` windows);
+only the kernel body sees `bfloat16` (chess native; RNE type in
+`aie_api_x86emu.h`), and `load_buffer` returns a pointer that converts to
+`const bfloat16 *`. Element size is decided in two front ends (`aiehlc.cc` bit
+width, `kernel_trace.cpp elemBytesOf`) plus the conv cross-check's
+`Target.elem_bytes`. Limits: one element type per kernel, scalar only (no bf16
+mmul in the x86 emulation yet), blocks twice the bytes (7x14 tile). palmyra:
+802,816 bit-exact, 12/12 runs. Design `doc/design/bf16_support.md`; skill
+**bf16kernel**.
+
 ### Declarative conv2d auto-tiling (`aie::Conv2d` + `aie::Mapping`)
 
 `__global__(conv, map) void k(aie::port<T, aie::IFM> a, aie::port<T, aie::WEIGHTS> b, aie::port<T, aie::OFM> c)`
@@ -939,6 +953,7 @@ Read the matching skill when the task fits:
 | Triton-style block-load kernel (`aie::program_id`, `aie::load_buffer` / `store_buffer` in tensor coordinates, `aie::release` / `commit`): `no member named 'program_id' in namespace 'aie'`, klog `BLKE`, wrong offsets but correct output, emulating the generated kernel on x86; hand-written `aie::GemmSpace` ports + `load_buffer` (`(GemmSpace X) .d1... = A, the kernel's blocks give B`) | blockloadkernel |
 | Kernel-only `{.depth / .resident / .tile}` options; `the core window is N elements x R round(s) ... but the kernel's blocks (#routing.kernel_block) are`; `the port buffers take N B of core memory`; a GEMM with B loaded once / full-K A strips; kernel macro under `#ifndef` undeclared | gemmdataflowoptions |
 | Misspelled `#include` reported as `` `HW_ROWS` ... no #define `` instead of `file not found`; kernel-only kernel: `kernel analysis needs the launch mesh: no device.partition(...)` though the call exists (mesh macros behind `#include <x.h>`); xchesscc `no matching function for call to 'aiehlc_load_buffer'` (window port by value, missing `*`); adding an early source-level diagnostic | kernelanalysisdiagnostics |
+| bfloat16 ports: `input_window_bfloat16`, DMA lengths twice/half, `output block bytes per round` mismatch on a 16-bit conv, `bfloat16` does not compile for tracing, a few hundred outputs reading 0 on 1 run in 6 | bf16kernel |
 | `data used without being loaded` and WHICH constant causes it (`oc_t = 15` vs loops walking 16); `cause (static analysis)` / `out-of-block access (static analysis)` lines; extending `kernel_static.cpp` | blockstaticbounds |
 | Edit the routing / dmaphop IR and feed it back (`AIEHLC_ROUTING_IR_IN`, `AIEHLC_DMAPHOP_IR_IN`, `aiebackend.routing_ir`: view / set_level / lint / check / build), round-trip test, an IR edit that does nothing or is silently accepted although illegal; `flowcheck FAILED` / `FLOWCHECK ERROR ... does not reach / also reaches` after a build | routingirreentry |
 | A dialect attribute's dumped IR does not parse back (`expected integer value`, `failed to parse ...Attr parameter ... ArrayRef<int64_t>`, `AIEHLC_*_IR_IN ... does not parse / verify`, roundtrip FAIL at the re-entry build): `struct(params)` with an `ArrayRefParameter` | mlirattrarrayroundtrip |
