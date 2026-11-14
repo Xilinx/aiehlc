@@ -299,6 +299,11 @@ Same placement as the GEMM: pid `(pid_h, pid_c)` is array tile
 
 ## 5. What the compiler made of it
 
+The same two steps as the GEMM ([tutorial 1, section 5](01_gemm_4x4.md#5-what-the-compiler-made-of-it)):
+trace + fit give a DMA pattern per port, then the routing -> dmap -> dmaphop ->
+dfschedule / routinghw pipeline turns it into `host.cc`, `kernel.cc` and
+`routing.cc`. Only the trace's report is new here:
+
 ```
 [KernelAnalysis] conv2d_spatial: traced on the 4x4 mesh
   win_a (IFM, tensor (230,230,4)): block (19,61,4), core offset (56,0,0)*p0 + (0,0,0)*p1, rounds 4x4 steps (14,0,0) / (0,56,0)

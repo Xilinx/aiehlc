@@ -432,6 +432,142 @@ def vec_mmul():
     s.save("vec_mmul.svg")
 
 
+# ------------------------------------------------------------- COMPILER ----
+def trace_to_dma():
+    """Kernel trace -> affine fit -> DMA pattern, for A of the GEMM."""
+    s = Svg(1060, 430)
+    s.text(530, 24, "Step 1: from load_buffer calls to a DMA pattern (matrix A of the GEMM)", 15, weight="bold")
+    cols = [(20, "1. run the kernel on x86 for every core", "(trace)"),
+            (370, "2. fit each port's blocks to one formula", "(affine fit)"),
+            (720, "3. that formula IS a DMA buffer descriptor", "(DMA pattern)")]
+    for x, t1, t2 in cols:
+        s.rect(x, 44, 320, 330, "#fafafa", GRID, 1, rx=8)
+        s.text(x + 160, 66, t1, 12, weight="bold")
+        s.text(x + 160, 82, t2, 11, color="#666")
+    for x in (346, 696):
+        s.line(x, 210, x + 18, 210, GRID, 2, arrow=True)
+    # column 1: recorded calls of two cores
+    x = 34
+    s.text(x, 108, "core (pm=1, pn=2) records:", 11, "start", weight="bold")
+    for j in range(4):
+        s.text(x + 8, 128 + j * 17, f"load a  offset ({16},{64 * j:>3})  shape (16,64)", 10, "start", "#a0522d")
+    s.text(x, 210, "core (pm=2, pn=0) records:", 11, "start", weight="bold")
+    for j in range(4):
+        s.text(x + 8, 230 + j * 17, f"load a  offset ({32},{64 * j:>3})  shape (16,64)", 10, "start", "#a0522d")
+    s.text(x, 316, "... 16 cores x 4 rounds, plus every", 10, "start", "#666")
+    s.text(x, 330, "store, release and commit", 10, "start", "#666")
+    s.text(x, 352, "stubs: aie::load_buffer records,", 10, "start", "#666")
+    s.text(x, 366, "ASan checks every byte the kernel reads", 10, "start", "#666")
+    # column 2: the fit
+    x = 384
+    s.text(x, 112, "offset = base_p0 * pm + base_p1 * pn", 11, "start", weight="bold")
+    s.text(x, 128, "       + step_i * i + step_j * j", 11, "start", weight="bold")
+    rows = [("block", "(16, 64)"), ("base_p0", "(16, 0)    moves with pm"), ("base_p1", "(0, 0)     same for all pn"),
+            ("rounds", "1 x 4"), ("step_j", "(0, 64)    the K loop")]
+    for k, (a, b) in enumerate(rows):
+        s.text(x + 6, 156 + k * 18, a, 11, "start", "#a0522d", "bold")
+        s.text(x + 76, 156 + k * 18, b, 11, "start")
+    s.text(x, 262, "=> A depends on pm only:", 11, "start", weight="bold")
+    s.text(x, 278, "   ROW BROADCAST", 11, "start", "#a0522d", "bold")
+    s.text(x, 300, "B: base_p1 = (16, 0) -> COLUMN broadcast", 10, "start", "#1f4e79")
+    s.text(x, 316, "C: moves with pm and pn -> GATHER", 10, "start", "#38761d")
+    s.text(x, 344, "not affine / not one shape -> build error", 10, "start", "#990000")
+    s.text(x, 358, "(the DMA could not stream it)", 10, "start", "#990000")
+    # column 3: the DMA pattern
+    x = 734
+    s.text(x, 112, "shim MM2S descriptor, mesh row pm:", 11, "start", weight="bold")
+    dims = [("start", "A + 4096 * pm   (16 rows x 256 B)"), ("d0", "16 words  = 64 B of one row"),
+            ("d1", "16 rows, pitch 256 B"), ("d2", "4 chunks, step 64 B   (j)"), ("length", "1024 B per round, 4 rounds")]
+    for k, (a, b) in enumerate(dims):
+        s.text(x + 6, 136 + k * 18, a, 11, "start", "#a0522d", "bold")
+        s.text(x + 60, 136 + k * 18, b, 11, "start")
+    s.text(x, 240, "routed to all 4 cores of mesh row pm", 11, "start", weight="bold")
+    s.text(x, 258, "core side: 1 KB ping + 1 KB pong window,", 10, "start")
+    s.text(x, 272, "a lock pair; load_buffer = acquire,", 10, "start")
+    s.text(x, 286, "release = give the buffer back", 10, "start")
+    s.text(x, 316, "written to aout/newfile.cpp as", 10, "start", "#666")
+    s.text(x, 330, "constexpr aie::GemmSpace __aie_gemm_IFM", 10, "start", "#666")
+    s.text(x, 344, "  .d1 = {64, tile_round 4, tile 16, stride 16}", 10, "start", "#666")
+    s.text(x, 358, "  .d2 = {256, tile_round 4, tile 64, stride 64}", 10, "start", "#666")
+    s.text(530, 405, "Nothing here knows it is a GEMM: the same three steps route the conv2d of tutorial 2.", 12,
+           color="#333")
+    s.save("trace_to_dma.svg")
+
+
+def compiler_flow():
+    """aiehlc frontend + the TilingLinalg MLIR pipeline down to host.cc / kernel.cc / routing.cc."""
+    s = Svg(1100, 760)
+    s.text(550, 24, "Step 2: the pipeline from the kernel's blocks to host.cc, kernel.cc and routing.cc", 15,
+           weight="bold")
+    s.text(550, 42, "every stage dumps its IR: ir/dfschedule/N_<Pass>.mlir and ir/simplerouting/N_<Pass>.mlir "
+           "(numbers below)", 11, color="#666")
+
+    def box(x, y, w, h, title, lines, fill):
+        s.rect(x, y, w, h, fill, "#333", 1.3, rx=8)
+        s.text(x + w / 2, y + 18, title, 12, weight="bold")
+        for k, l in enumerate(lines):
+            s.text(x + w / 2, y + 35 + k * 14, l, 10, color="#333")
+
+    FE, IR, PH, OUT = "#fff2cc", "#dbe8f5", "#e2f0d9", "#f4cccc"
+    # frontend lane
+    s.text(20, 76, "aiehlc frontend (src/llvm/aiehlc.cc, convautotile/)", 11, "start", "#7f6000", "bold")
+    box(20, 86, 230, 74, "your .cc", ["__global__ kernel with ports,", "load_buffer / store_buffer,",
+                                      "main() with <<<mesh>>>"], "#ffffff")
+    box(290, 86, 250, 74, "kernel analysis (trace + fit)", ["run on x86 for all 16 cores,",
+                                                           "fit blocks, check, plan:", "row / col broadcast, gather"], FE)
+    box(580, 86, 230, 74, "explicit descriptors", ["aout/newfile.cpp:", "aie::GemmSpace per port",
+                                                   "+ #routing.kernel_block"], FE)
+    box(850, 86, 230, 74, "Clang AST -> routing IR", ["mesh, tensors, partitions,", "tiling levels,",
+                                                      "IO per mesh row / column"], FE)
+    for x1, x2 in ((250, 290), (540, 580), (810, 850)):
+        s.line(x1 + 2, 123, x2 - 2, 123, "#333", 1.5, arrow=True)
+    s.line(965, 160, 965, 196, "#333", 1.5, arrow=True)
+    # shared MLIR lane
+    s.text(20, 192, "TilingLinalg MLIR pipeline (src/mlir/mlirfront/tilinglinalg/) -- shared stages", 11, "start",
+           "#1f4e79", "bold")
+    shared = [(850, "routing IR", ["0_initial.mlir", "createhwmesh, partitiontensor,", "movedatabyio (abstract tiles)"]),
+              (580, "routing unrolled", ["1_RoutingUnrollingLowerPass", "one op per mesh row / col", "(scf loops unrolled)"]),
+              (310, "dmap  (logical dataflow)", ["2_RoutingToDmapPass", "io engine -> core group,", "stream, push / pull"]),
+              (40, "dmaphop  (physical hops)", ["3_DmapToDmaphopPass", "tiles, DMA ports + channels,", "hop path shim->core->core"])]
+    for x, t, ls in shared:
+        box(x, 202, 230, 80, t, ls, IR)
+    for x1, x2 in ((850, 810), (580, 540), (310, 270)):
+        s.line(x1 - 2, 242, x2 + 2, 242, "#333", 1.5, arrow=True)
+    # three paths from dmaphop
+    s.text(300, 322, "the module is cloned: three paths read the same dmaphop IR", 11, "start", "#1f4e79", "bold")
+    s.line(155, 282, 155, 336, "#333", 1.5, arrow=True)          # -> blueprint
+    s.line(155, 300, 875, 300, "#333", 1.5)                       # -> routing path
+    s.line(875, 300, 875, 336, "#333", 1.5, arrow=True)
+    box(40, 338, 230, 80, "dfscheblueprint", ["5_DmaphopTodfscheblueprintPass", "per flow: data slices,",
+                                               "tile groups, flow configs"], IR)
+    box(760, 338, 230, 80, "routinghw  (stream switches)", ["simplerouting/1_DmaphopToRoutinghw",
+                                                            "switch port connections,", "packet flows, shim mux"], PH)
+    # host and kernel from blueprint
+    s.line(155, 418, 155, 450, "#333", 1.5)
+    s.line(155, 450, 520, 450, "#333", 1.5)
+    s.line(155, 450, 155, 470, "#333", 1.5, arrow=True)
+    s.line(520, 450, 520, 470, "#333", 1.5, arrow=True)
+    box(40, 472, 230, 94, "dfschedule  (host)", ["6_BlueprintToSchedulePass", "DMA BDs, locks, IOs, events",
+                                                  "7..11 canonicalize, merge waits", "12_DfscheduleToApiPass"], PH)
+    box(405, 472, 230, 94, "dfschedule  (kernel)", ["18_BlueprintToScheduleKernelPass", "core buffers ping / pong,",
+                                                     "locks, window_init", "19_DfscheduleToKernelApiPass"], PH)
+    s.text(338, 440, "both lower the SAME core tiles: shared helper/", 10, color="#666")
+    s.line(875, 418, 875, 472, "#333", 1.5, arrow=True)
+    box(760, 472, 230, 94, "routinghw lowered", ["2_RoutingHWVerifyPass", "5_RoutingHWLowerPass",
+                                                 "-> XAie_StrmConn*,", "XAie_Enable*ShimPort calls"], PH)
+    # outputs
+    for x, name, lines in ((40, "host.cc", ["runs on the Arm: program BDs,", "load + start cores, wait"]),
+                           (405, "kernel.cc", ["runs on each core: windows,", "then your kernel function"]),
+                           (760, "routing.cc", ["stream-switch setup,", "run at partition init"])):
+        s.line(x + 115, 566, x + 115, 602, "#333", 1.5, arrow=True)
+        box(x, 604, 230, 66, name, lines, OUT)
+    s.text(550, 700, "EmitC turns the last IR of each path into C++; aiehlc.sh compiles host.cc + routing.cc for "
+           "the Arm (main.elf)", 11, color="#333")
+    s.text(550, 718, "and kernel.cc with the AIE compiler (embedded in main.elf). flowcheck re-checks routing.cc + "
+           "host.cc against the dmaphop flows.", 11, color="#333")
+    s.save("compiler_flow.svg")
+
+
 if __name__ == "__main__":
     gemm_tiling()
     gemm_mesh()
@@ -441,3 +577,5 @@ if __name__ == "__main__":
     conv_mesh()
     sched_timeline()
     vec_mmul()
+    trace_to_dma()
+    compiler_flow()
