@@ -13,10 +13,10 @@ step by step.
 |---|---|---|---|
 | [1a](01_contraction/gemm.md) | Contraction: GEMM on a 4x4 mesh -- the whole model, every line, how the compiler gets from `load_buffer` to DMA, routing and C++ | `simplegemm_kernel_port.cc` | runs, board PASS |
 | [1b](01_contraction/conv2d.md) | Contraction: conv2d -- 3-D / 4-D tensors, the input halo | `simpleconv2dkernel_port_less.cc` | runs, board PASS |
-| [2](02_elementwise/elementwise.md) | Elementwise on 4x4 by redundant broadcast: a mesh row's data broadcast, the work split by column | (in the chapter) | analysis passes; lowering pending |
-| [3](03_reduction/reduction.md) | Reduction on 4x4 in two levels: partial sums in the array, combine on the host | (in the chapter) | analysis passes; lowering pending |
-| [4](04_data_movement/data_movement.md) | Data movement: transpose on 4x4 -- what the DMA re-orders, what the core does | (in the chapter) | analysis passes; lowering pending |
-| [5](05_indexing/indexing.md) | Indexing on 4x4: crop by host view, stride by footprint -- and why runtime gathers do not fit | (in the chapter) | analysis passes; lowering pending |
+| [2](02_elementwise/elementwise.md) | Elementwise on 4x4 by redundant broadcast: a mesh row's data broadcast, the work split by column | `simpleeltwise_add.cc` | analysis passes; lowering pending |
+| [3](03_reduction/reduction.md) | Reduction on 4x4 in two levels: partial sums in the array, combine on the host | `simplereduce_rowsum.cc` | analysis passes; lowering pending |
+| [4](04_data_movement/data_movement.md) | Data movement: transpose on 4x4 -- what the DMA re-orders, what the core does | `simpletranspose.cc` | analysis passes; lowering pending |
+| [5](05_indexing/indexing.md) | Indexing on 4x4: crop by host view, stride by footprint -- and why runtime gathers do not fit | `simpleslice.cc` | analysis passes; lowering pending |
 | [6.1](06_gemm_optimization/1_low_level_schedule.md) | GEMM optimization: the low-level schedule (`.depth`, `.resident`) | `simplegemm_opt0_baseline.cc`, `simplegemm_opt1_schedule.cc` | runs, board PASS |
 | [6.2](06_gemm_optimization/2_vector_instructions.md) | GEMM optimization: vector instructions (`aie::mmul`, `.tile`) | `simplegemm_dataflow.cc` | runs, board PASS |
 | [6.3](06_gemm_optimization/3_conv_scheduling.md) | The same scheduling options on the conv2d | `simpleconv2dkernel_port_opts.cc` | runs, board PASS |
