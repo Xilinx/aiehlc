@@ -243,7 +243,9 @@ cmd_build_unitest() {
 }
 
 # Untracked dependencies a fresh worktree needs (relative to the worktree root).
-LINK_DEPS=(thirdparty/alib thirdparty/tvm-0.16 build/aiehlc)
+# thirdparty/arch/cortexa78_0/workspace = the generated A78 BSP/platform (setup.sh); untracked,
+# so a fresh worktree has none and aiehlc.sh stops with "AIE BSP not found".
+LINK_DEPS=(thirdparty/alib thirdparty/tvm-0.16 build/aiehlc thirdparty/arch/cortexa78_0/workspace)
 
 # link-deps <wt-path> [--from <ref-worktree>]
 # For each dep: if missing in <wt-path>, symlink it to the ref's resolved
