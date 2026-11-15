@@ -5338,6 +5338,13 @@ public:
                     const std::string mkSitesK = outputDir + "/ctrlpkt_sites_" + mkd.kernelName + ".txt";
                     llvm::sys::fs::remove(mkSites);
                     llvm::sys::fs::remove(mkSitesK);
+                    // Kernel-ELF load AOT (GAP-aiehlc-multi-kernel-aot-046372): the pipeline leaves the
+                    // fabric ack count in ctrlpkt_kernel_nresp.txt; keep it as the per-kernel manifest
+                    // ctrlpkt_manifest_<kernel>.json, which kc.sh encodes into kernel_<kernel>_ctrlpkt.h.
+                    const std::string mkNresp = outputDir + "/ctrlpkt_kernel_nresp.txt";
+                    const std::string mkManK = outputDir + "/ctrlpkt_manifest_" + mkd.kernelName + ".json";
+                    llvm::sys::fs::remove(mkNresp);
+                    llvm::sys::fs::remove(mkManK);
                     if (!TilingLinalgPipeline::runPipeline(
                             ctx, module, outputDir, kernelBodyWithMacros, mkd.kernelFuncName, parsedDebugLevel,
                             /*userRewrittenSource=*/"", {}, mkd.maxPPBytes, aieGenStr, hostFuncSuffix, appendMode,
@@ -5349,6 +5356,18 @@ public:
                         if (!llvm::sys::fs::rename(mkSites, mkSitesK))
                             llvm::outs() << "[TilingLinalg] AOT control-packet sites for kernel " << mkd.kernelName
                                          << ": " << mkSitesK << "\n";
+                    }
+                    if (auto nb = llvm::MemoryBuffer::getFile(mkNresp)) {
+                        long kn = std::strtol((*nb)->getBuffer().str().c_str(), nullptr, 10);
+                        llvm::sys::fs::remove(mkNresp);
+                        std::error_code kec;
+                        llvm::raw_fd_ostream km(mkManK, kec, llvm::sys::fs::OF_None);
+                        if (kn > 0 && !kec) {
+                            km << "{\"entries\":[{\"func\":\"" << mkd.kernelName << "\",\"nresp\":" << kn
+                               << ",\"stream_id\":16,\"reset\":1}]}\n";
+                            llvm::outs() << "[TilingLinalg] AOT kernel-ELF control-packet manifest for kernel "
+                                         << mkd.kernelName << ": " << mkManK << " (nresp=" << kn << ")\n";
+                        }
                     }
                     mkd.numHostDdrArgs = hostDdrArgs;
                     llvm::outs() << "[TilingLinalg] Pipeline completed for kernel: " << mkd.kernelName
@@ -5655,7 +5674,22 @@ public:
                             stream << "#include \"host_ctrlpkt_" << mkd.kernelName << ".h\"\n";
                         }
                     }
+                    // Kernel-ELF load AOT: kc.sh encodes ctrlpkt_manifest_<kernel>.json into
+                    // kernel_<kernel>_ctrlpkt.h; each dispatch selects its kernel's blob (or clears the
+                    // previous kernel's blob so a kernel without one never replays a foreign ELF).
+                    std::set<std::string> mkKpkt;
+                    for (auto &mkd : parsedMeshKernels) {
+                        if (llvm::sys::fs::exists(outputDir + "/ctrlpkt_manifest_" + mkd.kernelName + ".json")) {
+                            mkKpkt.insert(mkd.kernelName);
+                            stream << "#include \"kernel_" << mkd.kernelName << "_ctrlpkt.h\"\n";
+                        }
+                    }
                     auto emitAotRegister = [&](const MeshKernelDesc &mkd, const char *indent) {
+                        if (mkKpkt.count(mkd.kernelName))
+                            stream << indent << "__Runtime_ctrl_kernel_pkt_set(kernel_" << mkd.kernelName
+                                   << "_ctrlpkt, (unsigned int)sizeof(kernel_" << mkd.kernelName << "_ctrlpkt));\n";
+                        else if (!mkKpkt.empty())
+                            stream << indent << "__Runtime_ctrl_kernel_pkt_set(0, 0u);\n";
                         if (mkAot.count(mkd.kernelName))
                             stream << indent << "__Runtime_ctrl_aot_register(&host_ctrlpkt_" << mkd.kernelName
                                    << "_table);\n";

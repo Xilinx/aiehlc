@@ -113,6 +113,23 @@ encode_aot_ctrlpkt() {
         }
         echo "AOT control packets: $(pwd)/${khdr#./}"
     fi
+    # Multi-kernel kernel-ELF load (GAP-aiehlc-multi-kernel-aot-046372): aiehlc.cc writes
+    # ctrlpkt_manifest_<func>.json per kernel; encode this kernel's ELF (just built into
+    # ${output_dir}/kernel) into kernel_<func>_ctrlpkt.h for __Runtime_ctrl_kernel_pkt_set.
+    if [ -f "./ctrlpkt_manifest_${func_name}.json" ]; then
+        local etool="${output_dir}/aiehlc_ctrlpkt"
+        [ -x "$etool" ] || bash "${AIEHLC_ROOT_DIR}/script/build_ctrlpkt_tool.sh" "$etool" "$gen" || {
+            echo "Error: aiehlc_ctrlpkt build failed"
+            return 1
+        }
+        local ehdr="./kernel_${func_name}_ctrlpkt.h"
+        "$etool" --manifest "./ctrlpkt_manifest_${func_name}.json" --func "$func_name" --elf "${output_dir}/kernel" \
+            --gen "$gen" --out "$ehdr" || {
+            echo "Error: aiehlc_ctrlpkt kernel-ELF encode failed for ${func_name}"
+            return 1
+        }
+        echo "AOT control packets (kernel ELF): $(pwd)/${ehdr#./}"
+    fi
     [ -f "$manifest" ] || return 0
     grep -q "\"func\":\"${func_name}\"" "$manifest" || return 0
 
