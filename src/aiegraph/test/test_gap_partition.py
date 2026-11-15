@@ -180,3 +180,45 @@ def test_real_unet_all_convs_mapped():
     adds = [a for r in rows for a in r["pattern"].adds]
     assert adds.count("channel") > 0 and adds.count("tensor") > 0
     assert not any(r["pattern"].relu for r in rows)
+
+
+# ── GPAT (unet-m2-s7): attention cores bmm -> softmax -> bmm ──────────────────
+def _toy_attn_onnx(scale=True, pv=True):
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+    W = numpy_helper.from_array(np.zeros((16, 16), np.float32), "W")
+    sc = numpy_helper.from_array(np.array(0.25, np.float32), "sc")
+    nodes = [helper.make_node("MatMul", ["x", "W"], ["q"], name="to_q"),
+             helper.make_node("MatMul", ["q", "kt"], ["s0"], name="qk")]
+    s_in = "s0"
+    if scale:
+        nodes.append(helper.make_node("Mul", ["s0", "sc"], ["s1"], name="scale"))
+        s_in = "s1"
+    nodes.append(helper.make_node("Softmax", [s_in], ["p"], name="sm", axis=-1))
+    outs = ["p"]
+    if pv:
+        nodes.append(helper.make_node("MatMul", ["p", "v"], ["o"], name="pv"))
+        outs = ["o"]
+    vi = lambda n, *s: helper.make_tensor_value_info(n, TensorProto.FLOAT, list(s))  # noqa: E731
+    g = helper.make_graph(nodes, "toy_attn", [vi("x", 2, 8, 16), vi("kt", 2, 16, 8), vi("v", 2, 8, 16)],
+                          [vi(o, 2, 8, 16 if o == "o" else 8) for o in outs], [W, sc])
+    return helper.make_model(g, opset_imports=[helper.make_opsetid("", 17)])
+
+
+def test_match_attention_toy():
+    from aiegraph.partition import match_attention
+    a = match_attention(_toy_attn_onnx())
+    assert len(a) == 1 and (a[0].qk, a[0].softmax, a[0].pv, a[0].scale) == ("qk", "sm", "pv", ("scale",))
+    assert match_attention(_toy_attn_onnx(scale=False))[0].scale == ()
+    assert match_attention(_toy_attn_onnx(pv=False)) == []          # no P.V bmm: not a core
+    assert "to_q" not in a[0].nodes                                   # weight MatMul is never a bmm
+
+
+@pytest.mark.skipif(not UNET_ONNX.is_file(), reason="bk-sdm-tiny unet_sim.onnx not present")
+def test_real_unet_attention_cores():
+    import onnx
+    from aiegraph.partition import match_attention
+    a = match_attention(onnx.load(str(UNET_ONNX), load_external_data=False))
+    assert len(a) == 18 and [x.group for x in a] == list(range(18))
+    assert len({n for x in a for n in x.nodes}) == 36
+    assert all(x.qk.endswith("/MatMul") and x.pv.endswith("/MatMul_1") for x in a)

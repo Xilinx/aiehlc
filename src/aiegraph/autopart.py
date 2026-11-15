@@ -23,7 +23,11 @@ partition is *generated* from the graph:
                  A layer whose single-launch walk does not fit is split along N into the fewest
                  equal 64-multiple pieces that fit (mkn gets one row per launch).
   4. mode        conv: every legal conv; l37: the legal convs of the board-proven --base set
-                 (today's 37) + every legal linear; all: every legal conv and linear. Optional ``budget_ms`` trims greedily by MAC/launch (the P35x rule).
+                 (today's 37) + every legal linear; all: every legal conv and linear;
+                 attn: all + every attention bmm of a partition.match_attention core
+                 (bmm -> softmax -> bmm, GPAT, unet-m2-s7). An attn row is one bmm, batch (heads)
+                 looped, M/K/N zero-padded to 64 (activations: no weight repack), and carries
+                 attn_group (one per softmax) + attn_role (qk | pv). Optional ``budget_ms`` trims greedily by MAC/launch (the P35x rule).
 
 Output = the partition.json schema of example/aiegraph/unet_bk_sdm_tiny (layers[] with part, file,
 node, op, cls, weight, macs, launches (64x64x64 tile launches), mkn, idx; N; aie_macs;
@@ -41,7 +45,7 @@ from .plan import kincore_geom
 
 __all__ = ["MODES", "inventory", "assign_parts", "autopartition", "write_partition"]
 
-MODES = ("conv", "l37", "all")
+MODES = ("conv", "l37", "all", "attn")
 TILE = 64
 _SUB = re.compile(r"^/u/((?:down|up|mid)_blocks?\.\d+/[a-z_]+\.\d+|mid_block)/")
 _TOP = re.compile(r"^/u/([^/]+)/")
@@ -211,10 +215,39 @@ def _legal(r, pad_kn):
     return False, None, {}, [f"kincore:{w}" for w in first["why"]]
 
 
+def _fit(Mp, Kp, Np):
+    """Fewest equal 64-multiple N pieces whose kincore walk fits: (pieces, first geom)."""
+    first = None
+    for s in range(1, Np // TILE + 1):
+        if Np % s or (Np // s) % TILE:
+            continue
+        g = kincore_geom(Np // s, Kp, Mp)
+        if first is None:
+            first = g
+        if g["legal"]:
+            return s, g
+    return None, first
+
+
+def _legal_attn(r):
+    """Attention bmm: per batch (head) one GEMM, M/K/N padded to 64 (both operands are
+    activations, so padding is a zero-filled copy, not a weight repack)."""
+    M, K, N, B = r["m"], r["k"], r["n"], r.get("batch", 1)
+    Mp, Kp, Np = _up(M), _up(K), _up(N)
+    s, g = _fit(Mp, Kp, Np)
+    if s is None:
+        return False, None, {}, [f"kincore:{w}" for w in g["why"]]
+    pad = {nm: p for nm, v, p in (("M", M, Mp), ("K", K, Kp), ("N", N, Np)) if p != v}
+    if s > 1:
+        pad["nsplit"] = s
+    pad["batch"] = B
+    return True, [[Mp, Kp, Np // s]] * (s * B), pad, []
+
+
 def autopartition(model, mode: str = "conv", base=None, ms_per_launch: float = 7.471,
                   pad_kn: bool = False, budget_ms: float = None,
                   log=print) -> dict:
-    """Generate the partition dict for ``mode`` (conv | l37 | all) from the ONNX ``model``.
+    """Generate the partition dict for ``mode`` (conv | l37 | all | attn) from the ONNX ``model``.
 
     ``base``: an older partition.json (path or dict) -- only compared against (the hand
     excludes / budget cuts are re-checked and reported), never copied."""
@@ -223,6 +256,12 @@ def autopartition(model, mode: str = "conv", base=None, ms_per_launch: float = 7
     m = _load(model)
     rows = inventory(m)
     parts = assign_parts(m)
+    agrp = {}
+    if mode == "attn":
+        from .partition import match_attention
+        for a in match_attention(m):
+            agrp[a.qk] = (a.group, "qk", a.softmax)
+            agrp[a.pv] = (a.group, "pv", a.softmax)
     part_key = {}
     for nm, (p, k) in parts.items():
         part_key.setdefault(p, k)
@@ -233,10 +272,17 @@ def autopartition(model, mode: str = "conv", base=None, ms_per_launch: float = 7
         raise AiegraphError("autopart", "mode l37 needs --base (the board-proven conv set, P35x 37 convs)",
                             hint="--base example/aiegraph/unet_bk_sdm_tiny/partition.json")
     total = sum(r["macs"] for r in gemm)
-    want_cls = ("conv",) if mode == "conv" else ("conv", "linear")
+    want_cls = {"conv": ("conv",), "attn": ("conv", "linear", "attn")}.get(mode, ("conv", "linear"))
     aie, cpu = [], []
     for r in gemm:
-        ok, mkn, pad, why = _legal(r, pad_kn)
+        if r["cls"] == "attn" and mode == "attn":
+            if r["node"] in agrp:
+                ok, mkn, pad, why = _legal_attn(r)
+                r["attn_group"], r["attn_role"], r["softmax"] = agrp[r["node"]]
+            else:
+                ok, mkn, pad, why = False, None, {}, ["attn: not in a bmm->softmax->bmm core"]
+        else:
+            ok, mkn, pad, why = _legal(r, pad_kn)
         if ok and r["cls"] not in want_cls:
             ok, why = False, [f"mode {mode}: {r['cls']} on CPU"]
         if ok and mode == "l37" and r["cls"] == "conv" and r["node"] not in proven:
@@ -270,6 +316,9 @@ def autopartition(model, mode: str = "conv", base=None, ms_per_launch: float = 7
                    mkn=r["mkn"], idx=i)
         if r["pad"]:
             lay["pad"] = dict(r["pad"], orig=[r["m"], r["k"], r["n"]])
+        if r["cls"] == "attn":
+            lay.update(attn_group=r["attn_group"], attn_role=r["attn_role"], softmax=r["softmax"],
+                       batch=r.get("batch", 1))
         layers.append(lay)
     aie_macs = sum(r["macs"] for r in aie)
     kin = sum(len(l["mkn"]) for l in layers)   # kincore: one launch per (N-split) piece
@@ -278,7 +327,9 @@ def autopartition(model, mode: str = "conv", base=None, ms_per_launch: float = 7
         onnx=str(model) if isinstance(model, (str, Path)) else None, wdtype="bf16",
         rule=dict(classes=list(want_cls), legality="plan.kincore_geom legal and K%64==N%64==0; M padded to 64",
                   pad_kn=pad_kn, l37_convs="board-proven --base layers (P35x)" if mode == "l37" else None, budget_ms=budget_ms,
-                  ms_per_launch=ms_per_launch, attn="CPU (PATN)", gemv="M==1, not a GEMM"),
+                  ms_per_launch=ms_per_launch,
+                  attn=("AIE: partition.match_attention bmm->softmax->bmm, per-head, M/K/N padded to 64"
+                        if mode == "attn" else "CPU (PATN)"), gemv="M==1, not a GEMM"),
         N=sum(l["launches"] for l in layers), kincore_launches=kin,
         aie_ms_est=round(kin * ms_per_launch, 3),
         aie_macs=aie_macs, total_gemm_macs=total, aie_flop_frac=aie_macs / total if total else 0.0,
@@ -317,7 +368,8 @@ def _report(doc, gemm, parts, base, log):
             log(f"AP_RECHECK part={p} base={tag} convs={len(pl)} aie_now={on} "
                 f"base_aie={sum(1 for r in pl if r['node'] in bset)}" + (f" cpu_why={';'.join(why)}" if why else ""))
     log(f"AP mode={doc['mode']} layers={len(doc['layers'])} conv={cls.get('conv', 0)} "
-        f"linear={cls.get('linear', 0)} cpu_gemm={len(doc['cpu_gemm_layers'])} "
+        f"linear={cls.get('linear', 0)} attn={cls.get('attn', 0)} "
+        f"attn_groups={len({l['attn_group'] for l in doc['layers'] if 'attn_group' in l})} cpu_gemm={len(doc['cpu_gemm_layers'])} "
         f"cpu_conv={sum(1 for l in doc['cpu_gemm_layers'] if l['cls'] == 'conv')} "
         f"padded={sum(1 for l in doc['layers'] if 'pad' in l)} N={doc['N']} "
         f"kincore_launches={doc['kincore_launches']} aie_ms_est={doc['aie_ms_est']} "
