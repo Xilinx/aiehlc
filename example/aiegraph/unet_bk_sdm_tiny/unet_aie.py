@@ -579,6 +579,7 @@ def patch_driver(text: str, sel: list) -> tuple:
         m = re.search(r"    tensors\[(\d+)\]\.data = 0;   /\* %s: bf16 @(\d+)\+(\d+) B" % re.escape(c["wname"]), text)
         assert m, f"no bf16 init line for {c['wname']}"
         eid, off, nb = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        c["woff"] = off   # P4w: prelayout_weights rewrites this bf16 region of weights.bin
         wel = 1
         for d in c["wshape"]:
             wel *= d
@@ -814,6 +815,38 @@ def main_c(base: str, ktimer: bool = False) -> str:
 KACC_CC = Path(__file__).resolve().parent / "bf16_gemm_kacc.cc"
 
 
+def kacc_wlayout(w6, N: int, K: int, M: int):
+    """P4w: bf16 weight [O/ob][C/ib][KH][KW][ib][ob] (TVM OIHW{i}{o}) -> the kacc W port chunk layout for K
+    (what uc_conv re-tiled on every call until P4w): W natural [N][K] (k = c*KH*KW + t), each 16-row block
+    = 16 rows x K, chunk j (kch bf16) at j*kch of every row, in-chunk flat f = mi*8*kch + kb*64 + mm*8 + kk
+    (n = 16*nb + 8*mi + mm, k = j*kch + 8*kb + kk). The Kp zero chunk (kacc_geom kp > k) is NOT stored: uc_conv
+    appends it per row."""
+    import numpy as np
+    on, cn, kh, kw, ib, ob = w6.shape
+    assert on * ob == N and cn * ib * kh * kw == K, (w6.shape, N, K)
+    kch = kacc_geom(N, K, M)["kch"]
+    wn = w6.transpose(0, 5, 1, 4, 2, 3).reshape(N, K)                      # [n][c][kh][kw]
+    t = wn.reshape(N // 16, 2, 8, K // kch, kch // 8, 8)                    # nb mi mm j kb kk
+    t = t.transpose(0, 3, 1, 4, 2, 5).reshape(N // 16, K // kch, 16, kch)   # nb j (f//kch) (f%kch)
+    return np.ascontiguousarray(t.transpose(0, 2, 1, 3)).reshape(-1)       # nb row j q
+
+
+def prelayout_weights(wbin: Path, sel: list) -> int:
+    """P4w: rewrite every AIE conv layer's bf16 weight in weights.bin (in place, same size) into the kacc
+    chunk layout, so the board pre step is only im2col. Returns the bytes rewritten."""
+    import numpy as np
+    blob = np.memmap(wbin, dtype=np.uint8, mode="r+")
+    tot = 0
+    for c in sel:
+        nel = int(np.prod(c["wshape"]))
+        w = np.frombuffer(blob[c["woff"]:c["woff"] + 2 * nel].tobytes(), dtype="<u2").reshape(c["wshape"])
+        blob[c["woff"]:c["woff"] + 2 * nel] = kacc_wlayout(w, c["N"], c["K"], c["M"]).view(np.uint8)
+        tot += 2 * nel
+    blob.flush()
+    del blob
+    return tot
+
+
 def kacc_name(ch: int, k: int, px: int) -> str:
     return f"gemm_kacc_{ch}x{k}x{px}"
 
@@ -1012,25 +1045,56 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     if (K % kch || (long)N * Kp > UC_KW_ELEMS || (long)M * Kp > UC_KX_ELEMS)
         return -3;
     uint16_t *Wd = (uint16_t *)g_kw, *Xd = (uint16_t *)g_kx;
-    for (int n = 0; n < N; n++) {
-        const int mi = (n >> 3) & 1, mm = n & 7;
-        uint16_t *dst = Wd + (size_t)(n >> 4) * 16 * Kp;
-        for (int k = 0; k < Kp; k++) {
-            const int c = k / KK, t = k % KK, j = k / kch, kr = k % kch, kb = kr >> 3, kk = kr & 7;
-            const int f = mi * 8 * kch + kb * 64 + mm * 8 + kk;
-            dst[(size_t)(f / kch) * Kp + j * kch + f % kch] =
-                k < K ? wbf[((((size_t)(n / ob) * (C / ib) + c / ib) * KK + t) * ib + c % ib) * ob + n % ob] : 0;
+    /* P4w: wbf already holds W in the kacc chunk layout for K (unet_aie.prelayout_weights, build time: each
+     * 16-row block = 16 rows of K, chunk j at j*kch, f = mi*8*kch + kb*64 + mm*8 + kk within a chunk). With
+     * Kp > K each row only gains the zero chunk at its end. */
+    if (Kp == K) {
+        memcpy(Wd, wbf, (size_t)N * K * 2);
+    } else {
+        for (int n = 0; n < N; n++) {
+            memcpy(Wd + (size_t)n * Kp, wbf + (size_t)n * K, (size_t)K * 2);
+            memset(Wd + (size_t)n * Kp + K, 0, (size_t)(Kp - K) * 2);
         }
     }
-    for (int m = 0; m < M; m++) { /* im2col of the activation, fp32 -> bf16 RNE */
-        const int oh = m / OW, ow = m % OW, ni = (m >> 3) & 1, nn = m & 7;
+    /* im2col of the activation, fp32 -> bf16 RNE; the in-chunk offset of (ni, nn, kr) from a table */
+    static int g_uc_tab[16][64];
+    static int g_uc_ty[64], g_uc_tx[64];
+    if (kch > 64 || KK > 64)
+        return -3;
+    for (int q = 0; q < 16; q++)
+        for (int kr = 0; kr < kch; kr++) {
+            const int f = (q >> 3) * 8 * kch + (kr >> 3) * 64 + (kr & 7) * 8 + (q & 7);
+            g_uc_tab[q][kr] = (f / kch) * Kp + f % kch;
+        }
+    for (int t = 0; t < KK; t++) {
+        g_uc_ty[t] = t / KW;
+        g_uc_tx[t] = t % KW;
+    }
+    const size_t HWc = (size_t)H * W * cb;
+    for (int m = 0; m < M; m++) {
+        const int oh = m / OW, ow = m % OW, ih0 = oh * sh - ph, iw0 = ow * sw - pw;
+        const int *tab = g_uc_tab[m & 15];
         uint16_t *dst = Xd + (size_t)(m >> 4) * 16 * Kp;
-        for (int k = 0; k < Kp; k++) {
-            const int c = k / KK, t = k % KK, ih = oh * sh + t / KW - ph, iw = ow * sw + t % KW - pw;
-            const float v = (k < K && ih >= 0 && ih < H && iw >= 0 && iw < W)
-                                ? xin[(((size_t)(c / cb) * H + ih) * W + iw) * cb + c % cb] : 0.0f;
-            const int j = k / kch, kr = k % kch, kb = kr >> 3, kk = kr & 7, f = ni * 8 * kch + kb * 64 + kk * 8 + nn;
-            dst[(size_t)(f / kch) * Kp + j * kch + f % kch] = uc_f2bf(v);
+        int kr = 0;
+        uint16_t *dj = dst;
+        for (int c = 0; c < C; c++) {
+            const float *xc = xin + (size_t)(c / cb) * HWc + c % cb;
+            for (int t = 0; t < KK; t++) {
+                const int ih = ih0 + g_uc_ty[t], iw = iw0 + g_uc_tx[t];
+                const float v = (ih >= 0 && ih < H && iw >= 0 && iw < W) ? xc[((size_t)ih * W + iw) * cb] : 0.0f;
+                dj[tab[kr]] = uc_f2bf(v);
+                if (++kr == kch) {
+                    kr = 0;
+                    dj += kch;
+                }
+            }
+        }
+        for (int k = K; k < Kp; k++) {
+            dj[tab[kr]] = 0;
+            if (++kr == kch) {
+                kr = 0;
+                dj += kch;
+            }
         }
     }
     const size_t wbytes = (size_t)N * Kp * 2, xbytes = (size_t)M * Kp * 2;

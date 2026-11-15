@@ -245,6 +245,10 @@ def aie_conv(a, emod, out: Path, hdr: Path):
         f = Path(out_dir) / "graph_driver.c"
         t, n = ua.patch_driver(f.read_text(), sel)
         f.write_text(t)
+        if a.kincore:
+            # P4w: weights of the kincore layers go into weights.bin already in the kacc chunk layout
+            nb = ua.prelayout_weights(Path(out_dir) / "weights.bin", sel)
+            log(f"WPRE layers={len(sel)} bytes={nb} ({Path(out_dir) / 'weights.bin'})")
         log(f"graph_driver.c: {n} partition call sites -> unet_aie_conv")
         return r
     generate_driver._p35w_orig = orig
