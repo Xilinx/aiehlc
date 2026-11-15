@@ -27,7 +27,8 @@ from .plan import PLAN_MODES, plan_conv_layers
 from .report import PartitionPlan
 
 __all__ = ["run_partition", "reset_aie_rows", "plan_partition_launches",
-           "ConvPattern", "match_conv", "conv_epilogue_ref", "AIEGRAPH_OP_KINDS"]
+           "ConvPattern", "match_conv", "conv_epilogue_ref", "AIEGRAPH_OP_KINDS",
+           "AttnPattern", "match_attention"]
 
 #: Every op the aiegraph dialect defines (``td/aiegraphop.td``).
 AIEGRAPH_OP_KINDS = ("conv_bn_relu", "conv_bn", "residual_add_relu", "avgpool_fc")
@@ -163,6 +164,75 @@ def match_conv(ops, add_shapes=None, out_shape=None) -> ConvPattern | None:
     # No relu: the joins are fp32 epilogue adds of conv_bn (UNet temb / skip /
     # attention residual) -- never a residual_add_relu (that would add a ReLU).
     return ConvPattern(("conv_bn",), bias, False, kinds)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Attention pattern: bmm(Q, K^T) [-> scale / mask / cast] -> softmax -> bmm(P, V)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The two batched matmuls of an attention block have two ACTIVATION inputs (no
+# initializer weight), so ``match_conv`` / the linear rule never see them and they
+# stayed on the A78 (unet-m2-s6 postmortem root cause 1: attn=0). ``match_attention``
+# walks an ONNX graph and returns one ``AttnPattern`` per softmax whose input comes
+# from an activation x activation MatMul (through at most ``MAX_ATTN_SCALE_OPS``
+# element-wise scale / mask / cast ops) and whose output feeds the P.V MatMul.
+
+#: Element-wise ops allowed between QK^T and the softmax (scale, additive mask, cast).
+_ATTN_SCALE_OPS = ("Mul", "Div", "Add", "Cast", "Where")
+MAX_ATTN_SCALE_OPS = 3
+
+
+@dataclass(frozen=True)
+class AttnPattern:
+    """One attention core: ``qk`` = node name of bmm(Q, K^T), ``softmax``, ``pv`` = bmm(P, V);
+    ``scale`` = the element-wise ops between ``qk`` and ``softmax`` (empty when the
+    1/sqrt(d) scale is folded into Q/K upstream, as in the bk-sdm-tiny export); ``group`` =
+    index of the softmax in graph order."""
+    qk: str
+    softmax: str
+    pv: str
+    scale: tuple = ()
+    group: int = 0
+
+    @property
+    def nodes(self) -> tuple:
+        return (self.qk, self.pv)
+
+
+def match_attention(model) -> list:
+    """All bmm -> softmax -> bmm attention cores of an ONNX model / graph (graph order).
+
+    *model*: ``onnx.ModelProto``, ``GraphProto`` or a path. A MatMul counts as a bmm only if
+    neither input is an initializer (activation x activation). A softmax that does not sit
+    between two such bmms is not an attention core and is skipped (never half-matched)."""
+    if isinstance(model, str) or hasattr(model, "__fspath__"):
+        import onnx
+        model = onnx.load(str(model), load_external_data=False)
+    g = model.graph if hasattr(model, "graph") else model
+    init = {t.name for t in g.initializer}
+    prod = {o: n for n in g.node for o in n.output}
+    cons = {}
+    for n in g.node:
+        for i in n.input:
+            cons.setdefault(i, []).append(n)
+
+    def bmm(n):
+        return n is not None and n.op_type == "MatMul" and not any(i in init for i in n.input[:2])
+
+    out = []
+    for s in (n for n in g.node if n.op_type == "Softmax"):
+        p, scale = prod.get(s.input[0]), []
+        while p is not None and p.op_type in _ATTN_SCALE_OPS and len(scale) < MAX_ATTN_SCALE_OPS:
+            scale.append(p.name)
+            act = [i for i in p.input if i in prod and i not in init]
+            p = prod.get(act[0]) if len(act) == 1 else None
+        if not bmm(p):
+            continue
+        pv = [c for c in cons.get(s.output[0], []) if bmm(c) and c.input[0] == s.output[0]]
+        if len(pv) != 1:
+            continue
+        out.append(AttnPattern(p.name, s.name, pv[0].name, tuple(reversed(scale)), len(out)))
+    return out
 
 
 def conv_epilogue_ref(acc, bias=None, adds=(), out_dtype="fp32"):

@@ -172,3 +172,39 @@ def test_cli(tmp_path, base):
                  "--out", str(out)]) == 0
     d = json.loads(out.read_text())
     assert d["N"] == sum(l["launches"] for l in d["layers"]) and len(d["layers"]) == 48
+
+
+# ── GPAT (unet-m2-s7): mode attn puts the bmm -> softmax -> bmm cores on the AIE ──
+@need_unet
+def test_attn_mode(parts):
+    d = parts["attn"]
+    a = [l for l in d["layers"] if l["cls"] == "attn"]
+    assert (sum(l["cls"] == "conv" for l in d["layers"]), sum(l["cls"] == "linear" for l in d["layers"])) == (48, 72)
+    assert len(a) == 36 and sum(l["macs"] for l in a) == 2561310720
+    groups = {}
+    for l in a:
+        groups.setdefault(l["attn_group"], []).append(l["attn_role"])
+    assert len(groups) == 18 and all(sorted(r) == ["pv", "qk"] for r in groups.values())
+    assert [l["cls"] for l in d["cpu_gemm_layers"]] == ["conv", "conv"]       # conv_in / conv_out only
+    assert d["aie_flop_frac"] >= 0.99
+    # the attn MACs are exactly the ones mode all left on the CPU
+    assert sum(l["macs"] for l in parts["all"]["cpu_gemm_layers"] if l["cls"] == "attn") == 2561310720
+    for l in a:
+        assert len(l["mkn"]) % l["batch"] == 0 and all(x % 64 == 0 for mkn in l["mkn"] for x in mkn)
+
+
+def test_tiny_attn_mode_needs_softmax():
+    """A lone activation x activation MatMul (no softmax core) stays on the CPU in mode attn."""
+    d = apm.autopartition(_tiny(), "attn", log=lambda *_: None)
+    assert [l["cls"] for l in d["cpu_gemm_layers"]] == ["attn"]
+    assert "softmax" in d["cpu_gemm_layers"][0]["why"][0]
+
+
+@need_unet
+def test_cli_attn(tmp_path, base):
+    from aiegraph.__main__ import main
+    out = tmp_path / "pa.json"
+    assert main(["autopart", "--onnx", str(UNET_ONNX), "--base", str(BASE), "--mode", "attn",
+                 "--ms-per-launch", "8.008", "--out", str(out)]) == 0
+    d = json.loads(out.read_text())
+    assert len(d["layers"]) == 156 and len({l.get("attn_group") for l in d["layers"] if l["cls"] == "attn"}) == 18

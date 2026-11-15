@@ -24,7 +24,7 @@
     aiegraph profile  [LAYER ...] [--by-layer] [--top N] [--workdir D]
                                                   per-call / per-layer time of the last board run
     aiegraph compile  MODEL TARGET ["layer1=KERNEL.cc"]
-    aiegraph autopart --onnx M.onnx --mode conv|l37|all --out partition.json [--base OLD.json]
+    aiegraph autopart --onnx M.onnx --mode conv|l37|all|attn --out partition.json [--base OLD.json]
                       [--ms-per-launch MS] [--pad-kn] [--budget-ms MS]
                                                   generate the AIE/CPU GEMM partition (GAP-A)
 
@@ -118,7 +118,7 @@ def main(argv=None) -> int:
     p.add_argument("-v", "--verbose", action="store_true")
     p = sub.add_parser("autopart")
     p.add_argument("--onnx", required=True)
-    p.add_argument("--mode", default="conv", choices=["conv", "l37", "all"])
+    p.add_argument("--mode", default="conv", choices=["conv", "l37", "all", "attn"])
     p.add_argument("--out", required=True)
     p.add_argument("--base", default=None, help="older partition.json, only compared against")
     p.add_argument("--ms-per-launch", type=float, default=7.471)
