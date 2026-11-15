@@ -568,6 +568,51 @@ def compiler_flow():
     s.save("compiler_flow.svg")
 
 
+def eltwise_bcast():
+    """Redundant broadcast: a mesh row's blocks go to all 4 cores, each uses chunk pn."""
+    s = Svg(1060, 470)
+    s.text(530, 24, "Redundant broadcast on the 4x4 mesh: one stream per mesh row, each core uses its quarter",
+           15, weight="bold")
+    chunk = ["#f4a261", "#e9c46a", "#2a9d8f", "#8ab17d"]
+    # the stream: blocks (i, j) of mesh row pm
+    s.text(40, 66, "mesh row pm's stream (x; y the same): blocks of rows 64 pm + 16 i, column chunk j", 12, "start",
+           weight="bold")
+    x0 = 40
+    for k, j in enumerate([0, 1, 2, 3, 0, 1]):
+        s.rect(x0 + k * 74, 78, 70, 28, chunk[j], "#333", 1)
+        s.text(x0 + k * 74 + 35, 97, f"i={k // 4} j={j}", 10)
+    s.text(x0 + 6 * 74 + 10, 97, "...  16 blocks, DDR read once", 11, "start", "#666")
+    # stream switch fan-out to 4 cores
+    s.line(240, 108, 240, 150, "#555", 3)
+    s.line(130, 150, 910, 150, "#555", 3)
+    for pn in range(4):
+        cx = 130 + pn * 260
+        s.line(cx, 150, cx, 176, "#555", 3, arrow=True)
+    s.text(530, 142, "stream switch copies the stream to the 4 cores of the mesh row", 11, color="#555")
+    for pn in range(4):
+        cx = 50 + pn * 260
+        s.rect(cx, 178, 200, 190, "#ffffff", "#333", 1.5, rx=8)
+        s.text(cx + 100, 198, f"core (pm, pn={pn})", 12, weight="bold")
+        s.text(cx + 100, 216, "receives every block:", 10, color="#666")
+        for j in range(4):
+            mine = j == pn
+            s.rect(cx + 14 + j * 45, 226, 40, 30, chunk[j] if mine else "#eeeeee", "#333" if mine else "#bbb",
+                   2 if mine else 1)
+            s.text(cx + 34 + j * 45, 245, f"j={j}", 10, color="#000" if mine else "#999")
+        s.text(cx + 100, 280, f"if (j == pn): add chunk {pn}", 11, color="#38761d", weight="bold")
+        s.text(cx + 100, 298, "other chunks: release only", 10, color="#999")
+        s.rect(cx + 40, 312, 120, 30, chunk[pn], "#333", 1.5)
+        s.text(cx + 100, 331, f"z chunk {pn}", 11, weight="bold")
+        s.line(cx + 100, 342, cx + 100, 392, "#38761d", 2, arrow=True)
+    s.text(530, 412, "output: z rows 64 pm + 16 i, columns 256 pn .. -- every core its own block (gather)", 12,
+           color="#38761d")
+    s.text(530, 432, "cost: each core receives 4x the bytes it uses; DDR reads and the number of shim streams "
+           "are the same as with one core per mesh row", 11, color="#666")
+    s.text(530, 452, "the same pattern in chapters 3-5: reduction (partial sums by chunk), transpose "
+           "(64-column quarters), slicing", 11, color="#666")
+    s.save("eltwise_bcast.svg")
+
+
 if __name__ == "__main__":
     gemm_tiling()
     gemm_mesh()
@@ -579,3 +624,4 @@ if __name__ == "__main__":
     vec_mmul()
     trace_to_dma()
     compiler_flow()
+    eltwise_bcast()

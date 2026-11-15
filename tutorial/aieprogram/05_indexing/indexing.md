@@ -38,14 +38,15 @@ the **view** -- its rows, with the full row pitch of the original tensor.
 #define SL_C0 64
 __global__ void slice2(aie::port<input_window_int8 *, aie::shape<128, OPS_C>> xv, // the cropped view
                        aie::port<output_window_int8 *, aie::shape<64, 256>> y) {
-    const int yr = 16, yc = 128;                // y block per round
-    const int pm = aie::program_id(0);
+    const int yr = 16, yc = 128;                // y block per mesh row and round
+    const int qc = yc / aie::num_programs(1);   // 32 y columns per core
+    const int pm = aie::program_id(0), pn = aie::program_id(1);
     for (int j = 0; j < 256 / yc; j++) {        // 2 column halves
         const int8_t *a = aie::load_buffer(xv, {2 * yr * pm, 2 * yc * j}, {2 * yr, 2 * yc});
-        int8_t *o = aie::store_buffer(y, {yr * pm, yc * j}, {yr, yc});
+        int8_t *o = aie::store_buffer(y, {yr * pm, yc * j + qc * pn}, {yr, qc});
         for (int r = 0; r < yr; r++)
-            for (int c = 0; c < yc; c++)
-                o[r * yc + c] = a[(2 * r) * (2 * yc) + 2 * c];
+            for (int c = 0; c < qc; c++)
+                o[r * qc + c] = a[(2 * r) * (2 * yc) + 2 * (qc * pn + c)];
         aie::release(xv);
         aie::commit(y);
     }
@@ -56,12 +57,15 @@ __global__ void slice2(aie::port<input_window_int8 *, aie::shape<128, OPS_C>> xv
 - `xv` is declared `aie::shape<128, OPS_C>`: 128 rows of the original 1024-byte
   pitch, starting at row 32, column 64. Its blocks start at the view's origin.
 - The launch passes `x + SL_R0 * OPS_C + SL_C0`.
+- 4x4 by redundant broadcast (chapter 2): mesh row `pm` receives the input
+  footprint, and core `(pm, pn)` makes the 32-column quarter `pn` of each
+  16 x 128 output block.
 
 ## 3. Stride: load the footprint, pick in the core
 
-A load is a dense block. For a stride-2 subsample the core loads the
-**footprint** of its 16 x 128 output block -- 32 x 256 of the input -- and
-keeps every other element. The DMA moves 4x the bytes the output needs; for a
+A load is a dense block. For a stride-2 subsample a mesh row receives the
+**footprint** of its 16 x 128 output block -- 32 x 256 of the input -- and each
+core keeps every other element of its quarter. The DMA moves 4x the bytes the output needs; for a
 large stride, prefer a layout where the needed elements are adjacent, or do
 the subsample in the kernel that produces `x`.
 
@@ -69,8 +73,8 @@ Kernel analysis:
 
 ```
   xv (IFM, row broadcast, 1x2 blocks/core): d1[128]=rows/4@32 d2[1024]=j2x256@256
-  y (OFM, gather, 1x2 blocks/core): d1[64]=rows/4@16 d2[256]=j2x128@128
-  => routed: 2 ports on the 4x1 mesh, DMA carriers taken from the traced blocks
+  y (OFM, gather, 1x2 blocks/core): d1[64]=rows/4@16 d2[256]=cols/4@32+j2x32@128
+  => routed: 2 ports on the 4x4 mesh, DMA carriers taken from the traced blocks
 ```
 
 ## 4. Runtime indices: not in this model
