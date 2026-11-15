@@ -1156,11 +1156,12 @@ static unsigned g_ul_wzc = 0; /* GHL: linear sites on the zero-copy W path */
  * come from / go to DRAM, as the ranges did. */
 static int g_uc_opt = UC_OPT;
 #ifndef UC_VAR
-#define UC_VAR 86
+#define UC_VAR 214
 #endif
-/* GHL loop variants (A78 microbench s7/hl/mb, default 86 = 2|4|16|64): bit0 scatter n-tiles outer, bit1 m-outer +
+/* GHL loop variants (A78 microbench s7/hl/mb, default 214 = 2|4|16|64|128): bit0 scatter n-tiles outer, bit1 m-outer +
  * prefetch of the next n-tile, bit2 im2col in destination-row order, bit3 DC ZVA of fully written lines (no gain),
- * bit4 linear X tile by 8x8 transposes, bit5 im2col chunk-outer (slower), bit6 im2col rows R/R+8 from one 32-B load */
+ * bit4 linear X tile by 8x8 transposes, bit5 im2col chunk-outer (slower), bit6 im2col rows R/R+8 from one 32-B load,
+ * bit7 pad columns zeroed in the planar pass (not a separate sweep over every plane) */
 static int g_uc_var = UC_VAR;
 /* GHL: DC ZVA usable with a 64-B block (DCZID_EL0.BS == 4, DZP == 0): a full output line is allocated zeroed
  * instead of read from DRAM before the scatter overwrites all of it */
@@ -1470,7 +1471,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
                 memset(pl, 0, (size_t)ph * Wp * 2);
                 memset(pl + (size_t)(Hp - ph) * Wp, 0, (size_t)ph * Wp * 2);
             }
-            if (pw)
+            if (pw && !(g_uc_var & 128))
                 for (int h = ph; h < Hp - ph; h++) {
                     uint16_t *rw = pl + (size_t)h * Wp;
                     for (int i = 0; i < pw; i++)
@@ -1503,6 +1504,12 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
                             for (int j = 0; j < 4; j++)
                                 d[(size_t)i * HWp + j] = uc_f2bf(s0[(size_t)j * cb + i]);
 #endif
+                    }
+                if (pw && (g_uc_var & 128)) /* GHL: pad columns of this row while its lines are in L1 */
+                    for (int c = 0; c < cb; c++) {
+                        uint16_t *rw = dst0 + (size_t)c * HWp - pw;
+                        for (int i = 0; i < pw; i++)
+                            rw[i] = rw[Wp - 1 - i] = 0;
                     }
             }
         /* per-k tables: source offset in P (c, ky, kx) and destination offset in the 16-row block (ni = 0) */
