@@ -1158,6 +1158,9 @@ static int g_uc_opt = UC_OPT;
 #ifndef UC_VAR
 #define UC_VAR 214
 #endif
+#ifndef UC_WHOOK /* GHL: linear S>1 sites scatter block s-1 from the runtime's wait_io poll during launch s */
+#define UC_WHOOK 1
+#endif
 /* GHL loop variants (A78 microbench s7/hl/mb, default 214 = 2|4|16|64|128): bit0 scatter n-tiles outer, bit1 m-outer +
  * prefetch of the next n-tile, bit2 im2col in destination-row order, bit3 DC ZVA of fully written lines (no gain),
  * bit4 linear X tile by 8x8 transposes, bit5 im2col chunk-outer (slower), bit6 im2col rows R/R+8 from one 32-B load,
@@ -1239,7 +1242,7 @@ static void uc_sync_pre(const void *w, size_t wb, const void *x, size_t xb, cons
  * (linear), else NCHWc with channel block yb (conv, yb % 4 == 0). Epilogue in argument order: et 0 bias [N],
  * et 1 same layout as the output. Values and add order = the scalar loops. Returns the nonfinite count. */
 static int uc_scatter16(const float *Ys, int P, int N, int tr, int mbase, int mvalid, float *yout, int M, int yb,
-                        const float *const *ep, const int *et, int ne_) {
+                        const float *const *ep, const int *et, int ne_, int mt0 = 0, int mt1 = 1 << 30) {
     const float32x4_t lim = vdupq_n_f32(1e30f);
     uint32x4_t badv = vdupq_n_u32(0);
     const float *src[16][2];
@@ -1249,8 +1252,16 @@ static int uc_scatter16(const float *Ys, int P, int N, int tr, int mbase, int mv
     /* GHL: src offsets tabulated once per call (2 divisions each): normal walk -> per m-tile (+ nt*P at use),
      * transposed -> per n-tile (+ mt*N at use) */
     static int32_t g_uc_srct[32768];
+    static int g_srct_key[4] = {-1, -1, -1, -1}; /* GHL: (tr, P, N, ntt) of the table: m-tile range calls reuse it */
     const int ntt = tr ? nnt : nmt, tab = ntt * 32 <= 32768;
-    if (tab)
+    const int fresh = !(g_srct_key[0] == tr && g_srct_key[1] == P && g_srct_key[2] == N && g_srct_key[3] == ntt);
+    if (tab && fresh) {
+        g_srct_key[0] = tr;
+        g_srct_key[1] = P;
+        g_srct_key[2] = N;
+        g_srct_key[3] = ntt;
+    }
+    if (tab && fresh)
         for (int ti = 0; ti < ntt; ti++)
             for (int r = 0; r < 16; r++)
                 for (int h = 0; h < 2; h++) {
@@ -1266,8 +1277,12 @@ static int uc_scatter16(const float *Ys, int P, int N, int tr, int mbase, int mv
                     }
                     g_uc_srct[ti * 32 + r * 2 + h] = o;
                 }
-    for (int it = 0; it < nmt * nnt; it++) {
+    if (mt1 > nmt)
+        mt1 = nmt;
+    for (int it = nouter ? 0 : mt0 * nnt; it < (nouter ? nmt * nnt : mt1 * nnt); it++) {
         const int mt = 16 * (nouter ? it % nmt : it / nnt), nt = 16 * (nouter ? it / nmt : it % nnt);
+        if (mt < 16 * mt0 || mt >= 16 * mt1) /* GHL: m-tile range [mt0, mt1) (wait-hook chunks) */
+            continue;
         if (tab) {
             const float *base = Ys + (tr ? (size_t)mt * N : (size_t)nt * P);
             const int32_t *tt = g_uc_srct + (tr ? nt : mt) * 2; /* (tile/16)*32 */
@@ -1833,6 +1848,30 @@ LINEAR_HOST = r"""
  * (+ bias [1,N] / residual [M,N] epilogue) as S launches of ONE gemm_kacc instance (N, K, px=Mp/S), split
  * along px (kacc_split, as kacc_gemm.py / PDK c009). W is pre-laid at build time in the kacc chunk layout
  * (unet_aie.kacc_dense_wlayout); X is tiled here fp32 -> bf16 RNE, rows M..Mp-1 zero. */
+#if UC_NEON && UC_WHOOK
+/* GHL: scatter of launch s-1's Y block stepped from the runtime's wait_io poll while launch s computes (one
+ * 16-row m-tile per poll iteration); the block was invalidated after launch s-1 returned and launch s's
+ * DMA neither reads nor writes it. Whatever the poll did not reach is finished after the launch. */
+typedef int (*Runtime_wait_hook_fn)(void *arg);
+void __Runtime_set_wait_hook(Runtime_wait_hook_fn fn, void *arg); /* C++ linkage, aie_runtime.h */
+typedef struct {
+    const float *Ys;
+    int P, N, tr, mbase, mvalid, M, nmt, t, bad, ne;
+    float *yout;
+    const float *const *ep;
+    const int *et;
+} uc_whook;
+static int uc_whook_step(void *a) {
+    uc_whook *h = (uc_whook *)a;
+    if (h->t < h->nmt) {
+        h->bad += uc_scatter16(h->Ys, h->P, h->N, h->tr, h->mbase, h->mvalid, h->yout, h->M, 0, h->ep, h->et, h->ne,
+                               h->t, h->t + 1);
+        h->t++;
+    }
+    return h->t >= h->nmt;
+}
+static unsigned long long g_uc_whook_tiles = 0, g_uc_whook_all = 0; /* m-tiles done in the poll / overlappable */
+#endif
 static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
     XTime ut0;
     XTime_GetTime(&ut0);
@@ -1979,50 +2018,6 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
         }
     }
     const size_t wbytes = (size_t)N * Kp * 2, xbytes = (size_t)Mp * Kp * 2, ybytes = (size_t)Mp * N * 4;
-    uc_ysentinel(g_ky, ybytes); // sentinel: unwritten -> NaN -> counted
-    XTime la0, la1; /* GHL: [UCL] split of the site, aie = all its launch windows */
-    XTime_GetTime(&la0);
-    for (int s = 0; s < S; s++) {
-        XTime lt0, lt1;
-        XTime_GetTime(&lt0);
-        const unsigned long long sp0 = uc_pmc();
-#if UC_WARM
-        unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
-        __Runtime_pm_warm_stats(&seg0, &cold0);
-#endif
-        if (s == 0) /* GHL: host->DMA sync in the first launch's window, as uc_conv */
-            uc_sync_pre(g_kw, wbytes, g_kx, xbytes, g_ky, ybytes);
-        const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
-        printf("[UCS] l=%d lin M=%d N=%d K=%d px=%d s=%d/%d tkw=%d\n", g_aie_launches, M, N, K, P, s, S, tkw);
-        fflush(stdout);
-        const int lrc = uc_kacc_launch(N, K, P, g_kw, g_kx + (size_t)s * P * Kp / 2, g_ky + (size_t)s * N * P);
-        const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();
-        if (s == S - 1)
-            uc_sync_post(g_ky, ybytes);
-#if UC_WARM
-        __Runtime_pm_warm_stats(&seg1, &cold1);
-        if (cold1 != cold0) {
-            g_uc_kloads++;
-            g_uc_cold_tiles += cold1 - cold0;
-        }
-#endif
-        const unsigned long long sp3 = uc_pmc();
-        XTime_GetTime(&lt1);
-        if (lrc != 0) {
-            g_kw = kw_pool;
-            return lrc;
-        }
-        g_sp_call += sp2 - sp1;
-        g_sp_glue += (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL;
-        g_sp_post += sp3 - sp2;
-        g_sp_pre += sp1 - sp0;
-        g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
-        g_aie_launches++;
-    }
-    g_kw = kw_pool;
-    XTime_GetTime(&la1);
-    g_uc_macs += (unsigned long long)M * N * K; /* real rows only (M, not Mp) */
-    const float *Y = (const float *)g_ky; /* launch s: [N][P] tiled block at s*N*P (P4bx [s][mi][ni][8x8]) */
     /* GHL: epilogue (bias [1,N] / residual [M,N], argument order kept) fused into the scatter */
     const float *ep[4];
     int et[4], ne_ = 0; /* et: 0 = bias [N], 1 = residual [M][N] */
@@ -2039,9 +2034,101 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
             return -5;
         ep[ne_++] = (const float *)e->data;
     }
+    const float *Y = (const float *)g_ky; /* launch s: [N][P] tiled block at s*N*P (P4bx [s][mi][ni][8x8]) */
     int bad = 0;
+#if UC_NEON && UC_WHOOK
+    uc_whook wh;
+    memset(&wh, 0, sizeof(wh));
+    wh.t = wh.nmt = 0;
+#endif
+    uc_ysentinel(g_ky, ybytes); // sentinel: unwritten -> NaN -> counted
+    XTime la0, la1; /* GHL: [UCL] split of the site, aie = all its launch windows */
+    XTime_GetTime(&la0);
+    for (int s = 0; s < S; s++) {
+        XTime lt0, lt1;
+        XTime_GetTime(&lt0);
+        const unsigned long long sp0 = uc_pmc();
+#if UC_WARM
+        unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
+        __Runtime_pm_warm_stats(&seg0, &cold0);
+#endif
+        if (s == 0) /* GHL: host->DMA sync in the first launch's window, as uc_conv */
+            uc_sync_pre(g_kw, wbytes, g_kx, xbytes, g_ky, ybytes);
+        const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
+        printf("[UCS] l=%d lin M=%d N=%d K=%d px=%d s=%d/%d tkw=%d\n", g_aie_launches, M, N, K, P, s, S, tkw);
+        fflush(stdout);
+#if UC_NEON && UC_WHOOK
+        if (s > 0 && (g_uc_var & 1) == 0 && (s - 1) * P < M) { /* block s-1 scattered while launch s computes */
+            wh.Ys = Y + (size_t)(s - 1) * N * P;
+            wh.P = P;
+            wh.N = N;
+            wh.tr = tr;
+            wh.mbase = (s - 1) * P;
+            wh.mvalid = M - (s - 1) * P < P ? M - (s - 1) * P : P;
+            wh.M = M;
+            wh.yout = yout;
+            wh.ep = ep;
+            wh.et = et;
+            wh.ne = ne_;
+            wh.t = 0;
+            wh.nmt = (wh.mvalid + 15) / 16;
+            __Runtime_set_wait_hook(uc_whook_step, &wh);
+        }
+#endif
+        const int lrc = uc_kacc_launch(N, K, P, g_kw, g_kx + (size_t)s * P * Kp / 2, g_ky + (size_t)s * N * P);
+        const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();
+#if UC_NEON && UC_WHOOK
+        __Runtime_set_wait_hook(0, 0);
+        if (g_uc_opt & 4) {
+            if (s == S - 1)
+                uc_sync_post(g_ky, ybytes);
+        } else { /* per-block invalidate (blocks tile Y): block s is read (next launch's poll / below) only after */
+            Xil_DCacheInvalidateRange((UINTPTR)(g_ky + (size_t)s * N * P), (size_t)N * P * 4);
+        }
+#else
+        if (s == S - 1)
+            uc_sync_post(g_ky, ybytes);
+#endif
+#if UC_WARM
+        __Runtime_pm_warm_stats(&seg1, &cold1);
+        if (cold1 != cold0) {
+            g_uc_kloads++;
+            g_uc_cold_tiles += cold1 - cold0;
+        }
+#endif
+        const unsigned long long sp3 = uc_pmc();
+        XTime_GetTime(&lt1);
+        if (lrc != 0) {
+            g_kw = kw_pool;
+            return lrc;
+        }
+#if UC_NEON && UC_WHOOK
+        if (s > 0 && wh.nmt > 0) { /* the rest of block s-1 the poll did not reach (host time) */
+            g_uc_whook_tiles += (unsigned long long)wh.t;
+            g_uc_whook_all += (unsigned long long)wh.nmt;
+            bad += wh.bad;
+            if (wh.t < wh.nmt)
+                bad += uc_scatter16(wh.Ys, P, N, tr, wh.mbase, wh.mvalid, yout, M, 0, ep, et, ne_, wh.t, wh.nmt);
+            wh.t = wh.nmt = 0;
+            wh.bad = 0;
+        }
+#endif
+        g_sp_call += sp2 - sp1;
+        g_sp_glue += (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL;
+        g_sp_post += sp3 - sp2;
+        g_sp_pre += sp1 - sp0;
+        g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
+        g_aie_launches++;
+    }
+    g_kw = kw_pool;
+    XTime_GetTime(&la1);
+    g_uc_macs += (unsigned long long)M * N * K; /* real rows only (M, not Mp) */
 #if UC_NEON
+#if UC_WHOOK
+    for (int s = (g_uc_var & 1) == 0 ? S - 1 : 0; s < S && s * P < M; s++) /* blocks < S-1: done above */
+#else
     for (int s = 0; s < S && s * P < M; s++) /* GHL: 16x16 tiles per launch block */
+#endif
         bad += uc_scatter16(Y + (size_t)s * N * P, P, N, tr, s * P, (M - s * P < P ? M - s * P : P), yout, M, 0, ep,
                             et, ne_);
     if (0)

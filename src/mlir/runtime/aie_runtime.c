@@ -2919,6 +2919,17 @@ void __Runtime_sync_for_cpu(XAie_DevInst *dev, void *ptr, size_t size) {
  * computes. Unregistered outputs keep the conservative clean+invalidate before
  * any DMA starts, exactly the old semantics (see emitSyncCalls' comment).
  * ------------------------------------------------------------------------- */
+static Runtime_wait_hook_fn g_wait_hook = 0;
+static void *g_wait_hook_arg = 0;
+void __Runtime_set_wait_hook(Runtime_wait_hook_fn fn, void *arg) {
+    g_wait_hook_arg = arg;
+    g_wait_hook = fn;
+}
+/* GHL: one chunk of the caller's independent host work per device-poll iteration (wait_io, ctrl MM2S waits) */
+static inline void rt_wait_hook_step(void) {
+    if (g_wait_hook && g_wait_hook(g_wait_hook_arg))
+        g_wait_hook = 0;
+}
 #define RT_DSYNC_MAX 16
 #define RT_DSYNC_CHUNK 16384U /* bytes of maintenance per wait_io poll step */
 #define RT_DEVWR_MAX 8
@@ -4290,6 +4301,7 @@ static AieRC rt_ctrl_mm2s_wait_below(XAie_DevInst *dev, uint8_t shim_col, int32_
             return rc;
         if (pending < below)
             return XAIE_OK;
+        rt_wait_hook_step();
     }
     printf("[aie_runtime] ctrl MM2S TIMEOUT shim(%u,0) ch=%d pending=%u below=%u\n", (unsigned)shim_col, channel,
            (unsigned)pending, (unsigned)below);
@@ -4306,6 +4318,7 @@ static AieRC rt_ctrl_mm2s_wait(XAie_DevInst *dev, uint8_t shim_col, int32_t chan
         uint32_t queued = (status & AIERT_DMA_TASK_Q_SIZE_MASK) >> AIERT_DMA_TASK_Q_SIZE_LSB;
         if ((status & AIERT_DMA_CHANNEL_RUNNING_MASK) == 0U && queued == 0U)
             return XAIE_OK;
+        rt_wait_hook_step();
     }
     printf("[aie_runtime] ctrl MM2S idle TIMEOUT shim(%u,0) ch=%d status=0x%08x running=%u queued=%u cur_bd=%u\n",
            (unsigned)shim_col, channel, (unsigned)status,
@@ -8589,6 +8602,7 @@ void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
     while (numPendingBDs > 0) {
         RT_PROF_INC(g_wait_io_iters);
         rt_dsync_step();
+        rt_wait_hook_step(); /* GHL: one chunk of independent host work */
         AieRC rc = XAie_DmaGetPendingBdCount(dev, tile, channel, dir, &numPendingBDs);
         if (rc != XAIE_OK) {
             printf("[aie_runtime] wait_io ERROR: XAie_DmaGetPendingBdCount "

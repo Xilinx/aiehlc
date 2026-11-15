@@ -402,6 +402,14 @@ void __Runtime_core_run(XAie_DevInst *dev, XAie_LocType *tiles, uint32_t num_til
 // Synchronization
 void __Runtime_wait_event(XAie_DevInst *dev, struct_event ev);
 void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_ev);
+// Wait-idle hook (GHL): host work that is independent of the running launch (e.g. the
+// post-processing of a PREVIOUS launch's output) stepped from __Runtime_wait_io's
+// DMA poll, one fn(arg) call per poll iteration while the array computes. fn does a
+// bounded chunk and returns nonzero when it has nothing left; the slot is then
+// cleared. The caller owns fn/arg: it clears the slot (fn = NULL) after the launch
+// and finishes any remainder itself. fn must not touch the launch's own buffers.
+typedef int (*Runtime_wait_hook_fn)(void *arg);
+void __Runtime_set_wait_hook(Runtime_wait_hook_fn fn, void *arg);
 /* C only: single name for emitted host. */
 #ifndef __cplusplus
 #define __Runtime_wait(dev, x)                                                                                         \
