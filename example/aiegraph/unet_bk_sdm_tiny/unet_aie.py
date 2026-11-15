@@ -1158,8 +1158,11 @@ static int g_uc_opt = UC_OPT;
 #ifndef UC_VAR
 #define UC_VAR 214
 #endif
-#ifndef UC_WHOOK /* GHL: linear S>1 sites scatter block s-1 from the runtime's wait_io poll during launch s */
-#define UC_WHOOK 1
+#ifndef UC_WHOOK /* GHL: linear S>1 sites scatter block s-1 from the runtime's wait_io poll during launch s.
+ * OFF: palmyra213 run of 8dd51b6 (=1) moved aie_host 177 -> 159 ms but aie_wall 1022 -> 1038 and graph_run
+ * 5609 -> 5610 (linear9 site 29.1 -> 29.0 ms): the CPU has no idle time inside a launch (bdcfg host glue
+ * ~3.6 ms/launch, wait_io short), so the hook only relabels host time as launch time. */
+#define UC_WHOOK 0
 #endif
 /* GHL loop variants (A78 microbench s7/hl/mb, default 214 = 2|4|16|64|128): bit0 scatter n-tiles outer, bit1 m-outer +
  * prefetch of the next n-tile, bit2 im2col in destination-row order, bit3 DC ZVA of fully written lines (no gain),
