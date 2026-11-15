@@ -8,26 +8,31 @@
 # --gemm: a MatMul golden (a.npy [1,M,K], b.npy [K,N], y.npy) through kacc_gemm.py: the generic gemm_kacc instance
 # (unet_aie.kacc_kernel_text, M padded to 64) + a bench main (warm-up pass, timed pass, KCMP vs y.npy), built
 # like the UNet --kincore path: --launch-opt warm defs + --skip-bss + --ctrlpkt aot pragmas.
+#   kacc_bench.sh --bmm --golden <op_golden/p0_matmul_gemm_s0_cond/cNNN_matmul_1x8x...> --out <dir>   (PBK)
+# --bmm: attention bmm golden (a.npy [1,H,M,K], b.npy [1,H,K,N]); A and B are embedded in their NATURAL f32 layout
+# and packed by the host at run time (src/mlir/runtime/aie_kacc_pack.h), M/K/N padded to 64 (aiegraph.gemmpad),
+# H heads x S launches; [BENCH] prints aie_wall_ms, host_ms (A/B pack + flush + invalidate + unpad) and launches.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
-GOLDEN="" OUT="" GEMM=0
+GOLDEN="" OUT="" GEMM=0 BMM=0
 while [ $# -gt 0 ]; do
     case "$1" in
     --golden) GOLDEN="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --gemm) GEMM=1; shift ;;
-    *) echo "usage: $0 [--gemm] --golden <dir> --out <dir>" >&2; exit 2 ;;
+    --bmm) GEMM=1; BMM=1; shift ;;
+    *) echo "usage: $0 [--gemm|--bmm] --golden <dir> --out <dir>" >&2; exit 2 ;;
     esac
 done
 [ -n "$GOLDEN" ] && [ -n "$OUT" ] || { echo "usage: $0 --golden <dir> --out <dir>" >&2; exit 2; }
 PY="${KACC_PY:-/scratch/staff/huaj/aiehlc/.venv/bin/python3}"
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
-echo "[kacc_bench] root=$ROOT golden=$GOLDEN out=$OUT commit=$(git -C "$HERE" rev-parse --short HEAD) gemm=$GEMM"
+echo "[kacc_bench] root=$ROOT golden=$GOLDEN out=$OUT commit=$(git -C "$HERE" rev-parse --short HEAD) gemm=$GEMM bmm=$BMM"
 
 if [ "$GEMM" = 1 ]; then
-    "$PY" -I "$HERE/kacc_gemm.py" "$GOLDEN" "$OUT"
+    if [ "$BMM" = 1 ]; then "$PY" -I "$HERE/kacc_gemm.py" --bmm "$GOLDEN" "$OUT"; else "$PY" -I "$HERE/kacc_gemm.py" "$GOLDEN" "$OUT"; fi
     cd "$OUT"
     rm -rf aout
     # same launch options as build_unet.py --launch-opt warm (WARM_DEFS, aiehlc.sh --skip-bss): kernel loaded once
@@ -38,6 +43,11 @@ if [ "$GEMM" = 1 ]; then
     rc=$?
     set -u
     [ $rc -eq 0 ] && [ -f "$OUT/aout/main.elf" ] || { echo "[kacc_bench] aiehlc.sh failed rc=$rc"; exit 1; }
+    if [ "$BMM" = 1 ] && grep -q 'DMA BD Config:.*iter_wrap' "$OUT/aout/worklocal/host.cc"; then
+        # GAP-aiehlc-bmm-lowering item 2: aiehlc's 2-dim + iteration b-port BD gave wrong results on the board
+        echo "[kacc_bench] REJECT: host.cc has a 2-dim+iter DMA BD (known-wrong on palmyra213, see kacc_gemm.main_bmm)"
+        exit 1
+    fi
     cp -f "$OUT/aout/main.elf" "$OUT/main.elf"
     ls -l "$OUT/main.elf"
     echo "[kacc_bench] BUILD_OK $OUT/main.elf"
