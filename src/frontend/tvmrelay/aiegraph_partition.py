@@ -226,24 +226,20 @@ def _aiegraph_ops_for(kind: str, ops: list) -> list:
 
     Driven off the fused op list rather than the folder name so an unseen
     fusion degrades to "no aiegraph op" instead of being silently mis-mapped.
+    The pattern family lives in AIEHLC ``aiegraph.partition.match_conv``: a
+    float conv(+bias)(+add) with no ReLU (UNet temb / skip / attention
+    residual) is ``conv_bn`` with an fp32 epilogue (see ``_conv_pattern``);
+    ``partition_layers`` keeps such a layer on the CPU unless the backend runs
+    the epilogue, so the add is never dropped.
     """
-    if "conv2d" not in ops:
-        return []
-    joins = _residual_joins(ops)
-    if joins == 0:
-        return ["conv_bn_relu" if "relu" in ops else "conv_bn"]
-    if not _float_bias(ops):
-        # QNN path (ResNet-18): ReLU is folded into a requant ``clip`` that
-        # cannot be told apart from int8 saturation, so keep the ResNet
-        # assumption that a single join is the block tail.
-        return ["conv_bn", "residual_add_relu"] if joins == 1 else []
-    # Float import path: the activation is a real ``relu`` op. A join without
-    # it (UNet skip / timestep / attention residual) or more than one join has
-    # no aiegraph op -- leave it unmapped rather than claim it as conv_bn and
-    # silently drop the add, or append a ReLU the model does not have.
-    if joins == 1 and "relu" in ops:
-        return ["conv_bn", "residual_add_relu"]
-    return []
+    p = _conv_pattern(ops)
+    return list(p.aiegraph) if p else []
+
+
+def _conv_pattern(ops: list):
+    from aiegraph.partition import match_conv
+
+    return match_conv(ops)
 
 
 def _float_bias(ops: list) -> bool:
@@ -318,6 +314,9 @@ def build_nodes(manifest: dict, graph: dict) -> list:
             else:
                 rec.update(geom)
                 rec["aiegraph"] = kinds
+                p = _conv_pattern(ops)
+                if p is not None and p.adds and "residual_add_relu" not in kinds:
+                    rec["epilogue"] = list(p.adds)
         records.append(rec)
 
     _mark_dead_layers(manifest, by_symbol, records)
@@ -416,7 +415,7 @@ def build_ir_ops(records: list) -> tuple:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def partition_layers(records: list, aie_ops=DEFAULT_AIE_OPS,
-                     layers=None) -> list:
+                     layers=None, epilogue=False) -> list:
     """Decide AIE vs CPU per layer. Returns one verdict dict per record.
 
     A layer goes to AIE only when **every** aiegraph op it expands to is in
@@ -443,6 +442,12 @@ def partition_layers(records: list, aie_ops=DEFAULT_AIE_OPS,
         if not kinds:
             reason = rec.get("reason", "no aiegraph op")
             target = "cpu"
+        elif rec.get("epilogue") and not epilogue:
+            target = "cpu"
+            reason = (f"aiegraph {' + '.join(kinds)} + fp32 epilogue add "
+                      f"({', '.join(rec['epilogue'])}), but this backend's conv "
+                      f"kernel takes no epilogue input; the fused C cannot be "
+                      f"split, so the whole layer stays on the APU")
         elif all(k in aie_ops for k in kinds):
             target, reason = "aie", f"aiegraph {' + '.join(kinds)}"
         else:

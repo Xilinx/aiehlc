@@ -32,11 +32,12 @@ class AiegraphOpsForTest(unittest.TestCase):
         self.assertEqual(_aiegraph_ops_for("", ["conv2d", "bias_add", "relu"]),
                          ["conv_bn_relu"])
 
-    def test_bias_add_plus_join_without_relu_is_unmapped(self):
-        # UNet skip / timestep / attention residual: previously mis-mapped to
-        # conv_bn, silently dropping the join.
+    def test_bias_add_plus_join_without_relu_is_conv_bn_epilogue(self):
+        # UNet skip / timestep / attention residual: conv_bn with an fp32
+        # epilogue add (aiegraph.partition.match_conv); partition_layers keeps
+        # it off a backend without an epilogue, so the join is never dropped.
         self.assertEqual(
-            _aiegraph_ops_for("", ["conv2d", "bias_add", "add"]), [])
+            _aiegraph_ops_for("", ["conv2d", "bias_add", "add"]), ["conv_bn"])
 
     def test_bias_add_plus_join_with_relu(self):
         self.assertEqual(
@@ -56,9 +57,9 @@ class AiegraphOpsForTest(unittest.TestCase):
         self.assertEqual(_aiegraph_ops_for("", ops), ["conv_bn"])
 
     # Name-token form of bias_add: "nn_conv2d_nn_bias_add_add".
-    def test_name_tokens_bias_add_plus_join_is_unmapped(self):
+    def test_name_tokens_bias_add_plus_join_is_conv_bn_epilogue(self):
         ops = ["nn", "conv2d", "nn", "bias", "add", "add"]
-        self.assertEqual(_aiegraph_ops_for("", ops), [])
+        self.assertEqual(_aiegraph_ops_for("", ops), ["conv_bn"])
 
     def test_name_tokens_bias_add_only(self):
         ops = ["nn", "conv2d", "nn", "bias", "add"]
