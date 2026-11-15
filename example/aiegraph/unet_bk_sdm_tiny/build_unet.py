@@ -390,7 +390,11 @@ def main(argv=None) -> int:
     # 1.29 GB fp32 weights: read in place from the linked blob (no 2nd .bss copy)
     os.environ["AIEGRAPH_PARAMS_INPLACE"] = "1"
     os.environ["AIEGRAPH_WDTYPE"] = a.wdtype
+    # GHL: the aiek host.cc carries the per-site im2col / scatter glue (A78 time inside graph_run); hostcompile.sh
+    # builds it -Os unless HOSTCOMPILE_HOST_OPT is set (runtime .c files and kernels keep -Os)
+    os.environ.setdefault("HOSTCOMPILE_HOST_OPT", "-O2")
     log(f"aiegraph from {ag.__file__} (repo {root})")
+    log(f"HOSTCOMPILE_HOST_OPT={os.environ['HOSTCOMPILE_HOST_OPT']} (aiek host.cc)")
 
     hdr = out / "unet_inputs.h"
     write_inputs_header(real_io, hdr, a.aie, a.wdtype)

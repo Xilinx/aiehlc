@@ -1133,9 +1133,18 @@ static inline uint16x4_t uc_f2bf4(float32x4_t v) {
     u = vaddq_u32(u, vaddq_u32(lsb, vdupq_n_u32(0x7fffu)));
     return vshrn_n_u32(u, 16);
 }
+/* GHL: in-place 4x4 fp32 transpose (rows r0..r3 -> columns) */
+static inline void uc_tr4(float32x4_t &r0, float32x4_t &r1, float32x4_t &r2, float32x4_t &r3) {
+    const float32x4x2_t t01 = vtrnq_f32(r0, r1), t23 = vtrnq_f32(r2, r3);
+    r0 = vcombine_f32(vget_low_f32(t01.val[0]), vget_low_f32(t23.val[0]));
+    r1 = vcombine_f32(vget_low_f32(t01.val[1]), vget_low_f32(t23.val[1]));
+    r2 = vcombine_f32(vget_high_f32(t01.val[0]), vget_high_f32(t23.val[0]));
+    r3 = vcombine_f32(vget_high_f32(t01.val[1]), vget_high_f32(t23.val[1]));
+}
 #else
 #define UC_NEON 0
 #endif
+static unsigned g_ul_wzc = 0; /* GHL: linear sites on the zero-copy W path */
 /* GPOOL: pooled host-glue buffers, grown once and reused by every layer (no per-call alloc) */
 static uint16_t *g_uc_pb = nullptr; /* padded bf16 planes [C][H+2ph][W+2pw] + slack */
 static int *g_uc_sk = nullptr, *g_uc_dk = nullptr; /* per-k source / destination offsets */
@@ -1417,9 +1426,51 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
             return -5;
         ep[ne_++] = (const float *)e->data;
     }
+    int N_ = N; /* GHL: rows left for the scalar scatter */
     const float *Y = (const float *)g_ky; // [N][M] fp32 (NCHW)
     int bad = 0;
-    for (int n = 0; n < N; n++) {
+#if UC_NEON
+    if (yb % 4 == 0) {
+        /* GHL: 4 channels (same yb block) x 4 px per 4x4 transpose -> 4 contiguous floats of pixel m in the
+         * NCHWc output; same values and add order as the scalar loop below */
+        const float32x4_t lim = vdupq_n_f32(1e30f);
+        uint32x4_t badv = vdupq_n_u32(0);
+        for (int n0 = 0; n0 < N; n0 += 4) {
+            const size_t ob = (size_t)(n0 / yb) * M * yb + n0 % yb;
+            for (int m = 0; m < M; m += 8) {
+                const float *src[4];
+                for (int jn = 0; jn < 4; jn++) {
+                    const int n = n0 + jn, r = n & 15;
+                    if (!tr) {
+                        const int c = m & 15, q = M / 4, cc = m % q;
+                        const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
+                        src[jn] = Y + (size_t)((n & ~15) + wi / q) * M + (m - cc) + wi % q;
+                    } else {
+                        const int c = m & 15, q = N / 4, cc = n % q;
+                        const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
+                        src[jn] = Y + (size_t)((m & ~15) + wi / q) * N + (n - cc) + wi % q;
+                    }
+                }
+                for (int h = 0; h < 8; h += 4) {
+                    float32x4_t v[4] = {vld1q_f32(src[0] + h), vld1q_f32(src[1] + h), vld1q_f32(src[2] + h),
+                                        vld1q_f32(src[3] + h)};
+                    uc_tr4(v[0], v[1], v[2], v[3]);
+                    for (int t = 0; t < 4; t++) {
+                        badv = vaddq_u32(badv, vshrq_n_u32(vmvnq_u32(vcaleq_f32(v[t], lim)), 31));
+                        const size_t o = ob + (size_t)(m + h + t) * yb;
+                        float32x4_t a = v[t];
+                        for (int e = 0; e < ne_; e++)
+                            a = vaddq_f32(a, vld1q_f32(ep[e] + (et[e] ? o : (size_t)n0)));
+                        vst1q_f32(yout + o, a);
+                    }
+                }
+            }
+        }
+        bad = (int)vaddvq_u32(badv);
+        N_ = 0; /* scalar loop below skipped */
+    }
+#endif
+    for (int n = 0; n < N_; n++) {
         const int r = n & 15;
         float *on = yout + (size_t)(n / yb) * M * yb + n % yb;
         for (int m = 0; m < M; m += 8) {
@@ -1525,7 +1576,13 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
     }
 #endif
     uint16_t *Wd = (uint16_t *)g_kw, *Xd = (uint16_t *)g_kx;
-    if (Kp == K) {
+    int32_t *const kw_pool = g_kw; /* GHL: the pooled W port, restored after the launches */
+    if (Kp == K && ((uintptr_t)wbf & 63) == 0) {
+        /* GHL (= GPOOL zero-copy W): wbf is the exact port image (kacc_dense_wlayout, build time) -> read in
+         * place by the launches (flushed below like the pool) */
+        g_kw = (int32_t *)(uintptr_t)wbf;
+        g_ul_wzc++;
+    } else if (Kp == K) {
         memcpy(Wd, wbf, (size_t)N * K * 2);
     } else {
         for (int n = 0; n < N; n++) {
@@ -1541,6 +1598,42 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
             const int f = (q >> 3) * 8 * kch + (kr >> 3) * 64 + (kr & 7) * 8 + (q & 7);
             g_ul_tab[q][kr] = (f / kch) * Kp + f % kch;
         }
+#if UC_NEON
+    /* GHL: 4 rows x 4 k per 4x4 transpose: for a fixed k the 4 rows q0..q0+3 (q0 % 4 == 0) are 4 contiguous
+     * bf16 of the chunk ((q & 7) is the fastest index of f) -> one 8-byte store, RNE as uc_f2bf */
+    for (int m0 = 0; m0 < Mp; m0 += 4) {
+        const int q0 = m0 & 15;
+        const int *tab = g_ul_tab[q0];
+        uint16_t *dst = Xd + (size_t)(m0 >> 4) * 16 * Kp;
+        if (m0 + 4 <= M) {
+            const float *x0 = xin + (size_t)m0 * K, *x1 = x0 + K, *x2 = x1 + K, *x3 = x2 + K;
+            for (int k0 = 0; k0 < K; k0 += 4) {
+                float32x4_t r0 = vld1q_f32(x0 + k0), r1 = vld1q_f32(x1 + k0), r2 = vld1q_f32(x2 + k0),
+                            r3 = vld1q_f32(x3 + k0);
+                uc_tr4(r0, r1, r2, r3);
+                const int j = k0 / kch, kr = k0 - j * kch;
+                uint16_t *dj = dst + (size_t)j * kch;
+                vst1_u16(dj + tab[kr], uc_f2bf4(r0));
+                vst1_u16(dj + tab[kr + 1], uc_f2bf4(r1));
+                vst1_u16(dj + tab[kr + 2], uc_f2bf4(r2));
+                vst1_u16(dj + tab[kr + 3], uc_f2bf4(r3));
+            }
+        } else {
+            for (int k0 = 0; k0 < K; k0 += 4) {
+                const int j = k0 / kch, kr = k0 - j * kch;
+                uint16_t *dj = dst + (size_t)j * kch;
+                for (int jj = 0; jj < 4; jj++)
+                    for (int i = 0; i < 4; i++)
+                        dj[tab[kr + jj] + i] = m0 + i < M ? uc_f2bf(xin[(size_t)(m0 + i) * K + k0 + jj]) : 0;
+            }
+        }
+        for (int k = K; k < Kp; k++) {
+            const int j = k / kch, kr = k - j * kch;
+            vst1_u16(dst + (size_t)j * kch + tab[kr], vdup_n_u16(0));
+        }
+    }
+    if (0)
+#endif
     for (int m = 0; m < Mp; m++) {
         const int *tab = g_ul_tab[m & 15];
         uint16_t *dst = Xd + (size_t)(m >> 4) * 16 * Kp;
@@ -1585,8 +1678,10 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
 #endif
         const unsigned long long sp3 = uc_pmc();
         XTime_GetTime(&lt1);
-        if (lrc != 0)
+        if (lrc != 0) {
+            g_kw = kw_pool;
             return lrc;
+        }
         g_sp_call += sp2 - sp1;
         g_sp_glue += (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL;
         g_sp_post += sp3 - sp2;
@@ -1594,9 +1689,74 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
         g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
         g_aie_launches++;
     }
+    g_kw = kw_pool;
     g_uc_macs += (unsigned long long)M * N * K; /* real rows only (M, not Mp) */
     const float *Y = (const float *)g_ky; /* launch s: [N][P] tiled block at s*N*P (P4bx [s][mi][ni][8x8]) */
+    /* GHL: epilogue (bias [1,N] / residual [M,N], argument order kept) fused into the scatter */
+    const float *ep[4];
+    int et[4], ne_ = 0; /* et: 0 = bias [N], 1 = residual [M][N] */
+    for (int i = 2; i < nargs - 1; i++) {
+        const uc_dlt *e = (const uc_dlt *)argv[i];
+        const long ne = uc_numel(e);
+        if (ne_ == 4)
+            return -5;
+        if (ne == N)
+            et[ne_] = 0;
+        else if (ne == (long)M * N)
+            et[ne_] = 1;
+        else
+            return -5;
+        ep[ne_++] = (const float *)e->data;
+    }
     int bad = 0;
+#if UC_NEON
+    /* GHL: for one n, the 8 px ml..ml+7 (ml % 8 == 0) are 8 contiguous fp32 of the launch's tiled block in
+     * both walks ((c & 7) adds to wi, q % 16 == 0); 4 n x 4 px per 4x4 transpose -> 4 contiguous outputs
+     * of row m. Same values, same add order as the scalar path. */
+    {
+        const float32x4_t lim = vdupq_n_f32(1e30f);
+        uint32x4_t badv = vdupq_n_u32(0);
+        for (int m0 = 0; m0 < M; m0 += 8) {
+            const int s = m0 / P, ml = m0 % P, c = ml & 15;
+            const float *Ys = Y + (size_t)s * N * P;
+            for (int n0 = 0; n0 < N; n0 += 4) {
+                const float *src[4];
+                for (int jn = 0; jn < 4; jn++) {
+                    const int n = n0 + jn, r = n & 15;
+                    size_t i;
+                    if (!tr) {
+                        const int q = P / 4, cc = ml % q;
+                        const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
+                        i = (size_t)((n & ~15) + wi / q) * P + (ml - cc) + wi % q;
+                    } else {
+                        const int q = N / 4, cc = n % q;
+                        const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
+                        i = (size_t)((ml & ~15) + wi / q) * N + (n - cc) + wi % q;
+                    }
+                    src[jn] = Ys + i;
+                }
+                for (int h = 0; h < 8; h += 4) {
+                    float32x4_t v[4] = {vld1q_f32(src[0] + h), vld1q_f32(src[1] + h), vld1q_f32(src[2] + h),
+                                        vld1q_f32(src[3] + h)};
+                    uc_tr4(v[0], v[1], v[2], v[3]); /* v[t] = n0..n0+3 of row m0+h+t */
+                    for (int t = 0; t < 4; t++) {
+                        const int m = m0 + h + t;
+                        if (m >= M)
+                            break;
+                        badv = vaddq_u32(badv, vshrq_n_u32(vmvnq_u32(vcaleq_f32(v[t], lim)), 31));
+                        const size_t o = (size_t)m * N + n0;
+                        float32x4_t a = v[t];
+                        for (int e = 0; e < ne_; e++)
+                            a = vaddq_f32(a, vld1q_f32(ep[e] + (et[e] ? o : (size_t)n0)));
+                        vst1q_f32(yout + o, a);
+                    }
+                }
+            }
+        }
+        bad = (int)vaddvq_u32(badv);
+    }
+    if (0)
+#endif
     for (int m = 0; m < M; m++) {
         const int s = m / P, ml = m % P, c = ml & 15;
         const float *Ys = Y + (size_t)s * N * P;
@@ -1613,32 +1773,17 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
                 const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8 + (c & 7);
                 i = (size_t)((ml & ~15) + wi / q) * N + (n - cc) + wi % q;
             }
-            const float v = Ys[i];
+            float v = Ys[i];
             if (!(v == v) || v > 1e30f || v < -1e30f)
                 bad++;
+            for (int e = 0; e < ne_; e++)
+                v += ep[e][et[e] ? (size_t)m * N + n : (size_t)n];
             yo[n] = v;
         }
     }
     if (bad) {
         printf("[unet_aie_linear] %d nonfinite AIE outputs\n", bad);
         return -4;
-    }
-    for (int i = 2; i < nargs - 1; i++) { // epilogue: bias [1,N] or residual [M,N]
-        const uc_dlt *e = (const uc_dlt *)argv[i];
-        const float *ev = (const float *)e->data;
-        const long ne = uc_numel(e);
-        if (ne == N) {
-            for (int m = 0; m < M; m++) {
-                float *yo = yout + (size_t)m * N;
-                for (int n = 0; n < N; n++)
-                    yo[n] += ev[n];
-            }
-        } else if (ne == (long)M * N) {
-            for (long q = 0; q < (long)M * N; q++)
-                yout[q] += ev[q];
-        } else {
-            return -5;
-        }
     }
     return 0;
 }
