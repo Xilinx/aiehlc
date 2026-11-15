@@ -982,7 +982,7 @@ def kacc_name(ch: int, k: int, px: int) -> str:
     return f"gemm_kacc_{ch}x{k}x{px}"
 
 
-def kacc_geom(ch: int, k: int, px: int, tkw_force: int = 0) -> dict:
+def kacc_geom(ch: int, k: int, px: int) -> dict:
     """walk of one layer on the 4x4 mesh (aiehlc's trace fitter takes a 2-level affine walk per port):
     core (pm, pn) owns ch/4 channels (ntile tiles of 16) x px/4 pixels (S sub-tiles of 16);
       a (W)  [ch][k/2]  block {16, tkw}      rounds (t, j)  -- Maxwell's c013 walk
@@ -1005,8 +1005,6 @@ def kacc_geom(ch: int, k: int, px: int, tkw_force: int = 0) -> dict:
         tkw = 32
         while (ch // 4) * tkw > 1024 or (k // 2) % tkw:
             tkw //= 2
-    if tkw_force:  # PBK (attention bmm, short K): one K chunk per tile instead of the <= 4 KiB b-block default
-        tkw = tkw_force
     assert tkw >= 4 and (k // 2) % tkw == 0, (ch, k, px, tkw)
     # K padded by one zero chunk when the W port would be square (ch == k/2 words): aiehlc's GemmSpace
     # derivation then mis-sizes the A window (gemm_kacc_1280x2560x64: 24 elements instead of 512)
@@ -1093,8 +1091,8 @@ KACC_KERNEL = r"""__global__ void @NAME@(aie::port<input_window_int32 *, aie::IF
 """
 
 
-def kacc_kernel_text(ch: int, k: int, px: int, tkw_force: int = 0) -> str:
-    g = kacc_geom(ch, k, px, tkw_force)
+def kacc_kernel_text(ch: int, k: int, px: int) -> str:
+    g = kacc_geom(ch, k, px)
     t = KACC_KERNEL
     for key, v in (("@NAME@", kacc_name(ch, k, px)), ("@SID@", f"{ch}x{k}x{px}"), ("@CH@", ch), ("@KW@", g["kp"] // 2), ("@PX@", px), ("@K@", k),
                    ("@TKW@", g["tkw"]), ("@KCH@", g["kch"]), ("@NKC@", g["nkc"]), ("@NT@", g["ntile"]),

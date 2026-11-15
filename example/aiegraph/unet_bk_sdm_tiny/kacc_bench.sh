@@ -43,6 +43,11 @@ if [ "$GEMM" = 1 ]; then
     rc=$?
     set -u
     [ $rc -eq 0 ] && [ -f "$OUT/aout/main.elf" ] || { echo "[kacc_bench] aiehlc.sh failed rc=$rc"; exit 1; }
+    if [ "$BMM" = 1 ] && grep -q 'DMA BD Config:.*iter_wrap' "$OUT/aout/worklocal/host.cc"; then
+        # GAP-aiehlc-bmm-lowering item 2: aiehlc's 2-dim + iteration b-port BD gave wrong results on the board
+        echo "[kacc_bench] REJECT: host.cc has a 2-dim+iter DMA BD (known-wrong on palmyra213, see kacc_gemm.main_bmm)"
+        exit 1
+    fi
     cp -f "$OUT/aout/main.elf" "$OUT/main.elf"
     ls -l "$OUT/main.elf"
     echo "[kacc_bench] BUILD_OK $OUT/main.elf"
