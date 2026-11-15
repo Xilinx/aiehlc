@@ -387,10 +387,20 @@ else
 fi
 AIENGINE_LIB_DIR=$ARCH_APU_ALIB/../libsrc/build_configs/gen_bsp/libsrc/aienginev2/src
 
-AIEHLC="${AIEHLC_DIR}/build/aiehlc"
-if [[ ! -f "${AIEHLC_DIR}/build/aiehlc" ]]; then
-    AIEHLC="${AIEHLC_DIR}/release/prebuild/aiehlc"
+# AIEHLC_BIN=<path>: run that aiehlc binary (e.g. a side build dir) instead of build/aiehlc
+if [[ -n "${AIEHLC_BIN:-}" ]]; then
+    if [[ ! -x "${AIEHLC_BIN}" ]]; then
+        echo "aiehlc.sh: AIEHLC_BIN=${AIEHLC_BIN} is not an executable" >&2
+        return 1 2>/dev/null || exit 1
+    fi
+    AIEHLC="${AIEHLC_BIN}"
+else
+    AIEHLC="${AIEHLC_DIR}/build/aiehlc"
+    if [[ ! -f "${AIEHLC_DIR}/build/aiehlc" ]]; then
+        AIEHLC="${AIEHLC_DIR}/release/prebuild/aiehlc"
+    fi
 fi
+echo "aiehlc.sh: AIEHLC_BIN=${AIEHLC}"
 
 # compile aie-rt, if the local aie-rt exist
 if [ -d "${AIE_DRIVER_PARENT_DIR}/aie-rt/driver/" ] && [[ "$platform" != "sim" ]]; then
