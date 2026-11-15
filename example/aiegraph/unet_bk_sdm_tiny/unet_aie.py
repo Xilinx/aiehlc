@@ -1145,6 +1145,154 @@ static inline void uc_tr4(float32x4_t &r0, float32x4_t &r1, float32x4_t &r2, flo
 #define UC_NEON 0
 #endif
 static unsigned g_ul_wzc = 0; /* GHL: linear sites on the zero-copy W path */
+#ifndef UC_OPT
+#define UC_OPT 1
+#endif
+/* GHL host<->DMA sync options: bit0 sparse Y sentinel (one NaN word per 4 KiB instead of a full 0xff memset +
+ * flush of Y), bit1 whole D-cache clean+invalidate to PoC before the launch instead of DC CIVAC per 64-B line
+ * over W, X and Y (the zero-copy W can be 26 MB = 400k lines), bit2 the same after the launch instead of the
+ * Y range invalidate. Set/way cost is bounded by the cache sizes; both make every line the launch touches
+ * come from / go to DRAM, as the ranges did. */
+static int g_uc_opt = UC_OPT;
+#ifndef UC_VAR
+#define UC_VAR 6
+#endif
+/* GHL loop variants: bit0 scatter n-tiles outer (Y streamed), bit1 m-outer + prefetch of the n-tile 2 ahead,
+ * bit2 im2col in destination-row order (sequential stores) */
+static int g_uc_var = UC_VAR;
+/* GHL: DC ZVA usable with a 64-B block (DCZID_EL0.BS == 4, DZP == 0): a full output line is allocated zeroed
+ * instead of read from DRAM before the scatter overwrites all of it */
+static int uc_zva64(void) {
+#if defined(__aarch64__)
+    static int z = -1;
+    if (z < 0) {
+        uint64_t d;
+        __asm__ volatile("mrs %0, dczid_el0" : "=r"(d));
+        z = ((d & 0x10u) == 0 && (d & 0xfu) == 4u) ? 1 : 0;
+    }
+    return z;
+#else
+    return 0;
+#endif
+}
+static void uc_dcache_clean_all(void) {
+#if defined(__aarch64__)
+    uint64_t clidr;
+    __asm__ volatile("dsb sy\n\tmrs %0, clidr_el1" : "=r"(clidr)::"memory");
+    const unsigned loc = (unsigned)(clidr >> 24) & 7u;
+    for (unsigned lvl = 0; lvl < loc; lvl++) {
+        if (((clidr >> (3 * lvl)) & 7u) < 2u) /* no data / unified cache at this level */
+            continue;
+        uint64_t ccs;
+        __asm__ volatile("msr csselr_el1, %1\n\tisb\n\tmrs %0, ccsidr_el1" : "=r"(ccs) : "r"((uint64_t)(lvl << 1)) : "memory");
+        const unsigned ls = (unsigned)(ccs & 7u) + 4u, ways = (unsigned)((ccs >> 3) & 0x3ffu) + 1u,
+                       sets = (unsigned)((ccs >> 13) & 0x7fffu) + 1u;
+        const unsigned wsh = ways > 1 ? (unsigned)__builtin_clz(ways - 1u) : 0u;
+        for (unsigned w = 0; w < ways; w++)
+            for (unsigned s = 0; s < sets; s++)
+                __asm__ volatile("dc cisw, %0" ::"r"(((uint64_t)w << wsh) | ((uint64_t)s << ls) | (uint64_t)(lvl << 1))
+                                 : "memory");
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
+    __asm__ volatile("msr csselr_el1, xzr\n\tdsb sy\n\tisb" ::: "memory");
+#endif
+}
+/* sentinel: unwritten -> NaN -> counted by the scatter. bit0: one word per 4 KiB (flushed by line unless the
+ * whole-cache clean follows), else the full memset (flushed with Y below) */
+static void uc_ysentinel(int32_t *ky, size_t bytes) {
+    if (g_uc_opt & 1) {
+        for (size_t o = 0; o < bytes / 4; o += 1024) {
+            ky[o] = -1;
+            if (!(g_uc_opt & 2))
+                Xil_DCacheFlushLine((INTPTR)(ky + o));
+        }
+    } else {
+        memset(ky, 0xff, bytes);
+    }
+}
+static void uc_sync_pre(const void *w, size_t wb, const void *x, size_t xb, const void *y, size_t yb) {
+    if (g_uc_opt & 2) {
+        uc_dcache_clean_all();
+        return;
+    }
+    Xil_DCacheFlushRange((UINTPTR)w, wb);
+    Xil_DCacheFlushRange((UINTPTR)x, xb);
+    if (!(g_uc_opt & 1))
+        Xil_DCacheFlushRange((UINTPTR)y, yb);
+}
+#if UC_NEON
+/* GHL: scatter of one launch's tiled fp32 block Y (P4bx: [N][P] normal, [P][N] transposed walk) into the output,
+ * 16 n x 16 px per tile, m-tiles outer / n-tiles inner: a tile reads 1 KiB of Y in contiguous chunks at a fixed
+ * stride and every output row gets whole 64-B pieces. For one n the 8 px of an 8-aligned group are 8 contiguous
+ * fp32 (c & 7 adds to wi, q % 16 == 0); 4 n x 4 px per 4x4 transpose. Output offset: yb == 0 -> [M][N] row-major
+ * (linear), else NCHWc with channel block yb (conv, yb % 4 == 0). Epilogue in argument order: et 0 bias [N],
+ * et 1 same layout as the output. Values and add order = the scalar loops. Returns the nonfinite count. */
+static int uc_scatter16(const float *Ys, int P, int N, int tr, int mbase, int mvalid, float *yout, int M, int yb,
+                        const float *const *ep, const int *et, int ne_) {
+    const float32x4_t lim = vdupq_n_f32(1e30f);
+    uint32x4_t badv = vdupq_n_u32(0);
+    const float *src[16][2];
+    const int nouter = g_uc_var & 1, pf = (g_uc_var & 2) && !tr;
+    const int zva = (g_uc_var & 8) && yb == 0 && ((uintptr_t)yout & 63) == 0 && uc_zva64();
+    const int nmt = (mvalid + 15) / 16, nnt = N / 16;
+    for (int it = 0; it < nmt * nnt; it++) {
+        const int mt = 16 * (nouter ? it % nmt : it / nnt), nt = 16 * (nouter ? it / nmt : it % nnt);
+        {
+            for (int r = 0; r < 16; r++)
+                for (int h = 0; h < 2; h++) {
+                    const int n = nt + r, ml = mt + 8 * h, c = ml & 15;
+                    if (!tr) {
+                        const int q = P / 4, cc = ml % q;
+                        const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
+                        src[r][h] = Ys + (size_t)((n & ~15) + wi / q) * P + (ml - cc) + wi % q;
+                    } else {
+                        const int q = N / 4, cc = n % q;
+                        const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
+                        src[r][h] = Ys + (size_t)((ml & ~15) + wi / q) * N + (n - cc) + wi % q;
+                    }
+                }
+            if (pf && nt + 32 < N) /* normal walk: the n-tile 2 ahead is the same tile 32 rows of P further */
+                for (int r = 0; r < 16; r++)
+                    for (int h = 0; h < 2; h++)
+                        __builtin_prefetch(src[r][h] + (size_t)32 * P);
+#if defined(__aarch64__)
+            if (zva) /* 16 n x 4 B = one whole 64-B line per row (row-major output, N % 16 == 0, 64-B aligned) */
+                for (int q = 0; q < 16 && mt + q < mvalid; q++)
+                    __asm__ volatile("dc zva, %0" ::"r"(yout + (size_t)(mbase + mt + q) * N + nt) : "memory");
+#endif
+            for (int mq = 0; mq < 16 && mt + mq < mvalid; mq += 4) {
+                const int h = mq >> 3, off = mq & 7;
+                for (int nq = 0; nq < 16; nq += 4) {
+                    float32x4_t v[4] = {vld1q_f32(src[nq][h] + off), vld1q_f32(src[nq + 1][h] + off),
+                                        vld1q_f32(src[nq + 2][h] + off), vld1q_f32(src[nq + 3][h] + off)};
+                    uc_tr4(v[0], v[1], v[2], v[3]); /* v[t] = n nt+nq..+3 of px mt+mq+t */
+                    const int n0 = nt + nq;
+                    for (int t = 0; t < 4; t++) {
+                        const int ml = mt + mq + t;
+                        if (ml >= mvalid)
+                            break;
+                        const int m = mbase + ml;
+                        badv = vaddq_u32(badv, vshrq_n_u32(vmvnq_u32(vcaleq_f32(v[t], lim)), 31));
+                        const size_t o = yb ? (size_t)(n0 / yb) * M * yb + (size_t)m * yb + n0 % yb
+                                            : (size_t)m * N + n0;
+                        float32x4_t a = v[t];
+                        for (int e = 0; e < ne_; e++)
+                            a = vaddq_f32(a, vld1q_f32(ep[e] + (et[e] ? o : (size_t)n0)));
+                        vst1q_f32(yout + o, a);
+                    }
+                }
+            }
+        }
+    }
+    return (int)vaddvq_u32(badv);
+}
+#endif
+static void uc_sync_post(const void *y, size_t yb) {
+    if (g_uc_opt & 4)
+        uc_dcache_clean_all();
+    else
+        Xil_DCacheInvalidateRange((UINTPTR)y, yb);
+}
 /* GPOOL: pooled host-glue buffers, grown once and reused by every layer (no per-call alloc) */
 static uint16_t *g_uc_pb = nullptr; /* padded bf16 planes [C][H+2ph][W+2pw] + slack */
 static int *g_uc_sk = nullptr, *g_uc_dk = nullptr; /* per-k source / destination offsets */
@@ -1308,26 +1456,63 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
                 dk[k] = j * kch + (f / kch) * Kp + f % kch;
             }
         }
-        for (int mb = 0; mb < M; mb += 8) {
-            const int oh = mb / OW, ow0 = mb % OW;
-            uint16_t *blk = Xd + (size_t)(mb >> 4) * 16 * Kp + (size_t)((mb >> 3) & 1) * 8 * Kp;
-            const uint16_t *row0 = P + (size_t)(oh * sh) * Wp + (size_t)ow0 * sw;
+        /* GHL: channel groups outer -- the CG padded planes (<= 32 KiB) stay in L1 while every 8-px block
+         * takes their k range (k-inner over all C streamed the whole P from DRAM once per block) */
+        const int CG = (int)(32768 / (HWp * 2)) > 0 ? (int)(32768 / (HWp * 2)) : 1;
 #if UC_NEON
-            if (sw == 1)
-                for (int k = 0; k < K; k++)
-                    vst1q_u16(blk + dk[k], vld1q_u16(row0 + sk[k]));
-            else
-                for (int k = 0; k < K; k++)
-                    vst1q_u16(blk + dk[k], vld2q_u16(row0 + sk[k]).val[0]);
-            for (int k = K; k < Kp; k++)
-                vst1q_u16(blk + dk[k], vdupq_n_u16(0));
+        if (g_uc_var & 4) {
+            /* GHL: destination-row order -- row R of a 16-px block, chunk j, unit u (8 bf16 = one k, 8 px):
+             * f = R*kch + 8u = ni*8*kch + (kb*64 + kk*8), k = j*kch + kb*8 + kk, px = mb0 + ni*8 (= the dk table
+             * inverted); every row of the X port is written front to back */
+            int kofs[8];
+            for (int mb0 = 0; mb0 < M; mb0 += 16)
+                for (int R = 0; R < 16; R++) {
+                    const int ni = R >> 3, mb = mb0 + ni * 8, oh = mb / OW, ow0 = mb % OW;
+                    const uint16_t *row0 = P + (size_t)(oh * sh) * Wp + (size_t)ow0 * sw;
+                    uint16_t *dst = Xd + (size_t)(mb0 >> 4) * 16 * Kp + (size_t)R * Kp;
+                    for (int u = 0; u < kch / 8; u++) {
+                        const int rem = (R & 7) * kch + u * 8;
+                        kofs[u] = (rem >> 6) * 8 + ((rem & 63) >> 3);
+                    }
+                    for (int j0 = 0; j0 < Kp; j0 += kch)
+                        for (int u = 0; u < kch / 8; u++) {
+                            const int k = j0 + kofs[u];
+                            uint16x8_t v;
+                            if (k >= K)
+                                v = vdupq_n_u16(0);
+                            else if (sw == 1)
+                                v = vld1q_u16(row0 + sk[k]);
+                            else
+                                v = vld2q_u16(row0 + sk[k]).val[0];
+                            vst1q_u16(dst + j0 + u * 8, v);
+                        }
+                }
+        } else
+#endif
+        for (int c0 = 0; c0 < C; c0 += CG) {
+            const int k0 = c0 * KK, k1 = (c0 + CG < C ? c0 + CG : C) * KK;
+            for (int mb = 0; mb < M; mb += 8) {
+                const int oh = mb / OW, ow0 = mb % OW;
+                uint16_t *blk = Xd + (size_t)(mb >> 4) * 16 * Kp + (size_t)((mb >> 3) & 1) * 8 * Kp;
+                const uint16_t *row0 = P + (size_t)(oh * sh) * Wp + (size_t)ow0 * sw;
+#if UC_NEON
+                if (sw == 1)
+                    for (int k = k0; k < k1; k++)
+                        vst1q_u16(blk + dk[k], vld1q_u16(row0 + sk[k]));
+                else
+                    for (int k = k0; k < k1; k++)
+                        vst1q_u16(blk + dk[k], vld2q_u16(row0 + sk[k]).val[0]);
 #else
-            for (int k = 0; k < K; k++)
-                for (int i = 0; i < 8; i++)
-                    blk[dk[k] + i] = row0[sk[k] + i * sw];
+                for (int k = k0; k < k1; k++)
+                    for (int i = 0; i < 8; i++)
+                        blk[dk[k] + i] = row0[sk[k] + i * sw];
+#endif
+            }
+        }
+        for (int mb = 0; mb < M && Kp > K && !(UC_NEON && (g_uc_var & 4)); mb += 8) {
+            uint16_t *blk = Xd + (size_t)(mb >> 4) * 16 * Kp + (size_t)((mb >> 3) & 1) * 8 * Kp;
             for (int k = K; k < Kp; k++)
                 memset(blk + dk[k], 0, 16);
-#endif
         }
         g_uc_fast++;
     } else {
@@ -1373,7 +1558,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     }
     const size_t wbytes = (size_t)N * Kp * 2, xbytes = (size_t)M * Kp * 2;
     (void)kc;
-    memset(g_ky, 0xff, (size_t)M * N * 4); // sentinel: unwritten -> NaN -> counted
+    uc_ysentinel(g_ky, (size_t)M * N * 4); // sentinel: unwritten -> NaN -> counted
     XTime lt0, lt1;
     XTime_GetTime(&lt0);
     const unsigned long long sp0 = uc_pmc();
@@ -1381,16 +1566,14 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
     __Runtime_pm_warm_stats(&seg0, &cold0);
 #endif
-    Xil_DCacheFlushRange((UINTPTR)g_kw, wbytes);
-    Xil_DCacheFlushRange((UINTPTR)g_kx, xbytes);
-    Xil_DCacheFlushRange((UINTPTR)g_ky, (size_t)M * N * 4);
+    uc_sync_pre(g_kw, wbytes, g_kx, xbytes, g_ky, (size_t)M * N * 4);
     const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
     printf("[UCS] l=%d M=%d N=%d K=%d tkw=%d\n", g_aie_launches, M, N, K, kch / 2); /* P4bp: names a hanging launch */
     fflush(stdout);
     const int lrc = uc_kacc_launch(N, K, M, g_kw, g_kx, g_ky); // ONE launch: the whole layer, K summed in the cores
     g_kw = kw_pool;
     const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();
-    Xil_DCacheInvalidateRange((UINTPTR)g_ky, (size_t)M * N * 4);
+    uc_sync_post(g_ky, (size_t)M * N * 4);
 #if UC_WARM
     __Runtime_pm_warm_stats(&seg1, &cold1);
     if (cold1 != cold0) {
@@ -1431,42 +1614,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     int bad = 0;
 #if UC_NEON
     if (yb % 4 == 0) {
-        /* GHL: 4 channels (same yb block) x 4 px per 4x4 transpose -> 4 contiguous floats of pixel m in the
-         * NCHWc output; same values and add order as the scalar loop below */
-        const float32x4_t lim = vdupq_n_f32(1e30f);
-        uint32x4_t badv = vdupq_n_u32(0);
-        for (int n0 = 0; n0 < N; n0 += 4) {
-            const size_t ob = (size_t)(n0 / yb) * M * yb + n0 % yb;
-            for (int m = 0; m < M; m += 8) {
-                const float *src[4];
-                for (int jn = 0; jn < 4; jn++) {
-                    const int n = n0 + jn, r = n & 15;
-                    if (!tr) {
-                        const int c = m & 15, q = M / 4, cc = m % q;
-                        const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
-                        src[jn] = Y + (size_t)((n & ~15) + wi / q) * M + (m - cc) + wi % q;
-                    } else {
-                        const int c = m & 15, q = N / 4, cc = n % q;
-                        const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
-                        src[jn] = Y + (size_t)((m & ~15) + wi / q) * N + (n - cc) + wi % q;
-                    }
-                }
-                for (int h = 0; h < 8; h += 4) {
-                    float32x4_t v[4] = {vld1q_f32(src[0] + h), vld1q_f32(src[1] + h), vld1q_f32(src[2] + h),
-                                        vld1q_f32(src[3] + h)};
-                    uc_tr4(v[0], v[1], v[2], v[3]);
-                    for (int t = 0; t < 4; t++) {
-                        badv = vaddq_u32(badv, vshrq_n_u32(vmvnq_u32(vcaleq_f32(v[t], lim)), 31));
-                        const size_t o = ob + (size_t)(m + h + t) * yb;
-                        float32x4_t a = v[t];
-                        for (int e = 0; e < ne_; e++)
-                            a = vaddq_f32(a, vld1q_f32(ep[e] + (et[e] ? o : (size_t)n0)));
-                        vst1q_f32(yout + o, a);
-                    }
-                }
-            }
-        }
-        bad = (int)vaddvq_u32(badv);
+        bad = uc_scatter16(Y, M, N, tr, 0, M, yout, M, yb, ep, et, ne_); /* GHL: 16x16 tiles */
         N_ = 0; /* scalar loop below skipped */
     }
 #endif
@@ -1543,6 +1691,9 @@ LINEAR_HOST = r"""
  * along px (kacc_split, as kacc_gemm.py / PDK c009). W is pre-laid at build time in the kacc chunk layout
  * (unet_aie.kacc_dense_wlayout); X is tiled here fp32 -> bf16 RNE, rows M..Mp-1 zero. */
 static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
+    XTime ut0;
+    XTime_GetTime(&ut0);
+    int wzc_ = 0;
     if (nargs < 3)
         return -2;
     const uc_dlt *x = (const uc_dlt *)argv[0], *w = (const uc_dlt *)argv[1], *y = (const uc_dlt *)argv[nargs - 1];
@@ -1582,6 +1733,7 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
          * place by the launches (flushed below like the pool) */
         g_kw = (int32_t *)(uintptr_t)wbf;
         g_ul_wzc++;
+        wzc_ = 1;
     } else if (Kp == K) {
         memcpy(Wd, wbf, (size_t)N * K * 2);
     } else {
@@ -1650,10 +1802,9 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
         }
     }
     const size_t wbytes = (size_t)N * Kp * 2, xbytes = (size_t)Mp * Kp * 2, ybytes = (size_t)Mp * N * 4;
-    memset(g_ky, 0xff, ybytes); // sentinel: unwritten -> NaN -> counted
-    Xil_DCacheFlushRange((UINTPTR)g_kw, wbytes);
-    Xil_DCacheFlushRange((UINTPTR)g_kx, xbytes);
-    Xil_DCacheFlushRange((UINTPTR)g_ky, ybytes);
+    uc_ysentinel(g_ky, ybytes); // sentinel: unwritten -> NaN -> counted
+    XTime la0, la1; /* GHL: [UCL] split of the site, aie = all its launch windows */
+    XTime_GetTime(&la0);
     for (int s = 0; s < S; s++) {
         XTime lt0, lt1;
         XTime_GetTime(&lt0);
@@ -1662,13 +1813,15 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
         unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
         __Runtime_pm_warm_stats(&seg0, &cold0);
 #endif
+        if (s == 0) /* GHL: host->DMA sync in the first launch's window, as uc_conv */
+            uc_sync_pre(g_kw, wbytes, g_kx, xbytes, g_ky, ybytes);
         const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
         printf("[UCS] l=%d lin M=%d N=%d K=%d px=%d s=%d/%d tkw=%d\n", g_aie_launches, M, N, K, P, s, S, tkw);
         fflush(stdout);
         const int lrc = uc_kacc_launch(N, K, P, g_kw, g_kx + (size_t)s * P * Kp / 2, g_ky + (size_t)s * N * P);
         const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();
         if (s == S - 1)
-            Xil_DCacheInvalidateRange((UINTPTR)g_ky, ybytes);
+            uc_sync_post(g_ky, ybytes);
 #if UC_WARM
         __Runtime_pm_warm_stats(&seg1, &cold1);
         if (cold1 != cold0) {
@@ -1690,6 +1843,7 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
         g_aie_launches++;
     }
     g_kw = kw_pool;
+    XTime_GetTime(&la1);
     g_uc_macs += (unsigned long long)M * N * K; /* real rows only (M, not Mp) */
     const float *Y = (const float *)g_ky; /* launch s: [N][P] tiled block at s*N*P (P4bx [s][mi][ni][8x8]) */
     /* GHL: epilogue (bias [1,N] / residual [M,N], argument order kept) fused into the scatter */
@@ -1710,51 +1864,9 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
     }
     int bad = 0;
 #if UC_NEON
-    /* GHL: for one n, the 8 px ml..ml+7 (ml % 8 == 0) are 8 contiguous fp32 of the launch's tiled block in
-     * both walks ((c & 7) adds to wi, q % 16 == 0); 4 n x 4 px per 4x4 transpose -> 4 contiguous outputs
-     * of row m. Same values, same add order as the scalar path. */
-    {
-        const float32x4_t lim = vdupq_n_f32(1e30f);
-        uint32x4_t badv = vdupq_n_u32(0);
-        for (int m0 = 0; m0 < M; m0 += 8) {
-            const int s = m0 / P, ml = m0 % P, c = ml & 15;
-            const float *Ys = Y + (size_t)s * N * P;
-            for (int n0 = 0; n0 < N; n0 += 4) {
-                const float *src[4];
-                for (int jn = 0; jn < 4; jn++) {
-                    const int n = n0 + jn, r = n & 15;
-                    size_t i;
-                    if (!tr) {
-                        const int q = P / 4, cc = ml % q;
-                        const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
-                        i = (size_t)((n & ~15) + wi / q) * P + (ml - cc) + wi % q;
-                    } else {
-                        const int q = N / 4, cc = n % q;
-                        const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
-                        i = (size_t)((ml & ~15) + wi / q) * N + (n - cc) + wi % q;
-                    }
-                    src[jn] = Ys + i;
-                }
-                for (int h = 0; h < 8; h += 4) {
-                    float32x4_t v[4] = {vld1q_f32(src[0] + h), vld1q_f32(src[1] + h), vld1q_f32(src[2] + h),
-                                        vld1q_f32(src[3] + h)};
-                    uc_tr4(v[0], v[1], v[2], v[3]); /* v[t] = n0..n0+3 of row m0+h+t */
-                    for (int t = 0; t < 4; t++) {
-                        const int m = m0 + h + t;
-                        if (m >= M)
-                            break;
-                        badv = vaddq_u32(badv, vshrq_n_u32(vmvnq_u32(vcaleq_f32(v[t], lim)), 31));
-                        const size_t o = (size_t)m * N + n0;
-                        float32x4_t a = v[t];
-                        for (int e = 0; e < ne_; e++)
-                            a = vaddq_f32(a, vld1q_f32(ep[e] + (et[e] ? o : (size_t)n0)));
-                        vst1q_f32(yout + o, a);
-                    }
-                }
-            }
-        }
-        bad = (int)vaddvq_u32(badv);
-    }
+    for (int s = 0; s < S && s * P < M; s++) /* GHL: 16x16 tiles per launch block */
+        bad += uc_scatter16(Y + (size_t)s * N * P, P, N, tr, s * P, (M - s * P < P ? M - s * P : P), yout, M, 0, ep,
+                            et, ne_);
     if (0)
 #endif
     for (int m = 0; m < M; m++) {
@@ -1784,6 +1896,24 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
     if (bad) {
         printf("[unet_aie_linear] %d nonfinite AIE outputs\n", bad);
         return -4;
+    }
+    {
+        XTime ut3;
+        XTime_GetTime(&ut3);
+        const double us = 1e6 / (double)COUNTS_PER_SECOND;
+        const int li = g_aie_launches - 1; /* GHL: [UCL] of the site's last launch; fast = 4 (linear) | 2 zero-copy W */
+        if (li >= 0 && li < UC_UCL_MAX) {
+            uc_ucl *u = &g_uc_ucl[li];
+            u->M = M;
+            u->N = N;
+            u->K = K;
+            u->fast = 4 | (wzc_ << 1);
+            u->pre = (float)((double)(la0 - ut0) * us);
+            u->aie = (float)((double)(la1 - la0) * us);
+            u->post = (float)((double)(ut3 - la1) * us);
+            if (li + 1 > g_uc_nucl)
+                g_uc_nucl = li + 1;
+        }
     }
     return 0;
 }
