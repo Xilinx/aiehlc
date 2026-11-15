@@ -6062,7 +6062,7 @@ void __Runtime_ctrl_shim_bd_ctrl_stats_print(void) {
     if (!g_vfy_summary_done) {
         g_vfy_summary_done = 1;
         printf("[aie_runtime] ctrl_pkt AOT VERIFY summary checks=%llu ok=%llu mismatch=%llu printed=%llu "
-               "bcast=%u rowack=%u shimbd=%u elf=%u\n",
+               "bcast=%u rowack=%u shimbd=%u elf=%u end=1\n",
                g_vfy_checks, g_vfy_ok, g_vfy_bad, g_vfy_printed, g_vfy_site_n[RT_VFY_BCAST],
                g_vfy_site_n[RT_VFY_ROWACK], g_vfy_site_n[RT_VFY_SHIMBD], g_vfy_site_n[RT_VFY_ELF]);
     }
