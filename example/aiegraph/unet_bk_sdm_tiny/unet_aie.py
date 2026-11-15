@@ -1136,10 +1136,11 @@ static inline uint16x4_t uc_f2bf4(float32x4_t v) {
 /* GHL: in-place 4x4 fp32 transpose (rows r0..r3 -> columns) */
 static inline void uc_tr4(float32x4_t &r0, float32x4_t &r1, float32x4_t &r2, float32x4_t &r3) {
     const float32x4x2_t t01 = vtrnq_f32(r0, r1), t23 = vtrnq_f32(r2, r3);
-    r0 = vcombine_f32(vget_low_f32(t01.val[0]), vget_low_f32(t23.val[0]));
-    r1 = vcombine_f32(vget_low_f32(t01.val[1]), vget_low_f32(t23.val[1]));
-    r2 = vcombine_f32(vget_high_f32(t01.val[0]), vget_high_f32(t23.val[0]));
-    r3 = vcombine_f32(vget_high_f32(t01.val[1]), vget_high_f32(t23.val[1]));
+    /* 64-bit lane trn1/trn2 = combine(low, low) / combine(high, high), one instruction each */
+    r0 = vreinterpretq_f32_f64(vtrn1q_f64(vreinterpretq_f64_f32(t01.val[0]), vreinterpretq_f64_f32(t23.val[0])));
+    r1 = vreinterpretq_f32_f64(vtrn1q_f64(vreinterpretq_f64_f32(t01.val[1]), vreinterpretq_f64_f32(t23.val[1])));
+    r2 = vreinterpretq_f32_f64(vtrn2q_f64(vreinterpretq_f64_f32(t01.val[0]), vreinterpretq_f64_f32(t23.val[0])));
+    r3 = vreinterpretq_f32_f64(vtrn2q_f64(vreinterpretq_f64_f32(t01.val[1]), vreinterpretq_f64_f32(t23.val[1])));
 }
 #else
 #define UC_NEON 0
@@ -1155,10 +1156,11 @@ static unsigned g_ul_wzc = 0; /* GHL: linear sites on the zero-copy W path */
  * come from / go to DRAM, as the ranges did. */
 static int g_uc_opt = UC_OPT;
 #ifndef UC_VAR
-#define UC_VAR 6
+#define UC_VAR 86
 #endif
-/* GHL loop variants: bit0 scatter n-tiles outer (Y streamed), bit1 m-outer + prefetch of the n-tile 2 ahead,
- * bit2 im2col in destination-row order (sequential stores) */
+/* GHL loop variants (A78 microbench s7/hl/mb, default 86 = 2|4|16|64): bit0 scatter n-tiles outer, bit1 m-outer +
+ * prefetch of the next n-tile, bit2 im2col in destination-row order, bit3 DC ZVA of fully written lines (no gain),
+ * bit4 linear X tile by 8x8 transposes, bit5 im2col chunk-outer (slower), bit6 im2col rows R/R+8 from one 32-B load */
 static int g_uc_var = UC_VAR;
 /* GHL: DC ZVA usable with a 64-B block (DCZID_EL0.BS == 4, DZP == 0): a full output line is allocated zeroed
  * instead of read from DRAM before the scatter overwrites all of it */
@@ -1235,9 +1237,36 @@ static int uc_scatter16(const float *Ys, int P, int N, int tr, int mbase, int mv
     const int nouter = g_uc_var & 1, pf = (g_uc_var & 2) && !tr;
     const int zva = (g_uc_var & 8) && yb == 0 && ((uintptr_t)yout & 63) == 0 && uc_zva64();
     const int nmt = (mvalid + 15) / 16, nnt = N / 16;
+    /* GHL: src offsets tabulated once per call (2 divisions each): normal walk -> per m-tile (+ nt*P at use),
+     * transposed -> per n-tile (+ mt*N at use) */
+    static int32_t g_uc_srct[32768];
+    const int ntt = tr ? nnt : nmt, tab = ntt * 32 <= 32768;
+    if (tab)
+        for (int ti = 0; ti < ntt; ti++)
+            for (int r = 0; r < 16; r++)
+                for (int h = 0; h < 2; h++) {
+                    int32_t o;
+                    if (!tr) {
+                        const int ml = ti * 16 + 8 * h, c = ml & 15, q = P / 4, cc = ml % q;
+                        const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
+                        o = (wi / q) * P + (ml - cc) + wi % q;
+                    } else {
+                        const int n = ti * 16 + r, q = N / 4, cc = n % q;
+                        const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + h) * 64 + (r & 7) * 8;
+                        o = (wi / q) * N + (n - cc) + wi % q;
+                    }
+                    g_uc_srct[ti * 32 + r * 2 + h] = o;
+                }
     for (int it = 0; it < nmt * nnt; it++) {
         const int mt = 16 * (nouter ? it % nmt : it / nnt), nt = 16 * (nouter ? it / nmt : it % nnt);
-        {
+        if (tab) {
+            const float *base = Ys + (tr ? (size_t)mt * N : (size_t)nt * P);
+            const int32_t *tt = g_uc_srct + (tr ? nt : mt) * 2; /* (tile/16)*32 */
+            for (int r = 0; r < 16; r++) {
+                src[r][0] = base + tt[2 * r];
+                src[r][1] = base + tt[2 * r + 1];
+            }
+        } else {
             for (int r = 0; r < 16; r++)
                 for (int h = 0; h < 2; h++) {
                     const int n = nt + r, ml = mt + 8 * h, c = ml & 15;
@@ -1251,34 +1280,67 @@ static int uc_scatter16(const float *Ys, int P, int N, int tr, int mbase, int mv
                         src[r][h] = Ys + (size_t)((ml & ~15) + wi / q) * N + (n - cc) + wi % q;
                     }
                 }
-            if (pf && nt + 32 < N) /* normal walk: the n-tile 2 ahead is the same tile 32 rows of P further */
+        }
+        {
+            if (pf && nt + 16 < N) /* normal walk: the next n-tile is the same tile 16 rows of P further */
                 for (int r = 0; r < 16; r++)
                     for (int h = 0; h < 2; h++)
-                        __builtin_prefetch(src[r][h] + (size_t)32 * P);
+                        __builtin_prefetch(src[r][h] + (size_t)16 * P);
 #if defined(__aarch64__)
             if (zva) /* 16 n x 4 B = one whole 64-B line per row (row-major output, N % 16 == 0, 64-B aligned) */
                 for (int q = 0; q < 16 && mt + q < mvalid; q++)
                     __asm__ volatile("dc zva, %0" ::"r"(yout + (size_t)(mbase + mt + q) * N + nt) : "memory");
 #endif
+            /* output offset of (m, n0) = ob[n0] + m * ds (row-major: n0 + m*N; NCHWc: block(n0) + m*yb + n0%yb) */
+            const size_t ds = yb ? (size_t)yb : (size_t)N;
+            size_t ob[4];
+            for (int i = 0; i < 4; i++) {
+                const int n0 = nt + 4 * i;
+                ob[i] = yb ? (size_t)(n0 / yb) * M * yb + n0 % yb : (size_t)n0;
+            }
             for (int mq = 0; mq < 16 && mt + mq < mvalid; mq += 4) {
-                const int h = mq >> 3, off = mq & 7;
+                const int h = mq >> 3, off = mq & 7, m0 = mbase + mt + mq;
+                const int nv = mvalid - (mt + mq) < 4 ? mvalid - (mt + mq) : 4; /* valid rows of the 4 */
                 for (int nq = 0; nq < 16; nq += 4) {
-                    float32x4_t v[4] = {vld1q_f32(src[nq][h] + off), vld1q_f32(src[nq + 1][h] + off),
-                                        vld1q_f32(src[nq + 2][h] + off), vld1q_f32(src[nq + 3][h] + off)};
-                    uc_tr4(v[0], v[1], v[2], v[3]); /* v[t] = n nt+nq..+3 of px mt+mq+t */
-                    const int n0 = nt + nq;
-                    for (int t = 0; t < 4; t++) {
-                        const int ml = mt + mq + t;
-                        if (ml >= mvalid)
-                            break;
-                        const int m = mbase + ml;
-                        badv = vaddq_u32(badv, vshrq_n_u32(vmvnq_u32(vcaleq_f32(v[t], lim)), 31));
-                        const size_t o = yb ? (size_t)(n0 / yb) * M * yb + (size_t)m * yb + n0 % yb
-                                            : (size_t)m * N + n0;
-                        float32x4_t a = v[t];
-                        for (int e = 0; e < ne_; e++)
-                            a = vaddq_f32(a, vld1q_f32(ep[e] + (et[e] ? o : (size_t)n0)));
-                        vst1q_f32(yout + o, a);
+                    float32x4_t v0 = vld1q_f32(src[nq][h] + off), v1 = vld1q_f32(src[nq + 1][h] + off),
+                                v2 = vld1q_f32(src[nq + 2][h] + off), v3 = vld1q_f32(src[nq + 3][h] + off);
+                    uc_tr4(v0, v1, v2, v3); /* vt = n nt+nq..+3 of px m0+t */
+                    const size_t o0 = ob[nq >> 2] + (size_t)m0 * ds;
+                    if (nv == 4) {
+                        badv = vaddq_u32(badv, vshrq_n_u32(vmvnq_u32(vcaleq_f32(v0, lim)), 31));
+                        badv = vaddq_u32(badv, vshrq_n_u32(vmvnq_u32(vcaleq_f32(v1, lim)), 31));
+                        badv = vaddq_u32(badv, vshrq_n_u32(vmvnq_u32(vcaleq_f32(v2, lim)), 31));
+                        badv = vaddq_u32(badv, vshrq_n_u32(vmvnq_u32(vcaleq_f32(v3, lim)), 31));
+                        for (int e = 0; e < ne_; e++) {
+                            if (et[e]) {
+                                const float *ev = ep[e] + o0;
+                                v0 = vaddq_f32(v0, vld1q_f32(ev));
+                                v1 = vaddq_f32(v1, vld1q_f32(ev + ds));
+                                v2 = vaddq_f32(v2, vld1q_f32(ev + 2 * ds));
+                                v3 = vaddq_f32(v3, vld1q_f32(ev + 3 * ds));
+                            } else {
+                                const float32x4_t bv = vld1q_f32(ep[e] + nt + nq);
+                                v0 = vaddq_f32(v0, bv);
+                                v1 = vaddq_f32(v1, bv);
+                                v2 = vaddq_f32(v2, bv);
+                                v3 = vaddq_f32(v3, bv);
+                            }
+                        }
+                        float *o = yout + o0;
+                        vst1q_f32(o, v0);
+                        vst1q_f32(o + ds, v1);
+                        vst1q_f32(o + 2 * ds, v2);
+                        vst1q_f32(o + 3 * ds, v3);
+                    } else {
+                        const float32x4_t vv[4] = {v0, v1, v2, v3};
+                        for (int t = 0; t < nv; t++) {
+                            const size_t o = o0 + (size_t)t * ds;
+                            badv = vaddq_u32(badv, vshrq_n_u32(vmvnq_u32(vcaleq_f32(vv[t], lim)), 31));
+                            float32x4_t a = vv[t];
+                            for (int e = 0; e < ne_; e++)
+                                a = vaddq_f32(a, vld1q_f32(ep[e] + (et[e] ? o : (size_t)(nt + nq))));
+                            vst1q_f32(yout + o, a);
+                        }
                     }
                 }
             }
@@ -1465,6 +1527,68 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
              * f = R*kch + 8u = ni*8*kch + (kb*64 + kk*8), k = j*kch + kb*8 + kk, px = mb0 + ni*8 (= the dk table
              * inverted); every row of the X port is written front to back */
             int kofs[8];
+            const int zx = (g_uc_var & 8) && ((uintptr_t)Xd & 63) == 0 && uc_zva64();
+            if (g_uc_var & 32) {
+                /* GHL: per 16-px block, chunk j0 outer / row R inner: one chunk's kch k (<= 8 channels) stay in L1
+                 * while its 16 row pieces (kch bf16 each, whole lines over 1-2 chunks) are written */
+                int ko[16][8];
+                const uint16_t *rw[16];
+                for (int R = 0; R < 16; R++)
+                    for (int u = 0; u < kch / 8; u++) {
+                        const int rem = (R & 7) * kch + u * 8;
+                        ko[R][u] = (rem >> 6) * 8 + ((rem & 63) >> 3);
+                    }
+                for (int mb0 = 0; mb0 < M; mb0 += 16) {
+                    for (int ni = 0; ni < 2; ni++) {
+                        const int mb = mb0 + ni * 8, oh = mb / OW, ow0 = mb % OW;
+                        rw[ni] = P + (size_t)(oh * sh) * Wp + (size_t)ow0 * sw;
+                    }
+                    uint16_t *blk = Xd + (size_t)(mb0 >> 4) * 16 * Kp;
+                    for (int j0 = 0; j0 < Kp; j0 += kch)
+                        for (int R = 0; R < 16; R++) {
+                            const uint16_t *row0 = rw[R >> 3];
+                            uint16_t *d = blk + (size_t)R * Kp + j0;
+                            for (int u = 0; u < kch / 8; u++) {
+                                const int k = j0 + ko[R][u];
+                                uint16x8_t v;
+                                if (k >= K)
+                                    v = vdupq_n_u16(0);
+                                else if (sw == 1)
+                                    v = vld1q_u16(row0 + sk[k]);
+                                else
+                                    v = vld2q_u16(row0 + sk[k]).val[0];
+                                vst1q_u16(d + u * 8, v);
+                            }
+                        }
+                }
+            } else if ((g_uc_var & 64) && sw == 1 && OW % 16 == 0) {
+                /* GHL: rows R and R + 8 take the same k at px mb0..+7 and mb0+8..+15 of one output row: one 32-B
+                 * load (16 contiguous px of the padded plane) feeds both */
+                for (int mb0 = 0; mb0 < M; mb0 += 16) {
+                    const int oh = mb0 / OW, ow0 = mb0 % OW;
+                    const uint16_t *row0 = P + (size_t)(oh * sh) * Wp + (size_t)ow0;
+                    uint16_t *blk = Xd + (size_t)(mb0 >> 4) * 16 * Kp;
+                    for (int R = 0; R < 8; R++) {
+                        for (int u = 0; u < kch / 8; u++) {
+                            const int rem = R * kch + u * 8;
+                            kofs[u] = (rem >> 6) * 8 + ((rem & 63) >> 3);
+                        }
+                        uint16_t *d0 = blk + (size_t)R * Kp, *d1 = d0 + (size_t)8 * Kp;
+                        for (int j0 = 0; j0 < Kp; j0 += kch)
+                            for (int u = 0; u < kch / 8; u++) {
+                                const int k = j0 + kofs[u];
+                                if (k >= K) {
+                                    vst1q_u16(d0 + j0 + u * 8, vdupq_n_u16(0));
+                                    vst1q_u16(d1 + j0 + u * 8, vdupq_n_u16(0));
+                                } else {
+                                    const uint16_t *s = row0 + sk[k];
+                                    vst1q_u16(d0 + j0 + u * 8, vld1q_u16(s));
+                                    vst1q_u16(d1 + j0 + u * 8, vld1q_u16(s + 8));
+                                }
+                            }
+                    }
+                }
+            } else
             for (int mb0 = 0; mb0 < M; mb0 += 16)
                 for (int R = 0; R < 16; R++) {
                     const int ni = R >> 3, mb = mb0 + ni * 8, oh = mb / OW, ow0 = mb % OW;
@@ -1476,6 +1600,10 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
                     }
                     for (int j0 = 0; j0 < Kp; j0 += kch)
                         for (int u = 0; u < kch / 8; u++) {
+#if defined(__aarch64__)
+                            if (zx && ((j0 + u * 8) & 31) == 0) /* row written front to back: allocate the line zeroed */
+                                __asm__ volatile("dc zva, %0" ::"r"(dst + j0 + u * 8) : "memory");
+#endif
                             const int k = j0 + kofs[u];
                             uint16x8_t v;
                             if (k >= K)
@@ -1757,6 +1885,40 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
         const int q0 = m0 & 15;
         const int *tab = g_ul_tab[q0];
         uint16_t *dst = Xd + (size_t)(m0 >> 4) * 16 * Kp;
+        if ((g_uc_var & 16) && (m0 & 7) == 0 && m0 + 8 <= M) {
+            /* GHL: 8 rows x 8 k: rows -> bf16 (RNE), 8x8 u16 transpose, one 16-byte store per k (8 px) */
+            const float *xr = xin + (size_t)m0 * K;
+            for (int k0 = 0; k0 < K; k0 += 8) {
+                uint16x8_t r[8];
+                for (int i = 0; i < 8; i++)
+                    r[i] = vcombine_u16(uc_f2bf4(vld1q_f32(xr + (size_t)i * K + k0)),
+                                        uc_f2bf4(vld1q_f32(xr + (size_t)i * K + k0 + 4)));
+                const uint16x8x2_t t0 = vtrnq_u16(r[0], r[1]), t1 = vtrnq_u16(r[2], r[3]), t2 = vtrnq_u16(r[4], r[5]),
+                                   t3 = vtrnq_u16(r[6], r[7]);
+                const uint32x4x2_t u0 = vtrnq_u32(vreinterpretq_u32_u16(t0.val[0]), vreinterpretq_u32_u16(t1.val[0])),
+                                   u1 = vtrnq_u32(vreinterpretq_u32_u16(t0.val[1]), vreinterpretq_u32_u16(t1.val[1])),
+                                   u2 = vtrnq_u32(vreinterpretq_u32_u16(t2.val[0]), vreinterpretq_u32_u16(t3.val[0])),
+                                   u3 = vtrnq_u32(vreinterpretq_u32_u16(t2.val[1]), vreinterpretq_u32_u16(t3.val[1]));
+#define UC_LO(a, b) vcombine_u16(vget_low_u16(vreinterpretq_u16_u32(a)), vget_low_u16(vreinterpretq_u16_u32(b)))
+#define UC_HI(a, b) vcombine_u16(vget_high_u16(vreinterpretq_u16_u32(a)), vget_high_u16(vreinterpretq_u16_u32(b)))
+                const uint16x8_t c[8] = {UC_LO(u0.val[0], u2.val[0]), UC_LO(u1.val[0], u3.val[0]),
+                                         UC_LO(u0.val[1], u2.val[1]), UC_LO(u1.val[1], u3.val[1]),
+                                         UC_HI(u0.val[0], u2.val[0]), UC_HI(u1.val[0], u3.val[0]),
+                                         UC_HI(u0.val[1], u2.val[1]), UC_HI(u1.val[1], u3.val[1])};
+#undef UC_LO
+#undef UC_HI
+                const int j = k0 / kch, kr = k0 - j * kch;
+                uint16_t *dj = dst + (size_t)j * kch;
+                for (int kk = 0; kk < 8; kk++)
+                    vst1q_u16(dj + tab[kr + kk], c[kk]);
+            }
+            for (int k = K; k < Kp; k++) {
+                const int j = k / kch, kr = k - j * kch;
+                vst1q_u16(dst + (size_t)j * kch + tab[kr], vdupq_n_u16(0));
+            }
+            m0 += 4; /* + the loop's 4: next 8-row group */
+            continue;
+        }
         if (m0 + 4 <= M) {
             const float *x0 = xin + (size_t)m0 * K, *x1 = x0 + K, *x2 = x1 + K, *x3 = x2 + K;
             for (int k0 = 0; k0 < K; k0 += 4) {
