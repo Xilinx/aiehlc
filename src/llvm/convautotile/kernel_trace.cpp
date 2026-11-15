@@ -869,6 +869,18 @@ void checkBlockOpts(const TracePort &p, const PortFit &f, const std::vector<Even
         r.errors.push_back(who + m);
         ok = false;
     };
+    // The lowering applies .tile and .resident to an input whose blocks it follows
+    // (resolveKernelBlock): blocks that are whole rows of the tensor. On any other
+    // block they would be accepted here and ignored by the DMA -- the kernel would
+    // read a row-major block (.tile) or two buffers instead of one (.resident).
+    bool rowContiguous = f.rank == (int)p.shape.size();
+    for (int d = 1; d < f.rank && rowContiguous; d++)
+        rowContiguous = f.shape[d] == p.shape[d];
+    if (!p.output && !rowContiguous && (o.tile[0] || o.tile[1] || o.resident))
+        err("{.tile / .resident} need blocks that are whole rows of the tensor (every dim after the first "
+            "complete); this port's blocks are " +
+            vecStr(f.shape) + " of " + vecStr(p.shape) +
+            " -- the DMA would not apply the option. Load whole rows, or drop it (e.g. pre-tile on the host)");
     if (o.depth < 0 || o.depth > 2)
         err("{.depth = " + std::to_string(o.depth) + "}: a core buffer is single (1) or ping-pong (2)");
     if (o.resident && o.depth > 1)

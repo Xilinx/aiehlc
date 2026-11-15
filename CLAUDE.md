@@ -549,6 +549,20 @@ mmul in the x86 emulation yet), blocks twice the bytes (7x14 tile). palmyra:
 802,816 bit-exact, 12/12 runs. Design `doc/design/bf16_support.md`; skill
 **bf16kernel**.
 
+### AIEDNN template kernels (one launch per layer)
+
+How to write a DNN-op kernel that is fast for a whole layer:
+**[tutorial/aiednn/howto/templatekernel.md](tutorial/aiednn/howto/templatekernel.md)**
+(from the UNet deployment report §15-21). Example `example/aiednn/gemm_kacc_bf16.cc`
+(bf16 GEMM, K accumulated in fp32 on the core, tile loop on the core, host
+pre-tiled chunks, fused ReLU; template parameters = plain `#define`s) +
+`gen_variants.py` (layer shapes -> de-duplicated variants + dispatch table).
+palmyra: 4 instances bit-exact; a cold launch is 98-99 % kload, so TK 64 (33 ms)
+beats TK 128 (53.6 ms) -- the buffers are BSS reloaded per launch. Needed two
+GEMM lowering fixes (B's window divided by m_rounds; the 3-D K BD started
+k_rounds times -- the latter only where its len is not already the walk, or
+`simplematmul2` breaks). Skill **aiednnkernel**.
+
 ### Declarative conv2d auto-tiling (`aie::Conv2d` + `aie::Mapping`)
 
 `__global__(conv, map) void k(aie::port<T, aie::IFM> a, aie::port<T, aie::WEIGHTS> b, aie::port<T, aie::OFM> c)`
@@ -954,6 +968,7 @@ Read the matching skill when the task fits:
 | Kernel-only `{.depth / .resident / .tile}` options; `the core window is N elements x R round(s) ... but the kernel's blocks (#routing.kernel_block) are`; `the port buffers take N B of core memory`; a GEMM with B loaded once / full-K A strips; kernel macro under `#ifndef` undeclared | gemmdataflowoptions |
 | Misspelled `#include` reported as `` `HW_ROWS` ... no #define `` instead of `file not found`; kernel-only kernel: `kernel analysis needs the launch mesh: no device.partition(...)` though the call exists (mesh macros behind `#include <x.h>`); xchesscc `no matching function for call to 'aiehlc_load_buffer'` (window port by value, missing `*`); adding an early source-level diagnostic | kernelanalysisdiagnostics |
 | bfloat16 ports: `input_window_bfloat16`, DMA lengths twice/half, `output block bytes per round` mismatch on a 16-bit conv, `bfloat16` does not compile for tracing, a few hundred outputs reading 0 on 1 run in 6 | bf16kernel |
+| AIEDNN template kernel (GEMM/conv, one launch per layer, fp32 K accumulation): window `N x R ... kernel's blocks are 4N` with M and K rounds, input-shim `wait_io TIMEOUT` ch 1, `.tile` on a K chunk refused, template parameter not declared, bigger TK slower | aiednnkernel |
 | `data used without being loaded` and WHICH constant causes it (`oc_t = 15` vs loops walking 16); `cause (static analysis)` / `out-of-block access (static analysis)` lines; extending `kernel_static.cpp` | blockstaticbounds |
 | Edit the routing / dmaphop IR and feed it back (`AIEHLC_ROUTING_IR_IN`, `AIEHLC_DMAPHOP_IR_IN`, `aiebackend.routing_ir`: view / set_level / lint / check / build), round-trip test, an IR edit that does nothing or is silently accepted although illegal; `flowcheck FAILED` / `FLOWCHECK ERROR ... does not reach / also reaches` after a build | routingirreentry |
 | A dialect attribute's dumped IR does not parse back (`expected integer value`, `failed to parse ...Attr parameter ... ArrayRef<int64_t>`, `AIEHLC_*_IR_IN ... does not parse / verify`, roundtrip FAIL at the re-entry build): `struct(params)` with an `ArrayRefParameter` | mlirattrarrayroundtrip |
