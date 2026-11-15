@@ -5331,12 +5331,24 @@ public:
                         llvm::errs() << "[aiehlc] Aborting: invalid #pragma aie_trace directive(s).\n";
                         std::exit(1);
                     }
+                    // AOT control packets: the pipeline writes one ctrlpkt_sites.txt per run;
+                    // in multi-kernel mode keep a per-kernel copy (ctrlpkt_sites_<kernel>.txt)
+                    // so kc.sh can build one host_ctrlpkt_<kernel>_table per kernel.
+                    const std::string mkSites = outputDir + "/ctrlpkt_sites.txt";
+                    const std::string mkSitesK = outputDir + "/ctrlpkt_sites_" + mkd.kernelName + ".txt";
+                    llvm::sys::fs::remove(mkSites);
+                    llvm::sys::fs::remove(mkSitesK);
                     if (!TilingLinalgPipeline::runPipeline(
                             ctx, module, outputDir, kernelBodyWithMacros, mkd.kernelFuncName, parsedDebugLevel,
                             /*userRewrittenSource=*/"", {}, mkd.maxPPBytes, aieGenStr, hostFuncSuffix, appendMode,
                             &hostDdrArgs, mkd.portVarNames, parsedTraceTiles)) {
                         llvm::errs() << "[TilingLinalg] Pipeline FAILED for kernel: " << mkd.kernelName << "\n";
                         std::exit(1);
+                    }
+                    if (llvm::sys::fs::exists(mkSites)) {
+                        if (!llvm::sys::fs::rename(mkSites, mkSitesK))
+                            llvm::outs() << "[TilingLinalg] AOT control-packet sites for kernel " << mkd.kernelName
+                                         << ": " << mkSitesK << "\n";
                     }
                     mkd.numHostDdrArgs = hostDdrArgs;
                     llvm::outs() << "[TilingLinalg] Pipeline completed for kernel: " << mkd.kernelName
@@ -5633,6 +5645,22 @@ public:
                         stream << "extern unsigned int _binary_kernel_" << mkd.kernelName << "_size;\n";
                     }
 
+                    // AOT control packets (multi-kernel): kc.sh encodes ctrlpkt_sites_<kernel>.txt into
+                    // host_ctrlpkt_<kernel>.h (table host_ctrlpkt_<kernel>_table); each dispatch registers
+                    // its kernel's table right before the launch, so every launch matches its own sites.
+                    std::set<std::string> mkAot;
+                    for (auto &mkd : parsedMeshKernels) {
+                        if (llvm::sys::fs::exists(outputDir + "/ctrlpkt_sites_" + mkd.kernelName + ".txt")) {
+                            mkAot.insert(mkd.kernelName);
+                            stream << "#include \"host_ctrlpkt_" << mkd.kernelName << ".h\"\n";
+                        }
+                    }
+                    auto emitAotRegister = [&](const MeshKernelDesc &mkd, const char *indent) {
+                        if (mkAot.count(mkd.kernelName))
+                            stream << indent << "__Runtime_ctrl_aot_register(&host_ctrlpkt_" << mkd.kernelName
+                                   << "_table);\n";
+                    };
+
                     // Find max DDR args across all kernels for __aie_launch signature
                     unsigned maxDdrArgs = 0;
                     for (auto &mkd : parsedMeshKernels) {
@@ -5667,6 +5695,7 @@ public:
                                    << "_start);\n";
                             // Flush+invalidate ALL buffers (inputs AND outputs) before DMA
                             emitSyncCalls(stream, mkd, "        ", /*beforeLaunch=*/true);
+                            emitAotRegister(mkd, "        ");
                             stream << "        " << hostFunc << "(dev";
                             for (unsigned i = 0; i < mkd.numHostDdrArgs; ++i)
                                 stream << ", _t" << i;
@@ -5697,6 +5726,7 @@ public:
                             stream << "    __Runtime_set_kernel_elf(_binary_kernel_" << mkd0.kernelName << "_start);\n";
                             // Flush+invalidate ALL buffers (inputs AND outputs) before DMA
                             emitSyncCalls(stream, mkd0, "    ", /*beforeLaunch=*/true);
+                            emitAotRegister(mkd0, "    ");
                             stream << "    " << hostFunc << "(dev";
                             for (unsigned i = 0; i < mkd0.numHostDdrArgs; ++i)
                                 stream << ", _t" << i;
@@ -5718,6 +5748,7 @@ public:
                                    << mkd.kernelName << "\") == 0) {\n";
                             stream << "        __Runtime_set_kernel_elf(_binary_kernel_" << mkd.kernelName
                                    << "_start);\n";
+                            emitAotRegister(mkd, "        ");
                             stream << "        " << hostFunc << "(dev);\n";
                         }
                         stream << "    }\n";
