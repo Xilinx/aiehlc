@@ -100,8 +100,8 @@ def map_layers(onnx_path: Path, partition: dict, work: Path, offsets_fn) -> tupl
     onodes = {n.name: n for n in m.graph.node}
     out, used = [], set()
     for L in partition["layers"]:
-        if L.get("cls") == "linear":
-            continue   # PDN: map_linears
+        if L.get("cls") in ("linear", "attn"):
+            continue   # PDN: map_linears; GATT: map_attn (autopart --mode attn partitions)
         n = onodes[L["node"]]
         assert n.op_type == "Conv" and n.input[1] == L["weight"], (L["node"], n.op_type)
         at = {a.name: onnx.helper.get_attribute_value(a) for a in n.attribute}
@@ -214,6 +214,80 @@ def map_linears(onnx_path: Path, partition: dict, work: Path, offsets_fn) -> lis
     log(f"mapped {len(out)} partition linear layers to TVM dense calls (weights equal by value), "
         f"{sum(c['S'] for c in out)} gemm_kacc launches")
     return out
+
+
+# ─────────────────────── GATT: attention bmm sites (--aie conv,linear,attn) ───────────────────────
+def bmm_geom(H: int, M: int, K: int, N: int) -> dict:
+    """GATT: geometry of one attention bmm Y[h] = X[h] (M x K) . W[h]^T (W [N][K]) on ONE gemm_kacc instance --
+    the board-proven PBK rules of kacc_gemm.main_bmm (fd4cb96): M/K/N zero-padded to 64 (aiegraph.gemmpad.pad_mkn),
+    swap (ch = M) for big square outputs, kacc_gemm.plan split, one more zero ch block when the a/b ports would
+    have the same shape (aiehlc GemmSpace port sizing), K padded until kp/2 is not 32/64 (aiehlc 2-dim+iter b BD)."""
+    import sys
+    src = str(Path(__file__).resolve().parents[3] / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from aiegraph.gemmpad import pad_mkn
+    import kacc_gemm
+    Mp, Kp, Np = pad_mkn(M, K, N)
+    swap = int(Mp == Np and H * M * N >= (4 << 20))
+    CHR, PXR = (M, N) if swap else (N, M)
+    CHP, PXP = (Mp, Np) if swap else (Np, Mp)
+    mode, S, chs, pxs = kacc_gemm.plan(CHP, Kp, PXP)
+    geo = kacc_geom(chs, Kp, pxs)
+    while geo["arows"] == geo["brows"] and mode == "none":
+        CHP += 64
+        mode, S, chs, pxs = kacc_gemm.plan(CHP, Kp, PXP)
+        geo = kacc_geom(chs, Kp, pxs)
+    while geo["kp"] // 2 in (32, 64):
+        Kp += 64
+        geo = kacc_geom(chs, Kp, pxs)
+    return dict(H=H, M=M, K=K, N=N, swap=swap, CHR=CHR, PXR=PXR, CHP=CHP, PXP=PXP, Kp=Kp, kp=geo["kp"],
+                kch=geo["kch"], tr=geo["tr"], splitpx=int(mode == "px"), S=S, chs=chs, pxs=pxs)
+
+
+def map_attn(partition: dict, work: Path) -> list:
+    """GATT (GAP-aiegraph-attn-site): partition 'attn' layers (aiegraph.partition.match_attention bmm groups,
+    autopart --mode attn) -> TVM nn_batch_matmul calls (transpose_b: X [H][M][K], W [H][N][K], Y [H][M][N]).
+    Both operands are activations. Matched in graph order (TVM keeps the ONNX topological order of the bmms);
+    every pair must agree on (H, M, K, N) or the build fails."""
+    graphs = sorted(work.glob("*_graph.json"))
+    assert len(graphs) == 1, graphs
+    g = json.loads(graphs[0].read_text())
+    nodes, row_ptr = g["nodes"], g["node_row_ptr"]
+    shapes = g["attrs"]["shape"][1]
+    bmm = []
+    for i, n in enumerate(nodes):
+        if n.get("op") != "tvm_op" or "nn_batch_matmul" not in n["attrs"]["func_name"]:
+            continue
+        ins = [s for s, _, _ in n["inputs"]]
+        f = n["attrs"]["func_name"]
+        bmm.append(dict(node=i, symbol=f if f.startswith("tvmgen_") else "tvmgen_default_" + f, func=f,
+                        eids=[row_ptr[s] for s in ins], yeid=row_ptr[i], nargs=len(ins) + 1,
+                        xshape=shapes[row_ptr[ins[0]]], wshape=shapes[row_ptr[ins[1]]], yshape=shapes[row_ptr[i]]))
+    att = sorted((L for L in partition["layers"] if L.get("cls") == "attn"), key=lambda L: (L["part"], L["idx"]))
+    log(f"TVM graph {graphs[0].name}: {len(bmm)} nn_batch_matmul calls; partition has {len(att)} attn bmm layers")
+    if len(bmm) != len(att):
+        raise SystemExit(f"map_attn: {len(att)} partition attn layers vs {len(bmm)} TVM nn_batch_matmul calls")
+    out = []
+    for L, c in zip(att, bmm):
+        M, K, N = L["pad"]["orig"] if "pad" in L else L["mkn"][0]
+        H = int(L["batch"])
+        want = ([H, M, K], [H, N, K], [H, M, N])
+        if (c["xshape"], c["wshape"], c["yshape"]) != want:
+            raise SystemExit(f"map_attn: {L['node']} (H={H} M={M} K={K} N={N}) vs TVM node {c['node']} {c['func']} "
+                             f"x{c['xshape']} w{c['wshape']} y{c['yshape']}")
+        geo = bmm_geom(H, M, K, N)
+        out.append(dict(c, kind="attn", cid=L["idx"], onnx=L["node"], group=int(L["attn_group"]),
+                        role=L["attn_role"], softmax=L.get("softmax"), geo=geo, launches=H * geo["S"],
+                        macs=H * M * N * K, M=M, N=N, K=K))
+    log(f"mapped {len(out)} partition attn bmm layers ({len({c['group'] for c in out})} groups) to TVM "
+        f"nn_batch_matmul calls, {sum(c['launches'] for c in out)} gemm_kacc launches")
+    return out
+
+
+def attn_shapes(att: list) -> list:
+    """gemm_kacc instances (ch, K, px) of the attention sites"""
+    return sorted({(c["geo"]["chs"], c["geo"]["Kp"], c["geo"]["pxs"]) for c in att})
 
 
 def check_data_arg0(layers_dir: Path, sel: list) -> None:
@@ -663,6 +737,9 @@ def write_kernel(kdst: Path, spec: str, maxacc: int, warm: bool = False, ctrlpkt
 DECL = ("int unet_aie_conv(int cid, void *args, int nargs, const uint16_t *wbf, "
         "int sh, int sw, int ph, int pw);   /* build_unet.py --aie conv */\n"
         "int unet_aie_linear(int cid, void *args, int nargs, const uint16_t *wbf, int S);   /* --aie conv,linear */\n")
+DECL_ATTN = ("int unet_aie_attn(int cid, void *args, int nargs, int qk, int swap, int chp, int pxp, int kk, int kp, "
+             "int kch, "
+             "int splitpx, int S, int chs, int pxs, int tr);   /* --aie conv,linear,attn (GATT) */\n")
 CALL_RE = re.compile(r"    GRAPH_PROF_BEGIN\((\d+)\);\n(#ifdef GRAPH_AIE_OFFLOAD\n.*?#endif\n|"
                      r"    \w+\(args, codes, \d+, 0, 0, 0\);\n    GRAPH_PROF_END\(\1, \"[^\"]*\"\);\n)", re.S)
 
@@ -670,8 +747,11 @@ CALL_RE = re.compile(r"    GRAPH_PROF_BEGIN\((\d+)\);\n(#ifdef GRAPH_AIE_OFFLOAD
 def patch_driver(text: str, sel: list) -> tuple:
     if "unet_aie_conv(int cid, void" in text.split("static uint8_t kernel_ws[")[0]:
         raise RuntimeError("driver already patched")
+    att = [c for c in sel if c.get("kind") == "attn"]
+    sel = [c for c in sel if c.get("kind") != "attn"]
     i = text.index("static uint8_t kernel_ws[")
-    text = text[:i] + DECL + PROF_C + "\n" + text[i:]
+    # GATT: the attn declaration / PROF branch only when there are attn sites (--aie conv,linear stays byte-identical)
+    text = text[:i] + DECL + (DECL_ATTN if att else "") + (prof_c_attn() if att else PROF_C) + "\n" + text[i:]
     exp_body = "    for (uint64_t i = 0; i < n; ++i) d[i] = (uint32_t)src[i] << 16;\n}\n"
     assert text.count(exp_body) == 1, text.count(exp_body)
     text = text.replace(exp_body, "    XTime e0_, e1_;\n    XTime_GetTime(&e0_);\n" + exp_body[:-2] +
@@ -718,7 +798,34 @@ def patch_driver(text: str, sel: list) -> tuple:
         n += 1
     nl = sum(1 for c in sel if c.get("kind") == "linear")
     assert text.count("    unet_aie_conv(") == len(sel) - nl and text.count("    unet_aie_linear(") == nl
+    for c in att:   # GATT: tag "aie unet_aie_attn <cid>" -> PROF op=aie_host_attn<cid>
+        text = _patch_attn_site(text, c)
+        n += 1
+    assert text.count("    unet_aie_attn(") == len(att)
     return text, n
+
+
+def _patch_attn_site(text: str, c: dict) -> str:
+    """GATT: one TVM nn_batch_matmul call site (located by its unique args[0..2] tensor block) -> unet_aie_attn.
+    No weight: both operands are activations, packed at run time by the host (aie_kacc_pack.h)."""
+    e0, e1 = c["eids"]
+    blk = ("    args[0].v_handle = &tensors[%d];\n    args[1].v_handle = &tensors[%d];\n"
+           "    args[2].v_handle = &tensors[%d];\n" % (e0, e1, c["yeid"]))
+    assert text.count(blk) == 1, (c["onnx"], c["node"], text.count(blk))
+    pos = text.index(blk)
+    cm = CALL_RE.search(text, pos)
+    nxt = text.find("    args[0].v_handle", pos + len(blk))
+    assert cm and (nxt < 0 or cm.start() < nxt), (c["onnx"], c["node"])
+    calls = re.findall(r"(?:aie_)?(tvmgen_\w+)\(args, codes, (\d+), 0, 0, 0\);", cm.group(2))
+    assert calls and all(s == c["symbol"] and int(k) == c["nargs"] for s, k in calls), (calls, c["symbol"])
+    g = c["geo"]
+    rep = ("    GRAPH_PROF_BEGIN(%s);\n    UP_AIE_BEGIN(%s);\n"
+           "    unet_aie_attn(%d, args, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d);   /* %s g%d %s */\n"
+           "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie unet_aie_attn %d\");\n"
+           % (cm.group(1), cm.group(1), c["cid"], c["nargs"], int(c["role"] == "qk"), g["swap"], g["CHP"], g["PXP"],
+              g["Kp"], g["kp"], g["kch"], g["splitpx"], g["S"], g["chs"], g["pxs"], g["tr"], c["role"], c["group"],
+              c["onnx"].replace("*/", "*_/"), cm.group(1), cm.group(1), c["cid"]))
+    return text[:cm.start()] + rep + text[cm.end():]
 
 
 # P1 (b) per-call-site A78 time: inserted into graph_driver.c by patch_driver
@@ -780,6 +887,20 @@ void unet_prof_print(double graph_run_ms, double aie_wall_ms) {
            aie_in);
 }
 """
+
+PROF_ATTN_BRANCH = (
+    '        if (is_aie && strncmp(up_tag[i], "aie unet_aie_attn ", 18) == 0) /* GATT attention bmm site */\n'
+    '            printf("PROF part=%u op=aie_host_attn%s ms=%.3f bf16_expand_ms=%.3f site_ms=%.3f aie_ms=%.3f\\n", i,\n'
+    '                   up_tag[i] + 18, a78 + e, e, site, up_aie_ms[i]);\n'
+    '        else ')
+
+
+def prof_c_attn() -> str:
+    """PROF_C with the GATT branch: attention sites print op=aie_host_attn<cid> (counted as aie_host by hsplit)"""
+    k = '        if (is_aie && strncmp(up_tag[i], "aie unet_aie_lin ", 17) == 0)'
+    assert PROF_C.count(k) == 1
+    return PROF_C.replace(k, PROF_ATTN_BRANCH + k.lstrip(), 1)
+
 
 MAIN_EXTRA_DECL = (
     "void unet_prof_print(double graph_run_ms, double aie_wall_ms); /* graph_driver.c (P1 PROF) */\n"
@@ -1104,7 +1225,7 @@ def kacc_kernel_text(ch: int, k: int, px: int) -> str:
     return t
 
 
-def kacc_host(shapes: list, lin: list = ()) -> str:
+def kacc_host(shapes: list, lin: list = (), att: list = ()) -> str:
     """host part of the --kincore aiek source: uc_conv with ONE gemm_kacc launch per layer (no host K-sum);
     lin (PDN): (N, K, Mp, pxs) of the linear layers -- buffers hold the whole GEMM (all S px launches)"""
     sw = "\n".join("    if (N == %d && K == %d && M == %d) {\n        %s<<<mesh>>>(%s, ky);\n        return 0;\n    }"
@@ -1112,10 +1233,13 @@ def kacc_host(shapes: list, lin: list = ()) -> str:
                    for ch, k, px in shapes)
     return KACC_HOST.replace("@DISPATCH@", sw) \
         .replace("@MAXW@", str(max([sh[0] * kacc_geom(*sh)["kp"] for sh in shapes] +
-                                   [n * kacc_geom(n, k, p)["kp"] for n, k, mp, p in lin]))) \
+                                   [n * kacc_geom(n, k, p)["kp"] for n, k, mp, p in lin] +
+                                   [g["CHP"] * g["kp"] for g in att]))) \
         .replace("@MAXX@", str(max([sh[2] * kacc_geom(*sh)["kp"] for sh in shapes] +
-                                   [mp * kacc_geom(n, k, p)["kp"] for n, k, mp, p in lin]))) \
-        .replace("@MAXY@", str(max([ch * px for ch, k, px in shapes] + [n * mp for n, k, mp, p in lin])))
+                                   [mp * kacc_geom(n, k, p)["kp"] for n, k, mp, p in lin] +
+                                   [g["PXP"] * g["kp"] for g in att]))) \
+        .replace("@MAXY@", str(max([ch * px for ch, k, px in shapes] + [n * mp for n, k, mp, p in lin] +
+                                   [g["CHP"] * g["PXP"] for g in att])))
 
 
 KACC_HOST = r"""
@@ -2199,12 +2323,137 @@ extern "C" int unet_aie_linear(int cid, void *args, int nargs, const uint16_t *w
 """
 
 
+ATTN_HOST = r"""
+/* GATT (--aie conv,linear,attn; GAP-aiegraph-attn-site): one TVM nn_batch_matmul call site (an attention QK^T or
+ * PV bmm of an aiegraph.partition.match_attention group) on the AIE. TVM batch_matmul is transpose_b:
+ * Y[h][M][N] = X[h][M][K] . W[h][N][K]^T, BOTH operands activations -> packed at run time from their natural f32
+ * layout by aie_kacc_pack.h (akp_pack, bf16 RNE, zero pad to the kernel geometry; PBK, bmk fd4cb96), H heads x S
+ * launches of ONE gemm_kacc instance (unet_aie.bmm_geom = kacc_gemm.main_bmm rules), output un-tiled by akp_unpad
+ * (one bf16 SRS) and widened to the f32 TVM tensor. PKC recipe kc_bf16out_pad64: for QK^T the keys (W rows) are
+ * centred over the REAL keys per head (softmax is shift-invariant per query row; pad rows stay 0). Softmax stays
+ * on the CPU (TVM). */
+#include "aie_kacc_pack.h"
+static float *g_ua_kc = nullptr;    /* one head's centred keys [N][K] (QK^T) */
+static uint16_t *g_ua_yb = nullptr; /* one head's bf16 output [M][N] */
+static size_t g_ua_kcap = 0, g_ua_ycap = 0;
+static unsigned g_ua_sites = 0;
+static int uc_attn(void *const *argv, int nargs, int qk, int swap, int CHP, int PXP, int Kp, int kp, int kch,
+                   int splitpx, int S, int chs, int pxs, int tr) {
+    if (nargs != 3)
+        return -2;
+    const uc_dlt *x = (const uc_dlt *)argv[0], *w = (const uc_dlt *)argv[1], *y = (const uc_dlt *)argv[2];
+    if (x->ndim != 3 || w->ndim != 3 || y->ndim != 3)
+        return -2;
+    const int H = (int)x->shape[0], M = (int)x->shape[1], K = (int)x->shape[2], N = (int)w->shape[1];
+    if ((int)w->shape[0] != H || (int)w->shape[2] != K || (int)y->shape[0] != H || (int)y->shape[1] != M ||
+        (int)y->shape[2] != N)
+        return -3;
+    const int CHR = swap ? M : N, PXR = swap ? N : M;
+    if (CHR > CHP || PXR > PXP || K > Kp || Kp > kp || S < 1 || (CHP | PXP) & 63 ||
+        (splitpx ? (PXP != S * pxs || CHP != chs) : (CHP != S * chs || PXP != pxs)))
+        return -3;
+    const size_t wel = (size_t)CHP * kp, xel = (size_t)PXP * kp, yel = (size_t)CHP * PXP;
+    if (wel > (size_t)UC_KW_ELEMS || xel > (size_t)UC_KX_ELEMS || yel > (size_t)UC_KY_ELEMS)
+        return -3;
+    const float *X = (const float *)x->data, *Wt = (const float *)w->data;
+    float *Y = (float *)y->data;
+    if (uc_kalloc() != 0)
+        return -1;
+    if ((size_t)M * N > g_ua_ycap) {
+        free(g_ua_yb);
+        g_ua_ycap = (size_t)M * N;
+        g_ua_yb = (uint16_t *)aligned_alloc(64, (g_ua_ycap * 2 + 63) & ~(size_t)63);
+    }
+    if (qk && (size_t)N * K > g_ua_kcap) {
+        free(g_ua_kc);
+        g_ua_kcap = (size_t)N * K;
+        g_ua_kc = (float *)aligned_alloc(64, (g_ua_kcap * 4 + 63) & ~(size_t)63);
+    }
+    if (!g_ua_yb || (qk && !g_ua_kc))
+        return -1;
+#if UC_CTRLPKT
+    if (!g_uc_ht) { // once, before the first launch
+        __Runtime_ctrl_high_throughput_enable(1);
+        g_uc_ht = 1;
+    }
+#endif
+    int32_t *const kw = g_kw, *const kx = g_kx, *const ky = g_ky;
+    const size_t wbytes = wel * 2, xbytes = xel * 2, ybytes = yel * 4;
+    for (int h = 0; h < H; h++) {
+        const float *xh = X + (size_t)h * M * K, *wh = Wt + (size_t)h * N * K;
+        if (qk) { /* PKC kc_bf16out_pad64: keys centred over the N real keys (fp64 mean per column) */
+            for (int k = 0; k < K; k++) {
+                double mu = 0.0;
+                for (int n = 0; n < N; n++)
+                    mu += wh[(size_t)n * K + k];
+                const float m = (float)(mu / N);
+                for (int n = 0; n < N; n++)
+                    g_ua_kc[(size_t)n * K + k] = wh[(size_t)n * K + k] - m;
+            }
+            wh = g_ua_kc;
+        }
+        /* W side = instance channels (rows of W, or of X when swapped), X side = pixels; both [rows][K], k stride 1 */
+        akp_pack((uint16_t *)kw, swap ? xh : wh, CHP, CHR, kp, K, kch, K, 1, 1, 0);
+        akp_pack((uint16_t *)kx, swap ? wh : xh, PXP, PXR, kp, K, kch, K, 1, 0, 0);
+        for (int s = 0; s < S; s++) {
+            XTime lt0, lt1;
+            XTime_GetTime(&lt0);
+            if (s == 0)
+                uc_sync_pre(kw, wbytes, kx, xbytes, ky, ybytes);
+            int32_t *Ws = kw + (splitpx ? 0 : (size_t)s * chs * kp / 2);
+            int32_t *Xs = kx + (splitpx ? (size_t)s * pxs * kp / 2 : 0);
+            int32_t *Ys = ky + (size_t)s * chs * pxs;
+            const int lrc = uc_kacc_launch(chs, Kp, pxs, Ws, Xs, Ys);
+            if (s == S - 1)
+                uc_sync_post(ky, ybytes);
+            XTime_GetTime(&lt1);
+            g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
+            g_aie_launches++;
+            if (lrc != 0)
+                return lrc;
+        }
+        for (int s = 0; s < S; s++) { /* launch s: Y block -> yb [M][N] (bf16) */
+            const int p0 = splitpx ? s * pxs : 0, c0 = splitpx ? 0 : s * chs;
+            const int pr = PXR - p0 < pxs ? PXR - p0 : pxs, cr = CHR - c0 < chs ? CHR - c0 : chs;
+            if (pr <= 0 || cr <= 0)
+                continue;
+            const size_t off = swap ? (size_t)c0 * N + p0 : (size_t)p0 * N + c0;
+            akp_unpad(g_ua_yb + off, N, (const float *)(ky + (size_t)s * chs * pxs), pxs, chs, tr, pr, cr, swap);
+        }
+        float *yh = Y + (size_t)h * M * N;
+        const uint16_t *yb = g_ua_yb;
+        for (size_t i = 0; i < (size_t)M * N; i++) {
+            const uint32_t u = (uint32_t)yb[i] << 16;
+            memcpy(yh + i, &u, 4);
+        }
+    }
+    g_uc_macs += (unsigned long long)H * M * N * K;
+    g_ua_sites++;
+    return 0;
+}
+
+extern "C" int unet_aie_attn(int cid, void *args, int nargs, int qk, int swap, int CHP, int PXP, int Kp, int kp,
+                             int kch, int splitpx, int S, int chs, int pxs, int tr) {
+    g_uc_calls++;
+    const int rc = uc_attn((void *const *)args, nargs, qk, swap, CHP, PXP, Kp, kp, kch, splitpx, S, chs, pxs, tr);
+    if (rc != 0) {
+        printf("[unet_aie_attn] layer %d rc=%d\n", cid, rc);
+        if (!g_uc_rc)
+            g_uc_rc = rc;
+    }
+    return rc;
+}
+
+"""
+
+
 def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, ctrlpkt: str = "off",
-                      lin: list = ()) -> Path:
+                      lin: list = (), att: list = ()) -> Path:
     """--kincore: aiek_unetconv.cc = one gemm_kacc instance per distinct (ch, K, px) + host unet_aie_conv;
     lin (PDN): (N, K, Mp, pxs) per linear layer -> + host unet_aie_linear"""
     spec = spec.replace('"out ', '"export    unet_aie_conv\\n"\n        "export    unet_aie_stats\\n"\n' +
                         ('        "export    unet_aie_linear\\n"\n' if lin else '') +
+                        ('        "export    unet_aie_attn\\n"\n' if att else '') +
                         '        "export    unet_aie_launch_stats\\n"\n'
                         '        "export    unet_aie_split_stats\\n"\n        "out ', 1)
     assert "export    unet_aie_conv" in spec, spec
@@ -2222,10 +2471,13 @@ def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, c
     # replace the 64x64-tile uc_conv (host K-sum) by the one-launch version up to its epilogue
     i0 = host.index("static int uc_conv(")
     i1 = host.index('extern "C" int unet_aie_conv(')  # GPOOL: epilogue fused into the kacc scatter
-    host = host[:i0] + kacc_host(shapes, lin) + host[i1:]
+    host = host[:i0] + (kacc_host(shapes, lin, [c["geo"] for c in att]) if att else kacc_host(shapes, lin)) + host[i1:]
     if lin:  # PDN: unet_aie_linear before unet_aie_conv
         j = host.index('extern "C" int unet_aie_conv(int cid')
         host = host[:j] + LINEAR_HOST.lstrip("\n") + host[j:]
+    if att:  # GATT: unet_aie_attn before unet_aie_conv
+        j = host.index('extern "C" int unet_aie_conv(int cid')
+        host = host[:j] + ATTN_HOST.lstrip("\n") + host[j:]
     # drop the 64x64-port state the one-launch path does not use (no unused-static warnings)
     a0, a1 = host.index("static int uc_alloc(void) {"), host.index("static long uc_numel(")
     host = host[:a0] + host[a1:]
