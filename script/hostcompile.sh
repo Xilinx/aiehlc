@@ -44,6 +44,11 @@ _HOSTCOMPILE_ORIG_PWD="$(pwd)"
 
 OPT_FLAGS="-Os"
 [ "${DEBUG_SYMS:-0}" -eq 1 ] && OPT_FLAGS="${OPT_FLAGS} -g"
+# HOSTCOMPILE_HOST_OPT: optimisation flags for the generated host.cc only (default: OPT_FLAGS).
+# host.cc carries the user's host code (e.g. im2col / scatter glue around the launches); -Os there
+# costs real A78 time, while the runtime .c files and the kernels keep OPT_FLAGS.
+HOST_OPT_FLAGS="${HOSTCOMPILE_HOST_OPT:-${OPT_FLAGS}}"
+[ "${DEBUG_SYMS:-0}" -eq 1 ] && [ -n "${HOSTCOMPILE_HOST_OPT:-}" ] && HOST_OPT_FLAGS="${HOST_OPT_FLAGS} -g"
 
 KERNEL_FUNC_NAME="computekernel"   # default fallback; overridden by auto-detection below
 
@@ -504,7 +509,7 @@ HOST_SRC="${HOST_FIXED}"
 if [ "${REBUILD}" -eq 1 ] || [ ! -f host.o ]; then
     set -x
     echo "Compiling host..."
-    ${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++20 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -c "${HOST_SRC}" -o host.o
+    ${TOOL_PREFIX}g++ ${HOST_OPT_FLAGS} -std=c++20 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -c "${HOST_SRC}" -o host.o
     if [ $? -ne 0 ]; then
         echo "Error: failed to compile host.cc"
         exit 1
