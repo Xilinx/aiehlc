@@ -237,7 +237,7 @@ def aie_conv(a, emod, out: Path, hdr: Path):
         planned = sum(c["launches"] for c in sel + att)
         shapes = sorted({(c["N"], c["K"], c["M"]) for c in convsel} | {(c["N"], c["K"], c["pxs"]) for c in lin} |
                         set(ua.attn_shapes(att)))
-        log(f"KINCORE layers={len(sel)} launches_planned={planned} kernel=bf16_gemm_kacc; "
+        log(f"KINCORE layers={len(sel) + len(att)} launches_planned={planned} kernel=bf16_gemm_kacc; "
             f"shapes={len(shapes)} (old 64x64x64 launches {part['N']})")
     else:
         convsel = sel
