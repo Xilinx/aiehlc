@@ -871,6 +871,9 @@ void checkBlockOpts(const TracePort &p, const PortFit &f, const std::vector<Even
     };
     if (o.depth < 0 || o.depth > 2)
         err("{.depth = " + std::to_string(o.depth) + "}: a core buffer is single (1) or ping-pong (2)");
+    if (p.output && o.depth == 1)
+        err("{.depth = 1} on aie::store_buffer: an output window is always ping-pong on the core (the next block "
+            "is written while the last one drains); drop the option or use {.depth = 2}");
     if (o.resident && o.depth > 1)
         err("{.resident = true} holds its block in ONE buffer; {.depth = " + std::to_string(o.depth) +
             "} contradicts it (drop .depth)");
