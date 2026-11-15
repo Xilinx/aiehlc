@@ -20,6 +20,7 @@
  ******************************************************************************/
 #include "conv_desugar.h"
 #include "kernel_front.h"
+#include "kernel_template.h"
 #include "kernel_trace.h"
 
 #include <cstdio>
@@ -59,6 +60,16 @@ static std::string baseOf(const std::string &p) {
 // Kernel analysis: kernel-only sources are traced and their DMA layout
 // inferred; __global__(conv, map) sources are traced against the derivation.
 static int traceCommand(std::string src, const std::string &path, const Overrides &ov, const Target &tgt, bool emit) {
+    KernelTemplateResult kt = instantiateKernelTemplates(src, dirOf(path));
+    if (kt.found) {
+        for (auto &n : kt.notes)
+            std::cout << "[KernelTemplate] instance " << n << "\n";
+        if (!kt.ok) {
+            for (auto &e : kt.errors)
+                std::cout << "ERROR: " << e << "\n";
+            return 2;
+        }
+    }
     TensorFormResult tf = lowerTensorForm(src, dirOf(path), baseOf(path));
     if (tf.found) {
         std::cout << tf.report;

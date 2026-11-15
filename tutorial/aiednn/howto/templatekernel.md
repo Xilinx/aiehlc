@@ -1,23 +1,27 @@
 # How to write an AIEDNN kernel: one template, many compiled instances
 
-An **AIEDNN kernel** is a DNN operator (GEMM, or a conv lowered to GEMM) written
-for the AIE array in aiehlc's kernel-only model: one `__global__` kernel that
-says, in tensor coordinates, which block each core loads and stores. The
-compiler derives the DMA and routing from it. This guide shows how to write one
-that is **fast for a whole layer, not just correct for one tile**, and why each
-decision is made the way it is.
+**AIEDNN** is a library of fast AIE kernels for offloading ML operators: GEMM,
+convolution (as GEMM after im2col), and fused variants such as conv + bias +
+activation. A model compiler or an application calls an AIEDNN kernel instead
+of running the operator on the CPU.
 
-It distills sections 15–21 of the UNet deployment report
-(<http://xsjsswsip51:8099/>, "How the P1 and P4 blocks were resolved" through
-"why an op still needs many kernels"). Its kernel is `gemm_kacc`, the bf16
-GEMM that took the UNet's 37 AIE conv layers from 131.2 s to 43.1 s. This guide
-also uses its own tested example:
+This tutorial explains how to **develop an AIEDNN kernel**: how to write it,
+why each design decision is made, and what each one trades off. It also covers
+how to **integrate the kernel into the AIEDNN library**, so that it serves every
+layer shape of an operator, and how to add a **custom op** (§7).
+
+An AIEDNN kernel is written in aiehlc's kernel-only model. One `__global__`
+kernel says, in tensor coordinates, which block each core loads and stores, and
+the compiler derives the DMA and routing from it. The goal is a kernel that is
+**fast for a whole layer, not just correct for one tile**.
+
+The tutorial is built around one tested example:
 
 | File | What |
 |---|---|
-| [`example/aiednn/gemm_kacc_bf16.cc`](../../../example/aiednn/gemm_kacc_bf16.cc) | the template kernel + a self-checking `main()` |
+| [`example/aiednn/gemm_kacc_bf16.cc`](../../../example/aiednn/gemm_kacc_bf16.cc) | the kernel as a C++ template (`gemm_kacc<M, N, K, TK, RELU>`) + a self-checking `main()` |
 | [`example/aiednn/gemm_kacc_bf16.h`](../../../example/aiednn/gemm_kacc_bf16.h) | host side: test data, pre-tiling, fp32 reference, check, phase report |
-| [`example/aiednn/gen_variants.py`](../../../example/aiednn/gen_variants.py) | the generator: layer shapes -> parameter sets -> one source per variant + dispatch table |
+| [`example/aiednn/gen_variants.py`](../../../example/aiednn/gen_variants.py) | the generator: layer shapes -> template arguments -> one source per variant + dispatch table |
 
 Read [tutorial/aieprogram](../../aieprogram/README.md) first if `load_buffer`,
 `program_id` or `{.resident}` are new to you.
@@ -28,36 +32,30 @@ Read [tutorial/aieprogram](../../aieprogram/README.md) first if `load_buffer`,
 
 Every AIE launch pays a **fixed cost** before any MAC happens. That cost covers
 kernel load, BD and DMA setup, core reset and synchronisation. So the first
-design decision is how much work one launch carries. The UNet deployment
-measured it (report §17, §18):
+design decision is how much work one launch carries.
 
-| Same work: one 64×64×64 tile (262 k MAC) | Time |
-|---|---|
-| on the A78 (TVM C) | ~0.29 ms |
-| one AIE launch (bf16 vector MAC, warm kernel) | 0.99 ms |
+The example measures it with the runtime's phase counters (`--profiling`, §8).
+One launch of a 256×64×2304 bf16 GEMM on the 4×4 mesh breaks down as:
 
-| The whole UNet (37 conv layers on the AIE) | Launches | One UNet call |
+| Phase | PMU cycles | Share |
 |---|---|---|
-| A78 only | — | 61.2 s |
-| one 64³ tile per launch | 86,600 | 131.2 s (AIE part 85.6 s) |
-| **one launch per layer, K accumulated on the core** (`gemm_kacc`) | **37** | **43.1 s (AIE part 0.33 s)** |
+| `kload` (kernel load) | 41.3 M | 98.0 % |
+| `bdcfg` (BD configuration) | 0.48 M | 1.1 % |
+| `wait_io` (the DMA and the vector MACs) | 0.31 M | 0.7 % |
 
-With one tile per launch, the AIE was **3.5× slower than the CPU** for the same
-work. The fixed cost (~0.9 ms) dwarfs ~0.02 ms of compute. The fix was not a
-faster kernel but a different unit of work:
+The actual work is under 1 % of the launch. If the same GEMM were issued as one
+launch per output tile, that is 64 tiles here, every launch would pay the fixed
+cost again: about 64× the time for the same result. In that regime the AIE can
+easily end up slower than the CPU it is meant to offload.
 
 > **Rule 1.** Push the tile loop down into the core and the DMA. The host
 > launches once per layer (or once per network), never once per tile.
-
-The example measures the same thing on one launch with the runtime's phase
-counters (`--profiling`, section 7). The DMA and the vector MACs (`wait_io`)
-are **0.7 %** of the launch. Reloading the kernel (`kload`) is **98 %**.
 
 ---
 
 ## 2. The skeleton: three loops and an epilogue
 
-Every AIEDNN GEMM / conv kernel has this shape (report §20.0). The comments say
+Every AIEDNN GEMM / conv kernel has this shape. The comments say
 which section of this guide decides each line:
 
 ```
@@ -87,36 +85,39 @@ pixels, K = Cin·kh·kw, N = Cout.
 ```cpp
 #include "gemm_kacc_bf16.h"
 
-// ---- template parameters (gen_variants.py rewrites this block) ----
-#define AD_M 256
-#define AD_N 64
-#define AD_K 2304
-#define AD_TK 64
-#define AD_RELU 1
-// ---- end of template parameters ----
-// The output tile, fixed by the 2 x 2 accumulator blocking below.
-#define AD_TM 16
-#define AD_TN 16
+// ---- this program's instance (gen_variants.py rewrites this block per layer) ----
+#define GM 256
+#define GN 64
+#define GK 2304
+#define GTK 64
+#define GRELU 1
+// ---- end of instance ----
 
-__global__ void gemm_kacc(aie::port<input_window_bfloat16 *, aie::IFM, aie::shape<AD_M, AD_K>> a,
-                          aie::port<input_window_bfloat16 *, aie::WEIGHTS, aie::shape<AD_N, AD_K>> w,
-                          aie::port<output_window_bfloat16 *, aie::OFM, aie::shape<AD_M, AD_N>> c) {
-    const int ntile = AD_M / (4 * AD_TM); // output tiles per core, walked on the core
-    const int nkc = AD_K / AD_TK;          // K chunks per tile
-    const int kt = AD_TK / 8;              // 8x8 tiles per chunk row
+// M rows of A / C (output pixels), a multiple of 4 * 16; N columns of C (output
+// channels) = 4 mesh cols x 16; K the reduction (Cin * kh * kw), a multiple of
+// TK; TK the K chunk in bf16 elements, a multiple of 8 (the mmul K); RELU the
+// fused epilogue.
+template <int M, int N, int K, int TK = 64, bool RELU = true>
+__global__ void gemm_kacc(aie::port<input_window_bfloat16 *, aie::IFM, aie::shape<M, K>> a,
+                          aie::port<input_window_bfloat16 *, aie::WEIGHTS, aie::shape<N, K>> w,
+                          aie::port<output_window_bfloat16 *, aie::OFM, aie::shape<M, N>> c) {
+    const int TM = 16, TN = 16;     // the output tile: fixed by the 2 x 2 accumulator blocking below
+    const int ntile = M / (4 * TM); // output tiles per core, walked on the core
+    const int nkc = K / TK;         // K chunks per tile
+    const int kt = TK / 8;          // 8x8 tiles per chunk row
     const int pm = aie::program_id(0), pn = aie::program_id(1);
     for (int t = 0; t < ntile; t++) {
-        const int m0 = pm * (ntile * AD_TM) + t * AD_TM;
+        const int m0 = pm * (ntile * TM) + t * TM;
 #if defined(__chess__)
         using MM = aie::mmul<8, 8, 8, bfloat16, bfloat16, accfloat>;
         MM c00(aie::zeros<accfloat, 64>()), c01(aie::zeros<accfloat, 64>());
         MM c10(aie::zeros<accfloat, 64>()), c11(aie::zeros<accfloat, 64>());
 #else
-        float acc[AD_TM * AD_TN] = {}; // x86 trace / emulation: the same math, scalar
+        float acc[TM * TN] = {}; // x86 trace / emulation: the same math, scalar
 #endif
         for (int j = 0; j < nkc; j++) {
-            const bfloat16 *x = aie::load_buffer(a, {m0, j * AD_TK}, {AD_TM, AD_TK});
-            const bfloat16 *v = aie::load_buffer(w, {pn * AD_TN, j * AD_TK}, {AD_TN, AD_TK});
+            const bfloat16 *x = aie::load_buffer(a, {m0, j * TK}, {TM, TK});
+            const bfloat16 *v = aie::load_buffer(w, {pn * TN, j * TK}, {TN, TK});
 #if defined(__chess__)
             for (int kb = 0; kb < kt; kb++) {
                 const auto a0 = aie::load_v<64>(x + kb * 64), a1 = aie::load_v<64>(x + (kt + kb) * 64);
@@ -127,36 +128,39 @@ __global__ void gemm_kacc(aie::port<input_window_bfloat16 *, aie::IFM, aie::shap
                 c11.mac(a1, b1);
             }
 #else
-            for (int m = 0; m < AD_TM; m++)
-                for (int n = 0; n < AD_TN; n++)
-                    for (int k = 0; k < AD_TK; k++)
-                        acc[m * AD_TN + n] += (float)x[((m / 8) * kt + k / 8) * 64 + (m % 8) * 8 + k % 8] *
-                                              (float)v[((n / 8) * kt + k / 8) * 64 + (k % 8) * 8 + n % 8];
+            for (int m = 0; m < TM; m++)
+                for (int n = 0; n < TN; n++)
+                    for (int k = 0; k < TK; k++)
+                        acc[m * TN + n] += (float)x[((m / 8) * kt + k / 8) * 64 + (m % 8) * 8 + k % 8] *
+                                           (float)v[((n / 8) * kt + k / 8) * 64 + (k % 8) * 8 + n % 8];
 #endif
             aie::release(a);
             aie::release(w);
         }
         // The tile is done: epilogue on the fp32 accumulator, one rounding, one write-back.
-        bfloat16 *y = aie::store_buffer(c, {m0, pn * AD_TN}, {AD_TM, AD_TN});
+        bfloat16 *y = aie::store_buffer(c, {m0, pn * TN}, {TM, TN});
 #if defined(__chess__)
-        alignas(64) float acc[AD_TM * AD_TN];
+        alignas(64) float acc[TM * TN];
         const MM *blk[4] = {&c00, &c01, &c10, &c11};
         for (int b = 0; b < 4; b++) {
             alignas(64) float t8[64];
             aie::store_v(t8, blk[b]->to_vector<float>());
             for (int i = 0; i < 64; i++)
-                acc[((b / 2) * 8 + i / 8) * AD_TN + (b % 2) * 8 + i % 8] = t8[i];
+                acc[((b / 2) * 8 + i / 8) * TN + (b % 2) * 8 + i % 8] = t8[i];
         }
 #endif
-        for (int i = 0; i < AD_TM * AD_TN; i++) {
+        for (int i = 0; i < TM * TN; i++) {
             float o = acc[i];
-            if (AD_RELU && o < 0.0f)
+            if (RELU && o < 0.0f)
                 o = 0.0f;
             y[i] = (bfloat16)o;
         }
         aie::commit(c);
     }
 }
+
+// The launch picks the instance (in gemm_kacc_run()):
+//     gemm_kacc<GM, GN, GK, GTK, GRELU><<<mesh>>>(A, W, C);
 ```
 
 The host part of the file packs the inputs, launches once, checks every output
@@ -170,7 +174,7 @@ Two things that look odd and are deliberate:
   kernel analysis traces has `bfloat16` but no `accfloat` / bf16 `mmul` yet. So
   the `#else` branch computes the same result in scalar code. The analysis
   checks *which blocks* the kernel touches, and both branches touch the same
-  ones. This is the workaround `gemm_kacc` used too (report §18, problem 5).
+  ones.
 - **The odd index arithmetic** (`(m / 8) * kt + k / 8) * 64 + ...`). The
   blocks arrive pre-tiled in `mmul` operand order (§4.6), and this is how one
   element of a pre-tiled block is addressed.
@@ -186,8 +190,9 @@ Two things that look odd and are deliberate:
 B tiles and each B tile against two A tiles before it leaves the registers.
 
 **Why.** A Tm×Tn×Tk tile does Tm·Tn·Tk MACs on Tm·Tk + Tk·Tn input elements.
-A larger output tile reuses every loaded byte more often. The 2×2 blocking is
-what the int8 `conv2dpeak` kernel uses to reach 92 % of int8 peak (report §19).
+A larger output tile reuses every loaded byte more often. Register blocking
+(several accumulators sharing each loaded operand) is the standard way to raise
+that reuse without growing the buffers.
 
 **Trade-off.**
 
@@ -214,11 +219,11 @@ them in that same order.
 **Why.** This is Rule 1: the fixed per-launch cost is paid once per layer
 instead of once per tile.
 
-**Trade-off and options** (report §20.2):
+**Trade-off and options:**
 
 | Distribution | How | Good for |
 |---|---|---|
-| **block** (this example, `gemm_kacc`) | core (pm, pn) takes `ntile` consecutive tiles: `m0 = pm·ntile·TM + t·TM` | a regular DMA walk (one affine sequence per port); what the kernel analysis can route |
+| **block** (this example) | core (pm, pn) takes `ntile` consecutive tiles: `m0 = pm·ntile·TM + t·TM` | a regular DMA walk (one affine sequence per port); what the kernel analysis can route |
 | strided | `for (u = core_id; u < U; u += P)` | load balance when U is not a multiple of P |
 
 The whole layer waits for the slowest core. **Pick TM/TN so U is a multiple of
@@ -230,9 +235,10 @@ P.** `gen_variants.py` pads M to a multiple of 4·TM for exactly this reason.
 `mmul` registers across all K/TK chunks and is rounded to bf16 **once**, after
 the last chunk.
 
-**Why one rounding.** Rounding the partial sum to bf16 after every chunk loses
-accuracy. On UNet layer c013 (K = 23,040, 360 chunks) it measured cosine
-0.999818, against 0.999998 with one final rounding (report §20.4).
+**Why one rounding.** bf16 keeps 8 significant bits. Rounding the partial sum
+to bf16 after every chunk adds a rounding error per chunk, and with K/TK chunks
+those errors accumulate. Long-K layers (thousands of chunks in large convs) lose
+visibly more accuracy than with a single rounding at the end.
 
 **Hard constraints on TK.**
 - A multiple of the `mmul` K (8 here).
@@ -256,9 +262,8 @@ The same 256×64×2304 GEMM on palmyra:
 
 TK 128 really does less work: `bdcfg` and `wait_io` both drop. But the extra
 8 KB per core costs ~27 M more cycles of kernel load, which is 60 % slower
-end to end. With a **warm** runtime (kernel resident, BSS not re-written: the
-UNet's "warm launch", 44.4 → 4.5 ms per launch) the load term disappears, and
-the larger TK wins.
+end to end. With a **warm** runtime (kernel resident between launches, BSS
+not re-written) the load term disappears, and the larger TK wins.
 
 > **Rule 2.** There is no universally best TK. Choose the largest one that
 > fits, *for the launch model you actually run*, and measure the launch split
@@ -268,12 +273,12 @@ the larger TK wins.
 
 | Dataflow | Resident on the core | Streamed | Reused | Fits |
 |---|---|---|---|---|
-| **C-stationary** (this example, `gemm_kacc`) | the TM×TN accumulator | A and B chunks along K | C over all K/TK chunks, written once | long K (UNet convs: K = 9·Cin up to 23,040) |
+| **C-stationary** (this example) | the TM×TN accumulator | A and B chunks along K | C over all K/TK chunks, written once | long K (convs: K = kh·kw·Cin, often thousands) |
 | B-stationary (weights) | a TK×TN weight block (`{.resident}`) | activations along M | weights over M/TM tiles | small weights, many pixels |
 | A-stationary (input) | a TM×TK activation block | weights along N | activations over N/TN tiles | few rows, many output channels (small-M Linear) |
 
 **How to choose.** A is reused N/TN times, B is reused M/TM times, and C is
-reused K/TK times. Keep the most-reused one that still fits (report §20.5).
+reused K/TK times. Keep the most-reused one that still fits.
 The loop order *is* the choice:
 
 ```
@@ -312,7 +317,7 @@ to re-order it:
 
 | Who | How | Limits |
 |---|---|---|
-| **the host, once** (this example, `gemm_kacc`) | `ad_pretile()` stores every 16×TK chunk of A and W in operand order inside the same tensor; the DMA moves it unchanged | host time (once per weight set; per call for activations) |
+| **the host, once** (this example) | `ad_pretile()` stores every 16×TK chunk of A and W in operand order inside the same tensor; the DMA moves it unchanged | host time (once per weight set; per call for activations) |
 | the shim DMA: `{.tile = {tr, tc}}` | the block arrives panel-major, so each tr×tc tile is contiguous (3 BD dims) | only blocks that are **whole rows** of the tensor, and only re-orders whole 32-bit words: it cannot transpose int8 or bf16. The analysis refuses `.tile` on a K-chunk block |
 | the core | `aie::transpose` / shuffles per chunk | vector cycles every chunk |
 
@@ -322,19 +327,19 @@ W also needs a K×N transpose. The host pre-tiles both.
 ### 4.7 Fusion: the epilogue
 
 **What.** Element-wise work applied to the accumulator before its single
-write-back: bias, activation, residual add, scale. Here it is one compile-time
-switch:
+write-back: bias, activation, residual add, scale. Here it is one template
+parameter, `bool RELU`:
 
 ```cpp
 float o = acc[i];
-if (AD_RELU && o < 0.0f)   // AD_RELU is a #define: the branch folds away when 0
+if (RELU && o < 0.0f)   // RELU is a template parameter: the branch folds away when false
     o = 0.0f;
 y[i] = (bfloat16)o;
 ```
 
 **Why.** A fused epilogue saves a DDR round trip: the unfused version writes C
-and another op reads it back. In the UNet, bias / timestep / residual still run
-on the A78 and are part of the 6.1 s of host glue (report §18).
+and another op (often on the CPU) reads it back, applies the element-wise work,
+and writes it again.
 
 **Trade-offs.**
 - **Every extra operand is an extra port.** Bias (per output channel) or a
@@ -343,8 +348,7 @@ on the A78 and are part of the 6.1 s of host glue (report §18).
   from a plain one.
 - **Order matters.** bias → ReLU → +residual is not +residual → ReLU. The
   epilogue must follow the model graph exactly.
-- A policy chain keeps one source for many epilogues (report §20.3,
-  illustration):
+- A policy chain keeps one source for many epilogues (illustration):
 
   ```cpp
   struct Bias { static float f(float x, const EpiArgs &e) { return x + e.bias[e.co]; } };
@@ -355,10 +359,11 @@ on the A78 and are part of the 6.1 s of host glue (report §18).
   using Epi_CBR = Chain<Bias, Relu>;   // conv + bias + relu
   ```
 
-  In aiehlc today the selection is a compile-time `#define`, as in the example:
-  the kernel body is analysed and compiled as text with the source's plain
-  `#define`s (§5, §8), so whatever selects the epilogue has to be a
-  `#define`.
+  In aiehlc today the selection that is proven on the board is an integral
+  template parameter, as in the example (`bool RELU`). aiehlc also substitutes
+  `typename` parameters, but a policy type like `Chain<Bias, Relu>` also has to
+  be visible to the AIE compile of the kernel, and this example does not
+  exercise that.
 
 ### 4.8 Data type
 
@@ -366,9 +371,9 @@ The example is all bf16: `input_window_bfloat16` / `output_window_bfloat16`
 ports, an fp32 `accfloat` accumulator, and one rounding to bf16. Two current
 limits shape the ports:
 
-- **One element type per kernel.** All ports are bf16, so C is bf16. The
-  UNet's `gemm_kacc` wanted fp32 out, so it declared every port `int32` and
-  packed two bf16 per word. That works, but it pushes packing onto the host.
+- **One element type per kernel.** All ports are bf16, so C is bf16. A kernel
+  that needs fp32 out can declare every port `int32` and pack two bf16 per
+  input word. That works, but it pushes packing onto the host.
 - int8 and bf16 use different vector instructions and have different best
   tiles. A type change is a new instance at least, and often a new template.
 
@@ -381,22 +386,63 @@ it, together with the block sizes and loop bounds, into the DMA windows, the
 buffer sizes and the BD walk. So a parameter set is one compiled kernel plus
 its DMA configuration, and it cannot be chosen at run time.
 
-**Why not one run-time-parameterised kernel** (report §21.2)?
+**Why not one run-time-parameterised kernel?**
 - Loop bounds and tile sizes become variables. The compiler can no longer
   unroll or schedule vector instructions for fixed sizes, and the inner loop
   slows down.
 - DMA windows must be sized for the largest shape. Small shapes still occupy
   the full buffers, and large ones may not fit at all.
-- That was the UNet's first version: one 64³ tile for every shape, looped by
-  the host. It computed correctly in 131 s. Per-layer instances took 43.1 s.
+- The usual fallback, one fixed tile for every shape looped by the host, is
+  Rule 1 broken: one launch per tile.
 
-**How, in this repo.** The parameters are a block of plain `#define`s at the
-top of the template file. aiehlc analyses and compiles the kernel body as
-**text**, together with the source's plain `#define` lines. It does not carry
-`#ifndef` blocks, and it does not instantiate a C++ template on a `__global__`.
-Tried: `template <int AD_TK> __global__ ...` with `gemm_kacc<64><<<mesh>>>`
-fails the analysis with `'AD_TK' was not declared in this scope`. So the
-generator rewrites the `#define` block, one copy per parameter set:
+**How, in this repo.** The kernel is a real C++ template on a `__global__`,
+and the launch picks the instance:
+
+```cpp
+template <int M, int N, int K, int TK = 64, bool RELU = true>
+__global__ void gemm_kacc(aie::port<input_window_bfloat16 *, aie::IFM, aie::shape<M, K>> a, ...);
+
+gemm_kacc<GM, GN, GK, GTK, GRELU><<<mesh>>>(A, W, C);   // or gemm_kacc<256, 64, 2304><<<mesh>>>
+```
+
+aiehlc reads a kernel's port shapes and body as **source text** in several
+places: the kernel analysis, the port parser, and the kernel extraction for the
+AIE compiler. Each needs `aie::shape<M, K>` as numbers. So aiehlc instantiates
+the template on the text first, before any of them runs
+(`src/llvm/convautotile/kernel_template.cpp`):
+
+- Every launch `name<args><<<mesh>>>(...)` selects an instance. Omitted trailing
+  arguments take the defaults, which may use earlier parameters.
+- An integer argument is folded to a literal using the source's `#define`s
+  (`GTK * 2`, `true`, and `2 * 128` all work). Every parameter token in the
+  kernel's signature and body is then replaced by the value, and the
+  `template <...>` header is removed.
+- With one instance, the kernel keeps its name. With several, each instance gets
+  its own name (`gemm_kacc__256_64_2304_64_1`), each launch is rewritten to its
+  instance, and every instance is compiled into its own kernel ELF in the same
+  host ELF.
+
+The build log names every instance:
+
+```
+[KernelTemplate] instance gemm_kacc<256, 64, 2304, 64, 1> -> gemm_kacc
+```
+
+Misuse is an error, never a silent default: a template kernel that is never
+launched, a launch with no template arguments, too many arguments, or a missing
+argument with no default. An instance that the kernel cannot cover is caught by
+the analysis, the same way as for a plain kernel. For example,
+`gemm_kacc<200, ...>` reports `512 output element(s) are never stored`, because
+200 is not a multiple of 4·16.
+
+**Parameters:** integral non-type (`int`, `unsigned`, `long`, `bool`, `size_t`,
+…) and `typename` / `class`, each with an optional default. Not supported:
+packs, template template parameters, and a template launched only through a
+pointer.
+
+So one source covers every shape. What is left to the library is *picking* the
+arguments per layer. `gen_variants.py` writes them into the instance block
+(`GM` … `GRELU`) that the launch reads, one source per distinct set:
 
 ```python
 def pick(layer):                      # gen_variants.py, abridged
@@ -407,7 +453,7 @@ def pick(layer):                      # gen_variants.py, abridged
             tk = cand
             break
     k = ceil_to(layer["k"], tk)                   # zero K padding is exact (§4.5)
-    return {"AD_M": m, "AD_N": layer["n"], "AD_K": k, "AD_TK": tk, "AD_RELU": layer["relu"]}
+    return {"GM": m, "GN": layer["n"], "GK": k, "GTK": tk, "GRELU": layer["relu"]}
 
 for i, layer in enumerate(layers):                # de-duplicate: same parameters = same kernel
     params = pick(layer)
@@ -424,11 +470,17 @@ layer 3: M=64 N=64 K=576 relu=1 -> gemm_kacc_v2 (TK 128, padded M 64 K 640, wast
 4 layers -> 3 variants in /tmp/variants (dispatch.json: layer -> variant)
 ```
 
+One source per variant keeps each variant a separate, self-checking program.
+A library host that serves several layers can instead launch several instances
+from **one** source, `gemm_kacc<256, 64, 2304, 64, 1>` for one layer and
+`gemm_kacc<256, 64, 2304, 64, 0>` for another. Each becomes its own kernel ELF
+inside one host ELF. This was verified on the board: two instances, both
+16,384 / 16,384 bit-exact.
+
 The host then launches each layer with its variant, once per layer. Consecutive
-layers that share a variant do not reload the kernel (warm launch). In the UNet
-this ran by hand: `kplan.py` picked the parameters and `unet_aie.py` wrote the
-sources, giving **37 layers → 21 variants**, plus transposed variants for the
-px = 1024 layers.
+layers that share a variant need not reload the kernel (warm launch). On a real
+network the de-duplication matters: layers repeat shapes, so dozens of layers
+typically collapse to a much smaller set of variants.
 
 > The generator's cost model above maximises TK. On the cold-launch runtime of
 > §4.3 that is the *slower* choice, because the buffers are reloaded per
@@ -440,13 +492,13 @@ px = 1024 layers.
 ## 6. Why one op needs many kernels
 
 A single fixed-tile kernel makes every shape **computable**; instances make
-every shape **fast** (report §19, §21).
+every shape **fast**.
 
-| Level | In the UNet conv path | Who makes it |
+| Level | For the GEMM / conv operator | Who makes it |
 |---|---|---|
 | template (source) | 1: `gemm_kacc`. One more per *structure*: B-stationary, direct conv, … | written by hand |
-| parameter sets (TM/TN/TK, layout, fusion, type) | 37 layers → 21 sets | the generator, from the shapes |
-| compiled kernels | 21 ELFs (+ transposed variants) | aiehlc |
+| parameter sets (TM/TN/TK, layout, fusion, type) | one per distinct layer shape (demo: 4 layers → 3) | the generator, from the shapes |
+| compiled kernels | one ELF per parameter set | aiehlc |
 | at run time | one launch per layer; no reload when the variant repeats | the host, from the dispatch table |
 
 What a parameter can cover and what needs another template:
@@ -466,17 +518,73 @@ so more variants only cost compile time and ELF space in DDR.
 
 ---
 
-## 7. Build, check, run
+## 7. Integrating a kernel into AIEDNN, and adding a custom op
+
+A kernel joins the library as **a template plus the means to instantiate it for
+any layer shape**, not as a single compiled binary. Today the integration points
+in this repo are the template source, its host-side support, and the generator
+with its dispatch table. AIEDNN has no packaged runtime API yet, so these
+files *are* the interface.
+
+### What a library kernel delivers
+
+| Deliverable | In the example | Why the library needs it |
+|---|---|---|
+| the template | `gemm_kacc_bf16.cc`: the kernel as a C++ template (`gemm_kacc<M, N, K, TK, RELU>`), instantiated by aiehlc at its launch | one source covers every shape of the op |
+| the host contract | `gemm_kacc_bf16.h`: operand layout (`ad_pretile`), fp32 reference (`ad_reference`), result check | callers must lay data out the way the kernel reads it, and every instance must be checkable |
+| the instantiation rules | `gen_variants.py`: `pick()` turns a layer shape into a legal, de-duplicated parameter set, or refuses it with the reason | the library serves shapes it has never seen, and refuses the ones the template cannot cover instead of mis-computing them |
+| the dispatch entry | `dispatch.json`: layer → variant + parameters | how the caller finds the kernel for each layer |
+| the evidence | analysis OK, x86 emulation, board self-check, `--profiling` split (§8) | a library kernel must be proven correct and fast, not assumed so |
+
+### Adding a custom op
+
+A custom op is anything the existing templates do not compute, for example
+conv + bias + residual add + scale, or a GEMM with an unusual activation. Work
+down this list and stop at the first step that covers the op:
+
+1. **Express it as an existing template plus an epilogue.** Most element-wise
+   additions after a GEMM or conv are epilogues (§4.7). If the op needs **no
+   new operand** (a different activation, a constant scale), it is a new
+   template parameter (an `int` / `bool` switch) in the template's epilogue,
+   plus a new argument in `pick()`.
+2. **New operand → new instance with a new signature.** A per-channel bias, a
+   residual tensor or per-channel scales each need an extra `aie::port`. The
+   port list is the kernel's signature, so this is a new instance (or a small
+   new template) with:
+   - the extra `load_buffer` per output tile (a bias block is TN values, a
+     residual block is TM×TN);
+   - the extra operand in the host contract (layout, reference);
+   - an epilogue order that matches the model graph exactly (bias → ReLU →
+     +residual is not +residual → ReLU).
+3. **New loop structure → new template.** If the op needs a different dataflow
+   (B-stationary, a direct conv without im2col, attention-style reductions),
+   write a new template following §2–§5. It gets its own generator rules and
+   dispatch entries.
+4. **Prove it.** The same gates as any library kernel (§8): `aiehlc-convtile
+   trace` OK; x86 emulation of the scalar branch against the reference; board
+   self-check (bit-exact with exactly representable test data, a tolerance
+   otherwise); the `--profiling` split to confirm the launch is not dominated
+   by something the kernel can avoid.
+5. **Register it.** Add the op's shapes to the generator's rules (what it
+   accepts, how it pads, what it refuses) and its entries to the dispatch
+   table.
+
+The decision rules of §6 decide between steps 1–3: whether the change is a
+parameter, a new instance, or a new template.
+
+## 8. Build, check, run
 
 ```bash
 # 1. the analysis (seconds): blocks fit the DMA, every vector access inside its block
 build/aiehlc-convtile trace example/aiednn/gemm_kacc_bf16.cc
+#   [KernelTemplate] instance gemm_kacc<256, 64, 2304, 64, 1> -> gemm_kacc
 #   OK: every load_buffer / store_buffer matches the DMA   (11 block accesses checked)
 
 # 2. build (aout/ lands in the current directory) and run on the board
 source script/aiehlc.sh --aie-version 5 --runtime-source-file $PWD/example/aiednn/gemm_kacc_bf16.cc
 python3 script/test/apppaltest.py -y --netload ./aout/main.elf
-#   [gemm_kacc] PERF SUMMARY launch 32.967 ms, 2.29 GOPS
+#   === AIEDNN gemm_kacc<256, 64, 2304, 64, 1>: C = A . W^T, bf16, one launch ===
+#   [gemm_kacc] PERF SUMMARY launch 33.029 ms, 2.29 GOPS
 #   [gemm_kacc] check: 16384 / 16384 bit-exact, max 0 ULP
 #   PASS
 
@@ -492,7 +600,8 @@ Results on palmyra (AIE2PS, 4×4 mesh), 2026-11-14:
 
 | Instance | Shape (M×N×K), TK | Result | Launch |
 |---|---|---|---|
-| template default | 256×64×2304, 64, ReLU | 16,384 / 16,384 bit-exact, 3/3 runs | 33.0 ms |
+| template default | 256×64×2304, 64, ReLU | 16,384 / 16,384 bit-exact, 4/4 runs (incl. the C++-template source, 2026-11-15) | 33.0 ms |
+| two instances in one ELF (`<…, 1>` and `<…, 0>`) | 256×64×2304, 64, ReLU and no ReLU | 16,384 / 16,384 bit-exact each (2026-11-15) | 33.1 ms (first) |
 | `gemm_kacc_v0` | 256×64×2304, 128, ReLU | 16,384 / 16,384 bit-exact, 2/2 | 53.6 ms |
 | `gemm_kacc_v1` | 512×64×1152, 128 | 32,768 / 32,768 bit-exact, 2/2 | 53.4 ms |
 | `gemm_kacc_v2` | 64×64×640 (K padded from 576), 128, ReLU | 4,096 / 4,096 bit-exact, 2/2 | 52.6 ms |
@@ -507,26 +616,26 @@ lever, not a faster inner loop.
 
 ---
 
-## 8. Pitfalls (each one cost a build or a board run)
+## 9. Pitfalls (each one cost a build or a board run)
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `the core window is 256 elements x 144 round(s) ..., but the kernel's blocks are 1024 elements x 144` | aiehlc divided **every** input's window by the M-round count; only A holds M strips (`unet_m2` P4bk) | fixed on main (from `8c60bf8`). The build error is the `#routing.kernel_block` check doing its job: without it, a silent hang |
-| board `wait_io TIMEOUT` on the input shims, ch 1 | the A strip BD walks all K chunks in 3-D but was started K-rounds times with an element-count length | fixed on main (from `5791cbd`, narrowed so a BD whose length already is the whole walk keeps its repeat: `simplematmul2` uses that) |
+| `the core window is 256 elements x 144 round(s) ..., but the kernel's blocks are 1024 elements x 144` | aiehlc divided **every** input's window by the M-round count; only A holds M strips | fixed in aiehlc. The build error is the `#routing.kernel_block` check doing its job: without it, a silent hang |
+| board `wait_io TIMEOUT` on the input shims, ch 1 | the A strip BD walks all K chunks in 3-D but was started K-rounds times with an element-count length | fixed in aiehlc (only where the BD's length is not already the whole walk: `simplematmul2` relies on the other form) |
 | `{.tile / .resident} need blocks that are whole rows of the tensor` | `.tile` on a K-chunk block: the DMA would have ignored it | pre-tile on the host (§4.6) |
-| `use of undeclared identifier` for a parameter | it was defined inside `#ifndef`; aiehlc copies only plain `#define`s into the kernel | plain `#define`s in the template block |
+| `use of undeclared identifier` for a macro used by the kernel | it was defined inside `#ifndef`; aiehlc copies only plain `#define`s into the kernel | plain `#define`s (the instance block, any constants the kernel reads) |
+| `template kernel gemm_kacc ... is never launched` / `launched without template arguments` / `N template arguments, the kernel has M` / `no argument and no default for template parameter K` | the launch does not select exactly one instance | launch as `gemm_kacc<args><<<mesh>>>(...)`; defaults fill only trailing parameters |
 | "static bounds analysis: not evaluable" | a `// comment` on a `#define` line | comments on their own lines |
-| a few hundred outputs = the host's `memset` value on ~1 run in 6 | the generated launch invalidates the output only *before* the DMA | `Xil_DCacheInvalidateRange(C)` after the launch (in the example); general fix on `arthur/output-post-dma-invalidate` |
+| a few hundred outputs = the host's `memset` value on ~1 run in 6 | the generated launch invalidates the output only *before* the DMA | `Xil_DCacheInvalidateRange(C)` after the launch (in the example), until the generated launch invalidates outputs itself |
 | bf16 kernel "does not compile for tracing" | the x86 emulation has `bfloat16` but no `accfloat` / bf16 `mmul` | `#if defined(__chess__)` vector path + scalar `#else` (§3) |
 | N wider than 4·16 | this template gives each mesh column one 16-wide column of C | an N loop in the kernel: another template (`gen_variants.py` refuses) |
 
 ---
 
-## 9. Checklist for a new AIEDNN kernel
+## 10. Checklist for a new AIEDNN kernel
 
 1. **Unit of work.** One launch per layer. Estimate fixed cost × launches
-   against the CPU time for the same work *before* writing the kernel (report
-   §17: the rule the UNet project lacked).
+   against the CPU time for the same work *before* writing the kernel.
 2. **Dataflow.** Pick the stationary operand from the reuse counts (§4.4).
 3. **Register blocking and tile.** A multiple of the `mmul` shape; U a
    multiple of the core count (§4.1, §4.2).
@@ -535,7 +644,11 @@ lever, not a faster inner loop.
 5. **Layout.** Who produces `mmul` operand order: host, `.tile`, or core (§4.6).
 6. **Epilogue.** Fuse what has no extra operand; count the ports for the rest
    (§4.7).
-7. **Template block.** Plain `#define`s, no trailing comments. A generator
-   picks the values per layer and de-duplicates (§5).
+7. **Template parameters.** The shape, chunk and switches as C++ template
+   parameters; the launch selects the instance (§5). A generator picks the
+   arguments per layer and de-duplicates. Macros the launch uses: plain
+   `#define`s, no trailing comments.
 8. **Verify in layers.** `aiehlc-convtile trace` (seconds), then x86 emulation
    (the scalar branch), then the board with a self-check and `--profiling`.
+9. **Integrate.** Host contract, generator rules (accept / pad / refuse) and
+   dispatch entries, so the library can serve every shape of the op (§7).

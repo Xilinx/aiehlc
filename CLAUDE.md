@@ -551,12 +551,23 @@ mmul in the x86 emulation yet), blocks twice the bytes (7x14 tile). palmyra:
 
 ### AIEDNN template kernels (one launch per layer)
 
-How to write a DNN-op kernel that is fast for a whole layer:
-**[tutorial/aiednn/howto/templatekernel.md](tutorial/aiednn/howto/templatekernel.md)**
-(from the UNet deployment report §15-21). Example `example/aiednn/gemm_kacc_bf16.cc`
+AIEDNN is the library of fast AIE kernels for ML offload. How to develop a kernel
+for it (fast for a whole layer), integrate it, and add a custom op:
+**[tutorial/aiednn/howto/templatekernel.md](tutorial/aiednn/howto/templatekernel.md)**.
+Example `example/aiednn/gemm_kacc_bf16.cc`
 (bf16 GEMM, K accumulated in fp32 on the core, tile loop on the core, host
-pre-tiled chunks, fused ReLU; template parameters = plain `#define`s) +
-`gen_variants.py` (layer shapes -> de-duplicated variants + dispatch table).
+pre-tiled chunks, fused ReLU) as a **real C++ template**,
+`template <int M, int N, int K, int TK = 64, bool RELU = true> __global__`,
++ `gen_variants.py` (layer shapes -> de-duplicated template arguments + dispatch
+table). aiehlc instantiates templates **on the source text** before the
+analysis / port parser / kernel extraction (they all read shapes as text):
+`convautotile/kernel_template.cpp`, called from `aiehlc.cc:applyKernelTemplates`
+(after `inlineSourceIncludes`, before `applyConvAutoTiling`) and from
+`aiehlc-convtile trace`. Each launch `k<args><<<mesh>>>` selects an instance
+(defaults filled, integers folded with the source's `#define`s); one instance
+keeps the name, several become `k__a_b_c` kernels in one host ELF (board:
+two instances, both bit-exact). Never-launched / argument-count / no-default
+are errors; a source without a template kernel is returned untouched.
 palmyra: 4 instances bit-exact; a cold launch is 98-99 % kload, so TK 64 (33 ms)
 beats TK 128 (53.6 ms) -- the buffers are BSS reloaded per launch. Needed two
 GEMM lowering fixes (B's window divided by m_rounds; the 3-D K BD started
@@ -968,7 +979,7 @@ Read the matching skill when the task fits:
 | Kernel-only `{.depth / .resident / .tile}` options; `the core window is N elements x R round(s) ... but the kernel's blocks (#routing.kernel_block) are`; `the port buffers take N B of core memory`; a GEMM with B loaded once / full-K A strips; kernel macro under `#ifndef` undeclared | gemmdataflowoptions |
 | Misspelled `#include` reported as `` `HW_ROWS` ... no #define `` instead of `file not found`; kernel-only kernel: `kernel analysis needs the launch mesh: no device.partition(...)` though the call exists (mesh macros behind `#include <x.h>`); xchesscc `no matching function for call to 'aiehlc_load_buffer'` (window port by value, missing `*`); adding an early source-level diagnostic | kernelanalysisdiagnostics |
 | bfloat16 ports: `input_window_bfloat16`, DMA lengths twice/half, `output block bytes per round` mismatch on a 16-bit conv, `bfloat16` does not compile for tracing, a few hundred outputs reading 0 on 1 run in 6 | bf16kernel |
-| AIEDNN template kernel (GEMM/conv, one launch per layer, fp32 K accumulation): window `N x R ... kernel's blocks are 4N` with M and K rounds, input-shim `wait_io TIMEOUT` ch 1, `.tile` on a K chunk refused, template parameter not declared, bigger TK slower | aiednnkernel |
+| AIEDNN template kernel (GEMM/conv, one launch per layer, fp32 K accumulation): window `N x R ... kernel's blocks are 4N` with M and K rounds, input-shim `wait_io TIMEOUT` ch 1, `.tile` on a K chunk refused, `[KernelTemplate]` / template kernel "never launched" or argument-count errors, bigger TK slower | aiednnkernel |
 | `data used without being loaded` and WHICH constant causes it (`oc_t = 15` vs loops walking 16); `cause (static analysis)` / `out-of-block access (static analysis)` lines; extending `kernel_static.cpp` | blockstaticbounds |
 | Edit the routing / dmaphop IR and feed it back (`AIEHLC_ROUTING_IR_IN`, `AIEHLC_DMAPHOP_IR_IN`, `aiebackend.routing_ir`: view / set_level / lint / check / build), round-trip test, an IR edit that does nothing or is silently accepted although illegal; `flowcheck FAILED` / `FLOWCHECK ERROR ... does not reach / also reaches` after a build | routingirreentry |
 | Kernel-only kernel without options hangs in `wait_io TIMEOUT ... dir=0` (output) but works with `{.depth = 2}`; output `pp_depth=1`, one output MM2S BD with `next_bd=-1` vs ping/pong `window_init`; `{.depth = 1} on aie::store_buffer` error | outputpingponghang |

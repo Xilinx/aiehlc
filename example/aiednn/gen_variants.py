@@ -5,11 +5,14 @@
 ###############################################################################
 """Instantiate the AIEDNN template kernel gemm_kacc_bf16.cc once per layer shape.
 
-aiehlc needs every port shape and loop bound as a compile-time constant (they
-become the DMA windows and buffer descriptors), so a template parameter set is
-one compiled kernel. This script does what a library generator does: pick the
-parameters for each layer, de-duplicate identical sets, and write one source
-per distinct set plus a dispatch table (layer -> variant).
+The kernel is a C++ template, gemm_kacc<M, N, K, TK, RELU>; aiehlc instantiates
+it at the launch, and every port shape and loop bound becomes a compile-time
+constant there (they are the DMA windows and buffer descriptors), so one
+argument set is one compiled kernel. This script does what a library generator
+does: pick the template arguments for each layer, de-duplicate identical sets,
+and write one source per distinct set (the GM ... GRELU instance block that the
+launch `gemm_kacc<GM, GN, GK, GTK, GRELU><<<mesh>>>` reads) plus a dispatch
+table (layer -> variant).
 
     python3 example/aiednn/gen_variants.py --out /tmp/variants            # the demo layer list
     python3 example/aiednn/gen_variants.py --out DIR --layers layers.json  # [{"m":..,"n":..,"k":..,"relu":0|1}, ...]
@@ -63,7 +66,7 @@ def pick(layer):
         raise SystemExit(f"layer K={layer['k']}: no K chunk fits the {PORT_BUDGET} B port region")
     k = ceil_to(layer["k"], tk)              # zero K padding is exact (0 * w = 0)
     waste = 1 - layer["m"] * layer["k"] / (m * k)
-    return {"AD_M": m, "AD_N": n, "AD_K": k, "AD_TK": tk, "AD_RELU": int(layer["relu"])}, waste
+    return {"GM": m, "GN": n, "GK": k, "GTK": tk, "GRELU": int(layer["relu"])}, waste
 
 
 def instantiate(params, name, out):
@@ -71,7 +74,7 @@ def instantiate(params, name, out):
     for key, val in params.items():
         src, hits = re.subn(rf"^#define {key} .*$", f"#define {key} {val}", src, flags=re.M)
         if hits != 1:
-            raise SystemExit(f"{TEMPLATE.name}: no unique '#define {key}' in the template block")
+            raise SystemExit(f"{TEMPLATE.name}: no unique '#define {key}' in the instance block")
     (out / f"{name}.cc").write_text(src)
 
 
@@ -93,7 +96,7 @@ def main():
             instantiate(params, variants[key], out)
         table.append({"layer": i, "variant": variants[key], **params, "pad_waste": round(waste, 4)})
         print(f"layer {i}: M={layer['m']} N={layer['n']} K={layer['k']} relu={layer['relu']} -> {variants[key]} "
-              f"(TK {params['AD_TK']}, padded M {params['AD_M']} K {params['AD_K']}, waste {waste:.1%})")
+              f"(TK {params['GTK']}, padded M {params['GM']} K {params['GK']}, waste {waste:.1%})")
     (out / "dispatch.json").write_text(json.dumps(table, indent=1) + "\n")
     print(f"{len(layers)} layers -> {len(variants)} variants in {out} (dispatch.json: layer -> variant)")
 

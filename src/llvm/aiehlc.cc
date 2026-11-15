@@ -45,6 +45,7 @@
 #include "routingmanager.h"
 #include "convautotile/conv_desugar.h"
 #include "convautotile/kernel_trace.h"
+#include "convautotile/kernel_template.h"
 #include "convautotile/kernel_front.h"
 
 class AieFrontEnd;
@@ -4027,6 +4028,22 @@ public:
             }
         }
 
+        // C++ templates on __global__ kernels (convautotile/kernel_template.h):
+        // every `kernel<args><<<mesh>>>` launch selects an instance, substituted
+        // into the text before anything reads the kernel's shapes or body.
+        void applyKernelTemplates(std::string &src) {
+            convautotile::KernelTemplateResult tr = convautotile::instantiateKernelTemplates(src, userSourceDir);
+            if (!tr.found)
+                return;
+            for (auto &n : tr.notes)
+                llvm::outs() << "[KernelTemplate] instance " << n << "\n";
+            if (!tr.ok) {
+                for (auto &e : tr.errors)
+                    llvm::errs() << "[KernelTemplate] ERROR: " << e << "\n";
+                std::exit(1);
+            }
+        }
+
         // Lower the declarative conv2d model (aie::Conv2d + aie::Mapping +
         // aie::port<T, aie::IFM|WEIGHTS|OFM>) into the explicit GemmSpace form
         // before any other rewrite sees the text (src/llvm/convautotile/). The
@@ -4220,6 +4237,7 @@ public:
                 // Headers (`.h`) are left to Clang, as before.
                 checkSourceIncludes(SourceCodeString);
                 inlineSourceIncludes(SourceCodeString);
+                applyKernelTemplates(SourceCodeString);
                 applyConvAutoTiling(SourceCodeString);
 
                 // Collect user #define macros before any rewriting.

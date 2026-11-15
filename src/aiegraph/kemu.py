@@ -195,7 +195,9 @@ template <class... P, class... A> void launch(const aieMesh &m, void (*k)(P...),
 } // namespace kemu
 """
 
-_LAUNCH = re.compile(r"\b(\w+)\s*<<<\s*([^<>]+?)\s*>>>\s*\(")
+# `name<<<mesh>>>(` or, for a template kernel, `name<args><<<mesh>>>(` -- the
+# instance `name<args>` is then the function passed to kemu::launch.
+_LAUNCH = re.compile(r"\b(\w+(?:\s*<[^<>;(){}]*>)?)\s*<<<\s*([^<>]+?)\s*>>>\s*\(")
 
 
 @dataclass
