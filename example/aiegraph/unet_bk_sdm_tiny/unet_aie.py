@@ -1206,9 +1206,17 @@ static void uc_ysentinel(int32_t *ky, size_t bytes) {
     if (g_uc_opt & 1) {
         for (size_t o = 0; o < bytes / 4; o += 1024) {
             ky[o] = -1;
+#if defined(__aarch64__)
+            if (!(g_uc_opt & 2)) /* clean+invalidate to PoC, one DSB for all (Xil_DCacheFlushLine: 2 DSB + IRQ mask each) */
+                __asm__ volatile("dc civac, %0" ::"r"(ky + o) : "memory");
+#else
             if (!(g_uc_opt & 2))
                 Xil_DCacheFlushLine((INTPTR)(ky + o));
+#endif
         }
+#if defined(__aarch64__)
+        __asm__ volatile("dsb sy" ::: "memory");
+#endif
     } else {
         memset(ky, 0xff, bytes);
     }
