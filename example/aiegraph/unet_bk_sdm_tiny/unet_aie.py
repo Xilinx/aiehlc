@@ -100,6 +100,8 @@ def map_layers(onnx_path: Path, partition: dict, work: Path, offsets_fn) -> tupl
     onodes = {n.name: n for n in m.graph.node}
     out, used = [], set()
     for L in partition["layers"]:
+        if L.get("cls") == "linear":
+            continue   # PDN: map_linears
         n = onodes[L["node"]]
         assert n.op_type == "Conv" and n.input[1] == L["weight"], (L["node"], n.op_type)
         at = {a.name: onnx.helper.get_attribute_value(a) for a in n.attribute}
@@ -120,11 +122,98 @@ def map_layers(onnx_path: Path, partition: dict, work: Path, offsets_fn) -> tupl
         assert [M, C * KH * KW, O] == list(mkn), (L["node"], M, C * KH * KW, O, mkn)
         assert launches == L["launches"], (L["node"], launches, L["launches"])
         assert c["warg"] == 1, c
-        out.append(dict(c, cid=L["idx"], onnx=L["node"], weight=L["weight"], launches=launches,
+        out.append(dict(c, kind="conv", cid=L["idx"], onnx=L["node"], weight=L["weight"], launches=launches,
                         macs=M * O * C * KH * KW, sh=at["strides"][0], sw=at["strides"][1],
                         ph=pads[0], pw=pads[1], M=M, N=O, K=C * KH * KW))
     log(f"mapped {len(out)} partition layers to TVM calls")
     return out, convs
+
+
+def kacc_split(N: int, K: int, Mp: int) -> tuple:
+    """PDN: launches of ONE gemm_kacc instance for a dense GEMM (= kacc_gemm.plan, PDK board-proven c009):
+    the whole GEMM if (ch N, k K, px Mp) fits, else S launches along px (X rows / Y blocks contiguous).
+    Returns (S, px per launch)."""
+    def fits(ch, k, px):
+        try:
+            kacc_geom(ch, k, px)
+            return True
+        except AssertionError:
+            return False
+    if fits(N, K, Mp):
+        return 1, Mp
+    for s in (2, 4, 8, 16):
+        if Mp % (64 * s) == 0 and fits(N, K, Mp // s):
+            return s, Mp // s
+    raise SystemExit(f"kacc_split: no px split of N={N} K={K} M={Mp} fits gemm_kacc")
+
+
+def map_linears(onnx_path: Path, partition: dict, work: Path, offsets_fn) -> list:
+    """PDN: partition 'linear' layers (ONNX MatMul/Gemm with a constant weight) -> TVM nn_contrib_dense_pack
+    calls (weight packed [N/nb][K][nb], arg 1). Matched by weight VALUE: the TVM fp32 param unpacked to [N][K]
+    must equal the ONNX weight (MatMul B^T / Gemm B or B^T) exactly; a unique match per layer or the build fails."""
+    import onnx
+    from onnx import numpy_helper
+    graphs = sorted(work.glob("*_graph.json"))
+    assert len(graphs) == 1, graphs
+    g = json.loads(graphs[0].read_text())
+    params = graphs[0].with_name(graphs[0].name.replace("_graph.json", "_params.bin"))
+    offs = offsets_fn(params)
+    nodes, row_ptr = g["nodes"], g["node_row_ptr"]
+    shapes = g["attrs"]["shape"][1]
+    blob = np.memmap(params, dtype=np.uint8, mode="r")
+    dense = {}   # (N, K) -> list of TVM calls
+    ndense = 0
+    for i, n in enumerate(nodes):
+        if n.get("op") != "tvm_op" or "dense" not in n["attrs"]["func_name"]:
+            continue
+        ndense += 1
+        ins = [s for s, _, _ in n["inputs"]]
+        w = ins[1]
+        if nodes[w]["op"] != "null" or nodes[w]["name"] not in offs:
+            continue   # weight computed at run time (time embedding, M=1): stays on the CPU
+        ws, xs, ys = shapes[row_ptr[w]], shapes[row_ptr[ins[0]]], shapes[row_ptr[i]]
+        if len(ws) != 3 or len(xs) != 2 or len(ys) != 2:
+            continue
+        N, K = ws[0] * ws[2], ws[1]
+        f = n["attrs"]["func_name"]
+        dense.setdefault((N, K), []).append(dict(
+            node=i, symbol=f if f.startswith("tvmgen_") else "tvmgen_default_" + f, func=f,
+            wname=nodes[w]["name"], warg=1, nargs=len(ins) + int(n["attrs"].get("num_outputs", 1)),
+            wshape=ws, xshape=xs, yshape=ys))
+    log(f"TVM graph {graphs[0].name}: {ndense} dense calls, {sum(len(v) for v in dense.values())} with a param weight")
+    m = onnx.load(str(onnx_path))
+    inits = {t.name: t for t in m.graph.initializer}
+    onodes = {n.name: n for n in m.graph.node}
+    out, used = [], set()
+    for L in partition["layers"]:
+        if L.get("cls") != "linear":
+            continue
+        n = onodes[L["node"]]
+        assert n.op_type in ("MatMul", "Gemm") and L["weight"] in n.input, (L["node"], n.op_type)
+        b = numpy_helper.to_array(inits[L["weight"]]).astype(np.float32)
+        at = {a.name: onnx.helper.get_attribute_value(a) for a in n.attribute}
+        wnk = b if (n.op_type == "Gemm" and at.get("transB", 0)) else b.T   # natural W [N][K]
+        M, K, N = L["pad"]["orig"] if "pad" in L else L["mkn"][0]
+        assert wnk.shape == (N, K), (L["node"], wnk.shape, N, K)
+        hit = []
+        for c in dense.get((N, K), []):
+            if c["node"] in used or c["xshape"][0] != M:
+                continue
+            off, nb = offs[c["wname"]]
+            on, kk, ob = c["wshape"]
+            pk = np.frombuffer(blob[off:off + nb].tobytes(), dtype="<f4").reshape(on, kk, ob)
+            if np.array_equal(pk.transpose(0, 2, 1).reshape(N, K), wnk):
+                hit.append(c)
+        assert len(hit) == 1, f"linear {L['node']} ({L['weight']} M={M} K={K} N={N}): {len(hit)} TVM matches"
+        c = hit[0]
+        used.add(c["node"])
+        assert c["yshape"] == [M, N], (L["node"], c["yshape"])
+        S, pxs = kacc_split(N, K, -(-M // 64) * 64)
+        out.append(dict(c, kind="linear", cid=L["idx"], onnx=L["node"], weight=L["weight"], launches=S, S=S,
+                        pxs=pxs, macs=M * N * K, M=M, N=N, K=K, sh=1, sw=1, ph=0, pw=0))
+    log(f"mapped {len(out)} partition linear layers to TVM dense calls (weights equal by value), "
+        f"{sum(c['S'] for c in out)} gemm_kacc launches")
+    return out
 
 
 def check_data_arg0(layers_dir: Path, sel: list) -> None:
@@ -557,13 +646,14 @@ def write_kernel(kdst: Path, spec: str, maxacc: int, warm: bool = False, ctrlpkt
 
 # ─────────────────────────────── driver patch ───────────────────────────────
 DECL = ("int unet_aie_conv(int cid, void *args, int nargs, const uint16_t *wbf, "
-        "int sh, int sw, int ph, int pw);   /* build_unet.py --aie conv */\n")
+        "int sh, int sw, int ph, int pw);   /* build_unet.py --aie conv */\n"
+        "int unet_aie_linear(int cid, void *args, int nargs, const uint16_t *wbf, int S);   /* --aie conv,linear */\n")
 CALL_RE = re.compile(r"    GRAPH_PROF_BEGIN\((\d+)\);\n(#ifdef GRAPH_AIE_OFFLOAD\n.*?#endif\n|"
                      r"    \w+\(args, codes, \d+, 0, 0, 0\);\n    GRAPH_PROF_END\(\1, \"[^\"]*\"\);\n)", re.S)
 
 
 def patch_driver(text: str, sel: list) -> tuple:
-    if "unet_aie_conv(int cid" in text:
+    if "unet_aie_conv(int cid, void" in text.split("static uint8_t kernel_ws[")[0]:
         raise RuntimeError("driver already patched")
     i = text.index("static uint8_t kernel_ws[")
     text = text[:i] + DECL + PROF_C + "\n" + text[i:]
@@ -598,14 +688,21 @@ def patch_driver(text: str, sel: list) -> tuple:
         assert cm and (nxt < 0 or cm.start() < nxt), c["wname"]
         calls = re.findall(r"(?:aie_)?(tvmgen_\w+)\(args, codes, (\d+), 0, 0, 0\);", cm.group(2))
         assert calls and all(s == c["symbol"] and int(k) == c["nargs"] for s, k in calls), (calls, c["symbol"])
-        rep = ("    GRAPH_PROF_BEGIN(%s);\n    UP_AIE_BEGIN(%s);\n"
-               "    unet_aie_conv(%d, args, %d, (const uint16_t *)(g_params + %d), %d, %d, %d, %d);\n"
-               "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie unet_aie_conv %d\");\n"
-               % (cm.group(1), cm.group(1), c["cid"], c["nargs"], off, c["sh"], c["sw"], c["ph"], c["pw"],
-                  cm.group(1), cm.group(1), c["cid"]))
+        if c.get("kind") == "linear":   # PDN: tag "aie unet_aie_lin <cid>" -> PROF op=aie_host_linear<cid>
+            rep = ("    GRAPH_PROF_BEGIN(%s);\n    UP_AIE_BEGIN(%s);\n"
+                   "    unet_aie_linear(%d, args, %d, (const uint16_t *)(g_params + %d), %d);\n"
+                   "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie unet_aie_lin %d\");\n"
+                   % (cm.group(1), cm.group(1), c["cid"], c["nargs"], off, c["S"], cm.group(1), cm.group(1), c["cid"]))
+        else:
+            rep = ("    GRAPH_PROF_BEGIN(%s);\n    UP_AIE_BEGIN(%s);\n"
+                   "    unet_aie_conv(%d, args, %d, (const uint16_t *)(g_params + %d), %d, %d, %d, %d);\n"
+                   "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie unet_aie_conv %d\");\n"
+                   % (cm.group(1), cm.group(1), c["cid"], c["nargs"], off, c["sh"], c["sw"], c["ph"], c["pw"],
+                      cm.group(1), cm.group(1), c["cid"]))
         text = text[:cm.start()] + rep + text[cm.end():]
         n += 1
-    assert text.count("    unet_aie_conv(") == len(sel)
+    nl = sum(1 for c in sel if c.get("kind") == "linear")
+    assert text.count("    unet_aie_conv(") == len(sel) - nl and text.count("    unet_aie_linear(") == nl
     return text, n
 
 
@@ -641,7 +738,10 @@ void unet_prof_print(double graph_run_ms, double aie_wall_ms) {
         const double site = (double)up_ticks[i] * tk, e = (double)up_exp_ticks[i] * tk;
         const double a78 = is_aie ? site - up_aie_ms[i] : site;
         const char *op = strncmp(up_tag[i], "cpu ", 4) == 0 ? up_tag[i] + 4 : up_tag[i];
-        if (is_aie)
+        if (is_aie && strncmp(up_tag[i], "aie unet_aie_lin ", 17) == 0) /* PDN linear site: AIE host glue */
+            printf("PROF part=%u op=aie_host_linear%s ms=%.3f bf16_expand_ms=%.3f site_ms=%.3f aie_ms=%.3f\n", i,
+                   up_tag[i] + 17, a78 + e, e, site, up_aie_ms[i]);
+        else if (is_aie)
             printf("PROF part=%u op=aie_host_conv%s ms=%.3f bf16_expand_ms=%.3f site_ms=%.3f aie_ms=%.3f\n", i,
                    up_tag[i] + 18, a78 + e, e, site, up_aie_ms[i]);
         else
@@ -831,6 +931,18 @@ def kacc_wlayout(w6, N: int, K: int, M: int):
     return np.ascontiguousarray(t.transpose(0, 2, 1, 3)).reshape(-1)       # nb row j q
 
 
+def kacc_dense_wlayout(wp, N: int, K: int, pxs: int):
+    """PDN: TVM dense_pack weight [N/nb][K][nb] (bf16) -> the kacc W chunk layout of instance (N, K, pxs), same
+    order as kacc_wlayout / kacc_gemm.layout(wside=True): nb row j q (16-row block, chunk j of kch bf16)."""
+    on, k, ob = wp.shape
+    assert on * ob == N and k == K, (wp.shape, N, K)
+    kch = kacc_geom(N, K, pxs)["kch"]
+    wn = wp.transpose(0, 2, 1).reshape(N, K)
+    t = wn.reshape(N // 16, 2, 8, K // kch, kch // 8, 8).transpose(0, 3, 1, 4, 2, 5)
+    t = t.reshape(N // 16, K // kch, 16, kch).transpose(0, 2, 1, 3)
+    return np.ascontiguousarray(t).reshape(-1)
+
+
 def prelayout_weights(wbin: Path, sel: list) -> int:
     """P4w: rewrite every AIE conv layer's bf16 weight in weights.bin (in place, same size) into the kacc
     chunk layout, so the board pre step is only im2col. Returns the bytes rewritten."""
@@ -840,7 +952,11 @@ def prelayout_weights(wbin: Path, sel: list) -> int:
     for c in sel:
         nel = int(np.prod(c["wshape"]))
         w = np.frombuffer(blob[c["woff"]:c["woff"] + 2 * nel].tobytes(), dtype="<u2").reshape(c["wshape"])
-        blob[c["woff"]:c["woff"] + 2 * nel] = kacc_wlayout(w, c["N"], c["K"], c["M"]).view(np.uint8)
+        if c.get("kind") == "linear":   # PDN: TVM dense_pack [N/nb][K][nb] -> natural [N][K] -> kacc chunks
+            lw = kacc_dense_wlayout(w, c["N"], c["K"], c["pxs"])
+        else:
+            lw = kacc_wlayout(w, c["N"], c["K"], c["M"])
+        blob[c["woff"]:c["woff"] + 2 * nel] = lw.view(np.uint8)
         tot += 2 * nel
     blob.flush()
     del blob
@@ -973,15 +1089,18 @@ def kacc_kernel_text(ch: int, k: int, px: int) -> str:
     return t
 
 
-def kacc_host(shapes: list) -> str:
-    """host part of the --kincore aiek source: uc_conv with ONE gemm_kacc launch per layer (no host K-sum)"""
-    sw = "\n".join("    if (N == %d && K == %d && M == %d) {\n        %s<<<mesh>>>(%s, g_ky);\n        return 0;\n    }"
-                   % (ch, k, px, kacc_name(ch, k, px), "g_kx, g_kw" if kacc_geom(ch, k, px)["tr"] else "g_kw, g_kx")
+def kacc_host(shapes: list, lin: list = ()) -> str:
+    """host part of the --kincore aiek source: uc_conv with ONE gemm_kacc launch per layer (no host K-sum);
+    lin (PDN): (N, K, Mp, pxs) of the linear layers -- buffers hold the whole GEMM (all S px launches)"""
+    sw = "\n".join("    if (N == %d && K == %d && M == %d) {\n        %s<<<mesh>>>(%s, ky);\n        return 0;\n    }"
+                   % (ch, k, px, kacc_name(ch, k, px), "kx, kw" if kacc_geom(ch, k, px)["tr"] else "kw, kx")
                    for ch, k, px in shapes)
     return KACC_HOST.replace("@DISPATCH@", sw) \
-        .replace("@MAXW@", str(max(sh[0] * kacc_geom(*sh)["kp"] for sh in shapes))) \
-        .replace("@MAXX@", str(max(sh[2] * kacc_geom(*sh)["kp"] for sh in shapes))) \
-        .replace("@MAXY@", str(max(ch * px for ch, k, px in shapes)))
+        .replace("@MAXW@", str(max([sh[0] * kacc_geom(*sh)["kp"] for sh in shapes] +
+                                   [n * kacc_geom(n, k, p)["kp"] for n, k, mp, p in lin]))) \
+        .replace("@MAXX@", str(max([sh[2] * kacc_geom(*sh)["kp"] for sh in shapes] +
+                                   [mp * kacc_geom(n, k, p)["kp"] for n, k, mp, p in lin]))) \
+        .replace("@MAXY@", str(max([ch * px for ch, k, px in shapes] + [n * mp for n, k, mp, p in lin])))
 
 
 KACC_HOST = r"""
@@ -998,7 +1117,7 @@ static int uc_kalloc(void) {
     return (g_kw && g_kx && g_ky) ? 0 : -1;
 }
 /* one launch of the layer's gemm_kacc instance (ports W [N][K/2], X [M][K/2], Y f32 [N][M]) */
-static int uc_kacc_launch(int N, int K, int M) {
+static int uc_kacc_launch(int N, int K, int M, int32_t *kw, int32_t *kx, int32_t *ky) {
     aieSetDevice(0);
     aieArray device;
     aieMesh mesh = device.partition({@PART_C0@, 6, 0, 6}, 4, 4); // aiegraph lint L015: the mesh VarDecl in the launching function
@@ -1113,7 +1232,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
     printf("[UCS] l=%d M=%d N=%d K=%d tkw=%d\n", g_aie_launches, M, N, K, kch / 2); /* P4bp: names a hanging launch */
     fflush(stdout);
-    const int lrc = uc_kacc_launch(N, K, M); // ONE launch: the whole layer, K summed in the cores
+    const int lrc = uc_kacc_launch(N, K, M, g_kw, g_kx, g_ky); // ONE launch: the whole layer, K summed in the cores
     const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();
     Xil_DCacheInvalidateRange((UINTPTR)g_ky, (size_t)M * N * 4);
 #if UC_WARM
@@ -1170,9 +1289,183 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
 """
 
 
-def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, ctrlpkt: str = "off") -> Path:
-    """--kincore: aiek_unetconv.cc = one gemm_kacc instance per distinct (ch, K, px) + host unet_aie_conv"""
-    spec = spec.replace('"out ', '"export    unet_aie_conv\\n"\n        "export    unet_aie_stats\\n"\n'
+LINEAR_HOST = r"""
+/* PDN (--aie conv,linear): one TVM nn_contrib_dense_pack call site on the AIE. Y[M][N] = X[M][K] . W[N][K]^T
+ * (+ bias [1,N] / residual [M,N] epilogue) as S launches of ONE gemm_kacc instance (N, K, px=Mp/S), split
+ * along px (kacc_split, as kacc_gemm.py / PDK c009). W is pre-laid at build time in the kacc chunk layout
+ * (unet_aie.kacc_dense_wlayout); X is tiled here fp32 -> bf16 RNE, rows M..Mp-1 zero. */
+static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
+    if (nargs < 3)
+        return -2;
+    const uc_dlt *x = (const uc_dlt *)argv[0], *w = (const uc_dlt *)argv[1], *y = (const uc_dlt *)argv[nargs - 1];
+    if (x->ndim != 2 || w->ndim != 3 || y->ndim != 2)
+        return -2;
+    const int M = (int)x->shape[0], K = (int)x->shape[1], N = (int)y->shape[1];
+    if ((int)y->shape[0] != M || (int)w->shape[1] != K || (int)(w->shape[0] * w->shape[2]) != N)
+        return -3;
+    const int Mp = (M + 63) & ~63;
+    if (S < 1 || Mp % (64 * S) || (N | K) & 63)
+        return -3;
+    const int P = Mp / S; /* px per launch */
+    int tkw = 4096 / P < 32 ? 4096 / P : 32; /* = kacc_geom(N, K, P) */
+    const int tr = 2 * (16 * tkw * 4 + (P / 4) * tkw * 4 + 16 * (P / 4) * 4) > 29696;
+    if (tr)
+        for (tkw = 32; (N / 4) * tkw > 1024 || (K / 2) % tkw; tkw /= 2)
+            ;
+    const int kch = 2 * tkw;
+    const int Kp = (N == K / 2) ? K + kch : K;
+    if (kch > 64 || K % kch || (long)N * Kp > UC_KW_ELEMS || (long)Mp * Kp > UC_KX_ELEMS ||
+        (long)Mp * N > UC_KY_ELEMS)
+        return -3;
+    const float *xin = (const float *)x->data;
+    float *yout = (float *)y->data;
+    if (uc_kalloc() != 0)
+        return -1;
+#if UC_CTRLPKT
+    if (!g_uc_ht) { // once, before the first launch
+        __Runtime_ctrl_high_throughput_enable(1);
+        g_uc_ht = 1;
+    }
+#endif
+    uint16_t *Wd = (uint16_t *)g_kw, *Xd = (uint16_t *)g_kx;
+    if (Kp == K) {
+        memcpy(Wd, wbf, (size_t)N * K * 2);
+    } else {
+        for (int n = 0; n < N; n++) {
+            memcpy(Wd + (size_t)n * Kp, wbf + (size_t)n * K, (size_t)K * 2);
+            memset(Wd + (size_t)n * Kp + K, 0, (size_t)(Kp - K) * 2);
+        }
+    }
+    /* X chunk layout = uc_conv im2col table: row m -> block m/16, in-chunk f = (q>>3)*8*kch + (kr>>3)*64 +
+     * (kr&7)*8 + (q&7), q = m&15, chunk j at j*kch of each of the 16 rows (row stride Kp) */
+    static int g_ul_tab[16][64];
+    for (int q = 0; q < 16; q++)
+        for (int kr = 0; kr < kch; kr++) {
+            const int f = (q >> 3) * 8 * kch + (kr >> 3) * 64 + (kr & 7) * 8 + (q & 7);
+            g_ul_tab[q][kr] = (f / kch) * Kp + f % kch;
+        }
+    for (int m = 0; m < Mp; m++) {
+        const int *tab = g_ul_tab[m & 15];
+        uint16_t *dst = Xd + (size_t)(m >> 4) * 16 * Kp;
+        const float *xr = xin + (size_t)m * K;
+        for (int j = 0; j * kch < Kp; j++) {
+            uint16_t *dj = dst + (size_t)j * kch;
+            const int k0 = j * kch;
+            if (m < M && k0 < K)
+                for (int kr = 0; kr < kch; kr++)
+                    dj[tab[kr]] = uc_f2bf(xr[k0 + kr]);
+            else
+                for (int kr = 0; kr < kch; kr++)
+                    dj[tab[kr]] = 0;
+        }
+    }
+    const size_t wbytes = (size_t)N * Kp * 2, xbytes = (size_t)Mp * Kp * 2, ybytes = (size_t)Mp * N * 4;
+    memset(g_ky, 0xff, ybytes); // sentinel: unwritten -> NaN -> counted
+    Xil_DCacheFlushRange((UINTPTR)g_kw, wbytes);
+    Xil_DCacheFlushRange((UINTPTR)g_kx, xbytes);
+    Xil_DCacheFlushRange((UINTPTR)g_ky, ybytes);
+    for (int s = 0; s < S; s++) {
+        XTime lt0, lt1;
+        XTime_GetTime(&lt0);
+        const unsigned long long sp0 = uc_pmc();
+#if UC_WARM
+        unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
+        __Runtime_pm_warm_stats(&seg0, &cold0);
+#endif
+        const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
+        printf("[UCS] l=%d lin M=%d N=%d K=%d px=%d s=%d/%d tkw=%d\n", g_aie_launches, M, N, K, P, s, S, tkw);
+        fflush(stdout);
+        const int lrc = uc_kacc_launch(N, K, P, g_kw, g_kx + (size_t)s * P * Kp / 2, g_ky + (size_t)s * N * P);
+        const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();
+        if (s == S - 1)
+            Xil_DCacheInvalidateRange((UINTPTR)g_ky, ybytes);
+#if UC_WARM
+        __Runtime_pm_warm_stats(&seg1, &cold1);
+        if (cold1 != cold0) {
+            g_uc_kloads++;
+            g_uc_cold_tiles += cold1 - cold0;
+        }
+#endif
+        const unsigned long long sp3 = uc_pmc();
+        XTime_GetTime(&lt1);
+        if (lrc != 0)
+            return lrc;
+        g_sp_call += sp2 - sp1;
+        g_sp_glue += (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL;
+        g_sp_post += sp3 - sp2;
+        g_sp_pre += sp1 - sp0;
+        g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
+        g_aie_launches++;
+    }
+    g_uc_macs += (unsigned long long)M * N * K; /* real rows only (M, not Mp) */
+    const float *Y = (const float *)g_ky; /* launch s: [N][P] tiled block at s*N*P (P4bx [s][mi][ni][8x8]) */
+    int bad = 0;
+    for (int m = 0; m < M; m++) {
+        const int s = m / P, ml = m % P, c = ml & 15;
+        const float *Ys = Y + (size_t)s * N * P;
+        float *yo = yout + (size_t)m * N;
+        for (int n = 0; n < N; n++) {
+            const int r = n & 15;
+            size_t i;
+            if (!tr) {
+                const int q = P / 4, cc = ml % q;
+                const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8 + (c & 7);
+                i = (size_t)((n & ~15) + wi / q) * P + (ml - cc) + wi % q;
+            } else {
+                const int q = N / 4, cc = n % q;
+                const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8 + (c & 7);
+                i = (size_t)((ml & ~15) + wi / q) * N + (n - cc) + wi % q;
+            }
+            const float v = Ys[i];
+            if (!(v == v) || v > 1e30f || v < -1e30f)
+                bad++;
+            yo[n] = v;
+        }
+    }
+    if (bad) {
+        printf("[unet_aie_linear] %d nonfinite AIE outputs\n", bad);
+        return -4;
+    }
+    for (int i = 2; i < nargs - 1; i++) { // epilogue: bias [1,N] or residual [M,N]
+        const uc_dlt *e = (const uc_dlt *)argv[i];
+        const float *ev = (const float *)e->data;
+        const long ne = uc_numel(e);
+        if (ne == N) {
+            for (int m = 0; m < M; m++) {
+                float *yo = yout + (size_t)m * N;
+                for (int n = 0; n < N; n++)
+                    yo[n] += ev[n];
+            }
+        } else if (ne == (long)M * N) {
+            for (long q = 0; q < (long)M * N; q++)
+                yout[q] += ev[q];
+        } else {
+            return -5;
+        }
+    }
+    return 0;
+}
+
+extern "C" int unet_aie_linear(int cid, void *args, int nargs, const uint16_t *wbf, int S) {
+    g_uc_calls++;
+    const int rc = uc_linear((void *const *)args, nargs, wbf, S);
+    if (rc != 0) {
+        printf("[unet_aie_linear] layer %d rc=%d\n", cid, rc);
+        if (!g_uc_rc)
+            g_uc_rc = rc;
+    }
+    return rc;
+}
+
+"""
+
+
+def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, ctrlpkt: str = "off",
+                      lin: list = ()) -> Path:
+    """--kincore: aiek_unetconv.cc = one gemm_kacc instance per distinct (ch, K, px) + host unet_aie_conv;
+    lin (PDN): (N, K, Mp, pxs) per linear layer -> + host unet_aie_linear"""
+    spec = spec.replace('"out ', '"export    unet_aie_conv\\n"\n        "export    unet_aie_stats\\n"\n' +
+                        ('        "export    unet_aie_linear\\n"\n' if lin else '') +
                         '        "export    unet_aie_launch_stats\\n"\n'
                         '        "export    unet_aie_split_stats\\n"\n        "out ', 1)
     assert "export    unet_aie_conv" in spec, spec
@@ -1190,7 +1483,10 @@ def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, c
     # replace the 64x64-tile uc_conv (host K-sum) by the one-launch version up to its epilogue
     i0 = host.index("static int uc_conv(")
     i1 = host.index("    for (int i = 2; i < nargs - 1; i++) { // epilogue")
-    host = host[:i0] + kacc_host(shapes) + host[i1:]
+    host = host[:i0] + kacc_host(shapes, lin) + host[i1:]
+    if lin:
+        j = host.index('extern "C" int unet_aie_conv(int cid')
+        host = host[:j] + LINEAR_HOST.lstrip("\n") + host[j:]
     # drop the 64x64-port state the one-launch path does not use (no unused-static warnings)
     a0, a1 = host.index("static int uc_alloc(void) {"), host.index("static long uc_numel(")
     host = host[:a0] + host[a1:]

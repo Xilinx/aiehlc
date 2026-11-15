@@ -189,6 +189,17 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     part = json.loads(a.partition.resolve().read_text())
     work = Path(emod.workdir)
     sel, convs = ua.map_layers(a.onnx.resolve(), part, work, ab.param_offsets)
+    nlin_part = sum(1 for L in part["layers"] if L.get("cls") == "linear")
+    lin = []
+    if "linear" in a.aie.split(","):
+        # PDN: the partition's linear layers (TVM nn_contrib_dense_pack) -> unet_aie_linear, gemm_kacc
+        lin = ua.map_linears(a.onnx.resolve(), part, work, ab.param_offsets)
+        if len(lin) != nlin_part:
+            raise SystemExit(f"mapped {len(lin)} linear layers, partition has {nlin_part}")
+    elif nlin_part:
+        raise SystemExit(f"partition has {nlin_part} linear layers: build with --aie conv,linear")
+    if lin and not a.kincore:
+        raise SystemExit("--aie conv,linear needs --kincore (gemm_kacc)")
     if a.kincore:
         # P4bg: one launch per layer from kplan.py (K in the core) -- the partition.json N (64x64x64
         # tile launches) does not apply on this path
@@ -207,26 +218,35 @@ def aie_conv(a, emod, out: Path, hdr: Path):
                 raise SystemExit(f"kplan: layer {c['cid']} M={c['M']} K={c['K']} N={c['N']} "
                                  f"legal={kp['legal']} launches={kp['launches']} why={kp['why']}")
             c["launches"] = kp["launches"]
+        convsel = sel
+        sel = sel + lin
         planned = sum(c["launches"] for c in sel)
-        shapes = sorted({(c["N"], c["K"], c["M"]) for c in sel})
+        shapes = sorted({(c["N"], c["K"], c["M"]) for c in convsel} | {(c["N"], c["K"], c["pxs"]) for c in lin})
         log(f"KINCORE layers={len(sel)} launches_planned={planned} kernel=bf16_gemm_kacc; "
             f"shapes={len(shapes)} (old 64x64x64 launches {part['N']})")
     else:
+        convsel = sel
         planned = sum(c["launches"] for c in sel)
         if planned != int(part["N"]):
             raise SystemExit(f"planned launches {planned} != partition.json N {part['N']}")
-    log(f"aie_launches_planned={planned} (partition.json N={part['N']}, {len(sel)} conv layers, "
+    log(f"aie_launches_planned={planned} (partition.json N={part['N']}, {len(sel)} layers: "
+        f"{len(sel) - len(lin)} conv + {len(lin)} linear, "
         f"{sum(c['macs'] for c in sel)} MACs of {part['total_gemm_macs']} GEMM MACs)")
     for c in sel:
-        log(f"  aie conv {c['cid']:2d} {c['onnx']} -> node {c['node']} {c['func']} "
-            f"M={c['M']} N={c['N']} K={c['K']} s={c['sh']} p={c['ph']} launches={c['launches']}")
-    ua.check_data_arg0(work / "layers", sel)
-    lidx, car = ua.pick_carrier(sel, convs, work / "layers")
+        if c.get("kind") == "linear":
+            log(f"  aie linear {c['cid']:3d} {c['onnx']} -> node {c['node']} {c['func']} "
+                f"M={c['M']} N={c['N']} K={c['K']} px_split={c['S']}x{c['pxs']} launches={c['launches']}")
+        else:
+            log(f"  aie conv {c['cid']:2d} {c['onnx']} -> node {c['node']} {c['func']} "
+                f"M={c['M']} N={c['N']} K={c['K']} s={c['sh']} p={c['ph']} launches={c['launches']}")
+    ua.check_data_arg0(work / "layers", convsel)
+    lidx, car = ua.pick_carrier(convsel, convs, work / "layers")
     log(f"carrier layer {lidx} ({car['func']}): aiegraph offload builds the gemm_bf16 archive on it")
     p = emod.offload_prototype(lidx, entry=ua.ENTRY)
     if a.kincore:
         kcc = ua.write_kernel_kacc(out / "aiek_src", p.spec(), shapes, warm=(a.launch_opt == "warm"),
-                                   ctrlpkt=a.ctrlpkt)
+                                   ctrlpkt=a.ctrlpkt,
+                                   lin=[(c["N"], c["K"], -(-c["M"] // 64) * 64, c["pxs"]) for c in lin])
     else:
         kcc = ua.write_kernel(out / "aiek_src", p.spec(), max(c["M"] * c["N"] for c in sel),
                               warm=(a.launch_opt == "warm"), ctrlpkt=a.ctrlpkt, ktimer=a.ktimer)
@@ -249,7 +269,8 @@ def aie_conv(a, emod, out: Path, hdr: Path):
             # P4w: weights of the kincore layers go into weights.bin already in the kacc chunk layout
             nb = ua.prelayout_weights(Path(out_dir) / "weights.bin", sel)
             log(f"WPRE layers={len(sel)} bytes={nb} ({Path(out_dir) / 'weights.bin'})")
-        log(f"graph_driver.c: {n} partition call sites -> unet_aie_conv")
+        log(f"graph_driver.c: {n} partition call sites -> unet_aie_conv ({n - len(lin)}) + "
+            f"unet_aie_linear ({len(lin)})")
         return r
     generate_driver._p35w_orig = orig
     ab.generate_driver = generate_driver
@@ -268,7 +289,7 @@ def aie_conv(a, emod, out: Path, hdr: Path):
         f.write("#define UNET_AIE_PLANNED_LAUNCHES %d\n#define UNET_AIE_PLANNED_CALLS %d\n"
                 "#define UNET_TOTAL_GEMM_MACS %dULL\n" % (planned, len(sel), int(part["total_gemm_macs"])))
     log(f"ktimer={'on' if a.ktimer else 'off'}")
-    return ua.main_c(MAIN_C, ktimer=a.ktimer), len(sel)
+    return ua.main_c(MAIN_C, ktimer=a.ktimer), (len(sel) - len(lin), len(lin))
 
 
 def read_layer_cflags_file(path) -> str:
@@ -288,7 +309,8 @@ def main(argv=None) -> int:
     ap.add_argument("--onnx", required=True, type=Path)
     ap.add_argument("--real-io", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--aie", choices=("none", "conv"), default="none")
+    ap.add_argument("--aie", choices=("none", "conv", "conv,linear"), default="none",
+                    help="conv,linear (PDN): also the partition's linear layers (dense) on the AIE (needs --kincore)")
     ap.add_argument("--wdtype", choices=("fp32", "bf16"), default="fp32",
                     help="bf16: weights.bin holds bf16 (RNE); each APU call expands its "
                          "weights into one static .bss fp32 scratch (~118 MB)")
@@ -326,7 +348,7 @@ def main(argv=None) -> int:
             log(str(e))
             return 2
         log(f"arm_layer_cflags ({a.arm_layer_cflags_file}): {layer_cflags}")
-    if a.aie == "conv":
+    if a.aie != "none":
         if a.partition is None or a.wdtype != "bf16":
             log("--aie conv needs --partition <partition.json> and --wdtype bf16")
             return 2
@@ -336,14 +358,14 @@ def main(argv=None) -> int:
     if a.kincore_layers != "all" and not a.kincore:
         log("--kincore-layers needs --kincore")
         return 2
-    if a.kincore and (a.aie != "conv" or a.ktimer):
+    if a.kincore and (a.aie == "none" or a.ktimer):
         log("--kincore needs --aie conv and no --ktimer")
         return 2
-    if a.ctrlpkt == "aot" and a.aie != "conv":
+    if a.ctrlpkt == "aot" and a.aie == "none":
         log("--ctrlpkt aot needs --aie conv")
         return 2
     if a.launch_opt == "warm":
-        if a.aie != "conv":
+        if a.aie == "none":
             log("--launch-opt warm needs --aie conv")
             return 2
         # --skip-bss is safe for gemm_bf16: its .bss is the 6 DMA port buffers (filled by DMA /
@@ -389,7 +411,7 @@ def main(argv=None) -> int:
         os.environ.update(kv.split("=", 1) for kv in env.split("\0") if "=" in kv)
         log(f"toolchain via {root}/script/setup.sh: {shutil.which('aarch64-none-elf-gcc')}")
     main_c = MAIN_C
-    if a.aie == "conv":
+    if a.aie != "none":
         main_c, n_patched = aie_conv(a, emod, out, hdr)
 
     rep = emod.build(target="a78", verbose=a.verbose, main_c=main_c,
@@ -399,13 +421,14 @@ def main(argv=None) -> int:
     if not rep.ok:
         log(f"build FAILED: {rep.reason}")
         return 1
-    if a.aie == "conv":
+    if a.aie != "none":
         drv = (Path(rep.elf).parent / "graph_driver.c").read_text()
-        got = drv.count("    unet_aie_conv(")
+        got = (drv.count("    unet_aie_conv("), drv.count("    unet_aie_linear("))
         if got != n_patched:
-            log(f"build FAILED: linked driver has {got} unet_aie_conv call sites, expected {n_patched}")
+            log(f"build FAILED: linked driver has {got} unet_aie_conv/unet_aie_linear call sites, expected {n_patched}")
             return 1
-        log(f"linked driver: {got} call sites -> unet_aie_conv (AIE), weights of those read as bf16 in place")
+        log(f"linked driver: {got[0]} call sites -> unet_aie_conv + {got[1]} -> unet_aie_linear (AIE), "
+            f"weights of those read as bf16 in place")
     elf = out / "main.elf"
     shutil.copy2(rep.elf, elf)
     wb = Path(rep.elf).parent / "weights.bin"
