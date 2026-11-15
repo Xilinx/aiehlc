@@ -1,5 +1,12 @@
 # 3. Reduction: row sums on the 4x4 mesh, in two levels
 
+> **Operator family: reduction.** Many elements **folded into fewer** along
+> one or more dimensions: sum, mean, max / min, argmax, product, norms; and the
+> reduction steps inside softmax (row max, row sum) and layer / batch norm
+> (mean, variance). Bandwidth-bound like elementwise ops, plus a new problem:
+> when several cores reduce parts of the same output, their **partial results
+> must be combined** somewhere.
+
 > **Status (2026-11-15).** As for [elementwise](../02_elementwise/elementwise.md):
 > the kernel passes the kernel analysis; the lowering does not support this
 > shape yet. A runnable example follows the compiler work.

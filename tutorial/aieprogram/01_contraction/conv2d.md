@@ -1,5 +1,10 @@
 # 1b. Contraction: Conv2d on a 4x4 tile mesh
 
+> **Operator family: contraction** (see [1a](gemm.md)). A convolution is a
+> GEMM in disguise: each output sums `kernel x kernel x channels` products.
+> What it adds is the **halo** -- neighbouring output blocks read overlapping
+> input -- and multi-dimensional tensors.
+
 Example: [`example/tileprogram/ccode/simpleconv2dkernel_port_less.cc`](../../../example/tileprogram/ccode/simpleconv2dkernel_port_less.cc)
 (59 lines, host included). Shared host helpers: `simpleconv2d_new_load.h`.
 

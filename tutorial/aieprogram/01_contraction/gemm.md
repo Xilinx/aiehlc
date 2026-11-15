@@ -1,5 +1,14 @@
 # 1a. Contraction: GEMM on a 4x4 tile mesh
 
+> **Operator family: contraction.** Ops that multiply and **sum over a shared
+> dimension**: matrix multiply (GEMM, batched GEMM, linear / fully-connected
+> layers), convolution (conv1d/2d/3d, depthwise, transposed), einsum,
+> attention's `Q x K^T` and `P x V`. Every input element is **reused** many
+> times (a GEMM reads O(n^2) bytes and does O(n^3) work), so these ops are
+> **compute-bound**: they want every core, and broadcasting one stream to a
+> whole mesh row or column feeds 16 cores from 8 streams. On AIE they map onto
+> the matrix unit (`aie::mmul`, chapter 6.2).
+
 Example: [`example/tileprogram/ccode/simplegemm_kernel_port.cc`](../../../example/tileprogram/ccode/simplegemm_kernel_port.cc)
 (56 lines, host included). Shared host helpers: `simplegemm_load.h`.
 

@@ -1,5 +1,15 @@
 # 5. Indexing: slices, strides and why runtime gathers do not fit
 
+> **Operator family: indexing.** Ops whose **positions come from an index**
+> rather than from the loop structure: slice / crop, strided slice
+> (`x[::2]`), select / narrow; and the data-dependent kind -- gather,
+> index_select, take, embedding lookup, scatter / index_put / scatter_add.
+> Little or no arithmetic; everything is addressing. Unlike data movement
+> (a fixed re-arrangement), indexing **selects** elements. Static indices
+> (known at compile time, affine) are a special case of data movement the DMA
+> can do; data-dependent indices are not expressible in this model, because the
+> DMA order is fixed at compile time (section 4).
+
 > **Status (2026-11-15).** The slicing kernel passes the kernel analysis; the
 > lowering does not support this shape yet (as in
 > [elementwise](../02_elementwise/elementwise.md)). The limits in sections 2

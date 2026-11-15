@@ -1,5 +1,13 @@
 # 2. Elementwise: `z = saturate(x + y)` on the 4x4 mesh
 
+> **Operator family: elementwise.** One output element from the elements at
+> the **same position** of the inputs, no interaction between positions:
+> add / sub / mul, activations (ReLU, GELU, sigmoid), cast, requantize, clamp,
+> bias add, residual add, `where` with a mask. One operation per element read,
+> no reuse, so they are **bound by data movement**, not compute -- count
+> streams and bytes before cores, and fuse them into the producing kernel when
+> you can.
+
 > **Status (2026-11-15).** The kernel below passes the compiler's kernel
 > analysis (section 3), but the pipeline after it still derives core windows
 > from its GEMM tiling model and stops the build for this shape

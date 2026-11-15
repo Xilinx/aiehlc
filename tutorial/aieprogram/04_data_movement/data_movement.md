@@ -1,5 +1,11 @@
 # 4. Data movement: transpose
 
+> **Operator family: data movement.** Ops that only **re-arrange bytes** by a
+> rule fixed by the shapes, no arithmetic: transpose / permute, reshape and
+> layout changes (NCHW <-> NHWC, tiling), concat / split, pad, copy, broadcast,
+> repeat. Pure bandwidth; the question is who re-orders the bytes -- the DMA
+> (strided walks, in 32-bit words) or the core.
+
 > **Status (2026-11-15).** As for [elementwise](../02_elementwise/elementwise.md):
 > the kernel passes the kernel analysis; the lowering does not support this
 > shape yet. A runnable example follows the compiler work.

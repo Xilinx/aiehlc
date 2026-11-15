@@ -28,6 +28,21 @@ tiling model and stops the build for those shapes. Making it follow every
 port's traced blocks is the next compiler step; those chapters get runnable,
 board-measured examples when it lands. Their model and limits are current.
 
+## Operator families
+
+| Family | What it does | Examples | Bound by | On the AIE |
+|---|---|---|---|---|
+| Contraction | multiply and sum over a shared dimension | GEMM, linear, conv, einsum, attention matmuls | compute (inputs reused many times) | all cores, broadcast streams, matrix unit |
+| Elementwise | one output from the same position of each input | add, mul, ReLU, cast, requantize, bias / residual add | data movement (one op per byte) | count streams and bytes; fuse into the producer |
+| Reduction | fold many elements into fewer | sum, mean, max, argmax, norms; softmax / layernorm statistics | data movement, plus combining partial results | reduce where no core needs another's partial, or combine in two levels |
+| Data movement | re-arrange bytes by a shape rule | transpose, permute, reshape, layout change, concat, split, pad, copy | data movement (no arithmetic) | the DMA re-orders words, the core re-orders bytes |
+| Indexing | select elements by an index | slice, strided slice, crop; gather, index_select, embedding, scatter | addressing | static (affine) indices: yes; data-dependent: not in this model |
+
+Real networks are mostly contractions surrounded by the other four; the best
+place for an elementwise, reduction or layout op is often **inside** the
+contraction kernel next to it (fusion), so its bytes never make an extra trip
+to DDR.
+
 All examples live in `example/tileprogram/ccode/`.
 
 ## Build and run an example
