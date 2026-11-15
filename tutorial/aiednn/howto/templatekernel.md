@@ -288,7 +288,7 @@ template**, not a parameter (§6).
 In aiehlc a resident input is expressed directly. Load the block once, outside
 the loop, with `{.resident = true}`. The DMA sends it once and gives it one
 buffer, and the analysis checks that the kernel really takes one block
-([tutorial 3](../../aieprogram/03_conv2d_scheduling.md)).
+([low-level schedule](../../aieprogram/06_gemm_optimization/1_low_level_schedule.md), [conv scheduling](../../aieprogram/06_gemm_optimization/3_conv_scheduling.md)).
 
 ### 4.5 Shapes that do not divide the tile
 
