@@ -235,6 +235,26 @@ class EmbeddedModel:
         from .prototype import prototype_for
         return prototype_for(self, layer, region, entry)
 
+    def ai_offload_prototype(self, layer=None, *, region=None, entry: str = None, rounds: int = 3,
+                             build: bool = True, model: str = None, claude: str = "claude",
+                             timeout_s: float = 2400, out_dir=None, quiet: bool = False):
+        """``offload_prototype(layer)`` writes the backbone, then ``claude -p`` fills its
+        TODOs until ``prototype_check`` passes (no TODO left; the kernel AND host code,
+        emulated on x86, byte-equal to TVM's output; DMA trace; ``offload_check``; then
+        an aiehlc build of ``test_<entry>.cc``). At most *rounds* Claude turns. Written
+        to ``<workdir>/aiproto/layerNN_prototype/``. Returns the kernel, path-like:
+        ``emod.offload("layer4", res)``."""
+        from .aiprototype import ai_offload_prototype
+        return ai_offload_prototype(self, layer, region=region, entry=entry, rounds=rounds, build=build,
+                                    model=model, claude=claude, timeout_s=timeout_s, out_dir=out_dir,
+                                    quiet=quiet)
+
+    def prototype_check(self, layer, src_dir, *, entry: str = None, build: bool = False):
+        """Is the prototype in *src_dir* a logically correct kernel for *layer*? Gates:
+        todo, kemu (x86 emulation of kernel + host vs TVM), trace, check, [build]."""
+        from .aiprototype import prototype_check
+        return prototype_check(self, layer, src_dir, entry=entry, build=build)
+
     def offload_reset(self, layers=None, verbose: bool = False) -> list:
         """Put offloaded layers back on the CPU: all of them, or *layers* (any
         ``resolve`` reference). ``partition.json`` rows lose their AIE entry and

@@ -1330,8 +1330,9 @@ public:
                                         innerTypeStr.find("char") != std::string::npos)
                                         bitWidth = 8;
                                     else if (innerTypeStr.find("int16") != std::string::npos ||
-                                             innerTypeStr.find("short") != std::string::npos)
-                                        bitWidth = 16;
+                                             innerTypeStr.find("short") != std::string::npos ||
+                                             innerTypeStr.find("bfloat16") != std::string::npos)
+                                        bitWidth = 16; // bfloat16: a 16-bit window (aie_block_io.h)
                                 } else if (ptype->isPointerType()) {
                                     // Plain pointer type (e.g. const int32_t*)
                                     clang::QualType pointee = ptype->getPointeeType();
@@ -4472,6 +4473,12 @@ public:
                 ret += "typedef short int16;\n";
                 ret += "typedef input_window<int16> input_window_int16;\n";
                 ret += "typedef output_window<int16> output_window_int16;\n";
+                // bfloat16 windows are 16-bit (aie_block_io.h); only for sources that use
+                // them, so every other host.cc stays byte-identical.
+                if (SourceCodeString.find("_window_bfloat16") != std::string::npos) {
+                    ret += "typedef input_window<int16> input_window_bfloat16;\n";
+                    ret += "typedef output_window<int16> output_window_bfloat16;\n";
+                }
                 // Kernel intrinsic stubs (body is #ifdef KERNEL_COMPILE guarded)
                 ret += "typedef unsigned char uint8_t;\n";
                 ret += "typedef unsigned long uintptr_t;\n";

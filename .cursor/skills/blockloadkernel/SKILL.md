@@ -33,6 +33,11 @@ convautotile: `doc/design/conv_autotiling.md`).
 
 ## Kernel-only kernels (no conv / map)
 - Ports carry the tensor: `aie::port<T, aie::IFM, aie::shape<230, 230, 4>>`.
+  The role tag is optional (`aie::port<T, aie::shape<...>>`): output window ->
+  OFM, input -> IFM, an input broadcast along a mesh column (moves with
+  `program_id(1)` only) -> WEIGHTS (`inferRoles`). The DMA is the same either
+  way; the tag only names the routed GemmSpace and the conv's roles. Tag a port
+  explicitly when that guess is wrong (tags are never re-inferred).
   `inferKernelOnly` (kernel_trace.cpp) traces the body on x86 under ASan for
   every core, fits each port to base/step/rounds, recognizes the spatial-halo
   conv, derives with convautotile, compares exactly, then rewrites the source
@@ -44,6 +49,10 @@ convautotile: `doc/design/conv_autotiling.md`).
   as a shape mismatch: the conv compute reads past it first.
 - The body must compile on x86 and the schedule must be data-independent.
 - Regression: `python3 src/llvm/convautotile/unitest/kernel_trace_cases.py build/aiehlc-convtile`.
+
+## Dataflow options
+`{.depth = 1|2, .resident = true, .tile = {tr, tc}}` on load_buffer (`.depth`
+on store_buffer): skill **gemmdataflowoptions** (`simplegemm_dataflow.cc`).
 
 ## Hand-written GemmSpaces + block loads
 - `__global__(policy) void k(aie::port<T, MySpace> p, ...)` with

@@ -9,8 +9,12 @@
     aiegraph convert resnet18 [--calib a.jpg ...] [--workdir D]
     aiegraph layers   [--workdir D]               the layer table
     aiegraph prototype                            the kernel-file format (no model needed)
-    aiegraph prototype layer1 [--region R] [--entry NAME] [--write DIR] [--workdir D]
+    aiegraph prototype layer1 [--region R] [--entry NAME] [--write DIR] [--no-test] [--workdir D]
                                                   one layer: runnable kernel .cc + reference .c, AIEK_SPEC
+    aiegraph aiprototype layer1 [--entry NAME] [--rounds N] [--no-build] [--out DIR] [--model M] [--workdir D]
+                                                  backbone, then claude fills the TODOs until prototype_check passes
+    aiegraph protocheck  layer1 DIR [--entry NAME] [--build] [--workdir D]
+                                                  is DIR's prototype a correct kernel? (todo, kemu, trace, check[, build])
     aiegraph detect   KERNEL.cc [--workdir D]
     aiegraph check    "layer1=KERNEL.cc" [--workdir D]
     aiegraph offload  "layer1=KERNEL.cc" [--workdir D] [--make]
@@ -85,7 +89,22 @@ def main(argv=None) -> int:
     p.add_argument("layer", nargs="?", default=None, help="TVM layer (layer1, 4, ...); omit for the format")
     p.add_argument("--region", default=None, help="an ONNX region name instead of a layer")
     p.add_argument("--entry", default=None, help="entry / kernel name (default aiek_layerNN)")
-    p.add_argument("--write", default=None, metavar="DIR", help="write <entry>.cc (kernel + host + entry) and <entry>_ref.c")
+    p.add_argument("--write", default=None, metavar="DIR", help="write <entry>.cc (kernel + host + entry), <entry>_ref.c and test_<entry>.cc (main())")
+    p.add_argument("--no-test", action="store_true", help="with --write: skip test_<entry>.cc")
+    p.add_argument("--workdir", default=None)
+    p = sub.add_parser("aiprototype")
+    p.add_argument("layer")
+    p.add_argument("--entry", default=None)
+    p.add_argument("--rounds", type=int, default=3)
+    p.add_argument("--no-build", action="store_true", help="skip the final aiehlc build of test_<entry>.cc")
+    p.add_argument("--out", default=None, metavar="DIR")
+    p.add_argument("--model", default=None)
+    p.add_argument("--workdir", default=None)
+    p = sub.add_parser("protocheck")
+    p.add_argument("layer")
+    p.add_argument("dir")
+    p.add_argument("--entry", default=None)
+    p.add_argument("--build", action="store_true", help="also build test_<entry>.cc with aiehlc")
     p.add_argument("--workdir", default=None)
     p = sub.add_parser("compile")
     p.add_argument("model")
@@ -121,12 +140,20 @@ def main(argv=None) -> int:
             print(ag.offload_prototype())
             return 0
         emod = _emod(args)
+        if args.cmd == "aiprototype":
+            return 0 if emod.ai_offload_prototype(args.layer, entry=args.entry, rounds=args.rounds,
+                                                  build=not args.no_build, out_dir=args.out,
+                                                  model=args.model).ok else 1
+        if args.cmd == "protocheck":
+            v = emod.prototype_check(args.layer, args.dir, entry=args.entry, build=args.build)
+            print(v)
+            return 0 if v.ok else 1
         if args.cmd == "prototype":
             itf = emod.offload_prototype(args.layer, region=args.region, entry=args.entry)
             print(itf)
             if args.write:
                 for one in (itf if isinstance(itf, ag.Prototypes) else [itf]):
-                    one.write(args.write)
+                    one.write(args.write, test=not args.no_test)
             return 0
         if args.cmd == "run":
             rep = emod.run(args.board, args.host, elf=args.elf, build=not args.no_build,

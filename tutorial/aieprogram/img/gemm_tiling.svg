@@ -1,0 +1,120 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1040' height='420' viewBox='0 0 1040 420'>
+<defs><marker id='arr' markerUnits='userSpaceOnUse' markerWidth='12' markerHeight='10' refX='11' refY='5' orient='auto'><path d='M0,0 L12,5 L0,10 z' fill='#444'/></marker></defs>
+<rect width='100%' height='100%' fill='white'/>
+<text x='520.0' y='24.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='15' text-anchor='middle' fill='#222' font-weight='bold'>simplegemm_kernel_port.cc:  C[64,64] = A[64,256] x B[64,256]^T  on the 4x4 mesh</text>
+<text x='520.0' y='44.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#e63946' font-weight='normal'>highlighted: the core with program_id(0) = pm = 1, program_id(1) = pn = 2</text>
+<text x='200.0' y='66.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>A  [64 x 256]   (input a, aie::IFM)</text>
+<rect x='60.0' y='80.0' width='70.0' height='60.0' rx='0' fill='#fde8d4' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='95.0' y='114.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=0</text>
+<rect x='130.0' y='80.0' width='70.0' height='60.0' rx='0' fill='#fde8d4' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='165.0' y='114.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=1</text>
+<rect x='200.0' y='80.0' width='70.0' height='60.0' rx='0' fill='#fde8d4' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='235.0' y='114.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=2</text>
+<rect x='270.0' y='80.0' width='70.0' height='60.0' rx='0' fill='#fde8d4' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='305.0' y='114.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=3</text>
+<text x='52.0' y='114.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#333' font-weight='normal'>pm=0</text>
+<rect x='60.0' y='140.0' width='70.0' height='60.0' rx='0' fill='#f4a261' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='95.0' y='174.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=0</text>
+<rect x='130.0' y='140.0' width='70.0' height='60.0' rx='0' fill='#f4a261' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='165.0' y='174.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=1</text>
+<rect x='200.0' y='140.0' width='70.0' height='60.0' rx='0' fill='#f4a261' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='235.0' y='174.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=2</text>
+<rect x='270.0' y='140.0' width='70.0' height='60.0' rx='0' fill='#f4a261' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='305.0' y='174.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=3</text>
+<text x='52.0' y='174.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#e63946' font-weight='normal'>pm=1</text>
+<rect x='60.0' y='200.0' width='70.0' height='60.0' rx='0' fill='#fde8d4' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='95.0' y='234.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=0</text>
+<rect x='130.0' y='200.0' width='70.0' height='60.0' rx='0' fill='#fde8d4' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='165.0' y='234.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=1</text>
+<rect x='200.0' y='200.0' width='70.0' height='60.0' rx='0' fill='#fde8d4' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='235.0' y='234.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=2</text>
+<rect x='270.0' y='200.0' width='70.0' height='60.0' rx='0' fill='#fde8d4' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='305.0' y='234.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=3</text>
+<text x='52.0' y='234.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#333' font-weight='normal'>pm=2</text>
+<rect x='60.0' y='260.0' width='70.0' height='60.0' rx='0' fill='#fde8d4' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='95.0' y='294.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=0</text>
+<rect x='130.0' y='260.0' width='70.0' height='60.0' rx='0' fill='#fde8d4' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='165.0' y='294.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=1</text>
+<rect x='200.0' y='260.0' width='70.0' height='60.0' rx='0' fill='#fde8d4' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='235.0' y='294.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=2</text>
+<rect x='270.0' y='260.0' width='70.0' height='60.0' rx='0' fill='#fde8d4' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='305.0' y='294.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=3</text>
+<text x='52.0' y='294.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#333' font-weight='normal'>pm=3</text>
+<text x='200.0' y='338.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='normal'>rows 16*pm .. +16  |  K chunk 64*j .. +64</text>
+<text x='200.0' y='354.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#a0522d' font-weight='normal'>block {16, 64}: load_buffer(a, {pm*16, j*64}, {16, 64})</text>
+<text x='540.0' y='66.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>B  [64 x 256]   (input b, aie::WEIGHTS)</text>
+<rect x='400.0' y='80.0' width='70.0' height='60.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='435.0' y='114.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=0</text>
+<rect x='470.0' y='80.0' width='70.0' height='60.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='505.0' y='114.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=1</text>
+<rect x='540.0' y='80.0' width='70.0' height='60.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='575.0' y='114.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=2</text>
+<rect x='610.0' y='80.0' width='70.0' height='60.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='645.0' y='114.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=3</text>
+<text x='392.0' y='114.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#333' font-weight='normal'>pn=0</text>
+<rect x='400.0' y='140.0' width='70.0' height='60.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='435.0' y='174.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=0</text>
+<rect x='470.0' y='140.0' width='70.0' height='60.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='505.0' y='174.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=1</text>
+<rect x='540.0' y='140.0' width='70.0' height='60.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='575.0' y='174.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=2</text>
+<rect x='610.0' y='140.0' width='70.0' height='60.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='645.0' y='174.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=3</text>
+<text x='392.0' y='174.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#333' font-weight='normal'>pn=1</text>
+<rect x='400.0' y='200.0' width='70.0' height='60.0' rx='0' fill='#6fa8dc' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='435.0' y='234.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=0</text>
+<rect x='470.0' y='200.0' width='70.0' height='60.0' rx='0' fill='#6fa8dc' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='505.0' y='234.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=1</text>
+<rect x='540.0' y='200.0' width='70.0' height='60.0' rx='0' fill='#6fa8dc' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='575.0' y='234.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=2</text>
+<rect x='610.0' y='200.0' width='70.0' height='60.0' rx='0' fill='#6fa8dc' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='645.0' y='234.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=3</text>
+<text x='392.0' y='234.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#e63946' font-weight='normal'>pn=2</text>
+<rect x='400.0' y='260.0' width='70.0' height='60.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='435.0' y='294.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=0</text>
+<rect x='470.0' y='260.0' width='70.0' height='60.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='505.0' y='294.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=1</text>
+<rect x='540.0' y='260.0' width='70.0' height='60.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='575.0' y='294.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=2</text>
+<rect x='610.0' y='260.0' width='70.0' height='60.0' rx='0' fill='#dbe8f5' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<text x='645.0' y='294.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>j=3</text>
+<text x='392.0' y='294.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#333' font-weight='normal'>pn=3</text>
+<text x='540.0' y='338.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='normal'>rows 16*pn .. +16  |  K chunk 64*j .. +64</text>
+<text x='540.0' y='354.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#1f4e79' font-weight='normal'>block {16, 64}: load_buffer(b, {pn*16, j*64}, {16, 64})</text>
+<text x='854.0' y='66.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>C  [64 x 64]  (output c, aie::OFM)</text>
+<rect x='750.0' y='80.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='776.0' y='110.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(0,0)</text>
+<rect x='802.0' y='80.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='828.0' y='110.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(0,1)</text>
+<rect x='854.0' y='80.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='880.0' y='110.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(0,2)</text>
+<rect x='906.0' y='80.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='932.0' y='110.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(0,3)</text>
+<rect x='750.0' y='132.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='776.0' y='162.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(1,0)</text>
+<rect x='802.0' y='132.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='828.0' y='162.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(1,1)</text>
+<rect x='854.0' y='132.0' width='52.0' height='52.0' rx='0' fill='#e63946' fill-opacity='1.0' stroke='#555555' stroke-width='2'/>
+<text x='880.0' y='162.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='white' font-weight='normal'>(1,2)</text>
+<rect x='906.0' y='132.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='932.0' y='162.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(1,3)</text>
+<rect x='750.0' y='184.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='776.0' y='214.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(2,0)</text>
+<rect x='802.0' y='184.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='828.0' y='214.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(2,1)</text>
+<rect x='854.0' y='184.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='880.0' y='214.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(2,2)</text>
+<rect x='906.0' y='184.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='932.0' y='214.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(2,3)</text>
+<rect x='750.0' y='236.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='776.0' y='266.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(3,0)</text>
+<rect x='802.0' y='236.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='828.0' y='266.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(3,1)</text>
+<rect x='854.0' y='236.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='880.0' y='266.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(3,2)</text>
+<rect x='906.0' y='236.0' width='52.0' height='52.0' rx='0' fill='#e2f0d9' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='932.0' y='266.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#333' font-weight='normal'>(3,3)</text>
+<text x='854.0' y='306.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='normal'>block (pm, pn) = 16 x 16</text>
+<text x='854.0' y='322.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#38761d' font-weight='normal'>store_buffer(c, {pm*16, pn*16}, {16, 16})</text>
+<text x='854.0' y='338.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='normal'>C(pm,pn) = sum over j of A(pm,j) x B(pn,j)^T</text>
+</svg>

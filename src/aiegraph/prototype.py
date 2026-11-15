@@ -6,7 +6,7 @@
 
     ag.offload_prototype()                    # the kernel-file format, no model needed
     proto = emod.offload_prototype("layer4")  # TVM layer 4: signature, AIEK_SPEC, backbone
-    proto.write("my_kernels/")                # aiek_layer04.cc + aiek_layer04_ref.c
+    proto.write("my_kernels/")                # aiek_layer04.cc + _ref.c + test_aiek_layer04.cc
     # ... fill in the TODO(...)s ...
     emod.offload_check("layer4", "my_kernels/aiek_layer04.cc")
 
@@ -26,6 +26,12 @@ what is the layer's is done, what is the algorithm's is the user's:
   4. ``AIEK_SPEC(<entry>)`` -- proven against every call of the layer.
 
 ``<entry>_ref.c`` is the x86 reference backbone with TVM's layouts spelled out.
+``test_<entry>.cc`` is an aiehlc entry file with ``main()`` that ``#include``s
+``<entry>.cc`` (spliced by aiehlc -> an ELF, not a library), binds the layer's
+tensors in TVM call order and calls the entry: with the layer's ``make TRACE=1``
+dumps (``<entry>_test_data.h`` + the ``layeriohex`` headers, copied flat) it
+byte-compares every output with TVM's own (golden); without them it is a smoke
+test on seeded synthetic tensors (rc, outputs written, repeats identical).
 Until the TODOs are filled the run function returns -1 and the entry
 ``AIEK_ERR_KERNEL``. Kernel frames exist for TVM NCHWc conv2d layers; any other
 layer gets the entry + spec skeleton.
@@ -35,6 +41,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -263,6 +270,7 @@ class OffloadPrototype:
     geom: ConvGeom = None
     generator: str = ""    # what the kernel source is (or why only a skeleton)
     requant: bool = False  # the reference is generated in full (conv + requantize)
+    iohex_dir: str = ""    # <workdir>/arm_build/layeriohex: the layer's real tensors (make TRACE=1)
 
     # ── spec ────────────────────────────────────────────────────────────
 
@@ -286,19 +294,42 @@ class OffloadPrototype:
         """``<entry>_ref.c``: the op on TVM's layouts, plain C, for calibrate."""
         return _conv_ref_c(self) if self.geom else _skeleton_ref(self)
 
-    def write(self, out_dir) -> list:
-        """Write ``<entry>.cc`` and ``<entry>_ref.c`` into *out_dir*; refuse to overwrite."""
+    def test_source(self) -> str:
+        """``test_<entry>.cc``: an aiehlc entry file with ``main()`` running the entry."""
+        return _test_cc(self)
+
+    def test_data(self):
+        """The layer's ``make TRACE=1`` dumps for the test: ``(dump paths, header text)``,
+        or ``(None, why not)`` when absent or not this signature."""
+        return _test_data(self)
+
+    def write(self, out_dir, test: bool = True) -> list:
+        """Write ``<entry>.cc``, ``<entry>_ref.c`` and (``test=True``) ``test_<entry>.cc``
+        into *out_dir*; refuse to overwrite. The test also gets the layer's real
+        tensors (``<entry>_test_data.h`` + the ``layeriohex`` dumps it includes) when
+        the deploy was traced."""
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         files = {out / f"{self.entry}.cc": self.kernel_source(),
                  out / f"{self.entry}_ref.c": self.reference_source()}
+        dumps, why = (None, "") if not test else self.test_data()
+        if test:
+            files[out / f"test_{self.entry}.cc"] = self.test_source()
+            if dumps:
+                files[out / f"{self.entry}_test_data.h"] = why
         exist = [str(p) for p in files if p.exists()]
         if exist:
             raise AiegraphError("offload_prototype", f"{', '.join(exist)} already exist(s)",
                                 hint="pick another directory or entry= name")
         for p, text in files.items():
             p.write_text(text)
+        for d in dumps or ():
+            if not (out / d.name).exists():  # flat beside the test: aiehlc.sh copies *.h flat
+                shutil.copyfile(d, out / d.name)
         print(f"[aiegraph] wrote {', '.join(str(p) for p in files)}")
+        if test:
+            print(f"[aiegraph] test data: {', '.join(d.name for d in dumps)} (TVM's call [{self.calls[0]:02d}])"
+                  if dumps else f"[aiegraph] test data: none ({why}) -- test_{self.entry}.cc runs a smoke test")
         return list(files)
 
     def __repr__(self) -> str:
@@ -321,7 +352,7 @@ class OffloadPrototype:
             lines.append(f"  the same spec also fits: {', '.join(f'layer{l}' for l in self.also_fits)}")
         lines += ["", f"  kernel source: {self.generator}",
                   f"  proto.write('dir/') -> {self.entry}.cc (kernel + host + entry + spec), "
-                  f"{self.entry}_ref.c (x86 reference)",
+                  f"{self.entry}_ref.c (x86 reference), test_{self.entry}.cc (main(): runs the entry)",
                   f"  then: emod.offload_check('layer{self.layer}', 'dir/{self.entry}.cc')",
                   "  format and rules: print(ag.offload_prototype())"]
         return "\n".join(lines)
@@ -607,6 +638,411 @@ AIEK_REFERENCE({p.entry}) {{
 """
 
 
+# ── the test: test_<entry>.cc, an aiehlc entry file with main() ──────────
+
+_DTYPE_CODE = {"int": 0, "uint": 1, "float": 2}
+_ROLE_RANGE = {"weight": (-127, 127), "bias": (-1024, 1024), "zero-point": (-16, 16),
+               "requant multiplier": (1 << 30, (1 << 31) - 1), "requant shift": (-8, 0),
+               "unused": (0, 0)}
+
+
+def _dtype_bits(dtype: str) -> tuple:
+    m = re.fullmatch(r"([a-z]+?)(\d+)", dtype)
+    return (_DTYPE_CODE.get(m.group(1), 1), int(m.group(2))) if m else (1, 8)
+
+
+def _fill_range(a) -> tuple:
+    """Synthetic [lo, hi] for one input/param: its dtype, its role, its spec ``require=``."""
+    code, bits = _dtype_bits(a.dtype)
+    if code == 2:
+        lo, hi = -4, 4
+    elif code == 1:
+        lo, hi = 0, min(255, (1 << bits) - 1)
+    else:
+        lo, hi = max(-128, -(1 << (bits - 1))), min(127, (1 << (bits - 1)) - 1)
+    if a.kind == "param" and code == 0 and bits >= 16:
+        lo, hi = _ROLE_RANGE.get(a.role, (-64, 64))
+    elif a.kind == "param" and a.role == "weight" and code == 0:
+        lo, hi = -127, 127
+    for r in a.requires:
+        if r == "zero":
+            lo = hi = 0
+        elif r == "nonzero":
+            lo, hi = (max(lo, 1), hi) if hi >= 1 else (lo, -1)
+        elif r == "nonneg":
+            lo, hi = max(lo, 0), max(hi, 0)
+        elif r == "uniform":
+            lo = hi = max(lo, min(hi, 1))
+        elif (m := re.fullmatch(r"range\((-?\d+),(-?\d+)\)", r)):
+            a0, b0 = int(m.group(1)), int(m.group(2))
+            lo, hi = (max(lo, a0), min(hi, b0)) if max(lo, a0) <= min(hi, b0) else (a0, a0)
+    return lo, hi
+
+
+def _iohex_vars(path: Path) -> list:
+    """[(variable prefix, shape)] of a layeriohex header, in slot order."""
+    text = path.read_text(errors="replace")
+    shapes = {m.group(1): tuple(int(d) for d in m.group(2).split(","))
+              for m in re.finditer(r"long long (\w+)_shape\[\d+\] = \{([^}]*)\}", text)}
+    return [(v, shapes.get(v)) for v in re.findall(r"#define (\w+)_DTYPE ", text)]
+
+
+def _test_data(p: OffloadPrototype):
+    """The layer's first call as ``make TRACE=1`` dumped it: (dumps, header) or (None, why)."""
+    d = Path(p.iohex_dir) if p.iohex_dir else None
+    if d is None or not d.is_dir():
+        return None, "no arm_build/layeriohex -- build the deploy with make TRACE=1"
+    call = p.calls[0]
+    ins, outs = sorted(d.glob(f"l{call:02d}_*_in.h")), sorted(d.glob(f"l{call:02d}_*_out.h"))
+    if len(ins) != 1 or len(outs) != 1:
+        return None, f"no unique l{call:02d}_*_in.h / _out.h in {d}"
+    vars_ = _iohex_vars(ins[0]) + _iohex_vars(outs[0])
+    if [s for _, s in vars_] != [a.shape for a in p.args]:
+        return None, f"{ins[0].name} does not carry this layer's signature (stale dump?)"
+    e = p.entry
+    maps = "\n".join(f"#define AIEKT_DATA_{a.index} {v}_data\n"
+                     f"static_assert({v}_BYTES == {_nbytes(a)}LL, \"{v}: not {a.dtype}"
+                     f"[{','.join(map(str, a.shape))}]\");" for a, (v, _) in zip(p.args, vars_))
+    hdr = f"""\
+/* {e}_test_data.h -- layer {p.layer}'s real tensors for test_{e}.cc: TVM's call
+ * [{call:02d}] as `make TRACE=1` dumped it ({ins[0].name}, {outs[0].name}, copied
+ * flat beside the test because aiehlc.sh copies user headers with a flat *.h glob).
+ * The outputs are TVM's own result -- the golden. Generated by aiegraph.offload_prototype. */
+#ifndef {e.upper()}_TEST_DATA_H
+#define {e.upper()}_TEST_DATA_H
+#include "{ins[0].name}"
+#include "{outs[0].name}"
+{maps}
+#endif
+"""
+    return [ins[0], outs[0]], hdr
+
+
+def _nbytes(a) -> int:
+    n = 1
+    for d in a.shape:
+        n *= d
+    return n * max(1, _dtype_bits(a.dtype)[1] // 8)
+
+
+def _test_tables(p: OffloadPrototype) -> str:
+    """The test's static tables: shapes, aiek_tensor args[] (data bound at run time), labels."""
+    shapes = "\n".join(f"static const int64_t aiekt_shape_{a.index}[] = {{{', '.join(map(str, a.shape))}}};"
+                       for a in p.args)
+    args = ",\n".join(f"    {{nullptr, {len(a.shape)}, {_dtype_bits(a.dtype)[0]}, {_dtype_bits(a.dtype)[1]}, 1, "
+                      f"aiekt_shape_{a.index}, {_nbytes(a)}ull}}" for a in p.args)
+    desc = ",\n".join(f'    "args[{a.index}] {a.kind} {a.dtype}[{",".join(map(str, a.shape))}] {a.name}"'
+                      for a in p.args)
+    outs = ", ".join(str(a.index) for a in p.args if a.kind == "out")
+    data = "\n".join(f"    AIEKT_DATA_{a.index}," for a in p.args)
+    fill = "\n".join(f"    for (int64_t i = 0; i < {_nbytes(a) // max(1, _dtype_bits(a.dtype)[1] // 8)}; i++) "
+                     f"// {a.role}{''.join(' require=' + r for r in a.requires)}\n"
+                     f"        (({a.ctype} *)aiekt_args[{a.index}].data)[i] = ({a.ctype})aiekt_rand({lo}LL, {hi}LL);"
+                     for a in p.args if a.kind != "out" for lo, hi in [_fill_range(a)])
+    return f"""\
+#define AIEKT_NARGS {len(p.args)}
+{shapes}
+static aiek_tensor aiekt_args[AIEKT_NARGS] = {{
+{args}}};
+static const char *const aiekt_desc[AIEKT_NARGS] = {{
+{desc}}};
+static const int aiekt_outs[] = {{{outs}}};
+#define AIEKT_NOUTS ((int)(sizeof(aiekt_outs) / sizeof(aiekt_outs[0])))
+
+#if AIEKT_HAVE_DATA
+// Each argument's bytes from {p.entry}_test_data.h; for outputs, the golden.
+static const unsigned char *const aiekt_data[AIEKT_NARGS] = {{
+{data}
+}};
+#endif
+
+static uint64_t aiekt_state = 0x9E3779B97F4A7C15ull; // fixed seed: every run sees the same tensors
+
+static int64_t aiekt_rand(int64_t lo, int64_t hi) {{
+    aiekt_state ^= aiekt_state << 13;
+    aiekt_state ^= aiekt_state >> 7;
+    aiekt_state ^= aiekt_state << 17;
+    return lo + (int64_t)(aiekt_state % (uint64_t)(hi - lo + 1));
+}}
+
+// Seeded synthetic tensors; each range follows the argument's role and its spec require=.
+static void aiekt_fill_synthetic(void) {{
+{fill}
+}}
+"""
+
+
+def _test_perf(p: OffloadPrototype) -> str:
+    """The test's clock and timing report (``test_conv2d.cc``'s ``run_perf`` pattern)."""
+    g, e = p.geom, p.entry
+    macs = g.OH * g.OW * g.K * g.KH * g.KW * g.C if g else 0
+    return f"""\
+// Wall clock: the Arm generic timer (XTime, as test_conv2d.cc), deliberately NOT
+// aie_timer.h (it branches on AIE_GEN, which the frontend parse does not define);
+// CLOCK_MONOTONIC where the BSP header is absent (Linux).
+#if defined(__has_include)
+#if __has_include("xiltimer.h")
+#include "xiltimer.h"
+#define AIEKT_XTIME 1
+#endif
+#endif
+#if AIEKT_XTIME
+typedef XTime aiekt_tick;
+static aiekt_tick aiekt_now(void) {{
+    XTime t;
+    XTime_GetTime(&t);
+    return t;
+}}
+static double aiekt_ms(aiekt_tick t0, aiekt_tick t1) {{
+    return t1 <= t0 ? 0.0 : 1000.0 * (double)(t1 - t0) / (double)COUNTS_PER_SECOND;
+}}
+#else
+#include <time.h>
+typedef uint64_t aiekt_tick;
+static aiekt_tick aiekt_now(void) {{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}}
+static double aiekt_ms(aiekt_tick t0, aiekt_tick t1) {{
+    return t1 <= t0 ? 0.0 : (double)(t1 - t0) / 1e6;
+}}
+#endif
+
+// Useful MACs of one call (the operator's arithmetic, not the padded channels
+// the array issues); 0 = not a conv frame, no GOPS line.
+#define AIEKT_MACS {macs}.0
+
+// The runtime's PMU phase counters (kload, bdcfg, coreen, startio) and wait_io:
+// always linked, they COUNT only in an `aiehlc.sh --profiling` build. C++ linkage.
+void __Runtime_phase_cycles(unsigned long long *cyc, unsigned int *calls);
+void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls);
+
+static void aiekt_phase_snapshot(unsigned long long *ph, unsigned long long *wio) {{
+    unsigned int calls[4], wcalls;
+    __Runtime_phase_cycles(ph, calls);
+    __Runtime_wait_io_cycles(wio, &wcalls);
+}}
+
+// Runtime split of the repeats, PMU cycles per call (deltas since the snapshot).
+static void aiekt_phase_report(const unsigned long long *ph0, unsigned long long wio0, int iters) {{
+    unsigned long long ph1[4], wio1, d[5], total = 0;
+    aiekt_phase_snapshot(ph1, &wio1);
+    for (int i = 0; i < 4; i++)
+        d[i] = ph1[i] >= ph0[i] ? ph1[i] - ph0[i] : 0;
+    d[4] = wio1 >= wio0 ? wio1 - wio0 : 0;
+    for (int i = 0; i < 5; i++)
+        total += d[i];
+    if (!total) {{
+        printf("[{e}] PERF launch split: counters read 0 -- rebuild with `aiehlc.sh --profiling`\\n");
+        return;
+    }}
+    const char *name[5] = {{"kload", "bdcfg", "coreen", "startio", "wait_io"}};
+    printf("[{e}] PERF launch split (PMU cycles per call):\\n");
+    for (int i = 0; i < 5; i++)
+        printf("[{e}]   %-8s %12.0f  (%5.1f%%)\\n", name[i], (double)d[i] / iters, 100.0 * (double)d[i] / (double)total);
+}}
+
+// ms[0] = the first call; ms[1..n-1] = the repeats.
+static void aiekt_perf_report(const double *ms, int n, const unsigned long long *ph0, unsigned long long wio0) {{
+    if (n < 1) {{
+        printf("[{e}] PERF n/a: no launch succeeded\\n");
+        return;
+    }}
+    double lo = ms[0], hi = ms[0], sum = 0.0;
+    for (int i = 1; i < n; i++) {{
+        lo = i == 1 || ms[i] < lo ? ms[i] : lo;
+        hi = i == 1 || ms[i] > hi ? ms[i] : hi;
+        sum += ms[i];
+    }}
+    const double mean = n > 1 ? sum / (n - 1) : ms[0];
+    printf("[{e}] PERF first call %.3f ms (partition init, staging alloc, ELF load)\\n", ms[0]);
+    if (n > 1) {{
+        printf("[{e}] PERF steady %d call(s): min %.3f  mean %.3f  max %.3f ms (config + launch + host staging)\\n",
+               n - 1, lo, mean, hi);
+        aiekt_phase_report(ph0, wio0, n - 1);
+    }}
+    if (AIEKT_MACS > 0.0 && mean > 0.0)
+        printf("[{e}] PERF %.0f MACs/call -> %.3f GOPS at the mean (2 ops/MAC)\\n", AIEKT_MACS,
+               2.0 * AIEKT_MACS / (mean * 1e6));
+    printf("[{e}] PERF SUMMARY iters %d  first %.3f  min %.3f  mean %.3f  max %.3f  (ms)\\n", n, ms[0],
+           n > 1 ? lo : ms[0], mean, n > 1 ? hi : ms[0]);
+}}
+"""
+
+
+def _test_cc(p: OffloadPrototype) -> str:
+    e = p.entry
+    return f"""\
+/******************************************************************************
+ * test_{e}.cc -- standalone test of {e} (layer {p.layer}, {p.label}).
+ * TVM symbol: {p.symbol}
+ * Generated by aiegraph.offload_prototype.
+ *
+ * An aiehlc ENTRY FILE: it owns main() and #includes {e}.cc, which the aiehlc
+ * frontend splices in before its rewrites, so one command builds the kernel,
+ * host.cc and a linked ELF (main() present -> ELF, not lib{e}.a):
+ *
+ *   source script/aiehlc.sh --aie-version 5 --runtime-source-file <dir>/test_{e}.cc
+ *   python3 script/test/apppaltest.py aout/worklocal/build/host
+ *
+ * main() binds the layer's {len(p.args)} tensors in TVM call order exactly as the
+ * generated TVM adapter would and calls AIEK_ENTRY({e}) AIEKT_ITERS times, each
+ * call TIMED (wall clock around the entry = what TVM's graph executor waits):
+ * the first apart (it carries partition init, staging allocation, kernel ELF
+ * load), then min/mean/max of the rest. aiehlc re-programs the array on every
+ * launch, so the steady number is the per-call latency, config included -- not
+ * "AIE compute". Build with `aiehlc.sh --profiling` for the per-launch runtime
+ * split (kload/bdcfg/coreen/startio/wait_io). One line: [{e}] PERF SUMMARY ...
+ *   {e}_test_data.h present (proto.write found make TRACE=1 dumps of call
+ *     [{p.calls[0]:02d}]): TVM's real inputs; every output byte-compared against TVM's
+ *     own output -- GOLDEN check;
+ *   absent: seeded synthetic inputs -- SMOKE check: the entry returns AIEK_OK,
+ *     writes every output (poisoned before each call) and repeats bit-identically.
+ * Verdict, one line: [{e}] TEST PASS|FAIL ...
+ * Until {e}.cc's TODOs are filled, the entry returns AIEK_ERR_KERNEL and this
+ * test FAILs -- by design.
+ ******************************************************************************/
+#include "{e}.cc"
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(__has_include)
+#if __has_include("{e}_test_data.h")
+#include "{e}_test_data.h"
+#define AIEKT_HAVE_DATA 1
+#endif
+#endif
+#ifndef AIEKT_HAVE_DATA
+#define AIEKT_HAVE_DATA 0
+#endif
+
+#ifndef AIEKT_ITERS
+#define AIEKT_ITERS 5 // launch 0 + 4 timed repeats; >= 2 also checks repeats give the same bytes
+#endif
+#ifndef AIEKT_MAX_REPORTED
+#define AIEKT_MAX_REPORTED 16
+#endif
+#define AIEKT_POISON 0xA5
+
+// The runtime allocator (64-byte aligned); C++ linkage, as in aie_runtime.h.
+void *__Runtime_Alloc(size_t bytes);
+
+{_test_tables(p)}
+{_test_perf(p)}
+static int aiekt_bind(void) {{
+    for (int i = 0; i < AIEKT_NARGS; i++) {{
+        aiekt_args[i].data = __Runtime_Alloc((aiekt_args[i].nbytes + 63) & ~(uint64_t)63);
+        if (!aiekt_args[i].data) {{
+            printf("[{e}] ERROR: allocating %s (%llu B)\\n", aiekt_desc[i], (unsigned long long)aiekt_args[i].nbytes);
+            return -1;
+        }}
+    }}
+#if AIEKT_HAVE_DATA
+    for (int i = 0; i < AIEKT_NARGS; i++)
+        memcpy(aiekt_args[i].data, aiekt_data[i], aiekt_args[i].nbytes);
+#else
+    aiekt_fill_synthetic();
+#endif
+    return 0;
+}}
+
+// Mismatching bytes of output k against the golden; prints the first few.
+static uint64_t aiekt_compare(int k, const unsigned char *golden) {{
+    const aiek_tensor *t = &aiekt_args[aiekt_outs[k]];
+    const unsigned char *got = (const unsigned char *)t->data;
+    uint64_t bad = 0;
+    for (uint64_t i = 0; i < t->nbytes; i++)
+        if (got[i] != golden[i] && bad++ < AIEKT_MAX_REPORTED)
+            printf("[{e}]   %s byte %llu: got 0x%02x want 0x%02x\\n", aiekt_desc[aiekt_outs[k]],
+                   (unsigned long long)i, got[i], golden[i]);
+    return bad;
+}}
+
+// One timed call of the entry (poisoning and hashing stay outside the clock);
+// returns the entry's rc.
+static int aiekt_launch(uint32_t *hash, uint64_t *untouched, double *ms) {{
+    for (int k = 0; k < AIEKT_NOUTS; k++)
+        memset(aiekt_args[aiekt_outs[k]].data, AIEKT_POISON, aiekt_args[aiekt_outs[k]].nbytes);
+    const aiekt_tick t0 = aiekt_now();
+    const int rc = {e}(aiekt_args, AIEKT_NARGS);
+    *ms = aiekt_ms(t0, aiekt_now());
+    *hash = 0;
+    *untouched = 0;
+    for (int k = 0; k < AIEKT_NOUTS; k++) {{
+        const aiek_tensor *t = &aiekt_args[aiekt_outs[k]];
+        const unsigned char *b = (const unsigned char *)t->data;
+        uint64_t run = 0; // a whole output still poisoned = the kernel never wrote it
+        for (uint64_t i = 0; i < t->nbytes; i++)
+            run += b[i] == AIEKT_POISON;
+        *untouched += run == t->nbytes ? t->nbytes : 0;
+        *hash = aiek_hash_bytes(t->data, t->nbytes, *hash);
+    }}
+    return rc;
+}}
+
+int main() {{
+    printf("=== {e}: layer {p.layer} ({p.label}) on AIE, %s ===\\n",
+           AIEKT_HAVE_DATA ? "TVM call [{p.calls[0]:02d}]'s real tensors" : "synthetic tensors (smoke)");
+    for (int i = 0; i < AIEKT_NARGS; i++)
+        printf("    %s\\n", aiekt_desc[i]);
+    if (aiekt_bind() != 0) {{
+        printf("[{e}] TEST FAIL alloc\\n");
+        return 1;
+    }}
+    int fail = 0, n_ok = 0;
+    uint32_t first = 0;
+    double ms[AIEKT_ITERS];
+    unsigned long long ph0[4] = {{0, 0, 0, 0}}, wio0 = 0;
+    for (int it = 0; it < AIEKT_ITERS && !fail; it++) {{
+        uint32_t hash;
+        uint64_t untouched;
+        const int rc = aiekt_launch(&hash, &untouched, &ms[it]);
+        printf("[{e}] launch %d: rc=%d hash=0x%08x  %.3f ms\\n", it, rc, (unsigned)hash, ms[it]);
+        if (it == 0)
+            aiekt_phase_snapshot(ph0, &wio0); // the repeats' PMU split excludes launch 0
+        if (rc != AIEK_OK) {{
+            printf("[{e}] TEST FAIL entry returned %d (AIEK_ERR_*; -4 = kernel / TODOs not filled)\\n", rc);
+            fail = 1;
+        }} else if (untouched) {{
+            printf("[{e}] TEST FAIL %llu output bytes never written\\n", (unsigned long long)untouched);
+            fail = 1;
+        }} else if (it > 0 && hash != first) {{
+            printf("[{e}] TEST FAIL launch %d differs from launch 0 (0x%08x vs 0x%08x)\\n", it, (unsigned)hash,
+                   (unsigned)first);
+            fail = 1;
+        }}
+        if (it == 0)
+            first = hash;
+        n_ok += !fail;
+    }}
+    aiekt_perf_report(ms, n_ok, ph0, wio0);
+#if AIEKT_HAVE_DATA
+    for (int k = 0; k < AIEKT_NOUTS && !fail; k++) {{
+        const uint64_t bad = aiekt_compare(k, aiekt_data[aiekt_outs[k]]);
+        if (bad) {{
+            printf("[{e}] TEST FAIL golden: %llu / %llu bytes of %s differ from TVM\\n", (unsigned long long)bad,
+                   (unsigned long long)aiekt_args[aiekt_outs[k]].nbytes, aiekt_desc[aiekt_outs[k]]);
+            fail = 1;
+        }}
+    }}
+    if (!fail)
+        printf("[{e}] TEST PASS golden: every output byte equals TVM's (hash 0x%08x)\\n", (unsigned)first);
+#else
+    if (!fail)
+        printf("[{e}] TEST PASS smoke: rc ok, outputs written, %d launches identical (hash 0x%08x); "
+               "no golden -- write the prototype from a make TRACE=1 deploy for one\\n",
+               AIEKT_ITERS, (unsigned)first);
+#endif
+    printf("{e} test done (rc=%d).\\n", fail);
+    return fail;
+}}
+"""
+
+
 # ── building one ─────────────────────────────────────────────────────────
 
 _ROLE_NAME = {"weight": "weight", "bias": "bias", "zero-point": "zero_point",
@@ -806,4 +1242,6 @@ def prototype_for(emod, layer=None, region=None, entry: str = None):
             pass
     out = Prototypes(layer_prototype(net, l, entry if len(layers) == 1 else None, by_layer.get(l, ()))
                      for l in layers)
+    for p in out:
+        p.iohex_dir = str(emod.workdir / "arm_build" / "layeriohex")
     return out[0] if len(out) == 1 else out

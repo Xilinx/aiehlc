@@ -1,30 +1,8 @@
 /******************************************************************************
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
- *
  * Kernel-only GEMM: the DMA is derived from the kernel.
- *
  *   C[64, 64] = A[64, 256] x B[64, 256]^T, int8, on the 4x4 mesh
- *
- * The ports declare only their tensors (aie::shape). The tiling lives in the
- * kernel: core (pm, pn) stores the 16x16 block C[16pm.., 16pn..] and loads A's
- * rows 16pm.. and B's rows 16pn.. in 4 K-chunks of 64. aiehlc traces the body
- * on x86 for every core, fits each port's blocks, and routes them -- with no
- * operator recognition -- into one GemmSpace per port (see aout/newfile.cpp):
- *   a: M over mesh rows, K chunks in the inner loop, broadcast along a mesh row
- *   b: N over mesh cols, K chunks in the inner loop, broadcast along a mesh col
- *   c: M over mesh rows, N over mesh cols, gathered
- * `build/aiehlc-convtile trace <this file>` prints that plan in seconds.
- *
- * The same kernel with hand-written GemmSpaces: simplegemm_kernel_space.cc.
- *
- * Status (palmyra 213, 2026-11-10): builds and passes the trace check, but
- * HANGS on the board (wait_io TIMEOUT on the output shim, cols 3 ch 0/1). The
- * pipeline gives each core's C block the tiling d0 = 16 rows in 4 rounds of 4
- * (#routing.tiling in ir/simplerouting/0_initial.mlir), while the kernel
- * commits one 16x16 block: tile_round on a mesh-split GEMM dim is applied
- * twice. Same with fullconnect_auto = 0 or 1. Open item 3 of
- * doc/design/trace_to_routing.md; not specific to either example.
  ******************************************************************************/
 #include "simplegemm_load.h"
 __global__ void gemm(aie::port<input_window_int8 *, aie::IFM, aie::shape<64, 256>> a,

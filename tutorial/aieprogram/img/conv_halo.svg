@@ -1,0 +1,41 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='960' height='360' viewBox='0 0 960 360'>
+<defs><marker id='arr' markerUnits='userSpaceOnUse' markerWidth='12' markerHeight='10' refX='11' refY='5' orient='auto'><path d='M0,0 L12,5 L0,10 z' fill='#444'/></marker></defs>
+<rect width='100%' height='100%' fill='white'/>
+<text x='480.0' y='24.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='15' text-anchor='middle' fill='#222' font-weight='bold'>Input footprint of an output block: 7x7 kernel, stride 2 -&gt; overlapping slabs (halo)</text>
+<text x='480.0' y='44.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#555' font-weight='normal'>input 230 x 230 x 4 (zero-padded in DDR), top-left corner -- mesh row pid_h = 0</text>
+<rect x='110.0' y='80.0' width='525.0' height='168.0' rx='0' fill='#fffaf4' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<rect x='110.0' y='80.0' width='256.2' height='79.8' rx='0' fill='#f4a261' fill-opacity='0.3' stroke='#333' stroke-width='1.5'/>
+<rect x='110.0' y='138.8' width='256.2' height='79.8' rx='0' fill='#e76f51' fill-opacity='0.3' stroke='#333' stroke-width='1.5'/>
+<rect x='345.2' y='80.0' width='256.2' height='79.8' rx='0' fill='#2a9d8f' fill-opacity='0.3' stroke='#333' stroke-width='1.5'/>
+<rect x='110.0' y='138.8' width='256.2' height='21.0' rx='0' fill='#8b0000' fill-opacity='0.35' stroke='none' stroke-width='0'/>
+<rect x='345.2' y='80.0' width='21.0' height='79.8' rx='0' fill='#8b0000' fill-opacity='0.35' stroke='none' stroke-width='0'/>
+<text x='227.6' y='113.6' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>round i=0, j=0</text>
+<text x='227.6' y='193.4' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>round i=1, j=0</text>
+<text x='488.0' y='113.6' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>round i=0, j=1</text>
+<text x='227.6' y='155.4' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='white' font-weight='bold'>halo: rows 14..18</text>
+<text x='374.4' y='155.4' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#8b0000' font-weight='bold'>&lt;- halo: cols 56..60</text>
+<line x1='98.0' y1='80.0' x2='98.0' y2='159.8' stroke='#333' stroke-width='1.2'/>
+<text x='94.0' y='115.9' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#222' font-weight='bold'>19 rows</text>
+<text x='94.0' y='129.9' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='end' fill='#666' font-weight='normal'>(7-1)*2+7</text>
+<line x1='70.0' y1='138.8' x2='106.0' y2='138.8' stroke='#333' stroke-width='1' stroke-dasharray='3,2'/>
+<text x='94.0' y='162.8' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='end' fill='#666' font-weight='normal'>next block</text>
+<text x='94.0' y='175.8' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='end' fill='#666' font-weight='normal'>starts at row 14</text>
+<line x1='110.0' y1='260.0' x2='366.2' y2='260.0' stroke='#333' stroke-width='1.2'/>
+<text x='236.0' y='276.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='bold'>61 columns = (28-1)*2+7</text>
+<line x1='345.2' y1='252.0' x2='345.2' y2='288.0' stroke='#333' stroke-width='1' stroke-dasharray='3,2'/>
+<text x='349.2' y='296.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#666' font-weight='normal'>next block starts at column 56</text>
+<text x='659.0' y='86.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='bold'>block - step = halo</text>
+<text x='659.0' y='103.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>rows:  19 - 14 = 5</text>
+<text x='659.0' y='120.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>cols:  61 - 56 = 5</text>
+<text x='659.0' y='137.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'></text>
+<text x='659.0' y='154.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='bold'>step = output block * stride</text>
+<text x='659.0' y='171.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>rows:  7 * 2 = 14</text>
+<text x='659.0' y='188.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>cols:  28 * 2 = 56</text>
+<text x='659.0' y='205.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'></text>
+<text x='659.0' y='222.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#8b0000' font-weight='bold'>halo bytes are sent twice:</text>
+<text x='659.0' y='239.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#8b0000' font-weight='normal'>each round gets its whole slab</text>
+<text x='659.0' y='256.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'></text>
+<text x='659.0' y='273.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='bold'>mesh row pid_h starts at</text>
+<text x='659.0' y='290.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>input row 56 * pid_h</text>
+<text x='480.0' y='345.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#a0522d' font-weight='normal'>The compiler reads exactly this from the trace: block (19,61,4), core offset (56,0,0)*p0, rounds 4x4, steps (14,0,0) / (0,56,0)</text>
+</svg>
