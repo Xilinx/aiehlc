@@ -86,6 +86,33 @@ encode_aot_ctrlpkt() {
     local output_dir="$2"
     local gen="$3"
     local manifest="./ctrlpkt_manifest.json"
+    # Multi-kernel host.cc (aiehlc.cc multi-kernel dispatch): one sites file per kernel,
+    # ctrlpkt_sites_<func>.txt -> host_ctrlpkt_<func>.h with every host_ctrlpkt_* symbol
+    # renamed host_ctrlpkt_<func>_* (the dispatch registers host_ctrlpkt_<func>_table).
+    if [ -f "./ctrlpkt_sites_${func_name}.txt" ]; then
+        local ktool="${output_dir}/aiehlc_ctrlpkt"
+        bash "${AIEHLC_ROOT_DIR}/script/build_ctrlpkt_tool.sh" "$ktool" "$gen" || {
+            echo "Error: aiehlc_ctrlpkt build failed"
+            return 1
+        }
+        local khdr="./host_ctrlpkt_${func_name}.h"
+        local kdbg="./ctrlpkt_${func_name}"
+        rm -rf "$kdbg"
+        "$ktool" --sites "./ctrlpkt_sites_${func_name}.txt" --host-cc ./host.cc --out-sites "${khdr}.tmp" \
+            --debug-dir "$kdbg" || {
+            echo "Error: aiehlc_ctrlpkt sites encode failed for ${func_name}"
+            return 1
+        }
+        local kguard
+        kguard="HOST_CTRLPKT_$(echo "$func_name" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9\n' '_')_H"
+        sed -e "s/\bhost_ctrlpkt_/host_ctrlpkt_${func_name}_/g" -e "s/\bHOST_CTRLPKT_H\b/${kguard}/g" \
+            "${khdr}.tmp" > "$khdr" && rm -f "${khdr}.tmp"
+        grep -q "host_ctrlpkt_${func_name}_table" "$khdr" || {
+            echo "Error: ${khdr} has no host_ctrlpkt_${func_name}_table"
+            return 1
+        }
+        echo "AOT control packets: $(pwd)/${khdr#./}"
+    fi
     [ -f "$manifest" ] || return 0
     grep -q "\"func\":\"${func_name}\"" "$manifest" || return 0
 

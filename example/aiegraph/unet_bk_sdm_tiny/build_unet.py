@@ -271,6 +271,18 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     return ua.main_c(MAIN_C, ktimer=a.ktimer), len(sel)
 
 
+def read_layer_cflags_file(path) -> str:
+    """--arm-layer-cflags-file: the file's lines joined with single spaces.
+    A missing or empty (whitespace-only) file is an error, never a silent ''."""
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f"--arm-layer-cflags-file {path}: no such file")
+    flags = " ".join(path.read_text().split())
+    if not flags:
+        raise ValueError(f"--arm-layer-cflags-file {path}: file is empty")
+    return flags
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--onnx", required=True, type=Path)
@@ -300,8 +312,20 @@ def main(argv=None) -> int:
     ap.add_argument("--kincore-layers", default="all",
                     help="P4bp: --kincore only -- comma-separated partition layer indices (0..36) put on the AIE; "
                          "the others keep their TVM C call site. Default all")
+    ap.add_argument("--arm-layer-cflags-file", type=Path, default=None,
+                    help="file of extra CFLAGS for the TVM per-layer kernel objects only (liblayers.a; "
+                         "arm_build layer_cflags). Lines are joined with spaces and passed as ONE string, "
+                         "so no shell word-splitting. Missing or empty file -> error. Default: none")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
+    layer_cflags = ""
+    if a.arm_layer_cflags_file is not None:
+        try:
+            layer_cflags = read_layer_cflags_file(a.arm_layer_cflags_file)
+        except ValueError as e:
+            log(str(e))
+            return 2
+        log(f"arm_layer_cflags ({a.arm_layer_cflags_file}): {layer_cflags}")
     if a.aie == "conv":
         if a.partition is None or a.wdtype != "bf16":
             log("--aie conv needs --partition <partition.json> and --wdtype bf16")
@@ -370,7 +394,8 @@ def main(argv=None) -> int:
 
     rep = emod.build(target="a78", verbose=a.verbose, main_c=main_c,
                      extra_sources=[P1_COS_C, real_io / "p1_ref.h", hdr],
-                     extra_cflags="-DP1_COS_NO_MAIN " + HEAP_LDFLAG)
+                     extra_cflags="-DP1_COS_NO_MAIN " + HEAP_LDFLAG,
+                     layer_cflags=layer_cflags)
     if not rep.ok:
         log(f"build FAILED: {rep.reason}")
         return 1

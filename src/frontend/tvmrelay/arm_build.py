@@ -1713,7 +1713,7 @@ liblayers.a: $(LAYER_OBJS)
 # Every layer includes ../layers_common.h, so a regenerated prologue must
 # rebuild all of them.
 $(LAYER_OBJS): $(LAYERS)/layers_common.h
-
+{layer_cflags_block}
 # main.c embeds the preprocessed image and the label table, so regenerating
 # either must force it to recompile.
 main.o: main.c input_image.h imagenet_labels.h
@@ -1986,8 +1986,30 @@ def layer_sources(layers_dir) -> list:
     return sorted(layers_dir.glob("*/*.c"))
 
 
+def _layer_cflags_block(layer_cflags: str) -> str:
+    """Makefile text for the ``layer_cflags`` knob, or ``""`` when it is empty.
+
+    Empty -> the generated Makefile is byte-identical to the one without the
+    knob. Non-empty -> ``LAYER_CFLAGS ?= <flags>`` plus a target-specific
+    ``$(LAYER_OBJS): CFLAGS += $(LAYER_CFLAGS)``, so ONLY the per-layer TVM
+    kernels (the members of liblayers.a) see the extra flags. The driver,
+    main.c, extra sources and the AIE host glue (aiek_*.cc, whose NaN sentinel
+    breaks under -ffinite-math-only) keep the plain CFLAGS.
+    ``make LAYER_CFLAGS=...`` overrides the value without regenerating.
+    """
+    flags = " ".join(str(layer_cflags or "").split())
+    if not flags:
+        return ""
+    return ("\n# Extra flags for the per-layer TVM kernels only (arm_build layer_cflags,\n"
+            "# build_unet.py --arm-layer-cflags-file). Target-specific: the driver,\n"
+            "# main.c and the AIE host glue are compiled with plain CFLAGS.\n"
+            f"LAYER_CFLAGS ?= {flags}\n"
+            "$(LAYER_OBJS): CFLAGS += $(LAYER_CFLAGS)\n")
+
+
 def write_makefile(build: Path, repo_root: Path, kernel_src: Path,
-                   layers_dir=None, verbose: bool = True) -> Path:
+                   layers_dir=None, verbose: bool = True,
+                   layer_cflags: str = "") -> Path:
     """Write the Makefile that actually builds the ELF. Returns its path.
 
     The recipe lives here rather than in Python so the build is reproducible
@@ -2026,6 +2048,7 @@ def write_makefile(build: Path, repo_root: Path, kernel_src: Path,
         repo=repo_root, arch=arch, bsp=bsp,
         layers_dir=layers_dir, kernels=kernels, kernel_rule=rule,
         kernel_obj=f"{kernel_src.stem}.o",
+        layer_cflags_block=_layer_cflags_block(layer_cflags),
         **_aie_link_vars(repo_root, kernel_src, build, layers_dir),
     )
     path = build / "Makefile"
@@ -2537,13 +2560,16 @@ def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
                   run_make: bool = True, jobs: int = 0, image=None,
                   local: bool = False, local_run: bool = True,
                   verbose: bool = True, make_vars: dict = None,
-                  main_c=None, extra_sources=(), extra_cflags: str = "") -> dict:
+                  main_c=None, extra_sources=(), extra_cflags: str = "",
+                  layer_cflags: str = "") -> dict:
     """Generate the sources + Makefile, then run ``make`` to link ``main.elf``.
 
     ``main_c`` (text) replaces the generated classifier ``main.c``;
     ``extra_sources`` (paths: .c compiled and linked, anything else copied next
     to them, e.g. headers) and ``extra_cflags`` go into the same build. For
     non-classifier graphs (aiegraph-unet-multiinput).
+    ``layer_cflags`` is added to CFLAGS for the per-layer kernel objects
+    (liblayers.a) only; empty leaves the Makefile unchanged.
 
     Python only *generates*; ``make`` does the building, so the same Makefile
     the flow used is the one a person re-runs by hand. ``run_make=False``
@@ -2599,7 +2625,8 @@ def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
     # Stage 5 splits into <out_dir>/layers/ and runs before this stage, so the
     # per-layer sources are already on disk when the Makefile is written.
     makefile = write_makefile(build, repo_root, out_dir / c_name,
-                              layers_dir=out_dir / "layers", verbose=verbose)
+                              layers_dir=out_dir / "layers", verbose=verbose,
+                              layer_cflags=layer_cflags)
     if main_c is not None:
         (build / "main.c").write_text(main_c)
     extra_c = []

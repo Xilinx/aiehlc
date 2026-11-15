@@ -152,6 +152,26 @@ static unsigned int g_kl_elf_n = 0U, g_kl_rst_n = 0U;
 static unsigned long long g_kl_elf_fill_cyc = 0ULL;
 static unsigned int g_kl_elf_fill_n = 0U;
 static int g_kl_ctrlpkt_aot = 0;
+#ifdef AIEHLC_CTRLPKT_AOT_VERIFY
+/* VERIFY bookkeeping: every check is counted; per site only the first RT_VFY_PRINT_MAX lines print. */
+enum { RT_VFY_BCAST = 0, RT_VFY_ROWACK = 1, RT_VFY_SHIMBD = 2, RT_VFY_ELF = 3, RT_VFY_NSITES = 4 };
+#define RT_VFY_PRINT_MAX 16U
+static unsigned long long g_vfy_checks = 0ULL, g_vfy_ok = 0ULL, g_vfy_bad = 0ULL, g_vfy_printed = 0ULL;
+static unsigned int g_vfy_site_n[RT_VFY_NSITES];
+static int g_vfy_summary_done = 0;
+/* Count one check; returns 1 if its line should print. */
+static int rt_vfy_note(unsigned site, int ok) {
+    g_vfy_checks++;
+    if (ok)
+        g_vfy_ok++;
+    else
+        g_vfy_bad++;
+    if (g_vfy_site_n[site]++ >= RT_VFY_PRINT_MAX)
+        return 0;
+    g_vfy_printed++;
+    return 1;
+}
+#endif
 static unsigned long long g_ctrl_plan_cyc = 0ULL, g_sync_dev_cyc = 0ULL;
 /* Bumped by every partition init and teardown. Anything cached against the
  * array's register state (rt_plan_cache below) is valid only within one
@@ -5241,8 +5261,10 @@ AieRC __Runtime_ctrl_row_broadcast_write(__Runtime_CtrlRowFabric *f, uint32_t ti
     if (aw) {
         uint32_t chk[64];
         uint32_t cw = __Runtime_ctrl_pktize_write(chk, 64U, (uint8_t)ACR_ID_BCAST, tile_addr, data, nwords, 0, 0U, NULL);
-        printf("[aie_runtime] ctrl_pkt AOT VERIFY broadcast_write 0x%x: %s\n", (unsigned)tile_addr,
-               (cw == pw && memcmp(chk, pkt, (size_t)pw * sizeof(uint32_t)) == 0) ? "ok" : "MISMATCH");
+        int vok = cw == pw && memcmp(chk, pkt, (size_t)pw * sizeof(uint32_t)) == 0;
+        if (rt_vfy_note(RT_VFY_BCAST, vok))
+            printf("[aie_runtime] ctrl_pkt AOT VERIFY broadcast_write 0x%x: %s\n", (unsigned)tile_addr,
+                   vok ? "ok" : "MISMATCH");
     }
 #endif
     if (!aw)
@@ -5925,9 +5947,10 @@ AieRC __Runtime_ctrl_row_write_ack(__Runtime_CtrlRowFabric *f, uint8_t row, uint
     if (aw) {
         uint32_t chk[64];
         uint32_t cw = __Runtime_ctrl_pktize_write(chk, 64U, sid, tile_addr, data, nwords, 1, 0U, NULL);
-        printf("[aie_runtime] ctrl_pkt AOT VERIFY row_write_ack row=%u 0x%x: %s\n", (unsigned)row,
-               (unsigned)tile_addr,
-               (cw == pw && memcmp(chk, pkt, (size_t)pw * sizeof(uint32_t)) == 0) ? "ok" : "MISMATCH");
+        int vok = cw == pw && memcmp(chk, pkt, (size_t)pw * sizeof(uint32_t)) == 0;
+        if (rt_vfy_note(RT_VFY_ROWACK, vok))
+            printf("[aie_runtime] ctrl_pkt AOT VERIFY row_write_ack row=%u 0x%x: %s\n", (unsigned)row,
+                   (unsigned)tile_addr, vok ? "ok" : "MISMATCH");
     }
 #endif
     if (pw == 0U || per_pkt == 0U) {
@@ -6035,6 +6058,15 @@ void __Runtime_ctrl_shim_bd_ctrl_stats_print(void) {
            g_aot_stats.plan_aot, g_sb_stats.aot_prefix, g_sb_stats.aot_bd_n, g_sb_stats.aot_bd_pre,
            g_sb_stats.aot_bd_take, g_sb_stats.aot_bd_post, g_sb_stats.aot_window_fast, g_sb_stats.aot_win_fast_cyc,
            g_sb_stats.aot_win_commit_cyc, g_sb_stats.aot_win_addr_cyc);
+#ifdef AIEHLC_CTRLPKT_AOT_VERIFY
+    if (!g_vfy_summary_done) {
+        g_vfy_summary_done = 1;
+        printf("[aie_runtime] ctrl_pkt AOT VERIFY summary checks=%llu ok=%llu mismatch=%llu printed=%llu "
+               "bcast=%u rowack=%u shimbd=%u elf=%u\n",
+               g_vfy_checks, g_vfy_ok, g_vfy_bad, g_vfy_printed, g_vfy_site_n[RT_VFY_BCAST],
+               g_vfy_site_n[RT_VFY_ROWACK], g_vfy_site_n[RT_VFY_SHIMBD], g_vfy_site_n[RT_VFY_ELF]);
+    }
+#endif
 }
 
 /* AOT shim-BD control-packet calls that fell back to the JIT encoder since boot (0 = every call hit the
@@ -6503,12 +6535,15 @@ static int rt_sb_aot_apply(void) {
         for (uint32_t w = 0U; w < len && w < jw && bad == 0xFFFFFFFFU; w++)
             if (vbuf[w] != p[w])
                 bad = w;
-        printf("[aie_runtime] ctrl_pkt AOT VERIFY shim-BD seg %u: jit=%u aot=%u words %s", (unsigned)k, (unsigned)jw,
-               (unsigned)len, (jw == len && bad == 0xFFFFFFFFU) ? "ok\n" : "MISMATCH");
-        if (bad != 0xFFFFFFFFU)
-            printf(" at %u: jit=%08x aot=%08x\n", (unsigned)bad, (unsigned)p[bad], (unsigned)vbuf[bad]);
-        else if (jw != len)
-            printf("\n");
+        int vok = jw == len && bad == 0xFFFFFFFFU;
+        if (rt_vfy_note(RT_VFY_SHIMBD, vok)) {
+            printf("[aie_runtime] ctrl_pkt AOT VERIFY shim-BD seg %u: jit=%u aot=%u words %s", (unsigned)k,
+                   (unsigned)jw, (unsigned)len, vok ? "ok\n" : "MISMATCH");
+            if (bad != 0xFFFFFFFFU)
+                printf(" at %u: jit=%08x aot=%08x\n", (unsigned)bad, (unsigned)p[bad], (unsigned)vbuf[bad]);
+            else if (jw != len)
+                printf("\n");
+        }
 #else
         uint32_t keep = g_sb.seg[k].pw;
         memcpy(p + keep, a->seg[k] + sh + keep, (size_t)(len - keep) * sizeof(uint32_t));
@@ -8111,16 +8146,22 @@ static AieRC rt_ctrl_load_elf_aot(__Runtime_CtrlRowFabric *fab, const uint8_t *e
         payload_words += body_words;
         g_kl_ctrlpkt_aot = 1;
 #ifdef AIEHLC_CTRLPKT_AOT_VERIFY
-        uint32_t *vbuf = (uint32_t *)__Runtime_alloc_buffer(fab->dev, (size_t)(body_words + 8U) * sizeof(uint32_t));
+        /* The JIT encoder always emits the full ELF body; the warm path may send the shorter s_elf_warm.body
+         * (derived from full_body), so the JIT re-encode is compared against full_body/full_words. */
+        uint32_t *vbuf = (uint32_t *)__Runtime_alloc_buffer(fab->dev, (size_t)(full_words + 8U) * sizeof(uint32_t));
         if (vbuf) {
             uint32_t vw = 0U, va = 0U;
-            int ver = rt_cpe_encode_body(&cpe, elf, loc.Col, loc.Row, (uint32_t)ACR_ID_BCAST, 1, vbuf, body_words + 8U,
+            int ver = rt_cpe_encode_body(&cpe, elf, loc.Col, loc.Row, (uint32_t)ACR_ID_BCAST, 1, vbuf, full_words + 8U,
                                          &vw, &va);
-            if (ver != 0 || vw != body_words || memcmp(vbuf, body, (size_t)body_words * sizeof(uint32_t)) != 0)
-                printf("[aie_runtime] ctrl_pkt AOT VERIFY mismatch jit_words=%u aot_words=%u\n", (unsigned)vw,
-                       (unsigned)body_words);
-            else
-                printf("[aie_runtime] ctrl_pkt AOT VERIFY ok words=%u\n", (unsigned)body_words);
+            int vok = ver == 0 && vw == full_words && memcmp(vbuf, full_body, (size_t)full_words * sizeof(uint32_t)) == 0;
+            if (rt_vfy_note(RT_VFY_ELF, vok)) {
+                if (!vok)
+                    printf("[aie_runtime] ctrl_pkt AOT VERIFY mismatch jit_words=%u aot_words=%u sent_words=%u\n",
+                           (unsigned)vw, (unsigned)full_words, (unsigned)body_words);
+                else
+                    printf("[aie_runtime] ctrl_pkt AOT VERIFY ok words=%u sent_words=%u\n", (unsigned)full_words,
+                           (unsigned)body_words);
+            }
             __Runtime_free_buffer(fab->dev, vbuf);
         }
 #endif
