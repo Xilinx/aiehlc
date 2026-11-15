@@ -16,6 +16,10 @@
 #   build <branch>            Run cmake + make in the worktree's build/
 #   build-unitest <branch>    Build the unitest binary in the worktree
 #   cd <branch>               Print worktree path (use: cd $(bash script/worktree.sh cd <name>))
+#   link-deps <wt-path> [--from <ref>]
+#                             Link untracked deps (thirdparty/alib, thirdparty/tvm-0.16,
+#                             build/aiehlc) from a reference worktree (default: repo root).
+#                             Idempotent; never overwrites an existing file/link.
 ###############################################################################
 
 set -euo pipefail
@@ -37,6 +41,11 @@ Commands:
   build <branch>            Run cmake + make in the worktree's build/
   build-unitest <branch>    Build the unitest binary in the worktree
   cd <branch>               Print worktree path
+  link-deps <wt-path> [--from <ref-worktree>]
+                            Symlink thirdparty/alib, thirdparty/tvm-0.16 and
+                            build/aiehlc from <ref-worktree> (default: repo root)
+                            into <wt-path>. Safe to re-run; existing files/links
+                            are left untouched.
 
 Examples:
   bash script/worktree.sh create fix-routing main
@@ -44,6 +53,7 @@ Examples:
   bash script/worktree.sh build fix-routing
   bash script/worktree.sh remove fix-routing
   cd $(bash script/worktree.sh cd fix-routing)
+  bash script/worktree.sh link-deps .worktrees/fix-routing --from .worktrees/unet_m2
 EOF
 }
 
@@ -79,6 +89,8 @@ cmd_create() {
     echo "Worktree created at: ${wt_path}"
     echo "Branch: ${branch} (based on ${base})"
     echo ""
+    cmd_link_deps "${wt_path}" || echo "Warning: link-deps failed; run: bash script/worktree.sh link-deps ${wt_path}"
+
     echo "Next steps:"
     echo "  cd ${wt_path}"
     echo "  bash script/worktree.sh build ${branch}"
@@ -116,6 +128,8 @@ cmd_create_from() {
     echo "Worktree created at: ${wt_path}"
     echo "Branch: ${branch}"
     echo ""
+    cmd_link_deps "${wt_path}" || echo "Warning: link-deps failed; run: bash script/worktree.sh link-deps ${wt_path}"
+
     echo "Next steps:"
     echo "  cd ${wt_path}"
     echo "  bash script/worktree.sh build ${branch}"
@@ -228,6 +242,53 @@ cmd_build_unitest() {
     echo "Run: ${build_dir}/test"
 }
 
+# Untracked dependencies a fresh worktree needs (relative to the worktree root).
+LINK_DEPS=(thirdparty/alib thirdparty/tvm-0.16 build/aiehlc)
+
+# link-deps <wt-path> [--from <ref-worktree>]
+# For each dep: if missing in <wt-path>, symlink it to the ref's resolved
+# target. Existing files/links (including dangling links) are never touched,
+# so a worktree with its own build/aiehlc keeps it. Re-running is a no-op.
+cmd_link_deps() {
+    local wt="${1:?Error: worktree path required}"
+    shift
+    local ref="${REPO_ROOT}"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from) ref="${2:?Error: --from needs a path}"; shift 2 ;;
+            *) echo "Error: unknown link-deps option '$1'" >&2; return 1 ;;
+        esac
+    done
+    [ -d "${wt}" ] || { echo "Error: worktree not found: ${wt}" >&2; return 1; }
+    [ -d "${ref}" ] || { echo "Error: reference worktree not found: ${ref}" >&2; return 1; }
+    wt="$(cd "${wt}" && pwd)"
+    ref="$(cd "${ref}" && pwd)"
+
+    local dep src dst missing=0
+    for dep in "${LINK_DEPS[@]}"; do
+        dst="${wt}/${dep}"
+        if [ -e "${dst}" ] || [ -L "${dst}" ]; then
+            echo "link-deps: keep ${dep} (exists)"
+            continue
+        fi
+        if [ ! -e "${ref}/${dep}" ]; then
+            echo "link-deps: skip ${dep} (not in ref ${ref})" >&2
+            missing=$((missing + 1))
+            continue
+        fi
+        src="$(readlink -f "${ref}/${dep}")"
+        if [ "${src}" = "${dst}" ]; then
+            echo "link-deps: skip ${dep} (ref is the worktree itself)"
+            continue
+        fi
+        mkdir -p "$(dirname "${dst}")"
+        ln -s "${src}" "${dst}"
+        echo "link-deps: ${dep} -> ${src}"
+    done
+    [ "${missing}" -eq 0 ] || echo "link-deps: ${missing} dep(s) missing in ref" >&2
+    return 0
+}
+
 cmd_cd() {
     local branch="${1:?Error: branch name required}"
 
@@ -269,6 +330,9 @@ case "${command}" in
         ;;
     cd)
         cmd_cd "$@"
+        ;;
+    link-deps)
+        cmd_link_deps "$@"
         ;;
     -h|--help|help|"")
         usage
