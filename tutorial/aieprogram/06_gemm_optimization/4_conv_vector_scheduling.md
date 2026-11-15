@@ -1,12 +1,12 @@
-# Tutorial 4 -- Vector instructions + low-level scheduling
+# 6.4 Vector instructions + scheduling on the conv2d
 
 Examples:
 
-- [`simpleconv2dkernel_port.cc`](../../example/tileprogram/ccode/simpleconv2dkernel_port.cc)
-  -- the conv of [tutorial 2](02_conv2d_4x4.md) computed with `aie::mmul`;
-- [`simpleconv2dkernel_port_opts.cc`](../../example/tileprogram/ccode/simpleconv2dkernel_port_opts.cc)
-  -- the scheduling options of [tutorial 3](03_conv2d_scheduling.md);
-- [`simpleconv2dkernel_port_vec_opts.cc`](../../example/tileprogram/ccode/simpleconv2dkernel_port_vec_opts.cc)
+- [`simpleconv2dkernel_port.cc`](../../../example/tileprogram/ccode/simpleconv2dkernel_port.cc)
+  -- the conv of [1b](../01_contraction/conv2d.md) computed with `aie::mmul`;
+- [`simpleconv2dkernel_port_opts.cc`](../../../example/tileprogram/ccode/simpleconv2dkernel_port_opts.cc)
+  -- the scheduling options of [6.3](3_conv_scheduling.md);
+- [`simpleconv2dkernel_port_vec_opts.cc`](../../../example/tileprogram/ccode/simpleconv2dkernel_port_vec_opts.cc)
   -- both together, with the output schedule a fast kernel needs and a
   golden-checking host. **This is the file to start from.**
 
@@ -20,7 +20,7 @@ host that de-tiles and golden-checks the result.
 #include "simpleconv2d_new_load.h"
 // simpleconv2dkernel_port.cc (aie::mmul<8,8,8> compute) + the per-port schedule
 // options of simpleconv2dkernel_port_opts.cc + a golden-checking host.
-// Walkthrough: tutorial/aieprogram/04_conv2d_vector_scheduling.md
+// Walkthrough: tutorial/aieprogram/06_gemm_optimization/4_conv_vector_scheduling.md
 //
 // output_tile_major: each core's 16 output blocks land back to back in DDR
 // ([mesh row][mesh col][round][7][28][16]) through ONE shim BD per core. The
@@ -142,7 +142,7 @@ int main() {
 ```
 <!-- /code -->
 
-The ports, blocks, loops and host stay exactly as in tutorials 2 and 3; only
+The ports, blocks, loops and host stay exactly as in 1b and 6.3; only
 the inner computation changes -- and then, because the kernel got fast, one
 part of the schedule has to change too.
 
@@ -178,11 +178,11 @@ and **20-27**. The last block starts 4 bytes early so it never reads past the
 end of the slab row; its first 4 rows are multiplied by zero weights, so bytes
 20-23 are not counted twice.
 
-![One mmul step: A from the slab, B from the packed filters](img/vec_mmul.svg)
+![One mmul step: A from the slab, B from the packed filters](../img/vec_mmul.svg)
 
 ## 3. The vector kernel, line by line
 
-Lines identical to tutorial 2 (ports, block constants, `program_id`, the `i` /
+Lines identical to 1b (ports, block constants, `program_id`, the `i` /
 `j` loops, `load_buffer` / `store_buffer`, `release` / `commit`) are not
 repeated. From `simpleconv2dkernel_port_vec_opts.cc`:
 
@@ -203,7 +203,7 @@ equivalent of the scalar `acc > 127 ? 127 : ...`.
 ```cpp
     const int8_t *w = aie::load_buffer(win_b, {pid_c * oc_t, 0, 0, 0}, {oc_t, KH, KW, C}, {.resident = true});
 ```
-The filters, **resident** (tutorial 3): one 3136-byte block per core, one
+The filters, **resident** (6.3): one 3136-byte block per core, one
 buffer, sent once.
 
 ```cpp
@@ -241,7 +241,7 @@ away. `zero` initializes the accumulators.
             const int8_t *x = aie::load_buffer(win_a, {oh0 * S, ow0 * S, 0}, {ih_t, iw_t, C}, {.depth = 2});
             int8_t *y = aie::store_buffer(win_c, {oh0, ow0, pid_c * oc_t}, {oh_t, ow_t, oc_t}, {.depth = 2});
 ```
-Unchanged blocks, ping-pong slab and output (tutorial 3).
+Unchanged blocks, ping-pong slab and output (6.3).
 
 ```cpp
             for (int oh = 0; oh < oh_t; oh++) {
@@ -320,7 +320,7 @@ byte stores are not allowed).
 
 The compiler's kernel analysis runs this vector code on x86 through an
 emulation of the AIE API (`src/mlir/runtime/aie_api_x86emu.h`), so the block
-checks of tutorials 1-2 apply, plus vector checks: a 64-byte load that runs
+checks of chapter 1 apply, plus vector checks: a 64-byte load that runs
 past the block, or an aligned `load_v` on a 32-byte-aligned window, is a build
 error at its line. The whole generated kernel can also be emulated against the
 CPU reference:
@@ -411,8 +411,8 @@ All on the board (palmyra), same data, golden-checked against `scalar_conv2d`:
 
 | Build | Launch | Result |
 |---|---|---|
-| scalar (`_less`, tutorial 2) | 93.8 ms | PASS |
-| scalar + `.resident` / `.depth` (`_opts`, tutorial 3) | 85.8 ms | PASS |
+| scalar (`_less`, 1b) | 93.8 ms | PASS |
+| scalar + `.resident` / `.depth` (`_opts`, 6.3) | 85.8 ms | PASS |
 | vector, dense output (`simpleconv2dkernel_port.cc` + check) | 64.7 ms | FAIL, 483,593 -- output race |
 | vector + `.resident` / `.depth`, dense output | 56.8 ms | FAIL, 545,488 -- output race |
 | **vector + `.resident` / `.depth` + `output_tile_major`** (`_vec_opts`) | **56.4 ms** | **PASS, 3 / 3 runs** |
@@ -421,7 +421,7 @@ What each step bought:
 
 - **vector instead of scalar**: ~29 ms -- the compute part of the launch;
 - **`.resident` weights**: ~8 ms, on both the scalar and the vector kernel
-  (one buffer less per core to configure, tutorial 3);
+  (one buffer less per core to configure, 6.3);
 - **`output_tile_major`**: correctness. A fast kernel is a new schedule, and
   a schedule that was safe for a slow one may not be.
 
@@ -434,7 +434,7 @@ convolution in **185 us per launch** that way (see `CLAUDE.md` and
 
 ## 7. Checklist for your own vector kernel
 
-1. Write the scalar kernel first and get `PASS` on the board (tutorial 2).
+1. Write the scalar kernel first and get `PASS` on the board (1b).
 2. Choose M / N / K so an A tile is one contiguous load where you can (here:
    stride x channels = 8 bytes = one K-block).
 3. Pack the operand that is reused (filters) once, outside the loops.
@@ -442,4 +442,4 @@ convolution in **185 us per launch** that way (see `CLAUDE.md` and
 5. **Run the golden check on the board** -- x86 cannot see DMA timing. If whole
    blocks are wrong only once the kernel is fast, look at the output schedule
    (`output_tile_major`).
-6. Then tune the data movement with `.resident` / `.depth` (tutorial 3).
+6. Then tune the data movement with `.resident` / `.depth` (6.3).

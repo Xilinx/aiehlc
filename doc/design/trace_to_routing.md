@@ -259,6 +259,13 @@ port is an analysis error (its window lowering is ping-pong). `.tile` needs a
 2-D block, so it does not apply to the 3-D slab. palmyra 213: `PASS: 0
 mismatches out of 802816`, 85.8 ms; `simpleconv2dkernel_port.cc` byte-identical.
 
+**Output depth (2026-11-15).** An output port is always ping-pong
+(`RoutingPort::ppDepth`): `kernel.cc` alternates the output's ping and pong
+whatever the depth, so when the buffer rule dropped the ports to one buffer the
+host gave the output a single unchained BD and the launch hung
+(`simplegemm_opt0_baseline.cc`). `{.depth = 1}` on `store_buffer` is an
+analysis error. Skill **outputpingponghang**.
+
 ## Next steps
 
 1. ~~Full aiehlc build / byte-identity~~ (done above). Per-port core-memory

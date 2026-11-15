@@ -1,6 +1,6 @@
-# Tutorial 1 -- GEMM on a 4x4 tile mesh
+# 1a. Contraction: GEMM on a 4x4 tile mesh
 
-Example: [`example/tileprogram/ccode/simplegemm_kernel_port.cc`](../../example/tileprogram/ccode/simplegemm_kernel_port.cc)
+Example: [`example/tileprogram/ccode/simplegemm_kernel_port.cc`](../../../example/tileprogram/ccode/simplegemm_kernel_port.cc)
 (56 lines, host included). Shared host helpers: `simplegemm_load.h`.
 
 ## The whole program
@@ -96,7 +96,7 @@ It needs a 16-row band of A and a 16-row band of B. Both bands are 16 x 256 =
 4 KB, too much to stream as one piece next to everything else, so the core walks
 K in **4 chunks of 64**: round `j` brings a `{16, 64}` block of A and of B.
 
-![GEMM tiling and the pid of each block](img/gemm_tiling.svg)
+![GEMM tiling and the pid of each block](../img/gemm_tiling.svg)
 
 Two facts fall out of this picture, and the compiler finds both by itself:
 
@@ -187,7 +187,7 @@ loop indices, one block shape per port.
             }
 ```
 Plain scalar C++: a 16 x 16 x 64 matrix product on the two blocks, B used
-transposed (`w[n * tk + k]` is row `n` of B). Tutorial 4 replaces loops like
+transposed (`w[n * tk + k]` is row `n` of B). Chapter 6.2 replaces loops like
 this with `aie::mmul`.
 
 ```cpp
@@ -209,7 +209,7 @@ other buffer while you compute round `j`.
 Write the result into the output block and `commit` it: the DMA sends the
 16 x 16 block to `C[16pm.., 16pn..]` in DDR.
 
-![One core over its 4 rounds](img/gemm_rounds.svg)
+![One core over its 4 rounds](../img/gemm_rounds.svg)
 
 ## 3. The host, line by line
 
@@ -275,7 +275,7 @@ Compare with a CPU GEMM (`PASS: all 4096 output elements match.`).
 
 ## 4. How the pids land on the hardware
 
-![The mesh: pids, tiles and the derived DMA](img/gemm_mesh.svg)
+![The mesh: pids, tiles and the derived DMA](../img/gemm_mesh.svg)
 
 | pid `(pm, pn)` | array tile `(col, row)` | A rows | B rows | C block |
 |---|---|---|---|---|
@@ -300,7 +300,33 @@ The derived data movement (from the generated `host.cc` and routing):
 
 ## 5. What the compiler made of it
 
-The build log shows the kernel analysis -- read it after every change:
+The compiler works in two steps. First it finds out **what data each core
+touches** by running your kernel, and turns that into a DMA pattern. Then an
+MLIR pipeline lowers that pattern, stage by stage, into the three C++ files
+that run on the hardware.
+
+### 5.1 From `load_buffer` calls to a DMA pattern
+
+![Trace -> affine fit -> DMA pattern](../img/trace_to_dma.svg)
+
+1. **Trace.** The kernel body is compiled for x86 with recording versions of
+   `aie::program_id`, `load_buffer`, `store_buffer`, `release` and `commit`
+   (under AddressSanitizer), and run once for **every core** of the
+   `device.partition(..., 4, 4)` mesh. Each call records
+   `(core, port, offset, shape)` -- the kernel's data access, in tensor
+   coordinates.
+2. **Fit.** Each port's recorded blocks must fit one formula,
+   `offset = base_p0*pm + base_p1*pn + step_i*i + step_j*j`, with one block
+   shape. Which `base` is non-zero decides the data movement: A moves with `pm`
+   only, so every core of a mesh row wants the same blocks (**row
+   broadcast**); B moves with `pn` only (**column broadcast**); C moves with
+   both, every core its own block (**gather**).
+3. **DMA pattern.** That formula is exactly what a DMA buffer descriptor does
+   -- a start address plus nested (stride, count) loops. For A: start at row
+   `16 pm`, 64 bytes of a row, 16 rows 256 bytes apart, 4 chunks 64 bytes
+   apart, one 1 KB window per round.
+
+The build log prints the result of steps 1-2 -- read it after every change:
 
 ```
 [KernelAnalysis] gemm: traced on the 4x4 mesh
@@ -314,15 +340,11 @@ The build log shows the kernel analysis -- read it after every change:
   => routed: 3 ports on the 4x4 mesh, DMA carriers taken from the traced blocks
 ```
 
-How to read it: the kernel was run on x86 for all 16 `(p0, p1)` and every
-`load_buffer` / `store_buffer` recorded. Each port's blocks were fitted to
-`offset = base_p0*p0 + base_p1*p1 + step_i*i + step_j*j` with one block shape
--- exactly what a DMA buffer descriptor can do. `a` moves with `p0` only (row
-broadcast), `b` with `p1` only (column broadcast), `c` with both (gather).
-`d2[256]=j4x64@64` = "dim 2 of 256 is walked by the inner loop, 4 rounds of 64,
-step 64".
-
-The source is then rewritten with explicit descriptors (`aout/newfile.cpp`):
+`d1[64]=rows/4@16` = "dim 1 (64) is split over the 4 mesh rows, 16 apart";
+`d2[256]=j4x64@64` = "dim 2 (256) is walked by the inner loop `j`, 4 blocks of
+64, step 64". Step 3 is written back into the source as one explicit
+descriptor per port (`aout/newfile.cpp`), which is what the rest of the
+compiler reads:
 
 ```cpp
 constexpr aie::GemmSpace __aie_gemm_IFM = {
@@ -332,17 +354,50 @@ constexpr aie::GemmSpace __aie_gemm_IFM = {
     .d2 = {.fullsize = 256, .tile_round = 4, .tile_size = 64, .stride = 64}};
 ```
 
-and the MLIR pipeline lowers those to `host.cc` (DMA buffer descriptors,
-locks, launch), `kernel.cc` (the core's `main()`: 1 KB ping + 1 KB pong per
-input, the output block, your function) and `routing.cc` (stream switches).
-In the shim, A's descriptor is a 3-D walk -- 64 bytes x 16 rows (row pitch
-256 B) per block, 4 blocks 64 bytes apart -- exactly the `{16, 64}` blocks of
-your loop.
+Nothing in these steps knows the kernel is a GEMM -- chapter 1b's conv goes
+through exactly the same three steps.
 
 The trace also **checks** the kernel: a block outside the tensor, data used
 without being loaded (an index past the block), a block used after `release`,
 an output never committed, loops a DMA cannot stream -- each is a build error
 with the source line, before anything reaches the board.
+
+### 5.2 From the DMA pattern to host.cc, kernel.cc and routing.cc
+
+![The compiler pipeline](../img/compiler_flow.svg)
+
+The descriptors become a **routing IR** module, and six MLIR dialects lower it
+one concern at a time. Every stage writes its IR to `ir/dfschedule/` or
+`ir/simplerouting/` in your build directory, so you can open each step. Here
+is matrix A at each stage of this build:
+
+| Stage (IR dump) | Dialect: what it says | A in this GEMM (excerpt of the real IR) |
+|---|---|---|
+| `0_initial.mlir` | **routing**: the abstract plan -- mesh, tensors, how each is split, which tile list gets which slice | `routingcreatehwmesh row = 4, col = 4 partition = 3, 6, 0, 6`; `partitiontensor ... splitnum = 4, splitdim = 0, hwAxisOwner = "row", replicateOn = "col"`; per mesh row: `routingextract_data ... -> tensor<16x256xi8>`, `routingmovedatabyio` to that row's tiles |
+| `1_RoutingUnrollingLowerPass` | **routing**, unrolled: one op per mesh row / column instead of a loop | the 2 loops (3 `routingmovedatabyio` in their bodies) become 12 separate moves: 4 for A (one per mesh row), 4 for B (one per mesh column), 4 for C |
+| `2_RoutingToDmapPass` | **dmap**: logical dataflow -- an IO engine, a core group, a stream between them, push / pull | `define_io_engine {ioattr = "SHIM"}`, `define_core_group {core_count = 4 ...}`, `create_stream src = ..., dst = ...`, `dmap.push` (8 push streams for A and B, 4 pull for C) |
+| `3_DmapToDmaphopPass` | **dmaphop**: physical placement -- real tiles, DMA ports and channels, the hop-by-hop path | `dmaphop.tile{TILETYPE = "core", col = 0, row = 3}`, `port ... direction = "In", direction_channel = 1`, hops shim -> (0,3) -> (0,4) -> (0,5) -> (0,6), `create_path {producers = [[@f0_shimPortIn]], consumers = [4 cores]}` |
+| `5_DmaphopTodfscheblueprintPass` | **dfscheblueprint**: per flow, what slice of the tensor goes to which tile group in which round | `flow_transfer`, `data_slice @consumer_slice_0_0 ...`, `flowconfig` |
+| `6_BlueprintToSchedulePass` ... `12_DfscheduleToApiPass` | **dfschedule (host)**: executable schedule -- DMA BDs, locks, IOs, launch, waits; then runtime API calls | `config.dma_bd(%subview ...)`, `config.create_io`; becomes `__Runtime_dma_bd_config_multidim_ooo(...)` in `host.cc` |
+| `18_BlueprintToScheduleKernelPass`, `19_DfscheduleToKernelApiPass` | **dfschedule (kernel)**: the core side of the same flows -- buffers, locks, windows | `buffer_def @buf_in_ping_1 ... {address = 491520}`, `window_init`; becomes `kernel.cc`'s `main()` |
+| `simplerouting/1_DmaphopToRoutinghwPass` ... `5_RoutingHWLowerPass` | **routinghw**: stream-switch connections for every hop, shim mux / demux | `connectsinglestreamswitchport {slaveportdirection = "SOUTH", slaveportidx = 3, masterportdirection = "NORTH", ...}`; becomes `XAie_StrmConnCctEnable(...)` in `routing.cc` |
+
+Three things to notice:
+
+- **Each dialect answers one question.** routing: *what goes to which group of
+  tiles*; dmap: *which logical streams*; dmaphop: *which physical tiles, ports
+  and paths*; dfschedule: *which DMA programs and locks, in what order*;
+  routinghw: *which stream-switch ports to connect*.
+- **dmaphop is the fork.** The host path, the kernel path and the routing
+  path all start from the same dmaphop IR, so the host's buffer descriptors,
+  the core's windows and the stream switches describe the same flows. (The
+  host and kernel paths program the same core tiles, so they share their
+  core-DMA logic in `passblueprintlowering/helper/`.)
+- **The last IR of each path is emitted as C++** (MLIR EmitC): `host.cc` and
+  `routing.cc` are compiled for the Arm into `main.elf`, `kernel.cc` with the
+  AIE compiler into the core image embedded in it. At the end of every build
+  `script/test/flowcheck.py` simulates `routing.cc` against the dmaphop flows
+  and prints `flowcheck: OK -- 12 flows` (8 push + 4 pull here).
 
 ## 6. Run it
 
@@ -383,4 +438,4 @@ block and the next run passes, that is a known intermittent host-cache issue
 after the output DMA, not your kernel: re-run, and compare against a second
 run before debugging the kernel.
 
-Next: [Tutorial 2 -- Conv2d on a 4x4 tile mesh](02_conv2d_4x4.md).
+Next: [1b. Conv2d on a 4x4 tile mesh](conv2d.md).

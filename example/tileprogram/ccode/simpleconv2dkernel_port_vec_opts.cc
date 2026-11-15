@@ -1,7 +1,7 @@
 #include "simpleconv2d_new_load.h"
 // simpleconv2dkernel_port.cc (aie::mmul<8,8,8> compute) + the per-port schedule
 // options of simpleconv2dkernel_port_opts.cc + a golden-checking host.
-// Walkthrough: tutorial/aieprogram/04_conv2d_vector_scheduling.md
+// Walkthrough: tutorial/aieprogram/06_gemm_optimization/4_conv_vector_scheduling.md
 //
 // output_tile_major: each core's 16 output blocks land back to back in DDR
 // ([mesh row][mesh col][round][7][28][16]) through ONE shim BD per core. The

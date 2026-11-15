@@ -638,4 +638,4 @@ output block while the host re-programs the shim S2MM BDs between height slabs
 (skill **outputtilemajorrace**). `simpleconv2dkernel_port_vec_opts.cc` adds
 `#pragma output_tile_major` (host de-tiles) plus `{.resident}` / `{.depth = 2}`:
 PASS 3/3, 56.4 ms (scalar `_less` 93.8 ms). Walkthrough:
-`tutorial/aieprogram/04_conv2d_vector_scheduling.md`.
+`tutorial/aieprogram/06_gemm_optimization/conv_vector_scheduling.md`.

@@ -1,6 +1,6 @@
-# Tutorial 2 -- Conv2d on a 4x4 tile mesh
+# 1b. Contraction: Conv2d on a 4x4 tile mesh
 
-Example: [`example/tileprogram/ccode/simpleconv2dkernel_port_less.cc`](../../example/tileprogram/ccode/simpleconv2dkernel_port_less.cc)
+Example: [`example/tileprogram/ccode/simpleconv2dkernel_port_less.cc`](../../../example/tileprogram/ccode/simpleconv2dkernel_port_less.cc)
 (59 lines, host included). Shared host helpers: `simpleconv2d_new_load.h`.
 
 ## The whole program
@@ -81,7 +81,7 @@ output  112 x 112 x 64    (HWC)             7x7 kernel, stride 2
 out[oh][ow][oc] = clamp_int8( sum over kh, kw, c of in[2oh+kh][2ow+kw][c] * w[oc][kh][kw][c] )
 ```
 
-Read [tutorial 1](01_gemm_4x4.md) first: the ports, `program_id`,
+Read [1a](gemm.md) first: the ports, `program_id`,
 `load_buffer` / `store_buffer` and `release` / `commit` work exactly as there.
 This tutorial adds three things: tensors with 3 and 4 dimensions, choosing a
 tiling for a convolution, and the **halo** -- input blocks that overlap.
@@ -97,7 +97,7 @@ Start from the output, as in the GEMM. 112 x 112 x 64 outputs on 16 cores:
 - inside its band each core computes **4 x 4 blocks of 7 rows x 28 columns x
   16 channels** (3136 bytes each), one block per round.
 
-![Output tiling: pid_h bands, pid_c channel groups, (i, j) blocks](img/conv_tiling.svg)
+![Output tiling: pid_h bands, pid_c channel groups, (i, j) blocks](../img/conv_tiling.svg)
 
 A 7 x 28 output block of a 7x7 stride-2 conv reads an input **footprint** of
 
@@ -111,7 +111,7 @@ columns further -- but each footprint is 19 rows / 61 columns tall / wide, so
 **consecutive footprints overlap by 5**. That overlap is the halo; the DMA
 simply sends those rows twice.
 
-![Input footprints overlap: the halo](img/conv_halo.svg)
+![Input footprints overlap: the halo](../img/conv_halo.svg)
 
 ## 2. The kernel, line by line
 
@@ -239,7 +239,7 @@ int main() {
     aieArray device;
     aieMesh mesh = device.partition({3, 6, 0, 6}, HW_ROWS, HW_COLS);
 ```
-As in tutorial 1: array columns 3..6, a 4 x 4 mesh.
+As in 1a: array columns 3..6, a 4 x 4 mesh.
 
 ```cpp
     const int in_n = INPUT_H_PAD * INPUT_W_PAD * INPUT_C_ALIGN, w_n = K * NUM_FILTERS, out_n = M * N;
@@ -268,7 +268,7 @@ the int8 clamp never hides a wrong sum.
     XTime_GetTime(&t1);
     printf("[BENCH] aie_wall_ms=%.3f\n", 1.0 * (t1 - t0) / COUNTS_PER_SECOND * 1000.0);
 ```
-The launch (tutorial 1, section 3). The three buffers bind to the three ports
+The launch (1a, section 3). The three buffers bind to the three ports
 in order; `M, N, K` after them are accepted and ignored (kept from the older
 API -- you can drop them).
 
@@ -285,7 +285,7 @@ Bit-exact comparison against the CPU convolution.
 
 ## 4. How the pids land on the hardware
 
-![conv2d on the mesh](img/conv_mesh.svg)
+![conv2d on the mesh](../img/conv_mesh.svg)
 
 Same placement as the GEMM: pid `(pid_h, pid_c)` is array tile
 `(3 + pid_c, 3 + pid_h)`.
@@ -298,6 +298,11 @@ Same placement as the GEMM: pid `(pid_h, pid_c)` is array tile
 - **output**: each core sends its 16 blocks to its own place in the HWC tensor.
 
 ## 5. What the compiler made of it
+
+The same two steps as the GEMM ([1a, section 5](gemm.md#5-what-the-compiler-made-of-it)):
+trace + fit give a DMA pattern per port, then the routing -> dmap -> dmaphop ->
+dfschedule / routinghw pipeline turns it into `host.cc`, `kernel.cc` and
+`routing.cc`. Only the trace's report is new here:
 
 ```
 [KernelAnalysis] conv2d_spatial: traced on the 4x4 mesh
@@ -326,7 +331,7 @@ Same placement as the GEMM: pid `(pid_h, pid_c)` is array tile
 
 Core memory per core (`aieml.bcf`): slab ping + pong 2 x 4636 B, weights
 2 x 3136 B, output ping + pong 2 x 3136 B = 21.8 KB of buffers, all
-double-buffered by default. Tutorial 3 changes exactly that.
+double-buffered by default. Chapter 6.3 changes exactly that.
 
 ## 6. Run it
 
@@ -354,4 +359,4 @@ PASS: 0 mismatches out of 802816
   are visited with the outer loop on dim 1 and the inner loop on dim 0; the DMA
   streams the outer tensor dim in the outer loop -- swap the two loops`.
 
-Next: [Tutorial 3 -- low-level scheduling options](03_conv2d_scheduling.md).
+Next: [2. Elementwise](../02_elementwise/elementwise.md).
