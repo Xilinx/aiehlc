@@ -159,13 +159,64 @@ __global__ void gemm_kacc(aie::port<input_window_bfloat16 *, aie::IFM, aie::shap
     }
 }
 
-// The launch picks the instance (in gemm_kacc_run()):
-//     gemm_kacc<GM, GN, GK, GTK, GRELU><<<mesh>>>(A, W, C);
+// One launch; the mesh must be declared in the function that launches.
+static void gemm_kacc_run(uint16_t *A, uint16_t *W, uint16_t *C) {
+    aieSetDevice(0);
+    aieArray device;
+    aieMesh mesh = device.partition({3, 6, 0, 6}, AD_HW_ROWS, AD_HW_COLS);
+    gemm_kacc<GM, GN, GK, GTK, GRELU><<<mesh>>>(A, W, C);
+}
+
+int main() {
+    printf("=== AIEDNN gemm_kacc<%d, %d, %d, %d, %d>: C = A . W^T, bf16, one launch ===\n", GM, GN, GK, GTK, GRELU);
+    const long na = (long)GM * GK, nw = (long)GN * GK, nc = (long)GM * GN;
+    uint16_t *A = (uint16_t *)malloc(na * 2), *W = (uint16_t *)malloc(nw * 2), *ref = (uint16_t *)malloc(nc * 2);
+    uint16_t *Ad = (uint16_t *)__Runtime_Alloc(na * 2), *Wd = (uint16_t *)__Runtime_Alloc(nw * 2);
+    uint16_t *Cd = (uint16_t *)__Runtime_Alloc(nc * 2);
+    ad_init(A, W, GM, GN, GK);
+    ad_pretile(A, Ad, GM, GK, GTK, 0); // mmul A operand order
+    ad_pretile(W, Wd, GN, GK, GTK, 1); // mmul B operand order
+    memset(Cd, 0, nc * 2);
+    XTime t0, t1;
+    XTime_GetTime(&t0);
+    gemm_kacc_run(Ad, Wd, Cd);
+    XTime_GetTime(&t1);
+    // The launch invalidates C only before the DMA; drop lines refetched while the cores wrote it.
+    Xil_DCacheInvalidateRange((UINTPTR)Cd, nc * 2);
+    const double ms = ad_ms(t0, t1);
+    printf("[gemm_kacc] PERF SUMMARY launch %.3f ms, %.2f GOPS\n", ms, 2.0 * GM * GN * GK / (ms * 1e-3) / 1e9);
+    ad_report_phases();
+    ad_reference(A, W, ref, GM, GN, GK, GRELU);
+    return ad_check(Cd, ref, nc);
+}
 ```
 
-The host part of the file packs the inputs, launches once, checks every output
-against an fp32 reference, and prints `PERF SUMMARY`, the phase split and
-`PASS` / `FAIL`. See the [file](../../../example/aiednn/gemm_kacc_bf16.cc).
+That is the whole file. The host side is the last two functions:
+
+- **`gemm_kacc_run()`** is the launch. It opens the device, partitions a 4×4
+  mesh (`{3, 6, 0, 6}` is the array region, `AD_HW_ROWS` × `AD_HW_COLS` the
+  mesh), and launches the instance `gemm_kacc<GM, GN, GK, GTK, GRELU>` once.
+  aiehlc turns that one line into the kernel load, the DMA / routing setup, the
+  core start and the wait. The `aieMesh` must be declared in the function that
+  launches.
+- **`main()`** is the caller:
+  1. allocates the logical tensors with `malloc` (for the reference) and the
+     device buffers with `__Runtime_Alloc` (what the DMA reads and writes);
+  2. fills A and W with test data (`ad_init`) and stores them pre-tiled in
+     `mmul` operand order (`ad_pretile`, §4.6): A as the mmul A operand, W as
+     the B operand;
+  3. times the launch with `XTime`;
+  4. invalidates the cache over C **after** the launch: the generated launch
+     invalidates the output only before the DMA (§9);
+  5. prints `PERF SUMMARY` and the phase split (`ad_report_phases`, filled only
+     in a `--profiling` build);
+  6. computes the fp32 reference (`ad_reference`) and compares every output
+     (`ad_check`), printing `PASS` / `FAIL`.
+
+The helpers are in
+[`gemm_kacc_bf16.h`](../../../example/aiednn/gemm_kacc_bf16.h). A library
+caller keeps steps 1, 2 (with real data) and the launch, and drops the test
+data and the check.
 
 Two things that look odd and are deliberate:
 
