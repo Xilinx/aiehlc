@@ -153,6 +153,14 @@ done
 KERNEL_OBJ_LIST=""
 if [ ${#MULTI_KERNEL_FILES[@]} -gt 0 ]; then
     echo "[Multi-kernel] Detected ${#MULTI_KERNEL_FILES[@]} kernel(s)"
+    # HOSTCOMPILE_KERNEL_JOBS: kernels compiled at once (default 8; 1 = the old serial loop). Each parallel
+    # kernel builds in a private worklocal (BUILD_DIR/kpar/<name>: every worklocal entry linked in, kernel.cc /
+    # aieml.prx -> this kernel's) so kernel.cc / kernel.o / chesswork never collide; the files kc.sh writes
+    # into its cwd (host_ctrlpkt_<f>.h, kernel_<f>_ctrlpkt.h, ctrlpkt_<f>/) are moved back to the worklocal.
+    _KJOBS="${HOSTCOMPILE_KERNEL_JOBS:-8}"
+    case "${_KJOBS}" in ''|*[!0-9]*) _KJOBS=8 ;; esac
+    _KTODO=()
+    _KTODO_N=${#MULTI_KERNEL_FILES[@]}
     pushd ${WORKLOCAL_DIR}
     for kf in "${MULTI_KERNEL_FILES[@]}"; do
         kfname="$(basename "$kf")"
@@ -168,6 +176,12 @@ if [ ${#MULTI_KERNEL_FILES[@]} -gt 0 ]; then
             { [ ! -f "${WORKLOCAL_DIR}/aieml_${kname}.prx" ] || [ "${BUILD_DIR}/kernel_${kname}.o" -nt "${WORKLOCAL_DIR}/aieml_${kname}.prx" ]; } &&
             { [ ! -f "${WORKLOCAL_DIR}/aieml_${kname}.bcf" ] || [ "${BUILD_DIR}/kernel_${kname}.o" -nt "${WORKLOCAL_DIR}/aieml_${kname}.bcf" ]; }; then
             echo "[Multi-kernel] Reusing ${BUILD_DIR}/kernel_${kname}.o (newer than ${kfname}, prx, bcf)"
+            KERNEL_OBJ_LIST="${KERNEL_OBJ_LIST} ${BUILD_DIR}/kernel_${kname}.o"
+            continue
+        fi
+        if [ "${_KJOBS}" -gt 1 ] && [ "${_KTODO_N}" -gt 1 ]; then
+            # parallel path: compiled below, each kernel in a private worklocal
+            _KTODO+=("$kf")
             KERNEL_OBJ_LIST="${KERNEL_OBJ_LIST} ${BUILD_DIR}/kernel_${kname}.o"
             continue
         fi
@@ -197,6 +211,71 @@ if [ ${#MULTI_KERNEL_FILES[@]} -gt 0 ]; then
         echo "✓ Compiled kernel: ${BUILD_DIR}/kernel_${kname}.o (func: ${kname})"
         KERNEL_OBJ_LIST="${KERNEL_OBJ_LIST} ${BUILD_DIR}/kernel_${kname}.o"
     done
+    if [ ${#_KTODO[@]} -gt 0 ]; then
+        _kpar="${BUILD_DIR}/kpar"
+        rm -rf "${_kpar}"
+        mkdir -p "${_kpar}"
+        echo "[Multi-kernel] Compiling ${#_KTODO[@]} kernel(s), ${_KJOBS} at a time (HOSTCOMPILE_KERNEL_JOBS)"
+        for kf in "${_KTODO[@]}"; do
+            kfname="$(basename "$kf")"
+            kname="${kfname#kernel_}"
+            kname="${kname%.cc}"
+            _kd="${_kpar}/${kname}"
+            mkdir -p "${_kd}/build"
+            for f in "${WORKLOCAL_DIR}"/* "${WORKLOCAL_DIR}"/.[!.]*; do
+                [ -e "$f" ] || continue
+                [ "$(basename "$f")" = "build" ] && continue
+                ln -s "$f" "${_kd}/$(basename "$f")"
+            done
+            rm -f "${_kd}/kernel.cc"
+            ln -s "$kf" "${_kd}/kernel.cc"
+            if [ -f "${WORKLOCAL_DIR}/aieml_${kname}.prx" ]; then
+                rm -f "${_kd}/aieml.prx"
+                ln -s "${WORKLOCAL_DIR}/aieml_${kname}.prx" "${_kd}/aieml.prx"
+            fi
+            # the compiled-in tool is shared read-only: copy it in when the serial build left one
+            [ -x "${BUILD_DIR}/aiehlc_ctrlpkt" ] && cp -p "${BUILD_DIR}/aiehlc_ctrlpkt" "${_kd}/build/"
+            echo "[Multi-kernel] Compiling kernel: ${kname} (${kfname}) in ${_kd}"
+            (
+                WORKLOCAL_DIR="${_kd}"
+                BUILD_DIR="${_kd}/build"
+                compile_one_kernel "${kname}"
+                echo $? > "${_kd}/rc"
+            ) > "${_kd}/compile.log" 2>&1 < /dev/null &
+            while [ "$(jobs -rp | wc -l)" -ge "${_KJOBS}" ]; do
+                wait -n 2>/dev/null || sleep 1
+            done
+        done
+        wait
+        _kfail=0
+        for kf in "${_KTODO[@]}"; do
+            kfname="$(basename "$kf")"
+            kname="${kfname#kernel_}"
+            kname="${kname%.cc}"
+            _kd="${_kpar}/${kname}"
+            echo "----- [Multi-kernel] ${kname}: ${_kd}/compile.log"
+            cat "${_kd}/compile.log"
+            if [ "$(cat "${_kd}/rc" 2>/dev/null)" != "0" ] || [ ! -f "${_kd}/build/kernel.o" ]; then
+                echo "Error: kernel build failed for kernel ${kname} (log ${_kd}/compile.log)"
+                _kfail=1
+                continue
+            fi
+            # files kc.sh wrote into its cwd (not the links) go back to the worklocal
+            for f in "${_kd}"/* "${_kd}"/.[!.]*; do
+                [ -e "$f" ] || [ -L "$f" ] || continue
+                [ -L "$f" ] && continue
+                case "$(basename "$f")" in build|rc|compile.log) continue ;; esac
+                rm -rf "${WORKLOCAL_DIR}/$(basename "$f")"
+                mv -f "$f" "${WORKLOCAL_DIR}/"
+            done
+            mv -f "${_kd}/build/kernel.o" "${BUILD_DIR}/kernel_${kname}.o"
+            echo "✓ Compiled kernel: ${BUILD_DIR}/kernel_${kname}.o (func: ${kname})"
+        done
+        [ ${_kfail} -eq 0 ] || exit 1
+        # the last kernel's ELF / tool where the serial loop leaves them (later steps may read build/kernel)
+        cp -p "${_kd}/build/kernel" "${BUILD_DIR}/kernel" 2>/dev/null || true
+        [ -x "${BUILD_DIR}/aiehlc_ctrlpkt" ] || cp -p "${_kd}/build/aiehlc_ctrlpkt" "${BUILD_DIR}/" 2>/dev/null || true
+    fi
     # Remove temporary symlink
     rm -f "${WORKLOCAL_DIR}/kernel.cc"
     popd
