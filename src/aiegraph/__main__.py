@@ -24,6 +24,9 @@
     aiegraph profile  [LAYER ...] [--by-layer] [--top N] [--workdir D]
                                                   per-call / per-layer time of the last board run
     aiegraph compile  MODEL TARGET ["layer1=KERNEL.cc"]
+    aiegraph autopart --onnx M.onnx --mode conv|l37|all --out partition.json [--base OLD.json]
+                      [--ms-per-launch MS] [--pad-kn] [--budget-ms MS]
+                                                  generate the AIE/CPU GEMM partition (GAP-A)
 
 ``--workdir`` defaults to ``worklocal/aiegraph/resnet18``. Exit 0 = success /
 READY, 1 = not ready / failed, 2 = usage or environment error.
@@ -113,6 +116,14 @@ def main(argv=None) -> int:
     p.add_argument("--workdir", default=None)
     p.add_argument("--no-build", action="store_true")
     p.add_argument("-v", "--verbose", action="store_true")
+    p = sub.add_parser("autopart")
+    p.add_argument("--onnx", required=True)
+    p.add_argument("--mode", default="conv", choices=["conv", "l37", "all"])
+    p.add_argument("--out", required=True)
+    p.add_argument("--base", default=None, help="older partition.json, only compared against")
+    p.add_argument("--ms-per-launch", type=float, default=7.471)
+    p.add_argument("--pad-kn", action="store_true", help="also pad K/N to 64 (needs GKP weight repack)")
+    p.add_argument("--budget-ms", type=float, default=None)
     args = ap.parse_args(argv)
 
     try:
@@ -135,6 +146,12 @@ def main(argv=None) -> int:
             emod = ag.compile(args.model, args.target, args.offload, workdir=args.workdir,
                               build=not args.no_build, verbose=args.verbose)
             print(emod)
+            return 0
+        if args.cmd == "autopart":
+            from . import autopart as apm
+            doc = apm.autopartition(args.onnx, args.mode, base=args.base,
+                                    ms_per_launch=args.ms_per_launch, pad_kn=args.pad_kn, budget_ms=args.budget_ms)
+            print(f"AP_OUT {apm.write_partition(doc, args.out)}")
             return 0
         if args.cmd == "prototype" and args.layer is None and args.region is None:
             print(ag.offload_prototype())
