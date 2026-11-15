@@ -22,9 +22,10 @@ import json
 from . import _env
 from .contract import check_region
 from .errors import AiegraphError
+from .plan import PLAN_MODES, plan_conv_layers
 from .report import PartitionPlan
 
-__all__ = ["run_partition", "reset_aie_rows"]
+__all__ = ["run_partition", "reset_aie_rows", "plan_partition_launches"]
 
 FALLBACKS = ("cpu", None)
 OBJECTIVES = ("latency", None)
@@ -130,3 +131,30 @@ def run_partition(emod, fallback="cpu", optimize_for="latency", verbose=False) -
         raise AiegraphError("partition", plan.report().splitlines()[0],
                             hint="print the plan: module.partition(fallback='cpu').report()")
     return plan
+
+
+def plan_partition_launches(model, partition, mode: str = "kincore") -> dict:
+    """Launch plan of the AIE conv layers of a partition (``{"layers": [{"node", "mkn"?, ...}]}``
+    or a path to that JSON) on ``model`` (ONNX path / ModelProto).
+
+    ``mode="kincore"``: one launch per layer, K accumulated in the core (plan.kincore_geom);
+    ``mode="tile"``: one launch per 64x64x64 tile. The GEMM geometry comes from the ONNX graph;
+    a partition row that carries ``mkn`` must agree with it (else AiegraphError).
+    Returns ``dict(layers=[...], launches_planned=N, tile_launches=T, fallbacks=[node...])``."""
+    from pathlib import Path
+    if mode not in PLAN_MODES:
+        raise AiegraphError("plan", f"mode={mode!r}", hint=f"one of {PLAN_MODES}")
+    doc = json.loads(Path(partition).read_text()) if isinstance(partition, (str, Path)) else partition
+    rows = doc.get("layers", [])
+    plans = plan_conv_layers(model, [r["node"] for r in rows], mode)
+    for r, p in zip(rows, plans):
+        mkn = r.get("mkn")
+        if mkn and p.get("m") is not None and [list(x) for x in mkn] != [[p["m"], p["k"], p["n"]]]:
+            raise AiegraphError("plan", f"{r['node']}: partition mkn {mkn} != graph "
+                                        f"{[p['m'], p['k'], p['n']]}",
+                                hint="the partition was made for another model / export")
+    ok = [p for p in plans if p["launches"] is not None]
+    return dict(layers=plans, mode=mode,
+                launches_planned=sum(p["launches"] for p in ok),
+                tile_launches=sum(p["tile_launches"] for p in ok),
+                fallbacks=[p["node"] for p in plans if p["mode"] != mode])
