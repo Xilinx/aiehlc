@@ -1,0 +1,93 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1060' height='470' viewBox='0 0 1060 470'>
+<defs><marker id='arr' markerUnits='userSpaceOnUse' markerWidth='12' markerHeight='10' refX='11' refY='5' orient='auto'><path d='M0,0 L12,5 L0,10 z' fill='#444'/></marker></defs>
+<rect width='100%' height='100%' fill='white'/>
+<text x='530.0' y='24.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='15' text-anchor='middle' fill='#222' font-weight='bold'>Redundant broadcast on the 4x4 mesh: one stream per mesh row, each core uses its quarter</text>
+<text x='40.0' y='66.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='start' fill='#222' font-weight='bold'>mesh row pm's stream (x; y the same): blocks of rows 64 pm + 16 i, column chunk j</text>
+<rect x='40.0' y='78.0' width='70.0' height='28.0' rx='0' fill='#f4a261' fill-opacity='1.0' stroke='#333' stroke-width='1'/>
+<text x='75.0' y='97.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#222' font-weight='normal'>i=0 j=0</text>
+<rect x='114.0' y='78.0' width='70.0' height='28.0' rx='0' fill='#e9c46a' fill-opacity='1.0' stroke='#333' stroke-width='1'/>
+<text x='149.0' y='97.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#222' font-weight='normal'>i=0 j=1</text>
+<rect x='188.0' y='78.0' width='70.0' height='28.0' rx='0' fill='#2a9d8f' fill-opacity='1.0' stroke='#333' stroke-width='1'/>
+<text x='223.0' y='97.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#222' font-weight='normal'>i=0 j=2</text>
+<rect x='262.0' y='78.0' width='70.0' height='28.0' rx='0' fill='#8ab17d' fill-opacity='1.0' stroke='#333' stroke-width='1'/>
+<text x='297.0' y='97.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#222' font-weight='normal'>i=0 j=3</text>
+<rect x='336.0' y='78.0' width='70.0' height='28.0' rx='0' fill='#f4a261' fill-opacity='1.0' stroke='#333' stroke-width='1'/>
+<text x='371.0' y='97.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#222' font-weight='normal'>i=1 j=0</text>
+<rect x='410.0' y='78.0' width='70.0' height='28.0' rx='0' fill='#e9c46a' fill-opacity='1.0' stroke='#333' stroke-width='1'/>
+<text x='445.0' y='97.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#222' font-weight='normal'>i=1 j=1</text>
+<text x='494.0' y='97.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#666' font-weight='normal'>...  16 blocks, DDR read once</text>
+<line x1='240.0' y1='108.0' x2='240.0' y2='150.0' stroke='#555' stroke-width='3'/>
+<line x1='130.0' y1='150.0' x2='910.0' y2='150.0' stroke='#555' stroke-width='3'/>
+<line x1='130.0' y1='150.0' x2='130.0' y2='176.0' stroke='#555' stroke-width='3' marker-end='url(#arr)'/>
+<line x1='390.0' y1='150.0' x2='390.0' y2='176.0' stroke='#555' stroke-width='3' marker-end='url(#arr)'/>
+<line x1='650.0' y1='150.0' x2='650.0' y2='176.0' stroke='#555' stroke-width='3' marker-end='url(#arr)'/>
+<line x1='910.0' y1='150.0' x2='910.0' y2='176.0' stroke='#555' stroke-width='3' marker-end='url(#arr)'/>
+<text x='530.0' y='142.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#555' font-weight='normal'>stream switch copies the stream to the 4 cores of the mesh row</text>
+<rect x='50.0' y='178.0' width='200.0' height='190.0' rx='8' fill='#ffffff' fill-opacity='1.0' stroke='#333' stroke-width='1.5'/>
+<text x='150.0' y='198.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>core (pm, pn=0)</text>
+<text x='150.0' y='216.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#666' font-weight='normal'>receives every block:</text>
+<rect x='64.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#f4a261' fill-opacity='1.0' stroke='#333' stroke-width='2'/>
+<text x='84.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#000' font-weight='normal'>j=0</text>
+<rect x='109.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#eeeeee' fill-opacity='1.0' stroke='#bbb' stroke-width='1'/>
+<text x='129.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>j=1</text>
+<rect x='154.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#eeeeee' fill-opacity='1.0' stroke='#bbb' stroke-width='1'/>
+<text x='174.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>j=2</text>
+<rect x='199.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#eeeeee' fill-opacity='1.0' stroke='#bbb' stroke-width='1'/>
+<text x='219.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>j=3</text>
+<text x='150.0' y='280.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#38761d' font-weight='bold'>if (j == pn): add chunk 0</text>
+<text x='150.0' y='298.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>other chunks: release only</text>
+<rect x='90.0' y='312.0' width='120.0' height='30.0' rx='0' fill='#f4a261' fill-opacity='1.0' stroke='#333' stroke-width='1.5'/>
+<text x='150.0' y='331.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='bold'>z chunk 0</text>
+<line x1='150.0' y1='342.0' x2='150.0' y2='392.0' stroke='#38761d' stroke-width='2' marker-end='url(#arr)'/>
+<rect x='310.0' y='178.0' width='200.0' height='190.0' rx='8' fill='#ffffff' fill-opacity='1.0' stroke='#333' stroke-width='1.5'/>
+<text x='410.0' y='198.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>core (pm, pn=1)</text>
+<text x='410.0' y='216.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#666' font-weight='normal'>receives every block:</text>
+<rect x='324.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#eeeeee' fill-opacity='1.0' stroke='#bbb' stroke-width='1'/>
+<text x='344.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>j=0</text>
+<rect x='369.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#e9c46a' fill-opacity='1.0' stroke='#333' stroke-width='2'/>
+<text x='389.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#000' font-weight='normal'>j=1</text>
+<rect x='414.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#eeeeee' fill-opacity='1.0' stroke='#bbb' stroke-width='1'/>
+<text x='434.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>j=2</text>
+<rect x='459.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#eeeeee' fill-opacity='1.0' stroke='#bbb' stroke-width='1'/>
+<text x='479.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>j=3</text>
+<text x='410.0' y='280.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#38761d' font-weight='bold'>if (j == pn): add chunk 1</text>
+<text x='410.0' y='298.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>other chunks: release only</text>
+<rect x='350.0' y='312.0' width='120.0' height='30.0' rx='0' fill='#e9c46a' fill-opacity='1.0' stroke='#333' stroke-width='1.5'/>
+<text x='410.0' y='331.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='bold'>z chunk 1</text>
+<line x1='410.0' y1='342.0' x2='410.0' y2='392.0' stroke='#38761d' stroke-width='2' marker-end='url(#arr)'/>
+<rect x='570.0' y='178.0' width='200.0' height='190.0' rx='8' fill='#ffffff' fill-opacity='1.0' stroke='#333' stroke-width='1.5'/>
+<text x='670.0' y='198.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>core (pm, pn=2)</text>
+<text x='670.0' y='216.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#666' font-weight='normal'>receives every block:</text>
+<rect x='584.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#eeeeee' fill-opacity='1.0' stroke='#bbb' stroke-width='1'/>
+<text x='604.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>j=0</text>
+<rect x='629.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#eeeeee' fill-opacity='1.0' stroke='#bbb' stroke-width='1'/>
+<text x='649.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>j=1</text>
+<rect x='674.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#2a9d8f' fill-opacity='1.0' stroke='#333' stroke-width='2'/>
+<text x='694.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#000' font-weight='normal'>j=2</text>
+<rect x='719.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#eeeeee' fill-opacity='1.0' stroke='#bbb' stroke-width='1'/>
+<text x='739.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>j=3</text>
+<text x='670.0' y='280.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#38761d' font-weight='bold'>if (j == pn): add chunk 2</text>
+<text x='670.0' y='298.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>other chunks: release only</text>
+<rect x='610.0' y='312.0' width='120.0' height='30.0' rx='0' fill='#2a9d8f' fill-opacity='1.0' stroke='#333' stroke-width='1.5'/>
+<text x='670.0' y='331.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='bold'>z chunk 2</text>
+<line x1='670.0' y1='342.0' x2='670.0' y2='392.0' stroke='#38761d' stroke-width='2' marker-end='url(#arr)'/>
+<rect x='830.0' y='178.0' width='200.0' height='190.0' rx='8' fill='#ffffff' fill-opacity='1.0' stroke='#333' stroke-width='1.5'/>
+<text x='930.0' y='198.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>core (pm, pn=3)</text>
+<text x='930.0' y='216.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#666' font-weight='normal'>receives every block:</text>
+<rect x='844.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#eeeeee' fill-opacity='1.0' stroke='#bbb' stroke-width='1'/>
+<text x='864.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>j=0</text>
+<rect x='889.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#eeeeee' fill-opacity='1.0' stroke='#bbb' stroke-width='1'/>
+<text x='909.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>j=1</text>
+<rect x='934.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#eeeeee' fill-opacity='1.0' stroke='#bbb' stroke-width='1'/>
+<text x='954.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>j=2</text>
+<rect x='979.0' y='226.0' width='40.0' height='30.0' rx='0' fill='#8ab17d' fill-opacity='1.0' stroke='#333' stroke-width='2'/>
+<text x='999.0' y='245.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#000' font-weight='normal'>j=3</text>
+<text x='930.0' y='280.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#38761d' font-weight='bold'>if (j == pn): add chunk 3</text>
+<text x='930.0' y='298.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#999' font-weight='normal'>other chunks: release only</text>
+<rect x='870.0' y='312.0' width='120.0' height='30.0' rx='0' fill='#8ab17d' fill-opacity='1.0' stroke='#333' stroke-width='1.5'/>
+<text x='930.0' y='331.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='bold'>z chunk 3</text>
+<line x1='930.0' y1='342.0' x2='930.0' y2='392.0' stroke='#38761d' stroke-width='2' marker-end='url(#arr)'/>
+<text x='530.0' y='412.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#38761d' font-weight='normal'>output: z rows 64 pm + 16 i, columns 256 pn .. -- every core its own block (gather)</text>
+<text x='530.0' y='432.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>cost: each core receives 4x the bytes it uses; DDR reads and the number of shim streams are the same as with one core per mesh row</text>
+<text x='530.0' y='452.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>the same pattern in chapters 3-5: reduction (partial sums by chunk), transpose (64-column quarters), slicing</text>
+</svg>

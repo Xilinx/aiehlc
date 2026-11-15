@@ -1,89 +1,130 @@
-# 3. Reduction: row sums
+# 3. Reduction: row sums on the 4x4 mesh, in two levels
 
 > **Status (2026-11-15).** As for [elementwise](../02_elementwise/elementwise.md):
 > the kernel passes the kernel analysis; the lowering does not support this
-> shape yet (`the core window is 64 elements x 1 round(s) ..., but the
-> kernel's blocks ... are 4096 elements x 16`). A runnable example follows the
-> compiler work.
+> shape yet. A runnable example follows the compiler work.
 
-## 1. The idea: reduce along a dimension each core owns
+## 1. The idea: partial sums in the array, the combine somewhere else
 
 A reduction reads a lot and writes a little: row sums of `x[256, 1024]` read
-256 KB and write 256 values. Like elementwise ops it is **bandwidth-bound**
-(one addition per byte read), and the same rule applies: use the input
-streams, not every core.
+256 KB and write 256 values, one addition per byte. What is new compared with
+an elementwise op is the **combine**: as soon as two cores each sum part of the
+same row, someone has to add their partial results.
 
-What is new is the **combine**. Where the partial results meet decides how
-hard it is:
-
-| Reduction | Who combines | Today |
+| Where the partial sums are combined | How | In aiehlc today |
 |---|---|---|
-| along a dimension each core owns completely (row sums, each core its own rows) | nobody: each core finishes its own rows | kernel analysis OK; lowering pending (above) |
-| across cores (one sum of the whole tensor) | partial sums from several cores | two launches: partial sums to DDR, then a second kernel or the host combines them -- every launch re-loads and re-configures the array, which costs far more than the data |
-| across cores, in the array | neighbouring cores pass accumulators over the **cascade** interface (a direct core-to-core accumulator link), or through shared neighbour memory | the AIE way; not expressible in aiehlc yet |
+| nowhere: each core owns whole rows | split rows across cores | fine on a mesh with one core per row band (4x1); on 4x4, splitting a row band's rows over the 4 cores puts both pids on the output's row dimension, which the router rejects (section 4) |
+| on the host, after the launch | each core writes its partial sum, the host adds them | **this chapter** -- a few additions per row on the Arm |
+| a second kernel launch | partial sums to DDR, another kernel adds them | works, but every launch re-loads and re-configures the array |
+| in the array | neighbouring cores pass accumulators over the **cascade** interface (a direct core-to-core link), or through shared neighbour memory | the AIE way; not expressible in aiehlc yet |
 
-So: **pick the reduced dimension so that no core needs another core's
-partial result.** For row sums, split rows across cores and walk the columns
-inside the core.
+On 4x4 we combine the two techniques of chapter 2: mesh row `pm` owns 64 rows
+and receives all of their columns by **broadcast**; core `(pm, pn)` sums only
+**column chunk `pn`** of every row (a quarter of each row) and writes one int32
+**partial sum** per row. The host adds the 4 partial sums of each row.
 
-## 2. The kernel (4x1 mesh)
+## 2. The kernel, line by line
 
 ```cpp
 #define OPS_R 256  // rows
 #define OPS_C 1024 // columns (bytes)
-// s[r] = sum over c of x[r][c] (int32); the int32 of row r is y[r][0..3]
 __global__ void rowsum(aie::port<input_window_int8 *, aie::shape<OPS_R, OPS_C>> x,
-                       aie::port<output_window_int8 *, aie::shape<OPS_R, 4>> y) {
+                       aie::port<output_window_int8 *, aie::shape<OPS_R, 16>> y) {
+```
+Two ports -- a kernel has as many as it needs. `y` holds 4 int32 partial sums
+per row = 16 bytes (ports carry int8 windows; an int32 is 4 of them): the
+partial of row `r` from mesh column `pn` is at `y[r][4 pn .. 4 pn + 3]`.
+
+```cpp
     const int tr = 16, tc = 256;                    // input block: 16 rows x 256 columns
-    const int rows = OPS_R / aie::num_programs(0); // 64 rows per core
-    const int pm = aie::program_id(0);
+    const int rows = OPS_R / aie::num_programs(0); // 64 rows per mesh row
+    const int pm = aie::program_id(0), pn = aie::program_id(1);
     for (int i = 0; i < rows / tr; i++) {           // 4 row strips
-        int8_t *o = aie::store_buffer(y, {pm * rows + i * tr, 0}, {tr, 4});
+        int8_t *o = aie::store_buffer(y, {pm * rows + i * tr, pn * 4}, {tr, 4});
+```
+One output block per strip: 16 rows x this core's 4-byte slot. Rows follow
+`pm` (dim 0), the slot follows `pn` (dim 1) -- one mesh axis per dimension.
+The output block is taken **before** the column loop and committed **after**
+it: one output block per 4 input blocks -- ports may have different round
+counts.
+
+```cpp
         int acc[tr];
         for (int r = 0; r < tr; r++)
             acc[r] = 0;
-        for (int j = 0; j < OPS_C / tc; j++) {      // 4 column chunks: the reduced dimension
+        for (int j = 0; j < OPS_C / tc; j++) {      // 4 column chunks, all received
             const int8_t *a = aie::load_buffer(x, {pm * rows + i * tr, j * tc}, {tr, tc});
-            for (int r = 0; r < tr; r++)
-                for (int c = 0; c < tc; c++)
-                    acc[r] += a[r * tc + c];
+            if (j == pn)                            // ... this core sums its own
+                for (int r = 0; r < tr; r++)
+                    for (int c = 0; c < tc; c++)
+                        acc[r] += a[r * tc + c];
             aie::release(x);
         }
-        for (int r = 0; r < tr; r++) // int32 little-endian into the row's 4 bytes
+```
+The redundant broadcast of chapter 2: every core of the mesh row receives the 4
+chunks of the strip; core `pn` accumulates chunk `pn` in `acc`, which stays in
+core memory across the chunks (like the GEMM's K loop in 1a).
+
+```cpp
+        for (int r = 0; r < tr; r++) // int32 little-endian
             for (int b = 0; b < 4; b++)
                 o[r * 4 + b] = (int8_t)(acc[r] >> (8 * b));
         aie::commit(y);
     }
 }
 ```
+Write the 16 partial sums and send the block.
 
-- Two ports: a kernel may have as many as it needs.
-- The output block `{16, 4}` is taken **before** the column loop and committed
-  **after** it: one output block per 4 input blocks. Different ports may have
-  different round counts.
-- The accumulator `acc` stays in core memory across the column chunks -- the
-  same pattern as the GEMM's K loop (1a).
-- The int32 result is written as 4 bytes because ports carry int8 windows.
+On the host, after the launch -- the second level:
+
+```cpp
+        for (int q = 0; q < 4; q++) {
+            int32_t v; // the level-2 combine: add the 4 partial sums of the row
+            memcpy(&v, &y[r * 16 + q * 4], 4);
+            got += v;
+        }
+```
+(`memcpy`, not a cast: `y` is a byte buffer, and an unaligned int32 load can
+fault on the A78.)
 
 Kernel analysis:
 
 ```
   x (IFM, row broadcast, 4x4 blocks/core): d1[256]=rows/4@64+i4x16@16 d2[1024]=j4x256@256
-  y (OFM, gather, 1x4 blocks/core): d1[256]=rows/4@64+j4x16@16 d2[4]=whole
-  => routed: 2 ports on the 4x1 mesh, DMA carriers taken from the traced blocks
+  y (OFM, gather, 1x4 blocks/core): d1[256]=rows/4@64+j4x16@16 d2[16]=cols/4@4
+  => routed: 2 ports on the 4x4 mesh, DMA carriers taken from the traced blocks
 ```
 
-## 3. Making it fast (once it runs)
+## 3. Why the partial sums go by column chunk
+
+Each core must reduce a part of the data the mesh row already receives (the
+broadcast), and its output must be split over the mesh columns on **its own
+dimension**. Column chunk `pn` of every row satisfies both: the input stays a
+row broadcast, and the partial-sum slot is a separate output dimension that
+`pn` can own.
+
+## 4. What does not work, and why
+
+Giving each core 4 whole rows of every strip (no combine at all) looks
+simpler, but the output offset becomes `64 pm + 16 i + 4 pn` -- both pids on
+the **same** dimension:
+
+```
+ERROR: rowsum: y (OFM): dim 0 moves with both program_id(0) and program_id(1)
+(offsets (64,0) / (4,0)); a mesh axis can split one tensor dim only
+```
+
+A DMA walk splits one tensor dimension per mesh axis. When you need both, give
+the second pid its own dimension -- here, the partial-sum slot.
+
+## 5. Making it fast (once it runs)
 
 - **Vectorize the inner loop**: accumulate whole vectors (`aie::accum`) and
   reduce across lanes once per row at the end, not per element.
-- **Input streams**: x is the only input, so a 4x1 mesh uses 4 of the 8 MM2S
-  channels. Using all 8 would mean two cores per row band, each reading half
-  the columns: a per-core input block, which the compiler cannot route yet
-  ([2, section 4](../02_elementwise/elementwise.md#4-why-not-the-4x4-mesh)),
-  plus a combine of the two halves (section 1).
 - **Fuse**: a reduction over data another kernel just produced (softmax's row
   max and sum, layer norm's mean and variance) is cheapest inside that kernel,
   while the data is still in core memory.
+- **Combine in the array** once the compiler can express cascade streams; then
+  the partial sums never leave the cores.
 
 Next: [4. Data movement](../04_data_movement/data_movement.md).
