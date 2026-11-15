@@ -1322,29 +1322,30 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
             return false;
         }
 
+        // Multi-kernel (aiehlc.cc dispatch: append runs, and the first run with no user source):
+        // the kernel-ELF load also goes AOT. Leave the
+        // fabric's ack count in ctrlpkt_kernel_nresp.txt; aiehlc.cc turns it into the per-kernel
+        // manifest ctrlpkt_manifest_<kernel>.json that kc.sh encodes into kernel_<kernel>_ctrlpkt.h
+        // (GAP-aiehlc-multi-kernel-aot-046372).
+        if (appendMode || userRewrittenSource.empty()) {
+            const std::string knPath = outputDir + "/ctrlpkt_kernel_nresp.txt";
+            llvm::sys::fs::remove(knPath);
+            auto aotA = hostModule->getAttrOfType<mlir::IntegerAttr>("routing.control_packet_aot");
+            auto nrespA = hostModule->getAttrOfType<mlir::IntegerAttr>("routing.control_packet_nresp");
+            if (aotA && aotA.getInt() != 0 && nrespA) {
+                std::error_code kec;
+                llvm::raw_fd_ostream kn(knPath, kec, llvm::sys::fs::OF_None);
+                if (!kec)
+                    kn << nrespA.getInt() << "\n";
+                else
+                    llvm::errs() << "[TilingLinalg] WARNING: cannot write " << knPath
+                                 << "; kernel-ELF load stays JIT.\n";
+            }
+        }
         // In append mode, skip user source and __aie_launch emission — caller handles it
         if (appendMode) {
             stream.close();
             std::cout << "Host function appended to " << hostPath << std::endl;
-            // Multi-kernel (aiehlc.cc dispatch): the kernel-ELF load also goes AOT. Leave the
-            // fabric's ack count in ctrlpkt_kernel_nresp.txt; aiehlc.cc turns it into the per-kernel
-            // manifest ctrlpkt_manifest_<kernel>.json that kc.sh encodes into kernel_<kernel>_ctrlpkt.h
-            // (GAP-aiehlc-multi-kernel-aot-046372).
-            {
-                const std::string knPath = outputDir + "/ctrlpkt_kernel_nresp.txt";
-                llvm::sys::fs::remove(knPath);
-                auto aotA = hostModule->getAttrOfType<mlir::IntegerAttr>("routing.control_packet_aot");
-                auto nrespA = hostModule->getAttrOfType<mlir::IntegerAttr>("routing.control_packet_nresp");
-                if (aotA && aotA.getInt() != 0 && nrespA) {
-                    std::error_code kec;
-                    llvm::raw_fd_ostream kn(knPath, kec, llvm::sys::fs::OF_None);
-                    if (!kec)
-                        kn << nrespA.getInt() << "\n";
-                    else
-                        llvm::errs() << "[TilingLinalg] WARNING: cannot write " << knPath
-                                     << "; kernel-ELF load stays JIT.\n";
-                }
-            }
             goto after_host_emit;
         }
 
