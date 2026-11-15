@@ -4,22 +4,45 @@
 # The golden dir holds a.npy (1xCxHxW f32), b.npy (OxCx3x3 f32), c.npy (O f32), y.npy (1xOxHxW f32), meta.json.
 # Writes into <dir>: kacc_{w,x,bias,y}.bin (W/X im2col as pre-tiled bf16, see bf16_gemm_kacc.cc), kacc_data.h
 # (.incbin of those files, host side only), then runs script/aiehlc.sh --aie-version 5 in <dir>.
+#   kacc_bench.sh --gemm --golden <op_golden/p0_matmul_gemm_s0_cond/cNNN_matmul_...> --out <dir>   (PDK)
+# --gemm: a MatMul golden (a.npy [1,M,K], b.npy [K,N], y.npy) through kacc_gemm.py: the generic gemm_kacc instance
+# (unet_aie.kacc_kernel_text, M padded to 64) + a bench main (warm-up pass, timed pass, KCMP vs y.npy), built
+# like the UNet --kincore path: --launch-opt warm defs + --skip-bss + --ctrlpkt aot pragmas.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
-GOLDEN="" OUT=""
+GOLDEN="" OUT="" GEMM=0
 while [ $# -gt 0 ]; do
     case "$1" in
     --golden) GOLDEN="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
-    *) echo "usage: $0 --golden <dir> --out <dir>" >&2; exit 2 ;;
+    --gemm) GEMM=1; shift ;;
+    *) echo "usage: $0 [--gemm] --golden <dir> --out <dir>" >&2; exit 2 ;;
     esac
 done
 [ -n "$GOLDEN" ] && [ -n "$OUT" ] || { echo "usage: $0 --golden <dir> --out <dir>" >&2; exit 2; }
 PY="${KACC_PY:-/scratch/staff/huaj/aiehlc/.venv/bin/python3}"
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
-echo "[kacc_bench] root=$ROOT golden=$GOLDEN out=$OUT commit=$(git -C "$HERE" rev-parse --short HEAD)"
+echo "[kacc_bench] root=$ROOT golden=$GOLDEN out=$OUT commit=$(git -C "$HERE" rev-parse --short HEAD) gemm=$GEMM"
+
+if [ "$GEMM" = 1 ]; then
+    "$PY" -I "$HERE/kacc_gemm.py" "$GOLDEN" "$OUT"
+    cd "$OUT"
+    rm -rf aout
+    # same launch options as build_unet.py --launch-opt warm (WARM_DEFS, aiehlc.sh --skip-bss): kernel loaded once
+    export EXTRA_DEFS="${EXTRA_DEFS:-} -DAIEHLC_ZFILL_WIDE=1 -DAIEHLC_PMLOAD_WIDE=1 -DAIEHLC_PM_WARM_SKIP=1 -DAIEHLC_SKIP_BSS_DEFAULT=1"
+    set +eu
+    # shellcheck disable=SC1091
+    source "$ROOT/script/aiehlc.sh" --aie-version 5 --skip-bss --runtime-source-file "$OUT/kacc_gemm.cc"
+    rc=$?
+    set -u
+    [ $rc -eq 0 ] && [ -f "$OUT/aout/main.elf" ] || { echo "[kacc_bench] aiehlc.sh failed rc=$rc"; exit 1; }
+    cp -f "$OUT/aout/main.elf" "$OUT/main.elf"
+    ls -l "$OUT/main.elf"
+    echo "[kacc_bench] BUILD_OK $OUT/main.elf"
+    exit 0
+fi
 
 "$PY" -I - "$GOLDEN" "$OUT" <<'EOF'
 import sys, json, hashlib, numpy as np
