@@ -989,6 +989,39 @@ KACC_HOST = r"""
 #define UC_KX_ELEMS @MAXX@ /* largest px*K (bf16) */
 #define UC_KY_ELEMS @MAXY@ /* largest ch*px (fp32) */
 static int32_t *g_kw = nullptr, *g_kx = nullptr, *g_ky = nullptr;
+#if defined(__aarch64__) && !defined(__chess__)
+#include <arm_neon.h>
+#define UC_NEON 1
+/* 4 x fp32 -> bf16, round-to-nearest-even: bit-identical to uc_f2bf */
+static inline uint16x4_t uc_f2bf4(float32x4_t v) {
+    uint32x4_t u = vreinterpretq_u32_f32(v);
+    const uint32x4_t lsb = vandq_u32(vshrq_n_u32(u, 16), vdupq_n_u32(1u));
+    u = vaddq_u32(u, vaddq_u32(lsb, vdupq_n_u32(0x7fffu)));
+    return vshrn_n_u32(u, 16);
+}
+#else
+#define UC_NEON 0
+#endif
+/* GPOOL: pooled host-glue buffers, grown once and reused by every layer (no per-call alloc) */
+static uint16_t *g_uc_pb = nullptr; /* padded bf16 planes [C][H+2ph][W+2pw] + slack */
+static int *g_uc_sk = nullptr, *g_uc_dk = nullptr; /* per-k source / destination offsets */
+static size_t g_uc_pcap = 0, g_uc_kcap = 0;
+static unsigned g_uc_fast = 0;
+static int uc_pool_need(size_t pel, size_t kel) {
+    if (pel > g_uc_pcap) {
+        free(g_uc_pb);
+        g_uc_pb = (uint16_t *)__Runtime_Alloc(pel * 2);
+        g_uc_pcap = g_uc_pb ? pel : 0;
+    }
+    if (kel > g_uc_kcap) {
+        free(g_uc_sk);
+        free(g_uc_dk);
+        g_uc_sk = (int *)__Runtime_Alloc(kel * sizeof(int));
+        g_uc_dk = (int *)__Runtime_Alloc(kel * sizeof(int));
+        g_uc_kcap = (g_uc_sk && g_uc_dk) ? kel : 0;
+    }
+    return (g_uc_pb && g_uc_sk && g_uc_dk) ? 0 : -1;
+}
 static int uc_kalloc(void) {
     if (g_ky)
         return 0;
@@ -1056,44 +1089,134 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
             memset(Wd + (size_t)n * Kp + K, 0, (size_t)(Kp - K) * 2);
         }
     }
-    /* im2col of the activation, fp32 -> bf16 RNE; the in-chunk offset of (ni, nn, kr) from a table */
-    static int g_uc_tab[16][64];
-    static int g_uc_ty[64], g_uc_tx[64];
+    /* GPOOL: im2col via pooled padded bf16 planes P[C][H+2ph][W+2pw] (one RNE convert per input element)
+     * and per-k offset tables; 8 output pixels of one row at a fixed k are 8 contiguous bf16 in the X chunk
+     * layout ([ni 2][kb][8x8 k x px]) -> one 16-byte copy (stride 2: vld2 even lanes). */
     if (kch > 64 || KK > 64)
         return -3;
-    for (int q = 0; q < 16; q++)
-        for (int kr = 0; kr < kch; kr++) {
-            const int f = (q >> 3) * 8 * kch + (kr >> 3) * 64 + (kr & 7) * 8 + (q & 7);
-            g_uc_tab[q][kr] = (f / kch) * Kp + f % kch;
-        }
-    for (int t = 0; t < KK; t++) {
-        g_uc_ty[t] = t / KW;
-        g_uc_tx[t] = t % KW;
-    }
-    const size_t HWc = (size_t)H * W * cb;
-    for (int m = 0; m < M; m++) {
-        const int oh = m / OW, ow = m % OW, ih0 = oh * sh - ph, iw0 = ow * sw - pw;
-        const int *tab = g_uc_tab[m & 15];
-        uint16_t *dst = Xd + (size_t)(m >> 4) * 16 * Kp;
-        int kr = 0;
-        uint16_t *dj = dst;
+    const int fast = (OW % 8) == 0 && sh == sw && (sh == 1 || sh == 2) && (kch % 8) == 0 && (cb % 4) == 0 &&
+                     (W % 4) == 0;
+    if (fast) {
+        const int Hp = H + 2 * ph, Wp = W + 2 * pw;
+        const size_t HWp = (size_t)Hp * Wp, pn = (size_t)C * HWp + 64;
+        if (uc_pool_need(pn, (size_t)Kp) != 0)
+            return -1;
+        uint16_t *P = g_uc_pb;
+        /* zero only the halo (pad rows/cols) and the slack the stride-2 vld2 may read past the last plane */
         for (int c = 0; c < C; c++) {
-            const float *xc = xin + (size_t)(c / cb) * HWc + c % cb;
-            for (int t = 0; t < KK; t++) {
-                const int ih = ih0 + g_uc_ty[t], iw = iw0 + g_uc_tx[t];
-                const float v = (ih >= 0 && ih < H && iw >= 0 && iw < W) ? xc[((size_t)ih * W + iw) * cb] : 0.0f;
-                dj[tab[kr]] = uc_f2bf(v);
+            uint16_t *pl = P + (size_t)c * HWp;
+            if (ph) {
+                memset(pl, 0, (size_t)ph * Wp * 2);
+                memset(pl + (size_t)(Hp - ph) * Wp, 0, (size_t)ph * Wp * 2);
+            }
+            if (pw)
+                for (int h = ph; h < Hp - ph; h++) {
+                    uint16_t *rw = pl + (size_t)h * Wp;
+                    for (int i = 0; i < pw; i++)
+                        rw[i] = rw[Wp - 1 - i] = 0;
+                }
+        }
+        memset(P + (size_t)C * HWp, 0, 64 * 2);
+        /* NCHWc fp32 -> planar bf16: 4 pixels x 4 channels per 4x4 transpose */
+        const size_t HWc = (size_t)H * W * cb;
+        for (int cbk = 0; cbk < C / cb; cbk++)
+            for (int h = 0; h < H; h++) {
+                const float *src = xin + (size_t)cbk * HWc + (size_t)h * W * cb;
+                uint16_t *dst0 = P + (size_t)cbk * cb * HWp + (size_t)(h + ph) * Wp + pw;
+                for (int w0 = 0; w0 < W; w0 += 4)
+                    for (int c0 = 0; c0 < cb; c0 += 4) {
+                        const float *s0 = src + (size_t)w0 * cb + c0;
+                        uint16_t *d = dst0 + (size_t)c0 * HWp + w0;
+#if UC_NEON
+                        const float32x4_t r0 = vld1q_f32(s0), r1 = vld1q_f32(s0 + cb), r2 = vld1q_f32(s0 + 2 * cb),
+                                          r3 = vld1q_f32(s0 + 3 * cb);
+                        const float32x4x2_t t01 = vtrnq_f32(r0, r1), t23 = vtrnq_f32(r2, r3);
+                        vst1_u16(d, uc_f2bf4(vcombine_f32(vget_low_f32(t01.val[0]), vget_low_f32(t23.val[0]))));
+                        vst1_u16(d + HWp, uc_f2bf4(vcombine_f32(vget_low_f32(t01.val[1]), vget_low_f32(t23.val[1]))));
+                        vst1_u16(d + 2 * HWp,
+                                 uc_f2bf4(vcombine_f32(vget_high_f32(t01.val[0]), vget_high_f32(t23.val[0]))));
+                        vst1_u16(d + 3 * HWp,
+                                 uc_f2bf4(vcombine_f32(vget_high_f32(t01.val[1]), vget_high_f32(t23.val[1]))));
+#else
+                        for (int i = 0; i < 4; i++)
+                            for (int j = 0; j < 4; j++)
+                                d[(size_t)i * HWp + j] = uc_f2bf(s0[(size_t)j * cb + i]);
+#endif
+                    }
+            }
+        /* per-k tables: source offset in P (c, ky, kx) and destination offset in the 16-row block (ni = 0) */
+        int *sk = g_uc_sk, *dk = g_uc_dk;
+        {
+            int k = 0;
+            for (int c = 0; c < C; c++)
+                for (int ky = 0; ky < KH; ky++)
+                    for (int kx = 0; kx < KW; kx++, k++)
+                        sk[k] = (int)((size_t)c * HWp + (size_t)ky * Wp + kx);
+            for (k = 0; k < Kp; k++) {
+                const int j = k / kch, kr = k - j * kch, f = (kr >> 3) * 64 + (kr & 7) * 8;
+                dk[k] = j * kch + (f / kch) * Kp + f % kch;
+            }
+        }
+        for (int mb = 0; mb < M; mb += 8) {
+            const int oh = mb / OW, ow0 = mb % OW;
+            uint16_t *blk = Xd + (size_t)(mb >> 4) * 16 * Kp + (size_t)((mb >> 3) & 1) * 8 * Kp;
+            const uint16_t *row0 = P + (size_t)(oh * sh) * Wp + (size_t)ow0 * sw;
+#if UC_NEON
+            if (sw == 1)
+                for (int k = 0; k < K; k++)
+                    vst1q_u16(blk + dk[k], vld1q_u16(row0 + sk[k]));
+            else
+                for (int k = 0; k < K; k++)
+                    vst1q_u16(blk + dk[k], vld2q_u16(row0 + sk[k]).val[0]);
+            for (int k = K; k < Kp; k++)
+                vst1q_u16(blk + dk[k], vdupq_n_u16(0));
+#else
+            for (int k = 0; k < K; k++)
+                for (int i = 0; i < 8; i++)
+                    blk[dk[k] + i] = row0[sk[k] + i * sw];
+            for (int k = K; k < Kp; k++)
+                memset(blk + dk[k], 0, 16);
+#endif
+        }
+        g_uc_fast++;
+    } else {
+        /* im2col of the activation, fp32 -> bf16 RNE; the in-chunk offset of (ni, nn, kr) from a table */
+        static int g_uc_tab[16][64];
+        static int g_uc_ty[64], g_uc_tx[64];
+        for (int q = 0; q < 16; q++)
+            for (int kr = 0; kr < kch; kr++) {
+                const int f = (q >> 3) * 8 * kch + (kr >> 3) * 64 + (kr & 7) * 8 + (q & 7);
+                g_uc_tab[q][kr] = (f / kch) * Kp + f % kch;
+            }
+        for (int t = 0; t < KK; t++) {
+            g_uc_ty[t] = t / KW;
+            g_uc_tx[t] = t % KW;
+        }
+        const size_t HWc = (size_t)H * W * cb;
+        for (int m = 0; m < M; m++) {
+            const int oh = m / OW, ow = m % OW, ih0 = oh * sh - ph, iw0 = ow * sw - pw;
+            const int *tab = g_uc_tab[m & 15];
+            uint16_t *dst = Xd + (size_t)(m >> 4) * 16 * Kp;
+            int kr = 0;
+            uint16_t *dj = dst;
+            for (int c = 0; c < C; c++) {
+                const float *xc = xin + (size_t)(c / cb) * HWc + c % cb;
+                for (int t = 0; t < KK; t++) {
+                    const int ih = ih0 + g_uc_ty[t], iw = iw0 + g_uc_tx[t];
+                    const float v = (ih >= 0 && ih < H && iw >= 0 && iw < W) ? xc[((size_t)ih * W + iw) * cb] : 0.0f;
+                    dj[tab[kr]] = uc_f2bf(v);
+                    if (++kr == kch) {
+                        kr = 0;
+                        dj += kch;
+                    }
+                }
+            }
+            for (int k = K; k < Kp; k++) {
+                dj[tab[kr]] = 0;
                 if (++kr == kch) {
                     kr = 0;
                     dj += kch;
                 }
-            }
-        }
-        for (int k = K; k < Kp; k++) {
-            dj[tab[kr]] = 0;
-            if (++kr == kch) {
-                kr = 0;
-                dj += kch;
             }
         }
     }
@@ -1134,28 +1257,63 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
     g_aie_launches++;
     g_uc_macs += (unsigned long long)M * N * K;
+    /* GPOOL: epilogue (bias / temb per channel, or residual in the output layout) fused into the scatter,
+     * applied in argument order as before; 8 px of one channel are 8 contiguous floats of the c window. */
+    const float *ep[4];
+    int et[4], ne_ = 0; /* et: 0 = per channel, 1 = same shape */
+    for (int i = 2; i < nargs - 1; i++) {
+        const uc_dlt *e = (const uc_dlt *)argv[i];
+        const long ne = uc_numel(e);
+        if (ne_ == 4)
+            return -5;
+        if (ne == N && e->ndim == 5)
+            et[ne_] = 0;
+        else if (ne == (long)M * N && e->ndim == 5 && (int)e->shape[4] == yb)
+            et[ne_] = 1;
+        else
+            return -5;
+        ep[ne_++] = (const float *)e->data;
+    }
     const float *Y = (const float *)g_ky; // [N][M] fp32 (NCHW)
     int bad = 0;
-    for (int n = 0; n < N; n++)
-        for (int m = 0; m < M; m++) {
+    for (int n = 0; n < N; n++) {
+        const int r = n & 15;
+        float *on = yout + (size_t)(n / yb) * M * yb + n % yb;
+        for (int m = 0; m < M; m += 8) {
             /* P4bx: each core's c block holds 16x16 tiles (ch r, px c) in [s][mi][ni][8x8] order. Normal: block
              * (n/16, m/(M/4)) of Y [N][M], s = px sub-tile. Transposed: block (m/16, n/(N/4)) of Y^T [M][N],
              * s = ch sub-tile. */
-            const int r = n & 15, c = m & 15;
-            float v;
+            const float *src;
             if (!tr) {
-                const int q = M / 4, cc = m % q;
-                const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8 + (c & 7);
-                v = Y[(size_t)((n & ~15) + wi / q) * M + (m - cc) + wi % q];
+                const int c = m & 15, q = M / 4, cc = m % q;
+                const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
+                src = Y + (size_t)((n & ~15) + wi / q) * M + (m - cc) + wi % q;
             } else {
-                const int q = N / 4, cc = n % q;
-                const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8 + (c & 7);
-                v = Y[(size_t)((m & ~15) + wi / q) * N + (n - cc) + wi % q];
+                const int c = m & 15, q = N / 4, cc = n % q;
+                const int wi = (cc >> 4) * 256 + ((r >> 3) * 2 + (c >> 3)) * 64 + (r & 7) * 8;
+                src = Y + (size_t)((m & ~15) + wi / q) * N + (n - cc) + wi % q;
             }
-            if (!(v == v) || v > 1e30f || v < -1e30f)
-                bad++;
-            yout[((size_t)(n / yb) * M + m) * yb + n % yb] = v;
+            float v[8]; /* (c & 7) = wi & 7 and q % 8 == 0: the 8 px are contiguous in both walks */
+            memcpy(v, src, 32);
+            for (int i = 0; i < 8; i++)
+                if (!(v[i] == v[i]) || v[i] > 1e30f || v[i] < -1e30f)
+                    bad++;
+            float *o = on + (size_t)m * yb;
+            for (int e = 0; e < ne_; e++) {
+                if (et[e] == 0) {
+                    const float bv = ep[e][n];
+                    for (int i = 0; i < 8; i++)
+                        v[i] += bv;
+                } else {
+                    const float *ev = ep[e] + (o - yout);
+                    for (int i = 0; i < 8; i++)
+                        v[i] += ev[(size_t)i * yb];
+                }
+            }
+            for (int i = 0; i < 8; i++)
+                o[(size_t)i * yb] = v[i];
         }
+    }
     if (bad) {
         printf("[unet_aie_conv] %d nonfinite AIE outputs\n", bad);
         return -4;
@@ -1164,11 +1322,13 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
         XTime ut3;
         XTime_GetTime(&ut3);
         const double us = 1e6 / (double)COUNTS_PER_SECOND;
-        printf("[UCL] l=%d M=%d N=%d K=%d pre_us=%.0f aie_us=%.0f post_us=%.0f\n", g_aie_launches - 1, M, N, K,
-               (double)(lt0 - ut0) * us, (double)(lt1 - lt0) * us, (double)(ut3 - lt1) * us);
+        printf("[UCL] l=%d M=%d N=%d K=%d pre_us=%.0f aie_us=%.0f post_us=%.0f fast=%d\n", g_aie_launches - 1, M, N, K,
+               (double)(lt0 - ut0) * us, (double)(lt1 - lt0) * us, (double)(ut3 - lt1) * us, fast);
     }
-"""
+    return 0;
+}
 
+"""
 
 def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, ctrlpkt: str = "off") -> Path:
     """--kincore: aiek_unetconv.cc = one gemm_kacc instance per distinct (ch, K, px) + host unet_aie_conv"""
@@ -1189,7 +1349,7 @@ def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, c
     host = kt_select(HOST_CC, False)
     # replace the 64x64-tile uc_conv (host K-sum) by the one-launch version up to its epilogue
     i0 = host.index("static int uc_conv(")
-    i1 = host.index("    for (int i = 2; i < nargs - 1; i++) { // epilogue")
+    i1 = host.index('extern "C" int unet_aie_conv(')  # GPOOL: epilogue fused into the kacc scatter
     host = host[:i0] + kacc_host(shapes) + host[i1:]
     # drop the 64x64-port state the one-launch path does not use (no unused-static warnings)
     a0, a1 = host.index("static int uc_alloc(void) {"), host.index("static long uc_numel(")
