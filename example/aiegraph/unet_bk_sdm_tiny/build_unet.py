@@ -25,6 +25,7 @@ import argparse
 import json
 import re
 import os
+import re
 import shutil
 import sys
 import zlib
@@ -119,6 +120,99 @@ int main(void) {
     return rc;
 }
 """
+
+
+# --runtime-io (GIN): the 3 inputs come from the .aiehlc_io section (arm_build.write_runtime_io), so
+# src/tool/elfio/aiehlc_elfio.py patch can swap them in a copy of main.elf without a rebuild. The
+# expected crc is computed ON THE BOARD from the section (and checked against its header); the
+# compiled-in ref compare (p1_cmp) only runs when that crc is the build's own real_io crc, otherwise
+# "CMP unet skipped runtime-input ..." and the host compares the AIO dump (aiehlc_elfio.py readout).
+RTIO_COPY_OLD = """    uint32_t c = 0xFFFFFFFFu;
+    for (int k = 0; k < UNET_N_INPUTS; ++k) {
+        if (strcmp(graph_input_name(k), unet_in_name[k]) != 0) {
+            printf("unet: graph input %d is %s, expected %s\\n", k, graph_input_name(k), unet_in_name[k]);
+            return 1;
+        }
+        uint8_t *dst = (uint8_t *)graph_input_k(k);
+        memcpy(dst, unet_in_ptr[k], unet_in_bytes[k]);
+        c = crc32_upd(c, dst, unet_in_bytes[k]);
+        printf("INPUT unet %s bytes=%lu\\n", unet_in_name[k], unet_in_bytes[k]);
+    }
+    snprintf(crc, sizeof crc, "%08x", (unsigned)(c ^ 0xFFFFFFFFu));
+    printf("INPUT unet sample+timestep_i32+ehs in_crc32_board=%s expect=%s %s (timestep=%d)\\n",
+           crc, P1_UNET_IN_CRC32, strcmp(crc, P1_UNET_IN_CRC32) == 0 ? "MATCH" : "MISMATCH",
+           (int)unet_timestep[0]);
+    if (strcmp(crc, P1_UNET_IN_CRC32) != 0) {
+        printf("unet: input crc mismatch -- not comparing\\n");
+        return 1;
+    }
+"""
+RTIO_COPY_NEW = """    char expect[16];
+    int aio_rc = aiehlc_io_check();
+    if (aio_rc != 0 || aiehlc_io_n() != UNET_N_INPUTS) {
+        printf("unet: .aiehlc_io section invalid rc=%d n_in=%d\\n", aio_rc, aiehlc_io_n());
+        return 1;
+    }
+    uint32_t aio_crc = aiehlc_io_crc();   /* the expect: computed here from the (patched) section */
+    snprintf(expect, sizeof expect, "%08x", (unsigned)aio_crc);
+    if (aio_crc != aiehlc_io_hdr_crc()) {
+        printf("unet: .aiehlc_io crc32=%s != header crc32=%08x\\n", expect, (unsigned)aiehlc_io_hdr_crc());
+        return 1;
+    }
+    uint32_t c = 0xFFFFFFFFu;
+    int32_t ts = 0;
+    for (int k = 0; k < UNET_N_INPUTS; ++k) {
+        if (strcmp(graph_input_name(k), unet_in_name[k]) != 0) {
+            printf("unet: graph input %d is %s, expected %s\\n", k, graph_input_name(k), unet_in_name[k]);
+            return 1;
+        }
+        if (aiehlc_io_bytes(k) != unet_in_bytes[k]) {
+            printf("unet: .aiehlc_io input %d (%s) has %lu bytes, graph wants %lu\\n", k, aiehlc_io_name(k),
+                   aiehlc_io_bytes(k), unet_in_bytes[k]);
+            return 1;
+        }
+        uint8_t *dst = (uint8_t *)graph_input_k(k);
+        memcpy(dst, aiehlc_io_ptr(k), unet_in_bytes[k]);
+        c = crc32_upd(c, dst, unet_in_bytes[k]);
+        if (k == 1) memcpy(&ts, dst, sizeof ts);
+        printf("INPUT unet %s bytes=%lu (runtime-io %s)\\n", unet_in_name[k], unet_in_bytes[k], aiehlc_io_name(k));
+    }
+    snprintf(crc, sizeof crc, "%08x", (unsigned)(c ^ 0xFFFFFFFFu));
+    printf("INPUT unet sample+timestep_i32+ehs in_crc32_board=%s expect=%s %s (timestep=%d) runtime_io=1 "
+           "build_crc32=%s\\n", crc, expect, strcmp(crc, expect) == 0 ? "MATCH" : "MISMATCH", (int)ts,
+           P1_UNET_IN_CRC32);
+    if (strcmp(crc, expect) != 0) {
+        printf("unet: input crc mismatch -- not comparing\\n");
+        return 1;
+    }
+    const int unet_rtio_own = strcmp(crc, P1_UNET_IN_CRC32) == 0;   /* the build's real_io: p1_ref applies */
+"""
+
+
+def runtime_io_main(base: str) -> str:
+    """MAIN_C (or its --aie conv form) -> inputs from .aiehlc_io; ref compare only for the build's own input"""
+    assert base.count(RTIO_COPY_OLD) == 1, "MAIN_C input block changed"
+    s = base.replace(RTIO_COPY_OLD, RTIO_COPY_NEW, 1)
+    inc = '#include "p1_ref.h"\n'
+    assert s.count(inc) == 1
+    s = s.replace(inc, inc + '#include "aiehlc_io.h"\n', 1)
+    m = re.search(r'^    int rc = p1_cmp\("unet[^;]*\);\n', s, re.M)
+    assert m, "p1_cmp call not found"
+    call = m.group(0)
+    launches = "launches" if "unet_aie_stats(&launches" in s else "0"
+    runrc = "run_rc" if launches == "launches" else "0"
+    new = ("    int rc;\n"
+           "    if (unet_rtio_own)\n"
+           "        " + call.strip().replace("int rc = ", "rc = ") + "\n"
+           "    else {\n"
+           '        printf("CMP unet skipped runtime-input aie_launches=%d run_rc=%d\\n", '
+           + launches + ", " + runrc + ");\n"
+           "        fflush(stdout);\n"
+           "        rc = " + runrc + " != 0;\n"
+           "    }\n"
+           "    if (aiehlc_io_dump_out())\n"
+           '        aiehlc_io_dump("unet", out, (unsigned long)n * sizeof(float), (unsigned long)n);\n')
+    return s.replace(call, new, 1)
 
 
 def log(msg):
@@ -416,6 +510,11 @@ def main(argv=None) -> int:
                     help="file of extra CFLAGS for the TVM per-layer kernel objects only (liblayers.a; "
                          "arm_build layer_cflags). Lines are joined with spaces and passed as ONE string, "
                          "so no shell word-splitting. Missing or empty file -> error. Default: none")
+    ap.add_argument("--runtime-io", action="store_true",
+                    help="GIN: inputs in the .aiehlc_io ELF section (arm_build.write_runtime_io), swappable "
+                         "after the build with src/tool/elfio/aiehlc_elfio.py patch; initialised from --real-io")
+    ap.add_argument("--dump-out", action="store_true",
+                    help="--runtime-io: set the section's dump_out flag at build time (AIO_* output dump)")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
     if a.ctrlpkt == "aot-kco":  # before unet_aie is imported: it reads UNET_CTRLPKT_KCO at import time
@@ -440,6 +539,8 @@ def main(argv=None) -> int:
         os.environ["EXTRA_DEFS"] = (os.environ.get("EXTRA_DEFS", "") + " -DAIEHLC_PROFILING=1").strip()
     if a.keep_layout and not a.attn_fa:
         log("--keep-layout needs --attn-fa")
+    if a.dump_out and not a.runtime_io:
+        log("--dump-out needs --runtime-io")
         return 2
     if a.kincore_layers != "all" and not a.kincore:
         log("--kincore-layers needs --kincore")
@@ -504,8 +605,18 @@ def main(argv=None) -> int:
     if a.aie != "none":
         main_c, n_patched = aie_conv(a, emod, out, hdr)
 
+    extra = [P1_COS_C, real_io / "p1_ref.h", hdr]
+    if a.runtime_io:
+        import aiegraph._env as agenv
+        agenv.frontend("")
+        import frontend.tvmrelay.arm_build as ab
+        main_c = runtime_io_main(main_c)
+        extra += ab.write_runtime_io(out / "runtime_io", [
+            ("sample", real_io / "sample.bin"), ("timestep_i32", real_io / "timestep_i32.bin"),
+            ("ehs", real_io / "ehs.bin")], dump_out=a.dump_out)
+        log(f"runtime_io: inputs in {ab.AIO_SECTION} (sample, timestep_i32, ehs), dump_out={int(a.dump_out)}")
     rep = emod.build(target="a78", verbose=a.verbose, main_c=main_c,
-                     extra_sources=[P1_COS_C, real_io / "p1_ref.h", hdr],
+                     extra_sources=extra,
                      extra_cflags="-DP1_COS_NO_MAIN " + HEAP_LDFLAG,
                      layer_cflags=layer_cflags)
     if not rep.ok:
@@ -524,6 +635,15 @@ def main(argv=None) -> int:
             f"weights of those read as bf16 in place" + (f"; {got[2]} -> unet_aie_attn" if got[2] else ""))
     elf = out / "main.elf"
     shutil.copy2(rep.elf, elf)
+    if a.runtime_io:
+        import subprocess
+        tool = Path(__file__).resolve().parents[3] / "src" / "tool" / "elfio" / "aiehlc_elfio.py"
+        r = subprocess.run([sys.executable, str(tool), "info", str(elf)], capture_output=True, text=True)
+        for ln in (r.stdout + r.stderr).splitlines():
+            log(ln)
+        if r.returncode != 0:
+            log("build FAILED: main.elf has no loadable .aiehlc_io section")
+            return 1
     wb = Path(rep.elf).parent / "weights.bin"
     if wb.is_file():   # the blob netload streams to the board, beside the ELF
         shutil.copy2(wb, out / "weights.bin")
