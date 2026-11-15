@@ -1,6 +1,6 @@
-# Tutorial 1 -- GEMM on a 4x4 tile mesh
+# 1a. Contraction: GEMM on a 4x4 tile mesh
 
-Example: [`example/tileprogram/ccode/simplegemm_kernel_port.cc`](../../example/tileprogram/ccode/simplegemm_kernel_port.cc)
+Example: [`example/tileprogram/ccode/simplegemm_kernel_port.cc`](../../../example/tileprogram/ccode/simplegemm_kernel_port.cc)
 (56 lines, host included). Shared host helpers: `simplegemm_load.h`.
 
 ## The whole program
@@ -96,7 +96,7 @@ It needs a 16-row band of A and a 16-row band of B. Both bands are 16 x 256 =
 4 KB, too much to stream as one piece next to everything else, so the core walks
 K in **4 chunks of 64**: round `j` brings a `{16, 64}` block of A and of B.
 
-![GEMM tiling and the pid of each block](img/gemm_tiling.svg)
+![GEMM tiling and the pid of each block](../img/gemm_tiling.svg)
 
 Two facts fall out of this picture, and the compiler finds both by itself:
 
@@ -187,7 +187,7 @@ loop indices, one block shape per port.
             }
 ```
 Plain scalar C++: a 16 x 16 x 64 matrix product on the two blocks, B used
-transposed (`w[n * tk + k]` is row `n` of B). Tutorial 4 replaces loops like
+transposed (`w[n * tk + k]` is row `n` of B). Chapter 6.2 replaces loops like
 this with `aie::mmul`.
 
 ```cpp
@@ -209,7 +209,7 @@ other buffer while you compute round `j`.
 Write the result into the output block and `commit` it: the DMA sends the
 16 x 16 block to `C[16pm.., 16pn..]` in DDR.
 
-![One core over its 4 rounds](img/gemm_rounds.svg)
+![One core over its 4 rounds](../img/gemm_rounds.svg)
 
 ## 3. The host, line by line
 
@@ -275,7 +275,7 @@ Compare with a CPU GEMM (`PASS: all 4096 output elements match.`).
 
 ## 4. How the pids land on the hardware
 
-![The mesh: pids, tiles and the derived DMA](img/gemm_mesh.svg)
+![The mesh: pids, tiles and the derived DMA](../img/gemm_mesh.svg)
 
 | pid `(pm, pn)` | array tile `(col, row)` | A rows | B rows | C block |
 |---|---|---|---|---|
@@ -307,7 +307,7 @@ that run on the hardware.
 
 ### 5.1 From `load_buffer` calls to a DMA pattern
 
-![Trace -> affine fit -> DMA pattern](img/trace_to_dma.svg)
+![Trace -> affine fit -> DMA pattern](../img/trace_to_dma.svg)
 
 1. **Trace.** The kernel body is compiled for x86 with recording versions of
    `aie::program_id`, `load_buffer`, `store_buffer`, `release` and `commit`
@@ -354,7 +354,7 @@ constexpr aie::GemmSpace __aie_gemm_IFM = {
     .d2 = {.fullsize = 256, .tile_round = 4, .tile_size = 64, .stride = 64}};
 ```
 
-Nothing in these steps knows the kernel is a GEMM -- tutorial 2's conv goes
+Nothing in these steps knows the kernel is a GEMM -- chapter 1b's conv goes
 through exactly the same three steps.
 
 The trace also **checks** the kernel: a block outside the tensor, data used
@@ -364,7 +364,7 @@ with the source line, before anything reaches the board.
 
 ### 5.2 From the DMA pattern to host.cc, kernel.cc and routing.cc
 
-![The compiler pipeline](img/compiler_flow.svg)
+![The compiler pipeline](../img/compiler_flow.svg)
 
 The descriptors become a **routing IR** module, and six MLIR dialects lower it
 one concern at a time. Every stage writes its IR to `ir/dfschedule/` or
@@ -438,4 +438,4 @@ block and the next run passes, that is a known intermittent host-cache issue
 after the output DMA, not your kernel: re-run, and compare against a second
 run before debugging the kernel.
 
-Next: [Tutorial 2 -- Conv2d on a 4x4 tile mesh](02_conv2d_4x4.md).
+Next: [1b. Conv2d on a 4x4 tile mesh](conv2d.md).

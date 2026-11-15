@@ -51,7 +51,7 @@ output_tile_major` works unchanged on a kernel-only source (the kernel's
 `[mesh row][mesh col][round i*4+j][7][28][16]`:
 `simpleconv2dkernel_port_vec_opts.cc` PASS 3/3, 56.4 ms. The original
 `simpleconv2dkernel_port.cc` host prints only `[BENCH]`, so it never showed.
-Tutorial: `tutorial/aieprogram/04_conv2d_vector_scheduling.md` section 5.
+Tutorial: `tutorial/aieprogram/06_gemm_optimization/conv_vector_scheduling.md` section 5.
 
 Telling it apart from the intermittent post-DMA stale-cache issue: the race is
 **reproducible** (hundreds of thousands of mismatches every run, values from

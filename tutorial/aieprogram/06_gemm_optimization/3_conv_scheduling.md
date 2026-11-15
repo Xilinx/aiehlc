@@ -1,12 +1,12 @@
-# Tutorial 3 -- Low-level scheduling: `{.depth}`, `{.resident}`, `{.tile}`
+# 6.3 The same scheduling options on the conv2d: `{.depth}`, `{.resident}`
 
-Example: [`example/tileprogram/ccode/simpleconv2dkernel_port_opts.cc`](../../example/tileprogram/ccode/simpleconv2dkernel_port_opts.cc)
--- [tutorial 2](02_conv2d_4x4.md)'s `simpleconv2dkernel_port_less.cc` with
+Example: [`example/tileprogram/ccode/simpleconv2dkernel_port_opts.cc`](../../../example/tileprogram/ccode/simpleconv2dkernel_port_opts.cc)
+-- [1b](../01_contraction/conv2d.md)'s `simpleconv2dkernel_port_less.cc` with
 **three changed lines**.
 
 ## The whole program
 
-The whole program. The only difference from tutorial 2 is the last argument of the three
+The whole program. The only difference from 1b is the last argument of the three
 `load_buffer` / `store_buffer` calls (`{.resident = true}`, `{.depth = 2}`).
 
 <!-- code: example/tileprogram/ccode/simpleconv2dkernel_port_opts.cc -->
@@ -91,7 +91,7 @@ schedule has to answer:
    launch (the filters) should be sent once and kept, in one buffer -- not
    double-buffered, not re-sent.
 
-![What {.depth} and {.resident} change](img/sched_timeline.svg)
+![What {.depth} and {.resident} change](../img/sched_timeline.svg)
 
 The defaults: every port double-buffered (if the buffers fit), each block
 streamed when its round comes. Options override that **per port**.
@@ -204,7 +204,7 @@ never a wrong answer.
 
 ## 7. Where the other options pay off: the GEMM path
 
-On a GEMM-style kernel (`fullconnect_auto`, no halo -- tutorial 1) the
+On a GEMM-style kernel (`fullconnect_auto`, no halo -- 1a) the
 defaults are less suited than on this conv, and the options do more:
 
 - the GEMM schedule **re-sends B with every M round**; `{.resident = true}` on
@@ -220,4 +220,4 @@ defaults are less suited than on this conv, and the options do more:
 79.6 ms on the board). Design notes: `doc/design/trace_to_routing.md`,
 section "Dataflow options".
 
-Next: [Tutorial 4 -- vector instructions + scheduling](04_conv2d_vector_scheduling.md).
+Next: [6.4 Vector instructions + scheduling on the conv2d](4_conv_vector_scheduling.md).

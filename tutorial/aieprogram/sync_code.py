@@ -37,11 +37,11 @@ def main():
     ap.add_argument("--check", action="store_true", help="only report stale listings")
     args = ap.parse_args()
     stale = []
-    for md in sorted(HERE.glob("*.md")):
+    for md in sorted(HERE.rglob("*.md")):
         old = md.read_text()
         new = render(old)
         if new != old:
-            stale.append(md.name)
+            stale.append(str(md.relative_to(HERE)))
             if not args.check:
                 md.write_text(new)
     if args.check:
