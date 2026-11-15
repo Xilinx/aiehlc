@@ -245,8 +245,23 @@ static inline unsigned long long uc_rt_cyc(void) {
     return ph[0] + ph[1] + ph[2] + ph[3] + w;
 }
 static unsigned long long g_sp_pre = 0, g_sp_call = 0, g_sp_glue = 0, g_sp_post = 0;
+/* GPOOL: per-layer [UCL] split, recorded in the site and printed after graph_run */
+#define UC_UCL_MAX 128
+typedef struct {
+    int M, N, K, fast;
+    float pre, aie, post;
+} uc_ucl;
+static uc_ucl g_uc_ucl[UC_UCL_MAX];
+static int g_uc_nucl = 0, g_uc_ucl_done = 0;
 extern "C" int unet_aie_split_stats(unsigned long long *pre, unsigned long long *call, unsigned long long *glue,
                                     unsigned long long *post) {
+    if (!g_uc_ucl_done) {
+        g_uc_ucl_done = 1;
+        for (int i = 0; i < g_uc_nucl; i++)
+            printf("[UCL] l=%d M=%d N=%d K=%d pre_us=%.0f aie_us=%.0f post_us=%.0f fast=%d\n", i, g_uc_ucl[i].M,
+                   g_uc_ucl[i].N, g_uc_ucl[i].K, (double)g_uc_ucl[i].pre, (double)g_uc_ucl[i].aie,
+                   (double)g_uc_ucl[i].post, g_uc_ucl[i].fast);
+    }
     *pre = g_sp_pre;
     *call = g_sp_call;
     *glue = g_sp_glue;
@@ -1006,7 +1021,7 @@ static inline uint16x4_t uc_f2bf4(float32x4_t v) {
 static uint16_t *g_uc_pb = nullptr; /* padded bf16 planes [C][H+2ph][W+2pw] + slack */
 static int *g_uc_sk = nullptr, *g_uc_dk = nullptr; /* per-k source / destination offsets */
 static size_t g_uc_pcap = 0, g_uc_kcap = 0;
-static unsigned g_uc_fast = 0;
+static unsigned g_uc_fast = 0, g_uc_wzc = 0; /* layers on the fast im2col / zero-copy W path */
 static int uc_pool_need(size_t pel, size_t kel) {
     if (pel > g_uc_pcap) {
         free(g_uc_pb);
@@ -1081,7 +1096,15 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     /* P4w: wbf already holds W in the kacc chunk layout for K (unet_aie.prelayout_weights, build time: each
      * 16-row block = 16 rows of K, chunk j at j*kch, f = mi*8*kch + kb*64 + mm*8 + kk within a chunk). With
      * Kp > K each row only gains the zero chunk at its end. */
-    if (Kp == K) {
+    int32_t *const kw_pool = g_kw; /* GPOOL: the pooled W port, restored after the launch */
+    int wz = 0;
+    if (Kp == K && ((uintptr_t)wbf & 63) == 0) {
+        /* GPOOL: wbf is already the exact port image (P4w prelayout) -> the launch reads it in place (DMA
+         * takes the raw address, as for the aligned_alloc pool; flushed below like the pool) */
+        g_kw = (int32_t *)(uintptr_t)wbf;
+        g_uc_wzc++;
+        wz = 1;
+    } else if (Kp == K) {
         memcpy(Wd, wbf, (size_t)N * K * 2);
     } else {
         for (int n = 0; n < N; n++) {
@@ -1237,6 +1260,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     printf("[UCS] l=%d M=%d N=%d K=%d tkw=%d\n", g_aie_launches, M, N, K, kch / 2); /* P4bp: names a hanging launch */
     fflush(stdout);
     const int lrc = uc_kacc_launch(N, K, M); // ONE launch: the whole layer, K summed in the cores
+    g_kw = kw_pool;
     const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();
     Xil_DCacheInvalidateRange((UINTPTR)g_ky, (size_t)M * N * 4);
 #if UC_WARM
@@ -1322,8 +1346,21 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
         XTime ut3;
         XTime_GetTime(&ut3);
         const double us = 1e6 / (double)COUNTS_PER_SECOND;
-        printf("[UCL] l=%d M=%d N=%d K=%d pre_us=%.0f aie_us=%.0f post_us=%.0f fast=%d\n", g_aie_launches - 1, M, N, K,
-               (double)(lt0 - ut0) * us, (double)(lt1 - lt0) * us, (double)(ut3 - lt1) * us, fast);
+        /* GPOOL: [UCL] is recorded here and printed by unet_aie_split_stats() after graph_run (a printf per
+         * layer cost ~3.5 ms of A78 time inside the site) */
+        const int li = g_aie_launches - 1;
+        if (li >= 0 && li < UC_UCL_MAX) {
+            uc_ucl *u = &g_uc_ucl[li];
+            u->M = M;
+            u->N = N;
+            u->K = K;
+            u->fast = fast | (wz << 1); /* bit0 fast im2col, bit1 zero-copy W */
+            u->pre = (float)((double)(lt0 - ut0) * us);
+            u->aie = (float)((double)(lt1 - lt0) * us);
+            u->post = (float)((double)(ut3 - lt1) * us);
+            if (li + 1 > g_uc_nucl)
+                g_uc_nucl = li + 1;
+        }
     }
     return 0;
 }
