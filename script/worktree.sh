@@ -16,10 +16,14 @@
 #   build <branch>            Run cmake + make in the worktree's build/
 #   build-unitest <branch>    Build the unitest binary in the worktree
 #   cd <branch>               Print worktree path (use: cd $(bash script/worktree.sh cd <name>))
-#   link-deps <wt-path> [--from <ref>]
+#   link-deps <wt-path> [--from <ref>] [--private-alib]
 #                             Link untracked deps (thirdparty/alib, thirdparty/tvm-0.16,
-#                             build/aiehlc) from a reference worktree (default: repo root).
-#                             Idempotent; never overwrites an existing file/link.
+#                             build/aiehlc, A78 BSP workspace) from a reference worktree
+#                             (default: repo root). Idempotent; never overwrites an
+#                             existing file/link. --private-alib: give the worktree its
+#                             own COPY of thirdparty/alib (aiehlc.sh rebuilds aie-rt into
+#                             alib in place, so parallel builds on a shared alib clobber
+#                             each other); an existing real alib dir is kept.
 ###############################################################################
 
 set -euo pipefail
@@ -41,11 +45,15 @@ Commands:
   build <branch>            Run cmake + make in the worktree's build/
   build-unitest <branch>    Build the unitest binary in the worktree
   cd <branch>               Print worktree path
-  link-deps <wt-path> [--from <ref-worktree>]
-                            Symlink thirdparty/alib, thirdparty/tvm-0.16 and
-                            build/aiehlc from <ref-worktree> (default: repo root)
-                            into <wt-path>. Safe to re-run; existing files/links
-                            are left untouched.
+  link-deps <wt-path> [--from <ref-worktree>] [--private-alib]
+                            Symlink thirdparty/alib, thirdparty/tvm-0.16,
+                            build/aiehlc and the A78 BSP workspace from
+                            <ref-worktree> (default: repo root) into <wt-path>.
+                            Safe to re-run; existing files/links are left untouched.
+                            --private-alib: copy thirdparty/alib (cp -a) instead of
+                            linking it, so this worktree's aiehlc.sh rebuild of
+                            aie-rt cannot clobber other worktrees. A symlinked alib
+                            is replaced by a copy of its target; a real dir is kept.
 
 Examples:
   bash script/worktree.sh create fix-routing main
@@ -54,6 +62,7 @@ Examples:
   bash script/worktree.sh remove fix-routing
   cd $(bash script/worktree.sh cd fix-routing)
   bash script/worktree.sh link-deps .worktrees/fix-routing --from .worktrees/unet_m2
+  bash script/worktree.sh link-deps .worktrees/fix-routing --from .worktrees/unet_m2 --private-alib
 EOF
 }
 
@@ -254,10 +263,11 @@ LINK_DEPS=(thirdparty/alib thirdparty/tvm-0.16 build/aiehlc thirdparty/arch/cort
 cmd_link_deps() {
     local wt="${1:?Error: worktree path required}"
     shift
-    local ref="${REPO_ROOT}"
+    local ref="${REPO_ROOT}" private_alib=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --from) ref="${2:?Error: --from needs a path}"; shift 2 ;;
+            --private-alib) private_alib=1; shift ;;
             *) echo "Error: unknown link-deps option '$1'" >&2; return 1 ;;
         esac
     done
@@ -267,6 +277,9 @@ cmd_link_deps() {
     ref="$(cd "${ref}" && pwd)"
 
     local dep src dst missing=0
+    if [ "${private_alib}" -eq 1 ]; then
+        private_alib_copy "${wt}" "${ref}" || return 1
+    fi
     for dep in "${LINK_DEPS[@]}"; do
         dst="${wt}/${dep}"
         if [ -e "${dst}" ] || [ -L "${dst}" ]; then
@@ -289,6 +302,37 @@ cmd_link_deps() {
     done
     [ "${missing}" -eq 0 ] || echo "link-deps: ${missing} dep(s) missing in ref" >&2
     return 0
+}
+
+# private_alib_copy <wt> <ref>: make <wt>/thirdparty/alib a real directory (cp -a of the
+# ref's resolved alib). aiehlc.sh compiles aie-rt into alib in place (build_hw_lib), so a
+# shared symlinked alib is rewritten by every concurrent build ("xaiegbl.h: No such file").
+# Keeps an existing real dir (idempotent); replaces a symlink by a copy of its target.
+# The copy goes to a temp dir next to the destination and is moved in atomically; the
+# source is only read.
+private_alib_copy() {
+    local wt="$1" ref="$2" dst="$1/thirdparty/alib" src tmp
+    if [ -d "${dst}" ] && [ ! -L "${dst}" ]; then
+        echo "link-deps: keep thirdparty/alib (private dir)"
+        return 0
+    fi
+    if [ -L "${dst}" ]; then
+        src="$(readlink -f "${dst}")"
+    else
+        [ -e "${ref}/thirdparty/alib" ] || { echo "Error: --private-alib: no thirdparty/alib in ref ${ref}" >&2; return 1; }
+        src="$(readlink -f "${ref}/thirdparty/alib")"
+    fi
+    [ -d "${src}" ] || { echo "Error: --private-alib: alib source is not a directory: ${src}" >&2; return 1; }
+    [ "${src}" != "${dst}" ] || { echo "Error: --private-alib: source is the destination ${dst}" >&2; return 1; }
+    mkdir -p "$(dirname "${dst}")"
+    tmp="$(mktemp -d "$(dirname "${dst}")/.alib_private.XXXXXX")" || return 1
+    if ! cp -a "${src}/." "${tmp}/"; then
+        rm -rf "${tmp}"; echo "Error: --private-alib: copy from ${src} failed" >&2; return 1
+    fi
+    chmod --reference="${src}" "${tmp}"
+    if [ -L "${dst}" ]; then rm -f "${dst}"; fi
+    mv -T "${tmp}" "${dst}" || { rm -rf "${tmp}"; return 1; }
+    echo "link-deps: thirdparty/alib private copy of ${src} ($(du -sh "${dst}" | cut -f1))"
 }
 
 cmd_cd() {

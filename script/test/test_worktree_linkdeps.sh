@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Self-test for `script/worktree.sh link-deps` (GAP-aiehlc-worktree-linkdeps).
-# Usage: bash script/test/test_worktree_linkdeps.sh <ref-worktree>
+# Usage: bash script/test/test_worktree_linkdeps.sh [<ref-worktree>]
+#        (default ref: the repo's main worktree, first entry of `git worktree list`)
 # Creates a detached temp worktree, runs link-deps twice, checks that
 # thirdparty/alib, thirdparty/tvm-0.16, build/aiehlc and the A78 BSP
 # workspace (thirdparty/arch/cortexa78_0/workspace) resolve, removes the
 # temp worktree and prints: WT_LINKDEPS links=<n> idempotent=<0|1> PASS|FAIL
 set -uo pipefail
-REF="${1:?usage: $0 <ref-worktree>}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WT_SH="${SCRIPT_DIR}/../worktree.sh"
 REPO="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)"
+REF="${1:-$(git -C "${REPO}" worktree list --porcelain | awk '/^worktree /{print substr($0,10); exit}')}"
+echo "ref=${REF}"
 TMP="$(mktemp -d /tmp/wt_linkdeps_test.XXXXXX)"
 WT="${TMP}/wt"
 cleanup() { git -C "${REPO}" worktree remove --force "${WT}" >/dev/null 2>&1; rm -rf "${TMP}"; git -C "${REPO}" worktree prune; }
