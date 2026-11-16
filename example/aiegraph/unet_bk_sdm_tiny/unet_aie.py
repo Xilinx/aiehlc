@@ -2613,6 +2613,7 @@ def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, c
     spec = spec.replace('"out ', '"export    unet_aie_conv\\n"\n        "export    unet_aie_stats\\n"\n' +
                         ('        "export    unet_aie_linear\\n"\n' if lin else '') +
                         ('        "export    unet_aie_attn\\n"\n' if att else '') +
+                        ('        "export    unet_aie_attn_kl\\n"\n' if fa else '') +  # P4a keep-layout
                         '        "export    unet_aie_launch_stats\\n"\n'
                         '        "export    unet_aie_host_split_site\\n"\n'
                         '        "export    unet_aie_host_split_line\\n"\n'
