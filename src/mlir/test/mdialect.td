@@ -22,7 +22,6 @@ def Aie_ADialect : Dialect {
   let hasOperationAttrVerify = 0;
   let useDefaultTypePrinterParser = 0;
   let useDefaultAttributePrinterParser = 0;
-  let usePropertiesForAttributes = 0;
 
 }
 

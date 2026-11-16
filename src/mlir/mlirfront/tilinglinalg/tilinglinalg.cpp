@@ -74,7 +74,10 @@ void tilinglinalg::creatematmul(int m, int k, int n) {
     module->setAttr("transform.with_named_sequence", sattr);
   
     module.push_back(func);
-    module.dump();
+    {
+        module->print(llvm::errs());
+        llvm::errs() << "\n";
+    }
 
     //tranform logic
     builder.setInsertionPointToEnd(module.getBody());
@@ -131,7 +134,10 @@ void tilinglinalg::creatematmul(int m, int k, int n) {
     module->setAttr("transform.with_named_sequence",
                     mlir::SymbolRefAttr::get(&context, "do_tiling"));
 
-    module.dump();
+    {
+        module->print(llvm::errs());
+        llvm::errs() << "\n";
+    }
     //run pass
     mlir::PassManager pm(&context);
     // tiling pass
@@ -141,7 +147,10 @@ void tilinglinalg::creatematmul(int m, int k, int n) {
     //after tiling code gen
     pm.addPass(std::make_unique<TilingCodePass>());
     (void)pm.run(module);
-    module.dump();
+    {
+        module->print(llvm::errs());
+        llvm::errs() << "\n";
+    }
     //*/
 }
 /*

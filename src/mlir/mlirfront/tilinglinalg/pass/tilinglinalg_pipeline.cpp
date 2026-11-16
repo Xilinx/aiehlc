@@ -2,6 +2,8 @@
  * Copyright (C) 2025 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  ******************************************************************************/
+#include <chrono>
+#include <cstdlib>
 #include "tilinglinalg_pipeline.h"
 
 #include "dmaptodmaphop.h"
@@ -11,6 +13,7 @@
 #include "passblueprinttoschedulekernel.h"
 #include "passcoretraceinsert/passcoretraceinsert.h"
 #include "passstartiointerleave/passstartiointerleave.h"
+#include "passmemtilejoin/passmemtilejoin.h"
 #include "passdfscheduleprovenancemap.h"
 #include "passdfscheduletoapi.h"
 #include "passdfscheduletokernelapi.h"
@@ -473,10 +476,16 @@ static bool runPipelineSinglePass(MLIRContext &ctx, mlir::ModuleOp module, std::
                           const std::string &irDir, int &stage, const std::string &passName) {
     mlir::PassManager singlePm(&ctx);
     singlePm.addPass(std::move(pass));
+    static const bool timing = std::getenv("AIEHLC_PASS_TIMING") != nullptr;
+    auto t0 = std::chrono::steady_clock::now();
     if (failed(singlePm.run(module))) {
         llvm::errs() << "ERROR: " << passName << " failed!\n";
         return false;
     }
+    if (timing)
+        llvm::errs() << "[pass-time] " << passName << " "
+                     << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count()
+                     << " ms\n";
     dumpPipelineIRToFile(module, irDir, stage, passName);
     stage++;
     return true;
@@ -769,9 +778,10 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
 
     // Extract partition bounds from createhwmesh op in the IR (if present)
     int partStartCol = -1, partEndCol = -1, partStartRow = -1, partEndRow = -1;
-    int meshCols = 0;
+    int meshCols = 0, meshRows = 0;
     module.walk([&](routing::createhwmesh meshOp) {
         meshCols = std::max<int>(meshCols, meshOp.getCol());
+        meshRows = std::max<int>(meshRows, meshOp.getRow());
         if (auto sc = meshOp.getStartCol())
             partStartCol = *sc;
         if (auto ec = meshOp.getEndCol())
@@ -782,11 +792,27 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
             partEndRow = *er;
     });
 
+    // The router only routes inside the partition rows: a mesh row past partEndRow
+    // gets no path, and its flows would be dropped silently (cores starved -> hang).
+    if (partEndRow >= 0 && meshRows > 0) {
+        RoutingTopology probe(aieGen, "", -1, -1, -1, -1);
+        const int coreStartRow = (int)probe.getRM()->getrsc()->absTileRow(::TileType::Core, 0);
+        const int lastMeshRow = coreStartRow + meshRows - 1;
+        if (lastMeshRow > partEndRow) {
+            llvm::errs() << "[TilingLinalg] ERROR: the " << meshRows << "-row mesh needs core rows " << coreStartRow
+                         << ".." << lastMeshRow << " but the partition ends at row " << partEndRow
+                         << " (aieArray::partition({startCol, endCol, startRow, endRow}) -- raise endRow to "
+                         << lastMeshRow << ")\n";
+            return false;
+        }
+    }
+
     // Convert absolute partition columns to 0-based partition-relative columns.
     // XAie_SetupPartitionConfig handles the physical mapping, so the pipeline
     // should generate coordinates relative to the partition origin.
     // Only enable partition mode when both startCol and endCol are specified;
     // otherwise keep relStartCol = -1 so RoutingTopology skips setPartitionBounds.
+    // Routing works partition-relative; rebase the absolute NoC-shim column list.
     setResourcePartitionStartCol(partStartCol >= 0 && partEndCol >= 0 ? partStartCol : 0);
     int relStartCol = (partStartCol >= 0 && partEndCol >= 0) ? 0 : -1;
     int relEndCol = (partStartCol >= 0 && partEndCol >= 0) ? (partEndCol - partStartCol) : -1;
@@ -851,7 +877,7 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
         // Trace a partitiontensor tensor operand back to its func arg number.
         auto tensorArgIndex = [](mlir::Value v) -> int {
             for (int guard = 0; guard < 8 && v; ++guard) {
-                if (auto ba = v.dyn_cast<mlir::BlockArgument>())
+                if (auto ba = llvm::dyn_cast<mlir::BlockArgument>(v))
                     return (int)ba.getArgNumber();
                 mlir::Operation *def = v.getDefiningOp();
                 if (!def)
@@ -1109,6 +1135,7 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
                                "RoutingConstantFoldPass"))
         return false;
 
+    // Issue each DMA channel right after its BD chain (mlir-aie-style interleave).
     if (!runPipelineSinglePass(ctx, hostModule, std::make_unique<StartioInterleavePass>(), irDir, stage,
                                "StartioInterleavePass"))
         return false;
@@ -1672,18 +1699,21 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
             // inside its own ack/DMA poll loops where it would otherwise spin. A range
             // registered with __Runtime_buffer_device_written() is invalidate-only and may
             // overlap the launch's DMA. After the launch: __Runtime_dsync_drain() finishes
-            // whatever is still queued before control returns to the caller.
+            // whatever is still queued, then SyncForCPU invalidates every argument again:
+            // a line the A72 pulled back in while the DMA ran (prefetch, or a neighbour of
+            // runtime-touched data) would otherwise serve stale output (VEK280: C row 0 on
+            // launch 1). __Runtime_alloc_buffer keeps every buffer on its own cache lines,
+            // so this invalidate never discards someone else's dirty data.
             auto emitSyncCalls = [&](llvm::raw_fd_ostream &os, unsigned nDdrArgs, const std::string &indent,
                                      bool beforeLaunch) {
-                if (!beforeLaunch) {
+                if (!beforeLaunch)
                     os << indent << "__Runtime_dsync_drain();\n";
-                    return;
-                }
                 unsigned limit = nDdrArgs;
                 if (limit > tensors.size())
                     limit = tensors.size();
                 for (unsigned i = 0; i < limit; ++i) {
-                    os << indent << "__Runtime_sync_for_dev_deferred(dev, _t" << i << ", _s" << i << ");\n";
+                    os << indent << (beforeLaunch ? "__Runtime_sync_for_dev_deferred" : "__Runtime_sync_for_cpu")
+                       << "(dev, _t" << i << ", _s" << i << ");\n";
                 }
             };
 
@@ -1703,7 +1733,7 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
                 for (unsigned i = 0; i < numDdrArgs; ++i)
                     stream << ", _t" << i;
                 stream << ");\n";
-                // No post-launch sync needed (cache lines already invalidated)
+                // Invalidate ALL buffers so the CPU reads what the DMA wrote
                 emitSyncCalls(stream, numDdrArgs, "    ", /*beforeLaunch=*/false);
                 stream << "}\n";
 
@@ -1728,7 +1758,7 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
                 for (unsigned i = 0; i < numDdrArgs; ++i)
                     stream << ", _t" << i;
                 stream << ");\n";
-                // No post-launch sync needed (cache lines already invalidated)
+                // Invalidate ALL buffers so the CPU reads what the DMA wrote
                 emitSyncCalls(stream, numDdrArgs, "    ", /*beforeLaunch=*/false);
                 stream << "    __Runtime_explicit_teardown(dev);\n";
                 stream << "}\n";
@@ -2031,7 +2061,7 @@ after_host_emit:
         if (!allocations.empty()) {
             TilingBcf bcf;
             constexpr uint32_t kStackBase = 0x70000;
-            bcf.setStack(kStackBase, allocator.getBaseAddr() - kStackBase);
+            bcf.setStack(kStackBase, allocator.getLowestAddr() - kStackBase);
             // Keep the linker's own .data/.bss (libme's control_rnd/control_sat,
             // main()'s sync_buffer, any kernel global) inside THIS tile's memory,
             // after the buffers. Unreserved, bridge placed them at DMb 0x0, which
@@ -2108,6 +2138,12 @@ after_host_emit:
             return false;
         if (!runPipelineSinglePass(ctx, routingDmaphopModule, std::make_unique<RoutingHWVerifyPass>(), routingIrDir,
                                    rstage, "RoutingHWVerifyPass"))
+            return false;
+        // Memtile output join bring-up (doc/design/memtile_staging.md stage 1).
+        if ((memtileStaging(routingDmaphopModule) &
+             (kMemtileStageOutput | kMemtileStageInput | kMemtileStageWeights)) &&
+            !runPipelineSinglePass(ctx, routingDmaphopModule, std::make_unique<MemtileOutputJoinRoutingPass>(),
+                                   routingIrDir, rstage, "MemtileOutputJoinRoutingPass"))
             return false;
 
         {

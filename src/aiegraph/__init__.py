@@ -25,6 +25,10 @@
     proto = module.offload_prototype("layer1")         # one layer: args, AIEK_SPEC, kernel backbone
     proto.write("my_kernels/")                         # <entry>.cc (kernel+host+entry) + <entry>_ref.c
 
+    lib = ag.kernel_lib("src/aietensorop")             # every AIEK_SPEC, as a dispatch list
+    module.use_kernels(lib)
+    k = module.match_kernel(["layer1.0.conv1", "layer1.1.conv1"])   # most specific spec, or None
+
     module = ag.compile("resnet18", "aie", "layer1=src/aietensorop/conv2dstem/conv2dstem_uk.cc")
 
 The layer-index API (``offload_check("layer1", k.cc)``, ``offload``) still works;
@@ -47,6 +51,8 @@ from .embedded import EmbeddedModel, Layer, convert, current, embedded_convert
 from .embedded import open_workdir as open  # noqa: A001  (ag.open(workdir))
 from .errors import AiegraphError
 from .prototype import Prototypes, KernelFormat, OffloadPrototype
+from .dnn import DnnBuild, dnn_build
+from .kernel_lib import Dispatch, KernelLib, LibEntry, kernel_lib
 from .model import ZOO, Model, download_model, from_onnx, from_torch, load
 from .region import Region, Regions
 from .report import (AIProtoResult, BuildReport, CheckReport, DetectReport, PartitionPlan,
@@ -65,7 +71,8 @@ __all__ = ["load", "from_onnx", "from_torch", "download_model", "ZOO", "Model",
            "PerfReport", "KernelOptResult",
            "compile", "guide", "doctor", "setup", "AiegraphError", "CheckReport",
            "DetectReport", "BuildReport", "AIProtoResult", "offload_prototype",
-           "OffloadPrototype", "Prototypes", "KernelFormat"]
+           "OffloadPrototype", "Prototypes", "KernelFormat", "kernel_lib", "KernelLib",
+           "LibEntry", "Dispatch", "dnn_build", "DnnBuild"]
 
 
 # ── module-level forms: act on ag.current() (pyplot-style convenience) ─────

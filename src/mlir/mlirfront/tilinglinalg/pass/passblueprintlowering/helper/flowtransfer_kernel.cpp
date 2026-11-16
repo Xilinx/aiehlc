@@ -451,7 +451,29 @@ LogicalResult emitCoreBufferDma(FlowLoweringCtx &c, CoreTileCtx &t, const CoreTi
                 // kernel path partSubview is null and this is skipped; the shape
                 // below is taken from perTileSizes either way.
                 memref::SubViewOp tileSubviewOp = nullptr;
+                // The tile subview's value is dead in the emitted host code (one
+                // `__runtime_buffer_offset` per tile, never read: BindCoreBufferOp keeps
+                // the L1 offset, memref_mapping is a no-op). Some flows' per-tile offsets
+                // run past the partition (offset 64 of a 64-row partition), which
+                // LLVM >= 20's subview verifier rejects ("offset 0 is out-of-bounds"):
+                // clamp those into the partition -- still a dead view, no allocation.
+                bool tileInBounds = false;
                 if (partSubview) {
+                    auto pShape = llvm::cast<MemRefType>(partSubview.getType()).getShape();
+                    tileInBounds = pShape.size() == perTileOffsets.size();
+                    for (size_t i = 0; tileInBounds && i < pShape.size(); i++) {
+                        if (ShapedType::isDynamic(pShape[i]))
+                            continue;
+                        const int64_t span = (perTileSizes[i] - 1) * perTileStrides[i];
+                        if (span >= pShape[i]) {
+                            tileInBounds = false; // the tile is bigger than the partition
+                            break;
+                        }
+                        if (perTileOffsets[i] + span >= pShape[i])
+                            perTileOffsets[i] = pShape[i] - 1 - span;
+                    }
+                }
+                if (partSubview && tileInBounds) {
                     tileSubviewOp = rewriter.create<memref::SubViewOp>(
                         loc, partSubview, toOpFoldResult(perTileOffsets, rewriter),
                         toOpFoldResult(perTileSizes, rewriter), toOpFoldResult(perTileStrides, rewriter));

@@ -10,6 +10,7 @@
 // byte-identical to the original; all cross-boundary locals are carried in
 // FlowLoweringCtx (`c`).
 
+#include "pass/passmemtilejoin/passmemtilejoin.h"
 #include "flowtransfer_internal.h"
 
 namespace blueprint_sched {
@@ -396,17 +397,44 @@ void FlowTransferConversion::emitShimBdOoo(FlowLoweringCtx &c) const {
                      << " oooMRounds=" << c.oooMRounds << "\n";
     }
 
-    // Allocate N shim BD IDs
+    // Allocate N shim BD IDs.
+    //
+    // With #pragma memtile_staging(output) the channel's out-of-order BDs move to the memtile
+    // above (StartioInterleavePass memtileOutputJoin), whose even channels own BDs 0-23
+    // (20 and 22 are the joins' re-emit BDs). Only the first id stays a real shim BD (the
+    // join's one linear BD), so the block is first .. first+N-1, contiguous as the join
+    // expects, and may run past the shim's 16 BDs -- which is what lets a mesh row of 8
+    // cores fit. Ids of the block that are also shim ids are reserved so another channel's
+    // block cannot start inside it.
     SmallVector<int32_t> shimBdIds;
+    ModuleOp parentModule = c.op->getParentOfType<ModuleOp>();
+    const bool joined = parentModule && (memtileStaging(parentModule) & kMemtileStageOutput) && numCoreTiles > 1;
     for (int64_t t = 0; t < numCoreTiles; t++) {
         int32_t bid = -1;
+        if (joined && t > 0) {
+            bid = shimBdIds[0] + (int32_t)t;
+            if (resourceMgr && bid < resourceMgr->tile(c.shimRow, c.shimCol).numBds() &&
+                !resourceMgr->tile(c.shimRow, c.shimCol).reserveBd(bid, c.flowIndex))
+                bid = -1;
+            if (bid >= 20 || bid < 0) {
+                c.op.emitError() << "memtile output join: shim (" << c.shimCol << ",0) has no contiguous block of "
+                                 << numCoreTiles << " out-of-order BD ids starting at " << shimBdIds[0]
+                                 << " below the memtile re-emit BDs (20)";
+                bid = shimBdIds[0] + (int32_t)t;
+            }
+            shimBdIds.push_back(bid);
+            continue;
+        }
         if (resourceMgr) {
             auto bdOpt = resourceMgr->allocateTileBd(c.shimRow, c.shimCol, /*ownerId=*/c.flowIndex);
             if (bdOpt)
                 bid = *bdOpt;
         }
-        if (bid < 0)
-            bid = c.shimBdIdVal + (int32_t)t; // fallback
+        if (bid < 0) {
+            c.op.emitError() << "shim (" << c.shimCol << ",0) is out of BDs for out-of-order output tile " << t
+                             << " of " << numCoreTiles << "; add #pragma memtile_staging(output)";
+            bid = c.shimBdIdVal + (int32_t)t;
+        }
         shimBdIds.push_back(bid);
     }
     c.shimPerTileBdIds = shimBdIds;
@@ -879,19 +907,19 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
         Value offset;
         if (halo2D) {
             auto wRoundsC =
-                rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(haloWRoundsVal), rewriter.getI32Type());
+                rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(), static_cast<int32_t>(haloWRoundsVal));
             auto hc = rewriter.create<arith::DivSIOp>(loc, ivI32, wRoundsC);
             auto wc = rewriter.create<arith::RemSIOp>(loc, ivI32, wRoundsC);
-            auto hStrideC = rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(haloHStrideBytes),
-                                                                  rewriter.getI32Type());
-            auto wStrideC = rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(haloWStrideBytes),
-                                                                  rewriter.getI32Type());
+            auto hStrideC = rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(),
+                                                                  static_cast<int32_t>(haloHStrideBytes));
+            auto wStrideC = rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(),
+                                                                  static_cast<int32_t>(haloWStrideBytes));
             auto hOff = rewriter.create<arith::MulIOp>(loc, hc, hStrideC);
             auto wOff = rewriter.create<arith::MulIOp>(loc, wc, wStrideC);
             offset = rewriter.create<arith::AddIOp>(loc, hOff, wOff);
         } else {
             auto strideConst =
-                rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(subTileStride), rewriter.getI32Type());
+                rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(), static_cast<int32_t>(subTileStride));
             offset = rewriter.create<arith::MulIOp>(loc, ivI32, strideConst);
         }
 
@@ -1022,21 +1050,21 @@ void FlowTransferConversion::emitScheduleOooOutput(FlowLoweringCtx &c) const {
                     innerProd *= rd[j].first;
                 Value comp = ivI32;
                 if (innerProd > 1) {
-                    auto divC = rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(innerProd),
-                                                                      rewriter.getI32Type());
+                    auto divC = rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(),
+                                                                      static_cast<int32_t>(innerProd));
                     comp = rewriter.create<arith::DivSIOp>(loc, comp, divC);
                 }
                 if (i != 0) {
-                    auto wrapC = rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(rd[i].first),
-                                                                       rewriter.getI32Type());
+                    auto wrapC = rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(),
+                                                                       static_cast<int32_t>(rd[i].first));
                     comp = rewriter.create<arith::RemSIOp>(loc, comp, wrapC);
                 }
                 comps[i] = comp;
             }
             SmallVector<Value> offs(nDims);
             for (size_t i = 0; i < nDims; i++) {
-                auto strideC = rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(rd[i].second),
-                                                                     rewriter.getI32Type());
+                auto strideC = rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(),
+                                                                     static_cast<int32_t>(rd[i].second));
                 offs[i] = rewriter.create<arith::MulIOp>(loc, comps[i], strideC);
             }
             mBaseOffset = offs[0];
@@ -1050,9 +1078,9 @@ void FlowTransferConversion::emitScheduleOooOutput(FlowLoweringCtx &c) const {
             int32_t thisBdId = c.shimPerTileBdIds[t];
             int64_t perTileOffset = t * c.perTileStrideFromDims;
 
-            auto bdIdConst = rewriter.create<arith::ConstantIntOp>(loc, thisBdId, rewriter.getI32Type());
+            auto bdIdConst = rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(), thisBdId);
             auto perTileOffsetConst =
-                rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(perTileOffset), rewriter.getI32Type());
+                rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(), static_cast<int32_t>(perTileOffset));
             auto totalOffset = rewriter.create<arith::AddIOp>(loc, mBaseOffset, perTileOffsetConst.getResult());
 
             Value linkedBd = (t < numCoreTiles - 1) ? loopBdHandles[t + 1] : Value();

@@ -219,6 +219,100 @@ Key invariants worth knowing before touching it:
   `#pragma control_plan_op_control_packet`; default off.
 
 Platforms: baremetal (`aarch64-none-elf-g++`) or Linux (`aarch64-linux-gnu-g++`).
+With `#pragma control_plan_op_control_packet`, the host emits the row-control
+fabric before kernel loading and calls
+`__Runtime_load_kernel_group_{4,8,16}t_ctrl` plus
+`__Runtime_launch_kernel_group_ctrl`. Core reset rides in the ELF payload: the
+first access is a whole-register `Core_Control` write of `CtrlRst.Mask` and the
+tenth writes 0, replacing 16 x 3 read-modify-write MMIO calls (~49k cycles); the core
+reset does not affect the tile's CTRL endpoint. Between them the four core-tile
+`DMA_*_Ctrl` registers get reset, then 0 (`rt_cpe_reset_accesses`), because a
+finished launch leaves every channel running its ping-pong BD chain; that is what
+makes a second `matmul<<<>>>` on the same partition work (skill **kernel-relaunch**;
+the 4x4 example runs `MATMUL_LAUNCHES` = 2: 0.194 ms, then 0.155 ms warm).
+`__Runtime_free_buffer` must drop the buffer from `s_alloc_map`, or a recycled
+address resolves through a freed `XAie_MemInst` and control packets go missing. `__Runtime_alloc_buffer` rounds each buffer to 64-byte lines (`RT_DMA_ALIGN`, offset kept in
+`AllocEntry.shift`) and `__aie_launch` calls `__Runtime_sync_for_cpu` on every buffer after the run;
+without both, the A72 serves stale output lines (VEK280: C row 0 wrong on launch 1). KCO's emitted
+`get_coreid()` dispatch subtracts `routing.partition_start_col` (cores report absolute columns). ELF words and core enable are
+blocking row-multicast control writes.
+Without the pragma, loading and launch keep the normal XAie APIs. Rows must use
+contiguous columns.
+
+**Coexistence with a live data plane** (see skill `control-plane-dataplane-coexistence`):
+the control entry and `routing.cc` share the shim SOUTH mux port (3 for MM2S ch0,
+7 for ch1), and a circuit slave feeding two masters multicasts — so control
+packets would also be replicated into the unarmed data-plane climb and stall the
+first push. Control sends are confined to load/launch, so
+`rt_ctrl_shim_park_data_masters` disables the spine shim's NORTH masters before
+programming the entry, and `__Runtime_ctrl_plan_release(f, mm2s_ch)` cuts
+`SOUTH→NORTH VFWD` and re-runs the idempotent `routing()` to restore the data
+plane (called at the end of `__Runtime_launch_kernel_group_ctrl`). A correct
+restore shows up as `wait_io` cycles matching the mmio baseline.
+**Automatic control-port placement** (any build with the control pragma; see
+`doc/controlplane.md`): (1) if the partition has a spare column, its first
+column becomes a dedicated control spine (shim MM2S0/S2MM0) and the mesh shifts
+east (`planControlColumn`, before data allocation); (2) else, after
+`DmapToDmaphopPass`, `ResourceMgr::findFreeControlChannels` takes a free MM2S +
+S2MM on the first mesh column's shim exclusively (`finalizeControlPlacement`);
+(3) else control time-shares channel 0 with park/release and the pipeline warns.
+The placement is published as `routing.control_plan_{shim_col,mm2s_ch,s2mm_ch,exclusive}`
+and stored in `ResourceMgr::setControlPlacement`. `reserveControlPlaneResources`
+then claims control's shim DMA channels and mux/demux ports when exclusive, plus
+the real spine ports on every spine tile (`RT_RES_VFWD_PORT` 4, `RT_RES_VRET_PORT` 3).
+`BlueprintToSchedulePass` calls `reserveControlShimBds` (BDs 2-6, 12-14).
+`GroupRegWritePass` and `DfscheduleToApi` use the chosen channels, and
+DfscheduleToApi emits `__Runtime_ctrl_plan_set_exclusive(&fab, 1)` when
+exclusive. The planner treats spine-column tiles west of `col_lo` as **relays**
+(forward slots + EAST/NORTH, no CTRL master / RET_LOCAL). Exclusive or relay
+placement sets `f->dedicated_shim`, which skips the park and makes
+`plan_release` a no-op. `RoutingPath::connectAvailable` is partition-bounded.
+`#pragma control_plan_dedicated_shim` only requires case 1.
+`#pragma control_plan_shim_bd_ctrl` (case 1, HT mode, ≤5 mesh columns; else a
+warning and MMIO) sends the host's post-launch shim BD / OOO-enable / start-queue
+writes as shim-row control packets: codegen brackets them with
+`__Runtime_ctrl_shim_bd_begin(&fab)` / `_commit()`, the route is spine MM2S ch1 →
+EAST 0 → shim WEST 0 slaves (`acr_plan_shim_row`), and the barrier is a
+write-with-return per column into spine S2MM ch1 BD 15, awaited at the first
+`wait_io`. `reserveShimRowControl` + `reserveControlShimBds(col, true)` claim those
+ports, channel 1 and BDs 7-11/15 (0.251 → 0.215 ms on the 4x4 GEMM; skill
+**shim-row-ctrl-bd-config**).
+**High-throughput ELF load** sends one packed BD of `payload_words`;
+`rt_ctrl_elf_fill` must write `*payload_words_out`, since a zero-length BD
+silently delivers only the final ACK and leaves program memory empty.
+`rt_ctrl_load_elf` rejects an empty payload.
+ELF loading has an AIE2PS **high-throughput control mode** enabled by calling
+`__Runtime_ctrl_high_throughput_enable(1)` before device initialization. The
+runtime passes `XAIE_PART_INIT_OPT_CTRL_TLASTERROR_DISABLE`, keeps every access's
+stream/control headers, packs all accesses contiguously, and sends the whole ELF
+in one shim MM2S BD with one final TLAST; CTRL self-delimits accesses from the
+control-header beat count. The final write-with-return is the last access of
+that same packed payload, as a **broadcast** (`ACR_ID_BCAST`), so every fabric
+tile (16) acknowledges. All responses land in one shim S2MM BD of `nresp` words
+with FoT **disabled** (each response is a one-word header, so the BD completes
+on count). This replaced a separate whole-row ACK send plus two 3+1 return
+waves (~27k cycles of shim register writes). The packed fill uses
+`rt_ctrl_elf_fill_seg_packed` (constant stream header, `__builtin_parity`),
+half the cycles of the generic `rt_ctrl_elf_put`. In HT mode `ctrl_plan_init` also
+holds back the core tiles' return-route writes, records them through a copy of
+`DevInst->Backend` (not an aie-rt transaction: `XAie_StartTransaction` callocs
+~17k cycles), and sends the offsets identical on every tile at the front of the
+ELF payload; the rest stay MMIO, and any earlier response-arming send flushes
+them over MMIO (`rt_ctrl_ret_flush_mmio`). Without the opt-in, compatibility mode lays one access
+per `RT_CTRL_ELF_PKT_STRIDE` slot and cycles `RT_CTRL_ELF_NBD` BD ids with one
+TLAST per access.
+**Never leave `log=1` on a per-send `__Runtime_ctrl_push` in a measured path**: the
+log branch dumps a `ctrl_push` line plus seven `ctrl_path` lines to the UART,
+costing ~100M cycles — an order of magnitude more than the whole ELF transfer, and
+enough to make control-packet load look 8x slower than MMIO when it is actually
+~11x faster. Per-send success chatter in the ELF path is behind `AIEHLC_LOG`;
+only genuine stalls/timeouts print unconditionally.
+`__Runtime_ctrl_pmap_enable(1)` prints ~200 CONTROLPAN-PMAP lines (~1.8 s of
+UART) inside `ctrl_plan_init`. The shim entry/return pairs print once per fabric
+and channel (`pmap_shim_seen`), because a re-print on every send cost ~19 ms per
+send. PMAP print time is excluded from every `RT_PROF_*` counter and from the
+`[TIMESYNC]` host clock, and is reported as `pmap_print`. Benchmark with PMAP off.
+
 
 ## Part 2: tilinglinalg (Multi-Tile GEMM)
 
@@ -511,7 +605,9 @@ log: **[doc/design/resnet_aie_engine.md](doc/design/resnet_aie_engine.md)**; ski
 **resnetengine**. Runtime mode switch `engine_set_mode(e, eager, layer_major)`: persistent,
 eager (kernel reloaded per layer), eager layer-major (B images per layer). Kernel
 reverted to the 2026-10-20 engine (~1.61 ms/image at B=32): the faster kernels
-(1.364 ms) hang ~1 run in 3 in residual layers (skill **shimctrlpushloss**).
+(1.364 ms) hang ~1 run in 3 in residual layers (skill **shimctrlpushloss**). **Also on VEK280** (2026-11-12):
+`AIE_VERSION=2 build.sh eng`, **2.593 ms/image**, bit-exact (fabric280/, two `mmul<4,8,8>` per MM, MMIO
+shim BDs, persistent mode only); same board as aiednn's 69.7 ms. Skill **resnetenginevek280**.
 
 ### Declarative conv2d auto-tiling (`aie::Conv2d` + `aie::Mapping`)
 
@@ -663,6 +759,185 @@ staging and parameters are `TODO`s for the user. It builds as generated
 offload reset to the CPU (`emod.offload_reset(layers=None)`, driver
 regenerated; `emod.offload("layer1", False)` resets just that spec); `keep_offloads=True` keeps them, `ag.open(workdir)` adopts a tree
 as it is, `force=True` re-converts.
+`ag.offload_interface()` / `emod.offload_interface("layer1" | region=...)`
+**aiednn has two layers** (`doc/design/aiednn.md` §0): the **library** (`include/aiednn.h`,
+`src/aiednn/`, `src/aietensorop/` kernels + `AIEK_SPEC`, dispatch, `ref:` fallbacks -- the
+oneDNN/cuDNN/hipDNN counterpart; never knows a model) and the **model compiler** on top
+(`dnn_torch`, `dnn_mlir` + the `aiednn` MLIR dialect, per-app megakernel modes, co-resident
+mode, `example/aiednn/models/`), which calls only `aiednn.h`. Per-shape speedups go into the
+library as specialized implementations chosen by dispatch, never into the compiler.
+
+**aiednn returns the AIE implementation by default** (`aiednn_set_preference(aiednn_prefer_aie)`;
+`aiednn_prefer_fastest` restores the "ref: is faster here" refusals, gated on `rt_cost_refusals()`), and
+`aiednn_primitive_impl_candidates` lists every acceptor, AIE first. Most remaining ops reach the AIE as
+**gemm+ composites** (`src/aiednn/aiednn_rt_gemmx.h`): host im2col / col2im / transposes / widening around
+an inner matmul that dispatch puts on the AIE -- `gemm+conv` (f32 1-3 D, s8 3-D, backward data / weights),
+`gemm+deconv`, `gemm+ip` (backward), `gemm+rnn`, `gemm+sdpa` (f32), `dequant` (int4 / int8 group scales,
+MXFP4 / MXFP8: `attr.wei_scales`), `cvt` (f16 / f8 / mixed). Floats go through the bf16 mode's bf16x3.
+A composite accepts only when its inner GEMM lands on the AIE; `rt_impl.caps` (`RT_CAP_3D` /
+`RT_CAP_TRAIN`) lets an impl past the 3-D / training guards. Design `doc/design/aiednn.md` §25; skill
+**aiednngemmx**. f32 pointwise / softmax / norm rows: the FVEC mode (`aie_modes_fvec.h`, opt-in, §25).
+
+**Kernel library (aiednn):** `ag.kernel_lib(root)` indexes every `AIEK_SPEC` under
+`root` (`src/aietensorop`), `module.use_kernels(lib)` registers them, and
+`module.match_kernel(regions)` picks one per TVM layer the way oneDNN's
+implementation list does -- every kernel accepts or says why
+(`verbose=True` / `module.last_match`) -- except the **most specific** acceptor
+wins (how many of `(O, I, KH, KW)` the spec fixes, after unpacking TVM's
+`OIHW{i}i{o}o` / dense-pack weight) and a tie is `None`, never first-by-path.
+It compares only the weight: residual-fused calls, stride and param values are
+still `check_offload`'s job. `lib.add(name, src)` keeps a ported kernel out of
+dispatch until a `check_offload` with it calibrates BIT-EXACT. Specs are read via
+`_env.aiekernel_pure`, so neither this nor `register_kernel` imports TVM or needs
+onnx. Skill **aiednnkernellib**; `doc/design/aiegraph_python_api.md` §4.9.
+
+**int8 ResNet-18 runs on VEK280 through aiednn** (galerina13: all 1000 logits
+bit-identical to TVM, 1406 ms/image, 598 AIE launches): `example/aiednn/resnet18/`
+(`gen_resnet18.py` reuses resnetengine's TVM extraction + numpy proof), every conv
+and the fc are aiednn primitives that dispatch to `im2col+blocked:aie:gemm_s8s32` /
+`blocked:aie:gemm_s8s32` on `src/aietensorop/gemm/gemm_uk.cc` (int8×int8→int32
+block 128×128×512; all-int8 program whose C is the int32 bytes, B square because of
+skill **gemmnonsquareb**). `AIEK_SPEC` has a `target <board>` line; `dnn_build`
+links only kernels for the board and picks the source serving the most primitive
+families. **Operator set** (survey of oneDNN / cuDNN / hipDNN in `doc/design/aiednn.md` §8):
+convolution, deconvolution, matmul, inner product, eltwise (29 algs), binary (+compare,
+select), PReLU, reduction, pooling, resampling, LRN, softmax, batch / layer / RMS / group /
+instance norm, SDPA, concat, sum, reorder, shuffle -- forward / inference. The int8 GEMM
+family runs on the AIE through `blocked:` / `im2col+` / `col2im+` / `ip+` composites; the
+rest on `ref:`. 140 op tests vs PyTorch (`test_aiednn_ops.py`, ctypes). Runtime sources:
+`src/aiednn/aiednn_rt.cc` + `aiednn_rt_{internal,gemm,ops}.h` (headers so aiehlc's `.cc`
+splice leaves them alone; `dnn_build` copies them next to the entry). **PyTorch models
+through aiednn** (`src/aiegraph/dnn_torch.py`: fx lowering, f32 / int8, ctypes executor, C app
+emitter; `example/aiednn/models/run_models.py`): resnet18, mobilenet_v2/v3, squeezenet,
+efficientnet_b0, regnet, densenet121, convnext_tiny + tiny ViT / U-Net / mixer, 22/22 PASS on
+x86 vs PyTorch with every int8 GEMM layer exact; all 11 build for VEK280 (skill
+**aiednnmodels**, design §9). **aiednn apps (oneDNN-style C API) run on VEK280.** `include/aiednn.h`:
+descriptors → `aiednn_matmul_primitive_create` (dispatch over a list generated
+from the library's `AIEK_SPEC`s; most specific acceptor wins, `ref:` CPU impls
+last) → `aiednn_primitive_execute`. `ag.dnn_build(app, target="vek280"|"x86")` /
+`python -m aiegraph dnn-build` writes `aiednn_impl_list.cc` and an aiehlc entry
+that `#include`s the kernel source FIRST, then `src/aiednn/aiednn_rt.cc`, the
+list and the app, and builds with `aiehlc.sh --aie-version 2` in
+`worklocal/aiednn/<app>_<target>/`. `example/aiednn/matmul_app.cc` +
+`src/aietensorop/matmul/matmul_uk.cc` (the VEK280 GEMM): PASS on galerina13,
+bit-exact vs `ref:`. Traps: the runtime is spliced into the aiehlc TU, so it must
+never contain the kernel keyword or launch chevrons; the kernel `#undef`s
+`M/N/K` (aiehlc reads GEMM dims from those macros) so they do not leak; one
+aiehlc kernel source per ELF. Design **[doc/design/aiednn.md](doc/design/aiednn.md)**;
+skill **aiednnapp**.
+**aiednn on VEK385** (`--target vek385`, portobello13): the scoreboard (27 problems, 26 on the AIE, every int8 one bit-exact, fvec: within contract) and ResNet-18 int8 (187.5 ms / image, 21/21 GEMMs exact) PASS. Partition `{0, 3, 0, 6}` on `AIE_GEN == 5`, MMT left out (AIE-ML-only mlir-aie kernel), the A78 system counter started in `__Runtime_init`, and `--warm-launch` (an MMIO ELF load is ~372 ns / write: a megakernel switch 65 -> 21 ms). Design `doc/design/aiednn.md` section 28; skill **aiednnvek385**.
+
+**aiednn MLIR dialect** (`src/mlir/mlirfront/frontend/aiednn/`, `aiednn-opt`): the whole model as
+aiednn primitives -- one op per primitive (all `Pure`), SSA tensors in a `func.func`, constants as
+`aiednn.const {index}` into an external store, fused epilogues as `#aiednn.post_op` attributes.
+`aiegraph.dnn_mlir` converts `AGraph` <-> MLIR bit-exactly (all 11 models). **AGraph rewrites first** (`dnn_mlir.REWRITES`, they need constant values the MLIR only references): `split_gemm_slices` (a GEMM read only by slices along N becomes one GEMM per slice: gpt2 / vit q,k,v), `fuse_rmsnorm` (pow / mean / add eps / rsqrt / mul / mul -> layer_norm RMS), `fuse_rope` (rotate-half chain -> `aiednn_rope_create`, bit-identical, moved in front of the head permute so fold-head-permute folds it into sdpa; follow views to the root when matching); tiny_llama 162 -> 49 primitives, gpt2 121 -> 109. **Pipeline**
+(`dnn_mlir.PIPELINE`, `references(mlir=True)`, `run_models.py --mlir`): canonicalize (view /
+identity-reorder / quant round-trip folds) -> cse (duplicate quantizations) ->
+`--aiednn-sink-permute` (a constant mul/add above a pure permute, towards its GEMM) ->
+`--aiednn-fuse-epilogue` (eltwise / residual add / constant mul -> GEMM post_ops; = the Python fusion) ->
+`--aiednn-quantize-residual` (fused residual adds take the int8 copy of their skip, scale/zp on
+the post-op: skip streams int8 end to end; NOT exact, so `references(mlir=True)` quantizes the
+same skips in PyTorch) -> cse -> `--aiednn-quantize-through-views` (exact: quantizing reorders move up through concat / slice / max pool / nearest resampling, and equal quantizations of a GEMM's result merge so fold-requant takes it; `clone=true` (opt-in) also gives a GEMM one clone per distinct quantization -- f32 convs 32 -> 7 on yolov8n, yet VEK280 8x4 432 vs 344 ms, because an s8 epilogue row costs the A72 what an f32 one does) -> cse -> `--aiednn-quantize-before-maxpool` (runs after it, so resnet's
+stem pool has one int8 consumer and goes to the AIE) ->
+`--aiednn-fold-requant` (GEMM writes int8 directly: no f32 intermediate, no CPU reorder) ->
+`--aiednn-fold-head-permute` (attention's head permutes into sdpa: [B,S,H,D]) -> `--aiednn-fold-norm-quant` (batch / layer norm and sdpa write int8) -> `--aiednn-plan-memory` (liveness arena + in-place eltwise; `model_test` proves the arena run
+bit-identical to private buffers). mobilenet_v2 int8: 107 -> 66 primitives, arena 7.0 -> 1.7 MB.
+Passes + plan export run in ONE aiednn-opt process: the printed IR is not exact for f32 arrays.
+**Non-GEMM ops on the AIE** (design §19, skill **aiednnaiemodes**): four more modes of the
+same GEMM ELF, all bit-exact vs `ref:` by construction -- `lut:` (0x7A: any per-channel
+function of an 8-bit value via a table that *is* ref run on all 256 bytes: eltwise, PReLU,
+batch norm, binary with a broadcast operand, reorders), `steps:` (0x75: f32/s32 -> s8/u8
+for functions monotone per half line -- batch norm, binary, arithmetic eltwise, s32 reorders --
+via steps of ref bisected over the 2^32 order-preserving float keys), `eltblk:` (0xE1: two
+8-bit tensors, exact int32) and `redblk:` (0xB0 pool mode as a reduction). Board:
+`example/aiednn/lut_app.cc` (GELU 0.77 vs 7.34 ms, per-channel mul 3.6 vs 29.8). Plain
+quantize / dequantize reorders stay on ref: -- its contiguous loop beats a 64 KB launch.
+**Many tiles per launch, MMT, several megakernels** (design §22, skill **aiednnntilemmt**):
+`persist_transform` emits an n-tile launch (`host_tile_n_start`: A/C BDs step per tile, B shared via
+a mem tile replay or streamed as a window ring for K chains), used by `run_ntile`
+(`aiednn_rt_ntile.h`); MMT (0x4D, opt-in) runs short-K (<= 128) int8 convs on mlir-aie's
+`matmul_vectorized_4x8x8_i8_i32` (the `mlir-aie/` submodule) with an exact vector requant, 4x a GEMM
+tile's outputs; `hostcompile.sh` builds one core ELF per `aie_modes_cfg_<k>.h` and
+`aiednn_megakernel_select(k)` reloads between them (~0.5 ms). Board: resnet18 115, mobilenet_v2 194,
+efficientnet_b0 720 ms steady, all exact.
+**Library megakernel set + scoreboard + vector depthwise** (design §23, skill **aiednnlibraryelf**):
+`dnn_build(modes="library")` builds the fixed `dnn.LIBRARY_MEGAKERNELS` (`cnn`: GEMMQ CONV DW DWQ POOL,
+the default kernel.o; `act`: GEMMQ DW POOL ELTWISE LUT STEPS MMT) and every entry with modes goes through
+an impl-list thunk calling `aiednn_megakernel_need(mask)` -- a path that launches without the entry
+(n-tile, async start) must ping `entry(nullptr, 0)` first, or it runs on an ELF without its mode.
+`example/aiednn/bench_app.cc` prints one `BENCH` line per problem (AIE vs `ref:` ms, mismatches,
+switches). The 0xD8 depthwise is vector (`aie_modes_dwq.h`) and batched up to 32 tiles per launch
+(`aiednn_rt_dwn.h`): dw3x3 c144 h56 14.6 -> 2.68 ms (ref 7.1). Pool batches the same way
+(`aiednn_rt_itemsn.h`, `aiednn_gemm_items_n_start`: 12.5 -> 8.5 ms). A GEMMQ launch is **core-bound**
+(`AIEDNN_KCYC 1`: ~200k cycles, the scalar 0xF1 requant), not DDR-bound (halving B bytes changed
+nothing). `dnn_build` refuses any `kernel*.map` over 16,384 B of program memory -- an overflowing
+megakernel links, loads and runs garbage; likewise a kernel stack frame within 512 B of DM_stack
+(`core_stack`). The 0xF1 requant is vector now (`aie_modes_gemmq.h` `aie_gq_tile`, one in-place pass after
+the K rounds: 202k -> 82k core cycles per launch), and `aiednn_set_autotune(1)` (`aiednn_rt_tune.h`) times
+every accepting implementation on a signature's first execute and keeps the fastest.
+**Op parity with oneDNN / cuDNN / hipDNN** (design §24, skill **aiednnparity**): bf16 / f16 / f8 / s4 / u4,
+1-D / 3-D conv / deconv / pool (`*_create_nd`; 1-D runs the 2-D paths incl. the AIE), RNN / LSTM / GRU,
+every training backward + normalization training forward (`rt_prob.prop`, ref: only), grouped (MoE)
+matmul, and the missing pointwise / binary / reduction / softmax algorithms; tests
+`test_aiednn_{dtypes,nd,rnn,train,algs}.py` against PyTorch.
+Design `doc/design/aiednn.md` §11; tests `test_dnn_mlir.py`. Integer (fixed-point) epilogue +
+on-core requant (GEMM 0xF1, depthwise 0xD8) + integer residual: §15. The persistent GEMM ELF also
+**chains K blocks on the core** (`gemm_kc_s8s32`, `0xA0` + continue: the core keeps the int32 sum
+between launches, so K > 512 needs no host accumulation and still requantizes on the AIE) and
+**adds an s8 residual on the core** (skip tile in B's padding rows, core row from `get_coreid()`); keep the bias at full
+precision in the int64 `B` (skill **fxrequantbias**). Host-side (A72) costs and fixes: §16
+(skill **aiednnhostperf**); convnext (7x7 dw on the AIE, `--aiednn-sink-permute`, constant-weight
+block cache via `aiednn_primitive_set_constant_weights`, polynomial GELU): §17. Larger mesh:
+`dnn_build(mesh=(6, 4))` / `run_models.py --mesh 6x4` (spec key `mesh`, §14). `run_models.py` defaults to
+**8x4** (all 8 VEK280 core rows, partition `{0, 16, 0, 10}`; resnet18 81.5 / mobilenet_v2 114.9 /
+tiny_vit 8.3 ms with ntile, direct conv on ntile); the library's own block stays 4x4. `--batch B` stacks B
+images along each conv's GEMM M (`conv_geo.nimg` / `pstride`, direct conv padded to 32 rows per image;
+design §22, skill **aiednnbatching**): resnet18 64.4 / mobilenet_v2 98.0 ms per image at batch 4.
+
+**LLVM 24 is the default build.** Our own clone `/scratch/staff/$USER/llvm-project`
+(`script/build_llvm.sh`, `source script/llvm_env.sh` / `llvm_env.csh`); `build/` is configured on
+it (the LLVM-19 tree is kept in `build_llvm19/`, `AIEHLC_BIN=` picks any binary for `aiehlc.sh`).
+Generated host/kernel/routing code was checked equivalent to LLVM 19's
+(`worklocal/llvm24cmp/run.sh`). Port traps (symbols with results, strict prop-dict, subview
+bounds, ...): skill **llvmupgrade**. Per-library routing (`__Runtime_init_mesh_partition_with`,
+upstream c03be9c2) is applied: several aiehlc libraries can share one ELF (skill
+**multiaiehlclibrary**).
+
+**Framework API: graph partitions, streams + workspace, find** (2026-11-12, in `aiehlc_c` until landed;
+contract + results **[doc/design/aiednn_framework_api.md](doc/design/aiednn_framework_api.md)**). What
+makes cuDNN / oneDNN usable from frameworks, split across three sessions: (1) partition graph API
+`include/aiednn_graph.h` -- add framework-level ops (conv, matmul, quantize, dequantize, add, relu, ...),
+`aiednn_graph_get_partitions`, compile, execute; an anchor fuses bias + post-ops + requantize into one
+primitive, int8 by reading through `dequantize`; support = dispatch accepted it (`aiehlc-aiesim-48`,
+skill **aiednngraphapi**); (2) `torch.compile` backend / ONNX Runtime EP + benchmark flag (phase2);
+(3) `aiednn_stream_t`, `aiednn_primitive_execute_async` with a caller workspace (no heap allocation),
+(4) `aiednn_primitive_find` HEURISTIC / MEASURE + `set_impl` (expansion). onnxruntime's int8
+ResNet-18 (`aiegraph.dnn_onnx_graph`): 140 nodes -> 64 partitions, all supported, 21 int8 fused
+GEMMs, logits within onnxruntime's own float-vs-integer spread (bit-identical on the Samoyed photo) --
+but every conv runs on `ref:`: framework int8 activations are **u8 with a zero point**, the AIE GEMMs
+take zero point 0 only. **Graph-op parity** (§7, 2026-11-14): every oneDNN graph op has a kind (generic
+`eltwise` / `binary` / `reduction` / `eltwise_backward` + alg, all training ops, gen_index / dynamic
+(de)quantize, up to 4 outputs per op); `dnn_onnx_graph` maps the standard
+ONNX opset onto them; table + tests `test_aiednn_graph_parity.py`.
+
+**Memory formats** (`doc/design/aiednn.md` §31, skill **aiednnformats**): `aiednn_memory_desc_t.format` =
+`aiednn_format_dense` | `aiednn_format_nhwc` (4-D, logical dims kept). Element-wise kinds take nhwc for free
+(canon), int8 conv / zp+ / 8-bit pooling natively (`RT_CAP_NHWC`; the q pipes write result tiles straight into an
+nhwc dst), everything else through a conversion (`+fmtwrap`). The graph API proposes nhwc on internal activation
+edges and keeps it where no partition wraps -- the ~22 ms of `hwc_transpose` / `c_unpack` / scatter per ResNet-18
+image is what it removes.
+
+**Framework hooks** (`doc/design/aiednn.md` §26): `torch.compile(model, backend="aiednn")`
+(`src/aiegraph/dnn_torch_backend.py` + `dnn_torch_graph.FxGraph`, flags in `aiegraph.backends.aiednn`) and an
+ONNX Runtime plugin EP (`src/aiegraph/dnn_ort_ep/`, `dnn_ort_ep.session(model)`). Both hand the graph to the
+partition graph API (`include/aiednn_graph.h`), so the library decides support; the rest stays framework
+code. Workstation emulation: 8 zoo models fully partitioned through torch.compile, resnet18-v1-7.onnx 24/24
+partitions through onnxruntime. Skill **aiednnframeworkhooks**.
+
+(`src/aiegraph/interface.py`): the kernel-file format, or one layer's exact
+interface -- args in TVM call order with roles and value facts, an `AIEK_SPEC`
+proven against every call by `aiekernel.match`, `.write(dir)` entry + reference
+templates; CLI `aiegraph interface`.
 
 `emod.offload_AI_proto(layers, kernel, rounds=3)` (`src/aiegraph/aiproto.py`): when
 `offload_check` is NOT READY, `claude -p` ports a flat copy of the kernel dir in
@@ -728,7 +1003,7 @@ silently -- and remember the kernel body is not in the IR. Design
 
 **Routing module attributes are control switches only** (`routing.fullconnect_auto`,
 `routing.kernel_config_offload`, `routing.output_tile_major`, `routing.control_*`,
-`routing.iter_policy`). Tiling/data-movement info is a typed attribute on its op:
+`routing.iter_policy`, `routing.memtile_staging`). Tiling/data-movement info is a typed attribute on its op:
 `#routing.halo` / `#routing.shim_dma` / `layout_transform` / `pp_depth` on each
 `routingcreatescheduletensor` (copied onto `dfscheblueprint.declare_data` as
 `routing.*`), `#routing.kernel_tiling` on the routing `func.func`, and GEMM
@@ -740,7 +1015,70 @@ skill **routingirtilingcarriers**.
 
 **Host path** → `host.cc`:
 
-5. `BlueprintToSchedulePass` → `ScheduleCanonicalizePass` → (`GroupRegWritePass`, opt-in) → `DfscheduleToApiPass` → `RoutingConstantFoldPass` → `CanonicalizerPass` → EmitC → `host.cc`
+5. `BlueprintToSchedulePass` → `ScheduleCanonicalizePass` → (`GroupRegWritePass`, opt-in) → (`APIToControlPacketPass` collect, opt-in) → `DfscheduleToApiPass` → `RoutingConstantFoldPass` → `CanonicalizerPass` → `StartioInterleavePass` → `CoreTraceInsertPass` → (`APIToControlPacketPass` emit, opt-in) → EmitC → `host.cc`
+
+**JIT vs AOT control packets** (gated on `routing.control_packet_mode`, set by
+`#pragma control_packet_mode(aot)`, default JIT, needs `control_plan_op_control_packet`):
+the kernel-ELF control packets are built in the runtime at load time (JIT) or
+precomputed at build time (AOT). `APIToControlPacketPass`
+(`pass/passapitocontrolpacket/`) marks the `load_kernel_group` op and publishes
+`nresp`; the host-emission step writes `aout/worklocal/ctrlpkt_manifest.json`, emits
+`#include "kernel_<fn>_ctrlpkt.h"` and `__Runtime_ctrl_kernel_pkt_set(kernel_<fn>_ctrlpkt, ...)`,
+and `kc.sh`'s `encode_aot_ctrlpkt` runs the offline `aiehlc_ctrlpkt` tool (shares
+`src/mlir/runtime/aie_ctrlpkt_encode.c` with the runtime) to write that header into
+`aout/worklocal/`: a `uint32_t` array (`rt_cpe_blob_hdr` + reset + PT_LOAD segments +
+final write-with-return), one control access per line, each commented with the
+operation and the MMIO API it replaces (`XAie_CoreReset`, `XAie_LoadElfMem` per
+PT_LOAD, completion ACK), plus the PT_LOAD segments not sent. Read it to debug what
+a load sends. The runtime (`rt_ctrl_load_elf_aot`) prepends the
+deferred return-route prefix and pushes it; a fingerprint/`nresp` mismatch or non-HT
+mode falls back to JIT. Build with `-DAIEHLC_CTRLPKT_AOT_VERIFY` to re-encode and
+`memcmp` the blob against the live JIT body. On the 4x4 GEMM (crimini4, with
+`control_plan_shim_bd_ctrl`): `elf` 53.5k (JIT) → 41.9k (AOT) cycles, wall 0.219 →
+0.211 ms. Skill **ctrlpkt-aot-elf**.
+The same pragma also precomputes every other control-packet site into
+`aout/worklocal/host_ctrlpkt.h` (`rt_aot_table`, `src/mlir/runtime/aie_ctrlpkt_aot.h`):
+the `ctrl_plan_init` return-route prefix, core enable, lock-init group writes, and the
+whole shim-BD window, with run-time DDR addresses patched into BD words 1/2/8 at commit.
+`APIToControlPacketPass` collects plan rows and group writes before `DfscheduleToApiPass`
+and runs again after `CoreTraceInsertPass` on the folded emitc calls to write
+`ctrlpkt_sites.txt`. The tool (`script/build_ctrlpkt_tool.sh`) links an x86 aie-rt
+(cached in `build/aiert_host/`) and runs the runtime's own call sequences
+(`aie_runtime_xaie_seq.c`) and planner on a recording `XAie_DevInst`. Shim-row framing and
+the return-route split are shared in `aie_ctrlpkt_encode.c`. host.cc keeps every API call
+plus `__Runtime_ctrl_aot_register(&host_ctrlpkt_table)`; the runtime matches each call
+(writes by content, window calls in order + argument hash) and replays to JIT on any
+mismatch. Every array line names the API call, its host.cc line and the register.
+`kc.sh` also passes `--debug-dir ./ctrlpkt`, so every AOT build leaves a debug dump in
+`aout/worklocal/ctrlpkt/` (`ctrlpkt_dbg.c`): one header per site, the words as
+`ctrlpkt_<name>[]` with each access commented (decoded header, register, API call,
+host.cc line), all included by `index.h`; `kernel_<fn>_wire.h` is the plan prefix + ELF
+body exactly as sent; `raw/` holds `.bin` words and `.ann` annotations.
+crimini4: all sites AOT 0.208 ms vs JIT 0.222 ms; VERIFY byte-identical with and without
+`KERNELCONFIGOFFLOAD`. With a matching table, `ctrl_plan_init` also skips the return-route
+capture + split (table holds the MMIO list too), shim-BD begin copies the return-route
+prefix, and the ELF load skips its packet count: 0.202–0.204 ms, `bdcfg` 21.0k.
+In AOT the emit phase also batches a self-contained shim-BD window: the 40 calls + their
+`createio` become one `__Runtime_ctrl_aot_window(dev, &fab, nbuf, bufs...)` and each
+`startio` becomes `__Runtime_ioevent_make`; the table carries every call's arguments
+(`host_ctrlpkt_win_calls`) so the runtime replays through the wrappers when the segments
+cannot be used. portobello13: 0.204 (per-call AOT) → 0.194–0.197 ms; JIT 0.221 ms.
+
+`StartioInterleavePass` (`pass/passstartiointerleave/`) moves each `__Runtime_startio` up to its
+`createio` so a channel starts as soon as its BD chain is written (mlir-aie's runtime-sequence order);
+skipped under AOT / `control_plan_shim_bd_ctrl`, off with `AIEHLC_NO_STARTIO_INTERLEAVE=1`.
+It also clones the first shim BD config of each shape before the kernel launch between
+`__Runtime_bd_template_prepare_begin/_end` (encode the AIE-ML shim BD template, no register
+write), so the first run's BDs are template hits too (`AIEHLC_NO_BDT_PREPARE=1` off). The
+template path needs the absolute column for NoC vs PL: aie-rt's public
+`XAie_GetTileTypefromLoc` ignores `StartCol`, so a partition starting at column 2 reported
+every NoC shim as PL (skill **aiehlc-vek280-gen2**). `AIEHLC_CORE_BANKS=1` makes
+`CoreMemAllocator` give each input window its own 16 KB core DM bank.
+Per-call MMIO cost is bus drain, not CPU: register writes are posted, so a microbenchmark of
+back-to-back writes with no read after them reports only issue time (0.05 µs per 8-word BD on
+VEK280) while a BD really costs ~0.3–0.5 µs once something reads; caching encoded BD words saved
+nothing on the board. Cut words written, not CPU. VEK280 cross-tool numbers:
+`vek280_mlir_aie/aiehlc_cmp/COMPARISON.md`.
 
 `GroupRegWritePass` is **gated** on `routing.control_plan_group_reg_write`, published by
 aiehlc only for `#pragma CONTROL_PLAN_GROUP_REG_WRITE`. Off (the default), per-tile lock
@@ -763,7 +1101,7 @@ covers why `declaretile.self` is its own op (fail-closed on `getDefiningOp`), wh
 erasure must be a fixpoint sweep.
 
 **KERNELCONFIGOFFLOAD** (gated on `routing.kernel_config_offload`, set by
-`#pragma KERNELCONFIGOFFLOAD`, default off, Gen5 only): the core self-configures all of
+`#pragma KERNELCONFIGOFFLOAD`, default off, Gen5 + Gen2 baremetal): the core self-configures all of
 its own core-tile DMA from `kernel.cc` via MMIO instead of the host programming it over
 the config bus, using `src/mlir/runtime/aie_kernel_runtime.h` (encoders + `core_reg_*`
 apply, the latter going through `kernel_tm.h`'s `TM_W` — a plain pointer cast never
@@ -774,9 +1112,12 @@ contract — each one deadlocks or silently corrupts registers if broken.
 
 **Pass layout.** Both blueprint-lowering passes live under `pass/passblueprintlowering/`, with the shared `helper/` hoisted **above** them (`passblueprintlowering/helper/`) rather than nested inside the host pass. The two paths describe the same physical core tiles — one BD bank, one lock array per tile — so whoever programs it must agree with whoever doesn't. Anything both paths must agree on belongs in `helper/`. See `passblueprintlowering/README.md`.
 
-**Routing path** (alternative, Path A) → `routing.cc`:
+**Routing path** → `routing.cc` (from a clone of the module after `DmapToDmaphopPass`, so packet IDs match `host.cc`; dumps in `ir/simplerouting/`):
 
-1. `RoutingUnrollingLowerPass` → `RoutingLowerPass` → `RoutingHWLowerPass` → `RoutingDeadArgPass` → `RoutingConstantFoldPass` → `CanonicalizerPass` → EmitC → `routing.cc`
+1. `DmaphopToRoutinghwPass` → `RoutingHWVerifyPass` → (`RoutingProvenanceMapPass`, `RoutingResourceMapPass`) → `RoutingHWLowerPass` → `RoutingDeadArgPass` → `RoutingConstantFoldPass` → `CanonicalizerPass` → EmitC → `routing.cc`
+
+Every stage of all three paths, with the real IR of the 4x4 GEMM at each step:
+**[doc/design/tilinglinalg_flow.md](doc/design/tilinglinalg_flow.md)**.
 
 ### Routing Implementation (`pass/routingimplement/`)
 
@@ -829,18 +1170,28 @@ Each dialect has its own `unitest/` directory with independent CMake build:
 - **[doc/controlplane.md](doc/controlplane.md)** — Control-packet plane: encoding, `CtrlInstance` send/recv, row/broadcast fabric, transaction capture, resource reservation, provenance
 - **[doc/performance/register_write_cost.md](doc/performance/register_write_cost.md)** — **Measured** host↔AIE register access cost: ~372 ns per 32-bit `XAie_Write32` (non-posted Device-nGnRnE NoC round trip; an N-word BD is N serial writes) vs ~2.9 ns via control packets. Cite this instead of deriving ns/write from a timeline span.
 - **[doc/performance/conv2dstem_perf_review.md](doc/performance/conv2dstem_perf_review.md)** — Why conv2dstem takes 31 ms: kernel.lst cycle model (scalar `MAC r`, 68 cycles / 21 MACs, 108-cycle per-output epilogue, 7 cycles/byte copies) closes to the measurement; 7.5 GOPS = 0.09 % of 4×4 int8 peak; **no vector instructions**; kernel/compiler/programming-model fixes
+- **[doc/performance/aiednn_resnet18_gap.md](doc/performance/aiednn_resnet18_gap.md)** — aiednn ResNet-18 (69.7 ms/image, VEK280 8x4) vs resnetengine (2.81 ms, VEK385): measured split (KCYC: GEMMQ ~79k core cycles/launch, ~6.6 of ~34 ms wait_io; the rest DMA/latency), 29 % tile utilization from one 256x128x512 block, ~17-22 ms host work between layers, ranked gaps
+- **[doc/performance/aie_solutions_evaluation.md](doc/performance/aie_solutions_evaluation.md)** — mlir-aie, mlir-air, Triton-XDNA, ARIES, ml-adf and aiehlc on complexity, operator support, performance (int8 GEMM on VEK280) and model support; summary scorecard
 - **[doc/tilinglinalg.md](doc/tilinglinalg.md)** — TilingLinalg deep dive: dialects, passes, routing engine, build/HW-run flow
 - **[doc/modelsupportevaluate.md](doc/modelsupportevaluate.md)** — Gap analysis for Gemma / ResNet-50 / YOLO / MobileNet / BERT / ViT (none run on AIE today); proposed `aiephase` + `aiecfg` dialects (phase-based control-plane reconfiguration, overlay kernels), new Depthwise/Eltwise/Reduce/Attention/Pipeline/Move spaces, milestones M0–M8
 - **[doc/design/resnet_aie_engine.md](doc/design/resnet_aie_engine.md)** — whole int8 ResNet-18 on the AIE in 2.81 ms, bit-exact: persistent engine architecture, exactness proofs (fusions, 8-bit tensors, on-core residuals), measured optimization steps 1270 → 2.81 ms, what did not help, remaining limits
 - **[doc/design/kernel_config_offload.md](doc/design/kernel_config_offload.md)** — `#pragma KERNELCONFIGOFFLOAD`: core self-configured DMA, lock asymmetry, BD-id reservation
+- **[proto/schedule-api-prototype/doc/proposal.md](proto/schedule-api-prototype/doc/proposal.md)** — schedule-api-prototype proposal (isolated subdir; our own project, not ARIES; VEK280 go/no-go spikes in `proto/schedule-api-prototype/spike/README.md`: run-time M extent free, composition switch ~310 µs MMIO dominated by ELF reload): kernel/tile/top + separate schedule in C++, task-graph co-residency and forwarding, memtile-vs-PL L2, DSE, runtime recomposition; ARIES/CHARM/SSR study (clones in `/scratch/staff/bkirinci/research/`)
+- **[doc/design/memtile_staging.md](doc/design/memtile_staging.md)** — memtile staging for GEMM: output join / input staging / DMA-side packing, `#pragma memtile_staging(output[, input][, cblocked][, weights])`, measured on the 4x4 test GEMM and on aiednn's `gemm_uk`; `weights` keeps GEMM B resident in the memtiles across launches (`__Runtime_memtile_weights_key`; persistent hit without the B copy/sync 0.110 -> 0.0815 ms)
 - **[doc/design/aie_offload_byoc.md](doc/design/aie_offload_byoc.md)** — `--aie-offload`: TVM BYOC → `libconv2dstem.a`, fused boundary, uint8 shift, weight-fingerprint layer mapping
 - **[doc/design/kernel_dma_aggregation.md](doc/design/kernel_dma_aggregation.md)** — `DfscheduleKernelAggregationPass`, `declaretile.self`, `packet_id`/`ooo_bd_id` operands
+- **[doc/design/tilinglinalg_flow.md](doc/design/tilinglinalg_flow.md)** — End-to-end walkthrough: one 4x4 GEMM through the front end, every numbered pass (host, kernel, routing paths) with its real IR, the generated C++, the build and the board run
+- **[doc/design/ctrlpkt_aot.md](doc/design/ctrlpkt_aot.md)** — `#pragma control_packet_mode(aot)` architecture: pragma → `APIToControlPacketPass` → `aiehlc_ctrlpkt` (x86 aie-rt recorder) → generated headers → runtime matching/fallback, formats, results
 - **[doc/debug/tutorial_aiehlc.md](doc/debug/tutorial_aiehlc.md)** — aiehlc simulator + debug UI (`--platform sim`, `--sim-only`)
 - **[doc/debug/tutorial_baremetal.md](doc/debug/tutorial_baremetal.md)** — naiebaremetal VEK385 boot + debug UI
 - **[doc/tutorial_aiegraph.md](doc/tutorial_aiegraph.md)** — `aiegraph` user guide: `pip install -e .`, `aiegraph doctor`, ONNX/PyTorch steps, `ag.compile`, API + CLI reference, limits
 - **[doc/design/aiegraph_python_api.md](doc/design/aiegraph_python_api.md)** — Design (M0–M3 implemented in `src/aiegraph/`): user-facing `import aiegraph as ag` facade — `ag.load` (ONNX/PyTorch) → `ag.convert(m, "a78")` (int8 + per-layer C) → `register_kernel` → `check_offload(region=, kernel=)` → `assign` → `partition` → `build(target=, output=)` (§4.8; the older `offload_check("layer1", k.cc)` → `offload(...)` remains), one-call `ag.compile(m, "aie", "layer1=k.cc")`; prior art (PyTorch/ExecuTorch, TVM BYOC, MLIR/IREE, Triton, ORT); maps onto `deploy_flow` + `aiekernel`; milestones M0–M5
 - **[doc/tutorial_userkernel.md](doc/tutorial_userkernel.md)** — Bring your own AIE kernel: `aie_user_kernel.h` contract (`AIEK_ENTRY/SPEC/REFERENCE`), lint → detect → calibrate → emulate → build → link, stem + 3×3 "bunch of layers" walkthroughs, one-library-per-ELF limit
 - **[doc/design/lwip_elf_bootloader.md](doc/design/lwip_elf_bootloader.md)** — netboot, **implemented** (`src/tool/netboot/`, `apppaltest.py --netload`): lwIP TCP supervisor resident on A78 core 0 at `0x7800_0000` runs each ELF on core 1 via xilpm; 15 MB ELF in ~0.2 s vs ~150 s JTAG; the target ELF is streamed from the dev box through `netboot_proxy.py` on PALIP over ssh (no scp), and a finished app parks core 1 (patched `_exit`) so the next run needs no bootstrap. Section 12 = board facts: `0x8_0000_0000` mirrors `0x0`; `Xil_SetTlbAttributes` >4 GB rewrites a 1 GB block; `p_memsz` includes the 1 GB heap; this PDI denies stopping core 1 (auto re-bootstrap). Section 13 = protocol v2: the board acks each request's header before the ELF is sent (`ok` / `busy` + time left / `overtime` / `stuck` / `serving`), per-run `max_run_ms` (default 60 s), `--force` preempts only an app past its max (on palmyra: `apppaltest` frees core 1 over JTAG -- `stop; rst -proc; pc=park_addr; con` -- ~17 s instead of a ~60 s re-bootstrap; the supervisor is polled, because that reset disables the GIC); `netload.py --wait/--force/--max-run-ms`, `apppaltest --netload-wait/--netload-max-run-ms/--netload-no-force`; `apppaltest --netload-force-now` takes over a run still within its max (JTAG park, re-bootstrap fallback; kills any running app). Section 14 = VEK385: `apppaltest.py -board vek385 -host gomphus3 [--netload]` (farm board: systest-client, the host's hw_server, `vek385_netboot.BIN`, com3; supervisor built with `NETBOOT_DMA_BASE=0xA00000000` because the LPD GEM cannot reach DDR_LOW0; apppaltest starts the A78 system counter, which is off after the PDI boot, and resets only A78 #0.0 since `rst -cores` leaves #0.1 in Reset Catch)
+- **[doc/design/aiednn_architecture.md](doc/design/aiednn_architecture.md)** — one-page diagrams of the whole aiednn stack: front doors (torch.compile, ORT EP, run_models, C), model compiler + MLIR pipeline, graph API, dispatch/impl families, persistent megakernel modes, build flow, session ownership, file map
+- **[doc/design/aiednn.md](doc/design/aiednn.md)** — aiednn: oneDNN-style C primitives (`aiednn.h`: matmul, convolution) over the kernel library; two-level automatic kernel selection (board/family at build, dispatch + `blocked:`/`im2col+` composites at run time); `ag.dnn_build` (vek280 / x86); ResNet-18 PASS on galerina13, bit-identical to TVM
+- **[doc/design/aiednn_handoff.md](doc/design/aiednn_handoff.md)** — Implementation handoff for the kernel library on top of aiegraph (acceptance script `doc/design/aiednn_resnet18_flow.py`): what this tree already has vs `fuse` / `kernel_lib` / `match_kernel` / `evaluate`, the one-library-per-ELF decision that blocks shipping 7×7 + 3×3 + 1×1 + fc in one `main.elf`, and the split across Priya / Lena / Kai. The kernel library is **done** (aiegraph design §4.9); the one-ELF choice is still open (status in the doc: upstream `c03be9c2` per-library routing, not merged, not board-run). Steps 8–9 (board `run` / `profile` / `AI_perf_analysis`) are on `huajlogic/aiehlc` `c86b35b`, not in this tree -- and that commit does not import (`board.py` / `aiperf.py` were never committed).
+- **[doc/design/lwip_elf_bootloader.md](doc/design/lwip_elf_bootloader.md)** — netboot, **implemented** (`src/tool/netboot/`, `apppaltest.py --netload`): lwIP TCP supervisor resident on A78 core 0 at `0x7800_0000` runs each ELF on core 1 via xilpm; 15 MB ELF in ~0.2 s vs ~150 s JTAG; the target ELF is streamed from the dev box through `netboot_proxy.py` on PALIP over ssh (no scp), and a finished app parks core 1 (patched `_exit`) so the next run needs no bootstrap. Section 12 = board facts: `0x8_0000_0000` mirrors `0x0`; `Xil_SetTlbAttributes` >4 GB rewrites a 1 GB block; `p_memsz` includes the 1 GB heap; this PDI denies stopping core 1 (auto re-bootstrap). Section 13 = protocol v2: the board acks each request's header before the ELF is sent (`ok` / `busy` + time left / `overtime` / `stuck` / `serving`), per-run `max_run_ms` (default 60 s), `--force` preempts only an app past its max (on palmyra: `apppaltest` frees core 1 over JTAG -- `stop; rst -proc; pc=park_addr; con` -- ~17 s instead of a ~60 s re-bootstrap; the supervisor is polled, because that reset disables the GIC); `netload.py --wait/--force/--max-run-ms`, `apppaltest --netload-wait/--netload-max-run-ms/--netload-no-force`; `apppaltest --netload-force-now` takes over a run still within its max (JTAG park, re-bootstrap fallback; kills any running app)
 - **[doc/resnetlaye1timeoutdebug.md](doc/resnetlaye1timeoutdebug.md)** — Step-by-step summary of the ResNet-18 layer-01 `--aie-offload` timeout debug: symptom, allconv review, source/pragma bisection, KCO absolute-column root cause + fix, `-O3` (2232 → 1282 ms), lessons
 - **[doc/debug/troubleshoot_aie_offload_timeout.md](doc/debug/troubleshoot_aie_offload_timeout.md)** — `--aie-offload` main.elf hangs (`ENTER` without `EXIT`, `wait_io TIMEOUT`): reading the deadlock, allconv review, HW bisection (committed stem passes, control-plane WIP hangs standalone too), `AIE_DEBUG_LOG`-gated timeout dump
 - **[doc/design/op_mapping_programming_model.md](doc/design/op_mapping_programming_model.md)** — Op + mapping model on top of convautotile: native-support plan (op/mapping in routing IR, `OpMappingToTilingPass`, more ops), evaluation, and §4 the Triton block-load kernel style (`aie::program_id`, `aie::load_buffer/store_buffer` in tensor coordinates, checked against the derived DMA by `aie_block_io.h`), its x86 emulator `simpleconv2ddebug/emu_conv2d_spatial.sh`, and why a load is an assertion, not a request, on a DMA-streamed array; §5 kernel analysis: kernel-only sources (`aie::shape` ports, no `conv`/`map`, `simpleconv2dkernel_port.cc`) whose DMA is inferred from the traced `load_buffer` calls and verified (too big/small, out of tensor, data used without load, use after release, never committed, loop order, data-dependent schedule, coverage), plus static bounds (`kernel_static.cpp`: names the constant behind an out-of-block access, e.g. `oc_t = 15` -> fits with 16); `aiehlc-convtile trace`; §6 tensor form (`simpleconv2dkernel.cc`: `aie::in<aie::tensor>`, `.pad` / `.reuse`, block views, `aie::autotune`; `kernel_front.cpp` lowers it via a logical trace + staged layout, `emu_conv2d_tensor.sh`); §7 vector kernels: `simpleconv2dkernel_port.cc` on `aie::mmul<8,8,8>`, traced via the AIE API x86 emulation `src/mlir/runtime/aie_api_x86emu.h` (ASan + vector alignment checks)
@@ -895,6 +1246,7 @@ Read the matching skill when the task fits:
 | hostcompile / missing compile_kernel.sh | hostcompile-entrypoint |
 | App source with no `main()` → static lib; "return-statement with a value, in function returning 'void'" | hostlibrarymode |
 | Entry file `#include`s a kernel `.cc`; `unknown type name '__global__'` or `acquire_input_window` errors pointing at an INCLUDED file | aiehlcincludekernel |
+| Sim single-kernel output all 0 but HW passes (`aie_device_map.h` fallback beats `dm_offsets.h`) | sim-dm-offsets-include-order |
 | Pipeline "succeeds" but emits an EMPTY module (0 routing connections, no BCF/PRX → `Couldn't open aie2ps.prx`): `__global__` in a comment, or a prototype above the kernel | aiesourcetextrewrite |
 | `deploy_flow.py` emits fp32 instead of the default int8, `target.build.llvm is not enabled`, missing `onnx`, or stage-5 split silently skipped | tvmrelaynollvm |
 | Run the TVM-generated ResNet C on x86 (`--local` / `make local`): `xtime_l.h: No such file`, `'CLOCK_MONOTONIC' undeclared`, `Circular ... dependency dropped`, stack-smash in `graph_run` | tvmlocalhostelf |
@@ -944,10 +1296,50 @@ Workflow: start the debug server → `browser_navigate` to `http://localhost:<po
 `browser_screenshot` → interact with `browser_click` / `browser_extract_text`.
 Other tools: `browser_type`, `browser_wait_for_element`, `browser_execute_script`.
 
+| `ag.kernel_lib` / `match_kernel`: returns None (`disagree on (op, KH)`, `ambiguous`), kernel missing from the library (skipped, reference-only, awaiting numerics), duplicate kernel name, `register_kernel` needs onnx / starts provisioning TVM | aiednnkernellib |
+| aiednn app (`aiednn.h`, `ag.dnn_build`, `aiegraph dnn-build`): `unimplemented` from create, wrong impl picked, `several aiehlc sources`, empty module / L014 after adding runtime code, `no fresh aout/main.elf`, board run FAIL vs `ref:` | aiednnapp |
+| aiednn on VEK385 (`--target vek385`): every time reads 0.000, MMT fails to compile for aie2ps, `persist_transform: host programs core tile` for a non-KCO kernel, fvec: softmax / layer norm FAIL the scoreboard by ulps, slow megakernel switches | aiednnvek385 |
+| PyTorch model through aiednn (`dnn_torch`, `run_models.py`): `<node>: X is not supported`, int8 differs from PyTorch, finding the first wrong layer (`layer_diff`), board app `gemm_bad` / no MODEL line | aiednnmodels |
+| Build against the local LLVM 24 / regenerate `.inc` (`OpaqueProperties` undeclared, `genMnemonicAlias` no field, `usePropertiesForAttributes` unknown, strict prop-dict format error, `symbols must not have results`, `offset 0 is out-of-bounds`) | llvmupgrade |
+| aiednn depthwise on the AIE (`dwblk:aie:dw_s8s32`, GEMM ELF depthwise mode): undeclared `is_dw_block`, `K` undeclared in the kernel, reference linked twice | aiednndwoverlay |
+| aiednn eltwise / binary / prelu / batch norm / reorder / reduction on the AIE (`lut:` 0x7A, `steps:` 0x75, `eltblk:` 0xE1, `redblk:` 0xB0): op stays on ref:, a byte differs from ref: (-0.0), "no AIE kernel ... serves what the app creates", adding a steps: algorithm, PM near 16 KB | aiednnaiemodes |
+| aiednn f32 op on the AIE (`fvec:`, FVEC 0xF5): off the 1e-5 contract on the board or for some row lengths, core PM near 16 KB, adding an eltwise function / row op / per-channel op (batch norm, PReLU, broadcast binary via ROWPROG) | aiednnfvec |
+| aiednn n-tile launches / MMT short-K mode (mlir-aie micro-kernel) / several megakernel ELFs: path never runs (launch counts unchanged), `alloc_buffer called with dev=NULL`, PM overflow, `aiednn_megakernel_select` undeclared, variants not built, L019 on an mlir-aie include | aiednnntilemmt |
+| aiednn op parity (bf16 / f16 / f8 / s4 types, `*_create_nd`, RNN, training backward, grouped matmul): a new type silently uses a byte-copy path, a training primitive picked an AIE impl, 4-bit buffer sizes, gate-order mismatch with torch | aiednnparity |
+| Board-only NaN / denormal garbage at the first op of a megakernel segment (tiny_llama int8), workstation passes, GEMMs exact, the isolated op passes: stale memtile-weights chunk after an ELF switch | megakernelswitchstalememtile |
+| aiednn fusion primitives (`*_create_attr` on pool / softmax / norms / reduction / resampling / reorder, `+pt`, slice, gated MLP, RoPE, int8 concat, sdpa execute-time scale): an attr seemingly ignored, a fused primitive vs its unfused chain, adding a fusion primitive | aiednnfusions |
+| aiednn memory formats (`aiednn_format_t`, nhwc descriptors, `aiednn_rt_layout.h`): nhwc result differs from dense, unexpected `+fmtwrap`, reorder to / from nhwc scrambles data, a batched nhwc stem conv wrong after image 0, graph keeps an edge dense | aiednnformats |
+| aiednn graph API (`aiednn_graph.h`, `dnn_graph`, ONNX import `dnn_onnx_graph`): partition unexpectedly unsupported / not fused, int8 QDQ conv not one int8 primitive, partitions on ref: (u8 zero point), ONNX shapes empty or batch 0, ctypes segfault on a partition, compile out_of_memory on a big model, logits vs onnxruntime | aiednngraphapi |
+| aiednn library megakernel set (`modes="library"`): a launch gives a few wrong pixels only after another op switched ELFs, `conflicting declaration of _binary_kernel_gemm_s8s32_start`, mk0 PM over 16 KB, reading the `bench_app` scoreboard, depthwise slower than `ref:` | aiednnlibraryelf |
+| f32 pooling on the AIE (`fpool:`, FPOOL mode 0xB2, `aiednn_rt_fpool.h`): an f32 max / avg pool stays on ref: (W stride > 2, dilation, a window wholly in padding, KD x KH x Wp > 1024 floats) | aiednnfpool |
+| Grouped weight-only quant on the AIE (`wq:`, WQ mode 0x57, `aiednn_rt_wq.h`): s8/u8 x s4/u4 matmul with `wei_scales` stays on ref:, app picks matmul_uk.cc, zero-point offsets, `no ELF to run` | aiednnwq |
+| Prebuilt static aiednn library (`python -m aiegraph dnn-lib`, `link.mk`, `example/aiednn/prebuilt`): `no routing() linked`, board `out_of_memory`, library set over 16 KB | aiednnprebuiltlib |
+| `torch.compile(model, backend="aiednn")` or the aiednn ONNX Runtime EP (`dnn_ort_ep`): `Invalid backend`, nothing offloaded, every node a wildcard (`dims -1`), partition `KeyError`, EP build needs ORT headers, IR version 14 | aiednnframeworkhooks |
+| A traced model (Dynamo export, PT2E, torch.compile) disagrees with eager, or a model PASSes while its int8 scales decay geometrically / every output saturates (random weights); a detector's top-1 flips between equally correct runs (yolov8n: C2f generator mistraced by torch 2.4 Dynamo, `top1_range`) | dynamotracedmodel |
+| Transformer models still run slices / concats / permutes / unfused RMSNorm on the host in the direct path; an AGraph rewrite in `dnn_mlir.REWRITES` (`split_gemm_slices`, `fuse_rmsnorm`, `fuse_rope`) matches nothing (views, own-dst uses, shifting indices) | aiednnllmrewrites |
+| aiednn MLIR pass changes a model's numbers (rel err jumps, every GEMM still exact): `--aiednn-sink-permute` taking a transposed constant for a view; bisecting the pipeline (`optimize.__defaults__`) | aiednnsinkpermute |
+| aiednn model slow on VEK280 while AIE launches are a small part: `aiednn_phase` im2col_pack / epilogue dominate, host.cc at -Os, a CPU pool/reorder between int8 layers | aiednnhostperf |
+| aiednn op still on ref: although an AIE path exists, a gemm+ composite declines ("its GEMM ... would run on ref:"), a 3-D / training problem never reaches the AIE, placement changed after the AIE-first preference default, a model's accuracy collapses only under prefer_aie (a table cache keyed on part of the problem) | aiednngemmx |
+| aiednn int8 model FAILs (rel err) only with the fixed-point / on-core requant epilogue (0xF1 / 0xD8) while every GEMM checks exact; ±1 flips growing to tens of codes | fxrequantbias |
+| Float matmul on the AIE (bf16 mode 0xBF, `bf16blk:` / `bf16x3:`, `aie_modes_bf16.h`), vector pool (`aie_modes_poolv.h`), extending the AIE-API x86 emulation | aiednnbf16 |
+| Attention on the AIE (`sdpablk:aie:sdpa_s8s32`, `aie_modes_sdpa.h`): sdpa stays on ref:, sdpablk off by more than a few codes, causal wrong only for long queries, "expected unqualified-id" in a mode header (M/N/K macros) | aiednnsdpa |
+| Linear attention (`aiednn_linear_attention_create`: Gated DeltaNet / KDA / GLA, `gemm+linattn` chunked on the AIE): stays on ref:, differs from ref:, a per-channel gate overflows, "no AIE kernel ... serves what the app creates" for a linear-attention-only app | aiednnlinattn |
+| Batched aiednn inference (`run_models.py --batch B`, `conv_geo.nimg` / `pstride`, direct conv on ntile `aiednn_gemm_ntile_conv`): batched conv differs or loses CONV/ntile, flat-argmax top-1, slow batch | aiednnbatching |
+| aiednn direct conv (CONV mode, `conv_kc_s8s32` / `conv_q_s8s8`, `aie_modes_conv.h`): board-only ±1 errors from a flag in B row 127, kernel_lib skipping gemm_uk.cc (L003, `#if` loop headers), stack near 32 KB, a layer stuck on the host epilogue (dead channel) | aiednndirectconv |
+| Control-packet plane on a VEK280 aiednn megakernel: "control spine column has no shim DMA", "No free shim DMA slot for `dio8`" after adding control pragmas, persist_transform "no launch_kernel_group"; does it speed aiednn up (measured: no) | aiednncontrolplanevek280 |
+| aiednn persistent megakernel (`--persistent`, GEMM/dw/pool/eltwise modes) or a GEMM mesh beyond 4x4: persist_transform refuses, mode macros undeclared, bad_optional_access, sync_buffer link error, all S2MM TIMEOUT | aiednnpersistentmegakernel |
+| Two VEK280 boards at once: identical result rows on both (shared run.tcl), overlapping aiehlc.sh builds, restart after network drop | vek280twoboards |
+| VEK280 PDI load fails with "PLM Error Major 0x326 Minor 0x14" (run_vek280.py silent ~900 s), e.g. truffle6: ES1 `vek280.pdi` on production silicon (idcode 14cd3093) | vek280pdisilicon |
+| Two aiehlc user-kernel libraries in one ELF; `routing()` defined twice; only the last offload stays on the AIE | multiaiehlclibrary |
+| tilinglinalg GEMM correct only in mesh column 0 (other columns 0) when B is not square (K != N); `output_window_int32` next to int8 inputs does not compile | gemmnonsquareb |
+| GEMM B (weights) resident in the memtiles across launches: `#pragma memtile_staging(weights)`, `__Runtime_memtile_weights_key`, `__Runtime_sync_skip_next`; hit returns stale data, small gain, memtile BD "Invalid stepsize or wrap for dimension 0" | memtileweights |
+| GEMM mesh past 4x4 or non-square (6x4, 4x8, 8x8): `bad_optional_access` after "Allocated DataIO", pkt_id pool exhausted, outputs on only 16 cores, every shim S2MM pending | nonsquaremesh |
+| Non-GEMM op on the AIE (eltwise, pooling, 1-D stripe): `__aie_launch` "candidate expects 8 arguments", tensors sized 256 B, `Invalid stepsize for dimension 1`, `int main(void)` builds a lib, "4 x 1" mesh programs 16 cores and hangs, header macros undeclared in the kernel (needs `AIEHLC_KERNEL_PROLOGUE_BEGIN/END`) -- use a GEMM-ELF mode (`aie_modes_pool.h`) | aiehlcnongemmkernel |
 After changing it: `cd thirdparty/mcp-browser && npm run build`, then restart Claude Code
 to reload the MCP server.
 
 ### Debug tools
+| resnetengine (or any KCO kernel) on VEK280 / AIE-ML: `__aiehlc_tm_anchor` undefined at link, no `mmul<8,8,8>` for int8, program memory over 16 KB, "No free shim DMA slot", `-lxaienginea72` not found at the host link, build.sh timing out | resnetenginevek280 |
 
 - **[src/tool/debug/README.md](src/tool/debug/README.md)** — user guide and CLI for all debug tools
 - **Skill: debug-ui-framework** — implementation map for `schedule_debug_server.py`, `schedule_view.py`, `aiegdb.py`, `aiemcp.py`, `aiediag.py`, `xaiehost2provenance.py` (detail in [reference.md](.cursor/skills/debug-ui-framework/reference.md))
@@ -957,6 +1349,8 @@ to reload the MCP server.
 - **[script/verify_env.sh](script/verify_env.sh)** — validate Vitis, LLVM, toolchain, board vars before build
 - **[script/hostcompile.sh](script/hostcompile.sh)** — kernel build via `compile_one_kernel()` → `kc.sh`; do not restore deleted `compile_kernel.sh` (skill: hostcompile-entrypoint). `compile_one_kernel` reuses `build/kernel.o` when `build/kernel.stamp` (sha256 of `kernel.cc`, `aieml.bcf`, `aieml.prx`, `kc.sh` + func/version/platform/llvm/debug knobs) matches -- aiekernel's install re-runs this script after editing only `host.cc` and used to recompile the identical kernel (~30 s per `offload`); `HOSTCOMPILE_KERNEL_REBUILD=1` forces it. Picks `HOST_ENTRY_KIND` from the generated `host.cc`: `int main()` / `void main()` link an ELF, **no main() archives `lib<app>.a`** instead (skill: hostlibrarymode). The `return;`→`return 0;` fixup is main-only — it rewrites the *first* `return;` in the file and corrupts `host_canonicalized` if applied without a main.
 - **[script/aiehlc.sh](script/aiehlc.sh)** — `--platform sim` is build-only; launch sim separately via `runsim.sh` or debug UI **Run** (skills: sim-build-run-separation, raw-xaie-sim-debug-bundle)
+- **[script/hostcompile.sh](script/hostcompile.sh)** — kernel build via `compile_one_kernel()` → `kc.sh`; do not restore deleted `compile_kernel.sh` (skill: hostcompile-entrypoint). Picks `HOST_ENTRY_KIND` from the generated `host.cc`: `int main()` / `void main()` link an ELF, **no main() archives `lib<app>.a`** instead (skill: hostlibrarymode). The `return;`→`return 0;` fixup is main-only — it rewrites the *first* `return;` in the file and corrupts `host_canonicalized` if applied without a main.
+- **[script/aiehlc.sh](script/aiehlc.sh)** — `--platform sim` is build-only; launch sim separately via `runsim.sh` or debug UI **Run** (tutorial: [doc/debug/tutorial_aiehlc.md](doc/debug/tutorial_aiehlc.md); skills: sim-build-run-separation, raw-xaie-sim-debug-bundle)
 - **`include/bspcompat/`** — shims for standalone-BSP headers present only on the armclang branch (`thirdparty/alib/include/` is a flattened copy of *one* BSP, picked by `--aie-version`, wiped every run, gitignored). `aiehlc.sh` appends `-I${AIEHLC_DIR}/include/bspcompat` **last** in `AIEHLC_ARGS` so the real Gen5 header still wins — add it to the **front-end only**, never to the host/kernel compiles. Details and the related `AIE_GEN > 2` XTime gate: skill **bspheadergen2**.
 - **[script/kc.sh](script/kc.sh)** — after linking the kernel ELF, `strip_kernel_debug_loc` drops `.debug_loc` + the `.debug_info` group via `llvm-objcopy` (13.7 MB → 82 KB on matmul; this is JTAG download time, since the kernel ELF is embedded into the host ELF and `dow -force`d). `.debug_line` is kept, so `kernel.linemap.json` / aiediag pc are unaffected; the full-DWARF original is parked at `<out>/kernel_debug`. `--keep-debug-loc` opts out. Must be `llvm-objcopy` — GNU binutils rejects the chess `e_machine 0x108`.
 
@@ -981,3 +1375,5 @@ to reload the MCP server.
   something you did wrong.
 - **Keep the architecture docs current** — update them as part of the change, not after.
 - **After each task, list every file changed or created.**
+- **AIE-RT for control-plan hardware demos:** `thirdparty/alib/aie-rt` must track `AMD-AECG-AIENGINE/aie-rt` branch `huaj`; it provides the expected TLAST-error option and bare-metal backend behavior.
+- **Default `script/setup.sh`:** clones aie-rt (`main-aie`, `AIE_RT_REPO` or `https://gitenterprise.xilinx.com/ai-engine/aie-rt`) and installs its public headers into `thirdparty/alib/include`. `aiehlc.sh` uses that tree. The Vitis `aietools` `xaiengine.h` is the aie-codegen subset and does not declare `XAie_RoutingInstance`.

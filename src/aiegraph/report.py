@@ -257,6 +257,19 @@ class RegionCheck:
         return bool(self.regions) and all(
             not self.contract[r.name] and self._gate(r.layer)[0] for r in self.regions)
 
+    @property
+    def bit_exact(self) -> bool:
+        """Every checked layer calibrated, and every call BIT-EXACT."""
+        if not self.ok or self.gates is None:
+            return False
+        layers = {str(r.layer) for r in self.regions}
+        for k in self.gates.raw.get("kernels", []):
+            for layer in layers:
+                calib = k.get("layers", {}).get(layer, {}).get("calibration", [])
+                if not calib or not all("BIT-EXACT" in c for c in calib):
+                    return False
+        return bool(self.gates.raw.get("kernels"))
+
     def raise_for_status(self) -> "RegionCheck":
         if not self.ok:
             raise AiegraphError("check_offload", self.summary().splitlines()[0],

@@ -33,19 +33,19 @@ echo $MLIR_INCLUDES
 echo "Script is located in: $GEN_SCRIPT_DIR"
 pushd ${GEN_SCRIPT_DIR}
 echo ${LLVM_BIN}
-${LLVM_BIN}/mlir-tblgen -gen-dialect-defs $TD/dfscheduletype.td -dialect=dfschedule -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} > $INC/dfscheduledialect.cc.inc
-${LLVM_BIN}/mlir-tblgen -gen-dialect-decls $TD/dfscheduletype.td -dialect=dfschedule -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduledialect.h.inc
-${LLVM_BIN}/mlir-tblgen -gen-typedef-defs $TD/dfscheduletype.td -typedefs-dialect=dfschedule -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduletype.cc.inc
-${LLVM_BIN}/mlir-tblgen -gen-typedef-decls $TD/dfscheduletype.td -typedefs-dialect=dfschedule -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduletype.h.inc
-${LLVM_BIN}/mlir-tblgen --gen-attrdef-defs $TD/dfscheduleattr.td -attrdefs-dialect=dfschedule -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduleattr.cc.inc
-${LLVM_BIN}/mlir-tblgen --gen-attrdef-decls $TD/dfscheduleattr.td -attrdefs-dialect=dfschedule -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduleattr.h.inc
+${LLVM_BIN}/mlir-tblgen -gen-dialect-defs $TD/dfscheduletype.td -dialect=dfschedule -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} > $INC/dfscheduledialect.cc.inc
+${LLVM_BIN}/mlir-tblgen -gen-dialect-decls $TD/dfscheduletype.td -dialect=dfschedule -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduledialect.h.inc
+${LLVM_BIN}/mlir-tblgen -gen-typedef-defs $TD/dfscheduletype.td -typedefs-dialect=dfschedule -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduletype.cc.inc
+${LLVM_BIN}/mlir-tblgen -gen-typedef-decls $TD/dfscheduletype.td -typedefs-dialect=dfschedule -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduletype.h.inc
+${LLVM_BIN}/mlir-tblgen --gen-attrdef-defs $TD/dfscheduleattr.td -attrdefs-dialect=dfschedule -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduleattr.cc.inc
+${LLVM_BIN}/mlir-tblgen --gen-attrdef-decls $TD/dfscheduleattr.td -attrdefs-dialect=dfschedule -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduleattr.h.inc
 
-${LLVM_BIN}/mlir-tblgen --gen-enum-decls $TD/dfscheduleattr.td -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduleenums.h.inc
-${LLVM_BIN}/mlir-tblgen --gen-enum-defs $TD/dfscheduleattr.td -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduleenums.cc.inc
+${LLVM_BIN}/mlir-tblgen --gen-enum-decls $TD/dfscheduleattr.td -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduleenums.h.inc
+${LLVM_BIN}/mlir-tblgen --gen-enum-defs $TD/dfscheduleattr.td -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} >  $INC/dfscheduleenums.cc.inc
 
-#${LLVM_BIN}/mlir-tblgen --gen-type-interface-defs $TD/dmamapterface.td -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} -o  $INC/dmamapterface.cc.inc
-#${LLVM_BIN}/mlir-tblgen --gen-type-interface-decls $TD/dmamapterface.td -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} -o  $INC/dmamapterface.h.inc
+#${LLVM_BIN}/mlir-tblgen --gen-type-interface-defs $TD/dmamapterface.td -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -o  $INC/dmamapterface.cc.inc
+#${LLVM_BIN}/mlir-tblgen --gen-type-interface-decls $TD/dmamapterface.td -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -o  $INC/dmamapterface.h.inc
 
-${LLVM_BIN}/mlir-tblgen -gen-op-defs $TD/dfscheduleop.td -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} > $INC/dfscheduleop.cc.inc
-${LLVM_BIN}/mlir-tblgen -gen-op-decls $TD/dfscheduleop.td -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include ${MLIR_INCLUDES} > $INC/dfscheduleop.h.inc
+${LLVM_BIN}/mlir-tblgen -gen-op-defs $TD/dfscheduleop.td -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} > $INC/dfscheduleop.cc.inc
+${LLVM_BIN}/mlir-tblgen -gen-op-decls $TD/dfscheduleop.td -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} > $INC/dfscheduleop.h.inc
 popd

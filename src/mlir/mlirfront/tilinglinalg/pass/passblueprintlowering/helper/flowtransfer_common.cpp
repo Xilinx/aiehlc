@@ -212,7 +212,7 @@ LogicalResult preprocessConstantToMemref(Operation *topLevel, std::shared_ptr<Bl
             OpBuilder builder(constantOp.getOperation());
             builder.setInsertionPointAfter(constantOp.getOperation());
             auto loc = constantOp.getLoc();
-            auto toMemref = builder.create<bufferization::ToMemrefOp>(loc, memrefType, constantOp.getResult());
+            auto toMemref = builder.create<bufferization::ToBufferOp>(loc, memrefType, constantOp.getResult());
             auto allocOp = builder.create<memref::AllocOp>(loc, memrefType);
             builder.create<memref::CopyOp>(loc, toMemref.getResult(), allocOp.getResult());
 
@@ -229,7 +229,7 @@ LogicalResult preprocessConstantToMemref(Operation *topLevel, std::shared_ptr<Bl
         // Case 2: bufferization.to_tensor of func arg (external DDR pointer)
         // The user's pointer IS the DDR buffer — no alloc, no copy needed.
         else if (auto toTensorOp = initTensor.getDefiningOp<bufferization::ToTensorOp>()) {
-            Value srcMemref = toTensorOp.getMemref();
+            Value srcMemref = toTensorOp.getBuffer();
 
             auto tensorType = dyn_cast<RankedTensorType>(toTensorOp.getType());
             if (!tensorType)

@@ -469,11 +469,11 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
     // aie_kc_encode_bd: constant "0, 0, 0, -1" for S2MM (circuit-switched), and
     // per-tile literals for MM2S. `indent` keeps the emitted C readable when this
     // sits inside a get_coreid() dispatch arm.
-    // lenBytes > 0 overrides sizeof(buffer): the host's BD length (CoreOffloadTileConfig::bdLenBytes)
+    // lenExpr (non-empty) overrides sizeof(buffer): the host's BD length (CoreOffloadTileConfig::bdLenBytes)
     // is authoritative, and an output buffer's C declaration can under-state it (conv2dstem
     // declares v4int8[196] = 784 B for a 3136 B BCF slot), which deadlocks the shim S2MM.
     static std::string emitWindowBdAndLocks(const WindowInfo &w, StringRef pktArgs, StringRef indent,
-                                            int32_t lenBytes = 0) {
+                                            StringRef lenExpr = "") {
         const std::string in = indent.str();
         // Register writes go through core_reg_write (aie_kernel_runtime.h), which
         // issues the TILE-LOCAL offset into the core's TM space via TM_W.
@@ -507,8 +507,8 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
         const std::string ping = w.pingBuffer;
         const std::string pong = w.pongBuffer.empty() ? w.pingBuffer : w.pongBuffer;
         const std::string pkt = pktArgs.str();
-        const std::string pingLen = lenBytes > 0 ? std::to_string(lenBytes) : "sizeof(" + ping + ")";
-        const std::string pongLen = lenBytes > 0 ? std::to_string(lenBytes) : "sizeof(" + pong + ")";
+        const std::string pingLen = !lenExpr.empty() ? lenExpr.str() : "sizeof(" + ping + ")";
+        const std::string pongLen = !lenExpr.empty() ? lenExpr.str() : "sizeof(" + pong + ")";
 
         // The BD's acquire/release lock ids are SWAPPED for output, mirroring the
         // host (helper/flowtransfer_kernel.cpp: `bdAcquireLockId = isOutputFlow ?
@@ -564,6 +564,54 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
              std::to_string(w.channel) + ");\n" + in +
              "  klog(\"STOF\", (int32_t)_kc[0].off); klog(\"STVL\", (int32_t)_kc[0].val);\n" + in + "#endif\n";
         s += one;
+        return s;
+    }
+
+    // The MM2S arm(s) of the per-tile dispatch. Only (col,row) -> packet enable, packet
+    // id, ooo bd id and BD length vary between tiles; one straight-line arm per tile
+    // grew .text by ~310 B per core and overflowed the 16 KB program memory at 8x8, so
+    // more than one tile becomes a const table in data memory + ONE arm in a lookup loop.
+    static std::string emitOutTileDispatch(const WindowInfo &w, ArrayRef<const CoreOffloadEntry *> outTiles) {
+        bool fitsTable = true;
+        for (const CoreOffloadEntry *e : outTiles)
+            fitsTable &= e->col < 128 && e->row < 128 && e->packetId < 128 && e->oooBdId < 128 && e->bdLenBytes < 32768;
+        if (outTiles.size() == 1 || !fitsTable) {
+            std::string s;
+            for (size_t i = 0; i < outTiles.size(); ++i) {
+                const CoreOffloadEntry &e = *outTiles[i];
+                const std::string pkt = std::string(e.enablePacket ? "1" : "0") + ", " + std::to_string(e.packetId) +
+                                        ", 0, " + std::to_string(e.oooBdId);
+                s += std::string("  ") + (i == 0 ? "if" : "else if") + " (_col == " + std::to_string(e.col) +
+                     " && _row == " + std::to_string(e.row) + ") {\n" +
+                     emitWindowBdAndLocks(w, pkt, "  ", e.bdLenBytes > 0 ? std::to_string(e.bdLenBytes) : "") + "  }\n";
+            }
+            return s;
+        }
+        // {col, row, en_packet, pkt_id, ooo_bd_id} as int8 (col < 38, row < 11, ids < 32) plus,
+        // only when the host overrides sizeof(buffer), an int16 BD length: ~7 B per tile in
+        // the 1 KB of core DM CoreMemAllocator reserves for linker globals.
+        const std::string n = std::to_string(outTiles.size());
+        std::string s = "  static const int8_t _kco_out[" + n + "][5] = {\n";
+        bool anyLen = false;
+        for (const CoreOffloadEntry *e : outTiles) {
+            s += "    {" + std::to_string(e->col) + ", " + std::to_string(e->row) + ", " +
+                 (e->enablePacket ? "1" : "0") + ", " + std::to_string(e->packetId) + ", " +
+                 std::to_string(e->oooBdId) + "},\n";
+            anyLen |= e->bdLenBytes > 0;
+        }
+        s += "  };\n";
+        std::string len;
+        if (anyLen) {
+            s += "  static const int16_t _kco_out_len[" + n + "] = {";
+            for (size_t i = 0; i < outTiles.size(); ++i)
+                s += (i ? ", " : "") + std::to_string(outTiles[i]->bdLenBytes > 0 ? outTiles[i]->bdLenBytes : 0);
+            s += "};\n";
+            len = "(_kco_out_len[_t] ? (int)_kco_out_len[_t] : (int)sizeof(" + w.pingBuffer + "))";
+        }
+        s += "  for (int _t = 0; _t < " + n + "; _t++) {\n";
+        s += "    if (_kco_out[_t][0] != _col || _kco_out[_t][1] != _row)\n      continue;\n";
+        s += emitWindowBdAndLocks(w, "_kco_out[_t][2], _kco_out[_t][3], 0, _kco_out[_t][4]", "    ", len);
+        s += "    break;\n  }\n";
         return s;
     }
 
@@ -663,15 +711,7 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                 block +=
                     "  int _col = (int)(_cid >> 16) - " + std::to_string(partStartCol) + "; // partition start col\n";
                 block += "  int _row = (int)(_cid & 0x1F);\n";
-                for (size_t i = 0; i < outTiles.size(); ++i) {
-                    const CoreOffloadEntry &e = *outTiles[i];
-                    std::string pkt = std::string(e.enablePacket ? "1" : "0") + ", " + std::to_string(e.packetId) +
-                                      ", 0, " + std::to_string(e.oooBdId);
-                    block += std::string("  ") + (i == 0 ? "if" : "else if") + " (_col == " + std::to_string(e.col) +
-                             " && _row == " + std::to_string(e.row) + ") {\n";
-                    block += emitWindowBdAndLocks(w, pkt, "  ", e.bdLenBytes);
-                    block += "  }\n";
-                }
+                block += emitOutTileDispatch(w, outTiles);
                 // No else: a core tile outside the plan has no host-programmed MM2S
                 // either, so arming nothing is the correct and safe outcome.
                 block += "}";

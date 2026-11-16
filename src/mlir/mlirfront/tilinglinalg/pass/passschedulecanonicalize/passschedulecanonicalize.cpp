@@ -144,7 +144,7 @@ static arith::ConstantOp findInitConstantForAlloc(Value allocVal) {
         auto copyOp = dyn_cast<memref::CopyOp>(&op);
         if (!copyOp || copyOp.getTarget() != allocVal)
             continue;
-        auto toMr = copyOp.getSource().getDefiningOp<bufferization::ToMemrefOp>();
+        auto toMr = copyOp.getSource().getDefiningOp<bufferization::ToBufferOp>();
         if (!toMr)
             continue;
         if (auto constOp = toMr.getOperand().getDefiningOp<arith::ConstantOp>())
@@ -221,7 +221,7 @@ static void preMapExternalValues(Operation *rcOp, OpBuilder &builder, Location l
                     Value clonedConst = builder.clone(*constOp.getOperation())->getResult(0);
                     auto tensorType = cast<RankedTensorType>(constOp.getType());
                     auto roType = MemRefType::get(tensorType.getShape(), tensorType.getElementType());
-                    Value roView = builder.create<bufferization::ToMemrefOp>(loc, roType, clonedConst).getResult();
+                    Value roView = builder.create<bufferization::ToBufferOp>(loc, roType, clonedConst).getResult();
                     newAlloc = builder.create<memref::AllocOp>(loc, plainType).getResult();
                     builder.create<memref::CopyOp>(loc, roView, newAlloc);
                 } else {
@@ -399,9 +399,9 @@ static void buildHostBlockByCloning(func::FuncOp mainFunc, ModuleOp moduleOp) {
         patterns.add<FoldDuplicateShimBdPattern>(ctx);
         FrozenRewritePatternSet frozen(std::move(patterns));
         GreedyRewriteConfig cfg;
-        cfg.maxIterations = 32;
+        cfg.setMaxIterations(32);
         // Ignore failure — dedup is best-effort.
-        (void)applyPatternsAndFoldGreedily(hostOp, frozen, cfg);
+        (void)applyPatternsGreedily(hostOp, frozen, cfg);
     }
 
     // ── Build canonicalTileMap from surviving declaretile ops in host ───────
@@ -553,7 +553,7 @@ static void eraseOldOps(func::FuncOp mainFunc) {
             return;
         if (!op->use_empty())
             return;
-        if (isa<arith::ConstantOp>(op) || isa<bufferization::ToMemrefOp>(op))
+        if (isa<arith::ConstantOp>(op) || isa<bufferization::ToBufferOp>(op))
             dead.push_back(op);
     });
     for (auto *op : llvm::reverse(dead))
@@ -608,8 +608,8 @@ void ScheduleCanonicalizePass::runOnOperation() {
         patterns.add<FoldDuplicateDeclareTilePattern>(ctx);
         patterns.add<FoldDuplicateShimBdPattern>(ctx);
         GreedyRewriteConfig cfg;
-        cfg.maxIterations = 32;
-        if (failed(applyPatternsAndFoldGreedily(mainFunc, std::move(patterns), cfg)))
+        cfg.setMaxIterations(32);
+        if (failed(applyPatternsGreedily(mainFunc, std::move(patterns), cfg)))
             return signalPassFailure();
     }
 

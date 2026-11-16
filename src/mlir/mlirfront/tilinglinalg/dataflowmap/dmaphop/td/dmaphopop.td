@@ -202,9 +202,15 @@ include "mlir/IR/BuiltinTypes.td"  // Add this line for MemRefType
 include "dmaphoptype.td"
 include "dmaphopattr.td"
 
+
+#ifndef AIEHLC_PUBLIC_SYMBOL_TD
+#define AIEHLC_PUBLIC_SYMBOL_TD
+// every aiehlc symbol is public (tilinglinalg/aiehlcsymbol.h)
+def AiehlcPublicSymbol : NativeOpTrait<"PublicSymbol"> { let cppNamespace = "::aiehlc"; }
+#endif
 def dmaphop_FuncOp : dmaphopop<"func",[ IsolatedFromAbove,  
     SymbolTable,
-    Symbol,
+    Symbol, SymbolName, AiehlcPublicSymbol,
     SingleBlock,
     NoTerminator]>
 {
@@ -225,7 +231,7 @@ def dmaphop_FuncOp : dmaphopop<"func",[ IsolatedFromAbove,
 
 // --- 1. Tile Definition Operation ---
 
-def dmaphop_tile : dmaphopop<"tile"> {
+def dmaphop_TileOp : dmaphopop<"tile"> {
   let summary = "Defines a physical tile instance with coordinates";
   let arguments = (ins
     StrAttr:$tiletype,
@@ -239,7 +245,7 @@ def dmaphop_tile : dmaphopop<"tile"> {
  
 // --- 2. Port Definition Operation ---
 // let hasCustomAssemblyFormat = 1; will fix the port itself generic print issue when have symbol
-def dmaphop_port : dmaphopop<"port",[Symbol]> {
+def dmaphop_PortOp : dmaphopop<"port",[]> {
   let summary = "Defines a logical port on a tile";
   let arguments = (ins
     dmaphoptiletype:$tile,
@@ -337,7 +343,7 @@ def dmaphop_pull : dmaphopop<"pull"> {
 }
 
 // --- 6b. Consumer Operation (DMA S2MM port mapping for receive) ---
-def dmaphop_consumer : dmaphopop<"consumer", [Symbol]> {
+def dmaphop_consumer : dmaphopop<"consumer", []> {
   let summary = "Declares DMA port mapping for a consumer (receive) port";
   let description = [{
     Maps a stream port (In direction) to a specific DMA S2MM channel.
@@ -354,7 +360,7 @@ def dmaphop_consumer : dmaphopop<"consumer", [Symbol]> {
 }
 
 // --- 6c. Producer Operation (DMA MM2S port mapping for send) ---
-def dmaphop_producer : dmaphopop<"producer", [Symbol]> {
+def dmaphop_producer : dmaphopop<"producer", []> {
   let summary = "Declares DMA port mapping for a producer (send) port";
   let description = [{
     Maps a stream port (Out direction) to a specific DMA MM2S channel.

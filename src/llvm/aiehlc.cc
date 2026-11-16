@@ -208,6 +208,11 @@ static bool parsedOutputTileMajor = false;
 static bool parsedControlPlanDedicatedShim = false;
 static bool parsedControlPlanShimBdCtrl = false;
 static int parsedControlPacketMode = 0;
+// #pragma memtile_staging(output[, input][, cblocked][, weights]): bit mask of the memtile
+// staging stages (doc/design/memtile_staging.md), published as routing.memtile_staging and
+// read by mlir::memtileStaging(). 1 = output join, 2 = input staging, 4 = C-blocked unblock,
+// 8 = column-broadcast inputs (GEMM B) resident in the memtile.
+static int64_t parsedMemtileStaging = 0;
 // Compute tiles to core-trace, from #pragma aie_trace(col,row) (mesh/partition-
 // relative). Repeatable and range-expanded (col:col2, row:row2 -> rectangle).
 // Each spec may carry an optional mem-module DMA/stream selection (2nd tuple).
@@ -320,6 +325,15 @@ static bool checkConvTilingAgainstAnalysis(const std::string &kernel, const Deri
 // passthrough the only way to reach TM from an aiehlc kernel is to hardcode the
 // undocumented address_space number the frontend happens to use.
 static std::string userKernelPrologue;
+// The prologue as emitted into a kernel file. The tilinglinalg pipeline compiles the
+// body handed to runPipeline (worklocal/<kernel>.cc), not the aout/ copy, so both
+// emissions must carry it.
+static std::string kernelPrologueBlock() {
+    if (userKernelPrologue.empty())
+        return "";
+    return "\n// User kernel prologue from source file (AIEHLC_KERNEL_PROLOGUE_BEGIN/END)\n" + userKernelPrologue +
+           "\n";
+}
 
 using namespace clang;
 using namespace clang::tooling;
@@ -2160,7 +2174,11 @@ public:
                                     if (pti.pattern == 0 && pti.distribution == 0) // Broadcast+Row -> A
                                         pti.shape = {macroDimM, macroDimK};
                                     else if (pti.pattern == 0 && pti.distribution == 1) // Broadcast+Col -> B
-                                        pti.shape = {macroDimK, macroDimN};
+                                        // B is stored row-major [N][K] (d1 = N, d2 = K in its
+                                        // GemmSpace); as {K, N} each mesh column's chunk was offset
+                                        // by tile*N instead of tile*K -- only K == N worked (skill
+                                        // gemmnonsquareb). Identical shape when K == N.
+                                        pti.shape = {macroDimN, macroDimK};
                                     else // Gather/Scatter -> C
                                         pti.shape = {macroDimM, macroDimN};
                                 }
@@ -3348,14 +3366,15 @@ public:
 			//std::string RewrittenCode = Rewrite.getEditBuffer(Rewrite.getSourceMgr().getMainFileID()).getBuffer();
 			 std::cout << "---------****---------" << std::endl;
 			 ///*
-			 const RewriteBuffer *RewriteBuf = Rewrite->getRewriteBufferFor(Rewrite->getSourceMgr().getMainFileID());
-			 if (RewriteBuf) {
-        //llvm::outs() << "Rewritten Source Code:\n" << RewriteBuf << "\n";
-			//*/
-			 //std::ofstream fd("./new_t.c");
+             const llvm::RewriteBuffer *RewriteBuf =
+                 Rewrite->getRewriteBufferFor(Rewrite->getSourceMgr().getMainFileID());
+             if (RewriteBuf) {
+                 // llvm::outs() << "Rewritten Source Code:\n" << RewriteBuf << "\n";
+                 //*/
+                 // std::ofstream fd("./new_t.c");
 				 RewriteBuf->write(llvm::outs());
-		 }
-			 /*
+             }
+             /*
 			 auto& sc = Rewrite.getSourceMgr();
 			 auto mid = sc.getMainFileID();
 			 llvm::StringRef sourceCode = sc.getBufferData(mid);
@@ -3819,6 +3838,35 @@ class AieControlPacketModePragmaHandler : public clang::PragmaHandler {
     }
 };
 
+class AieMemtileStagingPragmaHandler : public clang::PragmaHandler {
+  public:
+    AieMemtileStagingPragmaHandler() : PragmaHandler("memtile_staging") {}
+    void HandlePragma(clang::Preprocessor &PP, clang::PragmaIntroducer, clang::Token &Tok) override {
+        PP.Lex(Tok);
+        if (Tok.is(clang::tok::l_paren)) {
+            for (PP.Lex(Tok); Tok.isNot(clang::tok::r_paren) && Tok.isNot(clang::tok::eod); PP.Lex(Tok)) {
+                if (Tok.is(clang::tok::comma))
+                    continue;
+                const llvm::StringRef stage = Tok.is(clang::tok::identifier) ? Tok.getIdentifierInfo()->getName() : "";
+                if (stage == "output")
+                    parsedMemtileStaging |= 1;
+                else if (stage == "input")
+                    parsedMemtileStaging |= 2;
+                else if (stage == "cblocked")
+                    parsedMemtileStaging |= 4;
+                else if (stage == "weights")
+                    parsedMemtileStaging |= 8;
+                else
+                    llvm::errs() << "[aiehlc] WARNING: #pragma memtile_staging: unknown stage '" << stage
+                                 << "' (output, input, cblocked, weights)\n";
+            }
+        }
+        llvm::outs() << "[aiehlc] Detected #pragma memtile_staging (mask " << parsedMemtileStaging << ")\n";
+        if (Tok.isNot(clang::tok::eod))
+            PP.DiscardUntilEndOfDirective();
+    }
+};
+
 class MyFrontendAction : public ASTFrontendAction {
 public:
 		MyFrontendAction() {
@@ -3875,6 +3923,7 @@ public:
             PP.AddPragmaHandler(new AieOutputTileMajorPragmaHandler());
             PP.AddPragmaHandler(new AieControlPlanDedicatedShimPragmaHandler());
             PP.AddPragmaHandler(new AieControlPlanShimBdCtrlPragmaHandler());
+            PP.AddPragmaHandler(new AieMemtileStagingPragmaHandler());
             PP.AddPragmaHandler(new AieControlPacketModePragmaHandler());
 
             return true;
@@ -4146,9 +4195,10 @@ public:
             }
         }
 
-        std::string GetKeyReplaceAndAddInclude(clang::SourceManager &SourceMgr, std::unordered_map<std::string,std::string>& funcMap) {
-			std::string ret;
-			// Get the main file entry
+        std::string GetKeyReplaceAndAddInclude(clang::SourceManager &SourceMgr,
+                                               std::unordered_map<std::string, std::string> &funcMap) {
+            std::string ret;
+            // Get the main file entry
 			const auto FileEntryRef = SourceMgr.getFileEntryRefForID(SourceMgr.getMainFileID());
 
 			if (FileEntryRef) {
@@ -4931,10 +4981,10 @@ public:
 				*/
 			}
 			return ret;
-		}
+        }
 
-		void EndSourceFileAction() override {
-			//  std::cout << "---------EndSourceFileAction---------" << std::endl;
+        void EndSourceFileAction() override {
+            //  std::cout << "---------EndSourceFileAction---------" << std::endl;
 
             // Stop immediately if Clang reported any compilation errors.
             // Running the MLIR pipeline on an erroneous AST produces misleading output.
@@ -4945,15 +4995,16 @@ public:
                 return;
             }
 
-             const RewriteBuffer *RewriteBuf = TheRewriter.getRewriteBufferFor(TheRewriter.getSourceMgr().getMainFileID());
-			 if (RewriteBuf) {
-				 //RewriteBuf->write(llvm::outs());
-        //llvm::outs() << "Rewritten Source Code:\n" << RewriteBuf << "\n";
-	  		} else {
-					llvm::errs() << "RewriteBuf is null\n";
-				}
+            const llvm::RewriteBuffer *RewriteBuf =
+                TheRewriter.getRewriteBufferFor(TheRewriter.getSourceMgr().getMainFileID());
+            if (RewriteBuf) {
+                // RewriteBuf->write(llvm::outs());
+                // llvm::outs() << "Rewritten Source Code:\n" << RewriteBuf << "\n";
+            } else {
+                llvm::errs() << "RewriteBuf is null\n";
+            }
 
-			if (isTilingLinalgMode) {
+            if (isTilingLinalgMode) {
 				// ---- NEW PATH: tilinglinalg pipeline ----
 				llvm::outs() << "[TilingLinalg] Running multi-tile pipeline (mesh="
 							 << tilingMeshRows << "x" << tilingMeshCols << ")\n";
@@ -5040,6 +5091,13 @@ public:
 
                             if (mkdPtr) {
                                 unsigned numPtrArgs = (unsigned)mkdPtr->tensors.size();
+                                // The dispatcher takes as many tensor slots as the widest
+                                // kernel; a narrower kernel's call is padded with null slots
+                                // so its trailing scalars still land in the "...". (Counted
+                                // from tensors: numHostDdrArgs is set later, by the pipeline.)
+                                unsigned dispatchSlots = 0;
+                                for (auto &mk : parsedMeshKernels)
+                                    dispatchSlots = std::max(dispatchSlots, (unsigned)mk.tensors.size());
                                 // Rebuild the call with interleaved sizes
                                 std::string newCall = "__aie_launch(" + args[0] + ", " + args[1];
                                 for (unsigned ai = 2; ai < args.size(); ++ai) {
@@ -5051,6 +5109,9 @@ public:
                                             bytes *= dim;
                                         bytes *= mkdPtr->tensors[tensorIdx].elementBitWidth / 8;
                                         newCall += ", (size_t)" + std::to_string(bytes);
+                                        if (tensorIdx + 1 == numPtrArgs)
+                                            for (unsigned p = numPtrArgs; p < dispatchSlots; ++p)
+                                                newCall += ", nullptr, (size_t)0";
                                     }
                                 }
                                 newCall += ")";
@@ -5214,6 +5275,8 @@ public:
                                         fcAttrBuilder.getI64IntegerAttr(parsedControlPlanShimBdCtrl ? 1 : 0));
                         module->setAttr("routing.control_packet_mode",
                                         fcAttrBuilder.getI64IntegerAttr(parsedControlPacketMode));
+                        module->setAttr("routing.memtile_staging",
+                                        fcAttrBuilder.getI64IntegerAttr(parsedMemtileStaging));
                     }
 
                     // Replace aie::get_*() calls in kernel body with computed integer literals
@@ -5311,7 +5374,9 @@ public:
                             macroBlock += macro + "\n";
                         }
                         macroBlock += "\n";
-                        kernelBodyWithMacros = macroBlock + resolvedBody;
+                        kernelBodyWithMacros = macroBlock + kernelPrologueBlock() + resolvedBody;
+                    } else if (!resolvedBody.empty()) {
+                        kernelBodyWithMacros = kernelPrologueBlock() + resolvedBody;
                     }
 
                     // First kernel writes host.cc fresh; subsequent kernels append
@@ -5664,7 +5729,7 @@ public:
                             for (unsigned i = 0; i < mkd.numHostDdrArgs; ++i)
                                 stream << ", _t" << i;
                             stream << ");\n";
-                            // No post-launch sync needed (cache lines already invalidated)
+                            // Invalidate ALL buffers so the CPU reads what the DMA wrote
                             emitSyncCalls(stream, mkd, "        ", /*beforeLaunch=*/false);
                         }
                         stream << "    }\n";
@@ -5694,7 +5759,7 @@ public:
                             for (unsigned i = 0; i < mkd0.numHostDdrArgs; ++i)
                                 stream << ", _t" << i;
                             stream << ");\n";
-                            // No post-launch sync needed (cache lines already invalidated)
+                            // Invalidate ALL buffers so the CPU reads what the DMA wrote
                             emitSyncCalls(stream, mkd0, "    ", /*beforeLaunch=*/false);
                         }
                         stream << "    __Runtime_explicit_teardown(dev);\n";
@@ -5908,6 +5973,7 @@ public:
                                     fcAttrBuilder.getI64IntegerAttr(parsedControlPlanShimBdCtrl ? 1 : 0));
                     module->setAttr("routing.control_packet_mode",
                                     fcAttrBuilder.getI64IntegerAttr(parsedControlPacketMode));
+                    module->setAttr("routing.memtile_staging", fcAttrBuilder.getI64IntegerAttr(parsedMemtileStaging));
                 }
 
                 // Replace aie::get_*() calls in kernel body with computed integer literals
@@ -5999,7 +6065,9 @@ public:
                         macroBlock += macro + "\n";
                     }
                     macroBlock += "\n";
-                    kernelBodyWithMacros = macroBlock + singleKernelBody;
+                    kernelBodyWithMacros = macroBlock + kernelPrologueBlock() + singleKernelBody;
+                } else if (!singleKernelBody.empty()) {
+                    kernelBodyWithMacros = kernelPrologueBlock() + singleKernelBody;
                 }
 
                 // Port var names (indexed by tensor order) for IR-sourced builtin
@@ -6100,7 +6168,7 @@ public:
             aiefrontend.RunPass(fname);
         }
         //  std::cout << "----------------end-----------------" << std::endl;
-  	}
+        }
     std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI,
                                                    StringRef file) override {
 

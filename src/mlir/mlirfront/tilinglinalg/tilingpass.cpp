@@ -71,9 +71,9 @@ void DataPatternAnalysis(scf::ForallOp& forall, OpBuilder& builder,
       if (Value v = off.value().dyn_cast<Value>()) {
         if (auto apply = v.getDefiningOp<affine::AffineApplyOp>()) {
           Value v = apply.getOperand(0);
-          if (BlockArgument bar = v.dyn_cast<BlockArgument>()) {
-            unsigned idx = bar.getArgNumber();
-            usedDims.insert(idx);
+          if (BlockArgument bar = llvm::dyn_cast<BlockArgument>(v)) {
+              unsigned idx = bar.getArgNumber();
+              usedDims.insert(idx);
           }
         }
       }
@@ -86,9 +86,9 @@ void DataPatternAnalysis(scf::ForallOp& forall, OpBuilder& builder,
         if (Value v = off.value().dyn_cast<Value>()) {
           if (auto apply = v.getDefiningOp<affine::AffineApplyOp>()) {
             Value v = apply.getOperand(0);
-            if (BlockArgument bar = v.dyn_cast<BlockArgument>()) {
-              unsigned idx = bar.getArgNumber();
-              usedDimsOuter.insert(idx);
+            if (BlockArgument bar = llvm::dyn_cast<BlockArgument>(v)) {
+                unsigned idx = bar.getArgNumber();
+                usedDimsOuter.insert(idx);
             }
           }
         }
@@ -105,7 +105,10 @@ void DataPatternAnalysis(scf::ForallOp& forall, OpBuilder& builder,
             missingpos.push_back(pos);
         }
     }
-    sv.dump();
+    {
+        sv->print(llvm::errs());
+        llvm::errs() << "\n";
+    }
     if (missingpos.size()) {
       for (auto x : missingpos) {
         std::ostringstream ostr;
@@ -132,7 +135,10 @@ void DataPatternAnalysis(scf::ForallOp& forall, OpBuilder& builder,
             missingposouter.push_back(pos);
         }
     }
-    parentsvop.dump();
+    {
+        parentsvop->print(llvm::errs());
+        llvm::errs() << "\n";
+    }
     if (missingposouter.size()) {
       for (auto x : missingposouter) {
         std::ostringstream ostr;
@@ -182,15 +188,15 @@ void TilingCodePass::runOnOperation() {
               auto var = ivName(forallop.getInductionVars()[i]);
               int intVal = 0;
               ///*
-              //auto val = upper[i].get<mlir::Value>(); 
-              if (auto val = upper[i].dyn_cast<mlir::Value>()) { 
-                if (auto cstOp = val.getDefiningOp<mlir::arith::ConstantOp>()) {  
-                  if (auto intAttr = cstOp.getValue().dyn_cast<mlir::IntegerAttr>()) {  
-                    intVal = intAttr.getInt();  
-                    // Use 'intVal' here  
-                  }  
-                }  
-              }  
+              // auto val = upper[i].get<mlir::Value>();
+              if (auto val = llvm::dyn_cast<mlir::Value>(upper[i])) {
+                  if (auto cstOp = val.getDefiningOp<mlir::arith::ConstantOp>()) {
+                      if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(cstOp.getValue())) {
+                          intVal = intAttr.getInt();
+                          // Use 'intVal' here
+                      }
+                  }
+              }
               //*/
               ublb.push_back(intVal);
               llvm::outs() << "for (int " << var << "=0;" << var << " < " << intVal << ";" << var << "++) {\n";
@@ -204,10 +210,10 @@ void TilingCodePass::runOnOperation() {
         ///*
         if (auto apply = dyn_cast<mlir::affine::AffineApplyOp>(op)) {
           auto map = apply.getAffineMap();
-          if (map.getNumDims()==1 && map.getResult(0).isa<mlir::AffineBinaryOpExpr>()) {
-            auto mul = map.getResult(0).cast<mlir::AffineBinaryOpExpr>();
-            if (auto cst = mul.getRHS().dyn_cast<mlir::AffineConstantExpr>())
-              affineMap[apply.getResult()] = {apply.getOperand(0), cst.getValue()};
+          if (map.getNumDims() == 1 && llvm::isa<mlir::AffineBinaryOpExpr>(map.getResult(0))) {
+              auto mul = llvm::cast<mlir::AffineBinaryOpExpr>(map.getResult(0));
+              if (auto cst = llvm::dyn_cast<mlir::AffineConstantExpr>(mul.getRHS()))
+                  affineMap[apply.getResult()] = {apply.getOperand(0), cst.getValue()};
           }
         }
       //*/
@@ -239,7 +245,7 @@ void TilingCodePass::runOnOperation() {
               return llvm::formatv("{0}*{1}",ivName(it->second.iv),it->second.mul).str();
               //return ivName(v);
             }
-            return std::to_string(o.dyn_cast<mlir::Attribute>().cast<mlir::IntegerAttr>().getInt());
+            return std::to_string(llvm::cast<mlir::IntegerAttr>(llvm::dyn_cast<mlir::Attribute>(o)).getInt());
           };
           //llvm::outs() << "// tile view\nint off0="<<offExpr(off0)<<"; int off1="<<offExpr(off1)<<";\n";
           std::ostringstream ostr;
