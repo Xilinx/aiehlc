@@ -7,6 +7,7 @@
 #include "trace_routing.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <sstream>
 
 namespace convautotile {
@@ -18,6 +19,23 @@ constexpr long kCoreDataBytes = 49152;
 // What the port buffers actually get (dmbufferregion): the bcf's 32 KB buffer
 // region at 0x78000 (0x70000.. is DM_stack), less ~3 KB of klog ring and statics.
 constexpr long kPortBufferBytes = 32768 - 3072;
+
+// Hard limit for checkPortBuffers: CoreMemAllocator (ResourceManager.cpp, 6efd4d4)
+// places a buffer that does not fit in 0x78000.. below it, shrinking the core
+// stack [0x70000, area start) down to AIEHLC_DM_MIN_STACK (default 4 KB); the
+// kernel build checks the chess calltree stack bound against it. So the port
+// buffers may take up to 64 KB - min stack - the ~3 KB of klog ring / statics.
+// AIEHLC_DM_BUF_BASE pins the layout (no growth): back to kPortBufferBytes.
+// routingHints keeps preferring kPortBufferBytes (drops to one buffer first).
+long portBufferLimit() {
+    const char *pinned = std::getenv("AIEHLC_DM_BUF_BASE");
+    if (pinned && *pinned)
+        return kPortBufferBytes;
+    long minStack = 0x1000;
+    if (const char *ms = std::getenv("AIEHLC_DM_MIN_STACK"); ms && *ms)
+        minStack = (long)std::strtoul(ms, nullptr, 0);
+    return std::max(kPortBufferBytes, 2 * 32768 - minStack - 3072);
+}
 
 std::string vec(const std::vector<int> &v) {
     std::string s = "(";
@@ -348,7 +366,8 @@ long portBufferBytes(const RoutingPlan &plan, int pp_depth) {
 
 std::string checkPortBuffers(const RoutingPlan &plan, const RoutingHints &hints) {
     const long total = portBufferBytes(plan, hints.pp_depth);
-    if (plan.halo || total <= kPortBufferBytes)
+    const long limit = portBufferLimit();
+    if (plan.halo || total <= limit)
         return "";
     std::ostringstream os;
     os << "the port buffers take " << total << " B of core memory (";
@@ -357,7 +376,8 @@ std::string checkPortBuffers(const RoutingPlan &plan, const RoutingHints &hints)
         const int pp = rp.ppDepth(hints.pp_depth);
         os << (i ? ", " : "") << rp.var << " " << rp.declaredBytes(pp) / rp.blockBytes() << " x " << rp.blockBytes();
     }
-    os << "), more than the " << kPortBufferBytes << " B the kernel's buffer region holds; take smaller blocks, or "
+    os << "), more than the " << limit << " B the kernel's buffer region holds (stack grown down to "
+       << "AIEHLC_DM_MIN_STACK); take smaller blocks, or "
        << "load an input that is taken once with {.resident = true} (one buffer)";
     return os.str();
 }

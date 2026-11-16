@@ -1079,6 +1079,26 @@ analyzeKernelParams(Operation *rootOp, KernelResourceManager &resourceMgr, Type 
                             pingPongBufSize = maxElements;
                     }
                 }
+                // Per-port window cap (trace-routed kernel-only ports): the core
+                // window is the port's traced block, not the kernel-wide
+                // maxPingPongBytes. Without it a port whose block is smaller than
+                // its per-core slice got one slice-sized window while the kernel
+                // acquires block-sized windows per round -> silent lock deadlock.
+                // Must stay in lockstep with computeCoreIterations (host side).
+                if (!isSpatialHaloPort && !isKSplitHaloPort) {
+                    const int64_t capBytes = routing::lookupWindowBytes(tensorInfo, paramInfo.funcArgIndex);
+                    int64_t elemBytes =
+                        paramInfo.elementType.isIntOrFloat() ? paramInfo.elementType.getIntOrFloatBitWidth() / 8 : 1;
+                    if (capBytes > 0 && elemBytes > 0) {
+                        int64_t capElements = capBytes / elemBytes;
+                        if (capElements > 0 && pingPongBufSize > capElements) {
+                            llvm::errs() << "[BlueprintToScheduleKernel] arg" << paramInfo.funcArgIndex
+                                         << " window " << pingPongBufSize << " -> " << capElements
+                                         << " elems (traced block " << capBytes << " B)\n";
+                            pingPongBufSize = capElements;
+                        }
+                    }
+                }
                 // bufferSize is in units of vectors (BUF_SZ = elements / vectorWidth)
                 paramInfo.bufferSize = pingPongBufSize / defaultVectorWidth;
                 if (paramInfo.bufferSize <= 0)

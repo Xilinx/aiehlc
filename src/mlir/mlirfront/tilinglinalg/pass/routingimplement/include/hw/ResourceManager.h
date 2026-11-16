@@ -562,6 +562,12 @@ public:
   bool portDirAvailable(Point a, int &portIdx, PortDirection direction, bool master) const;
 
   bool occupyLink(Point a, Point b, const int ioId, int &portidx, PortDirection &pda, PortDirection &pdb);
+  // Occupy the a->b link on one fixed port index. Only the forward wires are
+  // checked (a's output, b's input): the reverse wires on the same index are
+  // separate stream-switch ports in hardware. Used where the switch needs a
+  // specific index, e.g. an AIE2/2PS core-tile same-side turn (WEST i -> WEST j)
+  // is only legal for i == j (aie-rt *_StrmSwCheckPortValidity).
+  bool occupyLinkAtPort(Point a, Point b, const int ioId, int portidx, PortDirection &pda, PortDirection &pdb);
   bool occupyPointDirection(Point a, int &portidx, PortDirection &pd, bool slave);
   bool releaseLink(Point a, Point b, int ioId, int portidx);
   std::optional<Point> freeShimNoc(std::optional<Point> dst = std::nullopt) const;

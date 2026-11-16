@@ -118,6 +118,10 @@ struct TensorSplitDesc {
     // hwAxisOwner="row"; stored for validation only.)
     int group1Dim = 0;   // 1-based tensor dim split across mesh rows (validation)
     int group2Dim = 0;   // 1-based tensor dim split across mesh cols (e.g. 3 = channel)
+    // Per-port core window cap in bytes (trace-routed kernel-only ports: the
+    // traced block). 0 = none: the window is clamped by the kernel-wide
+    // maxPingPongBytes only.
+    int64_t windowBytes = 0;
     int group2Slice = 0; // elements per col-tile along group2Dim (e.g. 16)
     int group2Full = 0;  // full extent of group2Dim (e.g. 64)
     // Output row-dim (group1 = d1) on-core slice_tiling + d2 (W) chunk. Carried into

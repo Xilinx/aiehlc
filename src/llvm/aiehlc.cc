@@ -111,6 +111,10 @@ struct ParsedTensorInfo {
                                      // channel coverage for the filter K). Used by the
                                      // structured-dim coalescing path.
     bool perPort2D = false;          // true when d1/d2 were set on this port
+    // The placeholder shape the launch parse gave this port (defaultDim0 x
+    // defaultDim1, 16x16 when the launch has no dim scalars). A port whose
+    // shape is still this after all overrides never got a real extent.
+    std::vector<int64_t> placeholderShape;
     int layoutTransform = 0;         // 0=None, 1=DmaShuffle, 2=CoreShuffle
     int tileMode = 0;                // 0=Partition, 1=Overlap
     bool requireFullCoverage = true; // validation: tiles must cover the dim
@@ -267,6 +271,9 @@ static KernelBlock kernelBlockFor(const std::string &kernel, const std::string &
     kb.tileC = p->second.opts.tile[1];
     return kb;
 }
+// Trace-routed kernel-only kernels: kernel -> port var -> traced block bytes
+// (the per-port core window cap, TensorSplitDesc::windowBytes).
+static std::map<std::string, std::map<std::string, int64_t>> traceWindowBytesByKernel;
 
 // Spatial-halo conv: the core windows and round count the GEMM-model derivation
 // produced must be the blocks the kernel loads / stores, as the conv auto-tiling
@@ -320,6 +327,22 @@ static bool checkConvTilingAgainstAnalysis(const std::string &kernel, const Deri
 // passthrough the only way to reach TM from an aiehlc kernel is to hardcode the
 // undocumented address_space number the frontend happens to use.
 static std::string userKernelPrologue;
+
+// Text prepended to the user's __global__ body in the tiling / multi-kernel
+// paths: the user's #define lines, then the AIEHLC_KERNEL_PROLOGUE block
+// (file-scope helpers, static scratch arrays, ...). Before 2026-11-12 only the
+// macros were carried here, so a prologue was silently dropped in these paths.
+static std::string userMacroAndPrologueBlock() {
+    std::string out;
+    if (!userMacroDefines.empty()) {
+        out = "// User macro definitions from source file\n";
+        for (const auto &macro : userMacroDefines) out += macro + "\n";
+        out += "\n";
+    }
+    if (!userKernelPrologue.empty())
+        out += "// User kernel prologue from source file (AIEHLC_KERNEL_PROLOGUE_BEGIN/END)\n" + userKernelPrologue + "\n";
+    return out;
+}
 
 using namespace clang;
 using namespace clang::tooling;
@@ -1386,6 +1409,7 @@ public:
                                 } else {
                                     pti.shape = {defaultDim0, defaultDim1};
                                 }
+                                pti.placeholderShape = pti.shape;
                                 pti.elementBitWidth = bitWidth;
                                 pti.isInput = isInput;
                                 pti.spatialTag = spatialTag;
@@ -2340,6 +2364,41 @@ public:
                         llvm::outs() << "[TilingLinalg] GEMM dims from the ports' GemmSpaces: M=" << macroDimM
                                      << " N=" << macroDimN << " K=" << macroDimK << "\n";
 
+                    // Non-GEMM kernel-only ports (eltwise, row reductions: GroupNorm,
+                    // LayerNorm, softmax, SiLU ...). Trace routing writes each port's
+                    // full tensor extent into its GemmSpace d1..d4 fullsize, but only
+                    // GEMM (M/N/K) re-derived the shape from it; every other port kept
+                    // the launch placeholder (16x16), so the windows and the shim BDs
+                    // moved 128 B where the kernel's blocks were KBs and the array
+                    // deadlocked in wait_io with no build error. Take the shape from
+                    // the port's own d1..d4 here; a port that still has the placeholder
+                    // while it declares a GemmSpace is a hard error.
+                    if (macroDimM == 0 && macroDimN == 0 && macroDimK == 0) {
+                        for (auto &t : parsedTensors) {
+                            if (!t.policyResolved || !t.perPort2D || t.shape != t.placeholderShape)
+                                continue;
+                            std::vector<int64_t> sh;
+                            for (const auto *td : {&t.tdD1, &t.tdD2, &t.tdD3, &t.tdD4}) {
+                                if (td->base <= 0)
+                                    break;
+                                sh.push_back(td->base);
+                            }
+                            if (sh.size() < 2) {
+                                llvm::errs() << "[TilingLinalg] ERROR: port " << t.varName
+                                             << " declares a GemmSpace but no d1/d2 fullsize; refusing the "
+                                             << t.placeholderShape[0] << "x" << t.placeholderShape[1]
+                                             << " placeholder shape (its DMA would move the wrong byte count)\n";
+                                std::exit(1);
+                            }
+                            t.shape = sh;
+                            llvm::outs() << "[TilingLinalg] Port shape from GemmSpace d1..d" << sh.size() << ": "
+                                         << t.varName << " [";
+                            for (size_t k = 0; k < sh.size(); ++k)
+                                llvm::outs() << (k ? "x" : "") << sh[k];
+                            llvm::outs() << "] (non-GEMM kernel-only port)\n";
+                        }
+                    }
+
                     // ---- Compute derived tiling parameters from M/K/N + per-port policy ----
                     int effectiveMeshRows = localMeshRows > 0 ? localMeshRows : tilingMeshRows;
                     int effectiveMeshCols = localMeshCols > 0 ? localMeshCols : tilingMeshCols;
@@ -3049,6 +3108,14 @@ public:
                             } else {
                                 mkd.splitModel.tensorSplits.push_back(SplitModel::fromPolicyFields(
                                     pt.isInput ? 0 : 3, 0, pt.isInput ? 0 : 1, 2, pt.isInput, pt.maxBufferBytes));
+                            }
+                            {
+                                auto wk = traceWindowBytesByKernel.find(currentLaunchKernel);
+                                if (wk != traceWindowBytesByKernel.end()) {
+                                    auto wp = wk->second.find(pt.varName);
+                                    if (wp != wk->second.end())
+                                        mkd.splitModel.tensorSplits.back().windowBytes = wp->second;
+                                }
                             }
                             // Spatial-halo: mirror halo descriptor onto the just-pushed split
                             // so createroutingfuncBySplitModel produces overlapping partitions.
@@ -4091,6 +4158,66 @@ public:
                         convDerivedByKernel[kd.first] = kd.second;
                     for (auto &kb : ko.blocks)
                         kernelBlocksByKernel[kb.first] = kb.second;
+                    for (auto &kd : ko.window_bytes)
+                        traceWindowBytesByKernel[kd.first] = kd.second;
+                    // GAP-MKROUTE: aiehlc emits ONE routing() for the whole program. Kernels whose
+                    // port topologies ((role, distribution) per port) differ would silently run on
+                    // one kernel's stream routes and hang on the board -> hard build error.
+                    // Same rule as script/test/multikernel_routing_check.py (1fbf524).
+                    {
+                        std::map<std::string, std::vector<std::string>> topo;
+                        std::vector<std::string> order;
+                        std::string cur;
+                        const std::string kmark = "// ==== aiehlc trace -> routing: ";
+                        std::istringstream ls(src);
+                        for (std::string line; std::getline(ls, line);) {
+                            if (line.rfind(kmark, 0) == 0) {
+                                std::string rest = line.substr(kmark.size());
+                                size_t q = rest.find("'s ports");
+                                cur = q == std::string::npos ? rest : rest.substr(0, q);
+                                if (!topo.count(cur))
+                                    order.push_back(cur);
+                                topo[cur].clear();
+                                continue;
+                            }
+                            if (cur.empty() || line.rfind("//    ", 0) != 0)
+                                continue;
+                            size_t o = line.find(" (");
+                            if (o == std::string::npos)
+                                continue;
+                            std::string r = line.substr(o + 2);
+                            size_t c1 = r.find(", ");
+                            if (c1 == std::string::npos)
+                                continue;
+                            std::string role = r.substr(0, c1);
+                            if (role != "IFM" && role != "WEIGHTS" && role != "OFM")
+                                continue;
+                            size_t c2 = r.find(',', c1 + 2);
+                            if (c2 == std::string::npos)
+                                continue;
+                            topo[cur].push_back(role + "=" + r.substr(c1 + 2, c2 - c1 - 2));
+                        }
+                        std::map<std::vector<std::string>, std::vector<std::string>> groups;
+                        for (auto &k : order)
+                            groups[topo[k]].push_back(k);
+                        if (groups.size() > 1) {
+                            for (auto &g : groups) {
+                                std::string t, ks;
+                                for (auto &x : g.first)
+                                    t += (t.empty() ? "" : " ") + x;
+                                for (auto &k : g.second)
+                                    ks += (ks.empty() ? "" : ",") + k;
+                                llvm::errs() << "[KernelAnalysis] MKROUTE topology " << t << ": " << g.second.size()
+                                             << " kernel(s) " << ks << "\n";
+                            }
+                            llvm::errs() << "[KernelAnalysis] ERROR: MKROUTE kernels=" << order.size()
+                                         << " topologies=" << groups.size()
+                                         << ": aiehlc emits one routing() for all kernels of a program; kernels "
+                                            "with different port topologies would hang on the board. Give every "
+                                            "kernel the same port topology (or build them as separate programs).\n";
+                            std::exit(1);
+                        }
+                    }
                 }
                 // Hand-written GemmSpaces + aie::load_buffer / store_buffer: the
                 // GemmSpaces stay the authority; the kernel's traced blocks must
@@ -5312,14 +5439,8 @@ public:
 
                     // Prepend user macros to kernel body
                     std::string kernelBodyWithMacros = resolvedBody;
-                    if (!userMacroDefines.empty() && !resolvedBody.empty()) {
-                        std::string macroBlock = "// User macro definitions from source file\n";
-                        for (const auto &macro : userMacroDefines) {
-                            macroBlock += macro + "\n";
-                        }
-                        macroBlock += "\n";
-                        kernelBodyWithMacros = macroBlock + resolvedBody;
-                    }
+                    if (!resolvedBody.empty())
+                        kernelBodyWithMacros = userMacroAndPrologueBlock() + resolvedBody;
 
                     // First kernel writes host.cc fresh; subsequent kernels append
                     bool appendMode = (ki > 0);
@@ -6065,14 +6186,8 @@ public:
 
                 // Prepend user macros to kernel body for multi-tile path
                 std::string kernelBodyWithMacros = singleKernelBody;
-                if (!userMacroDefines.empty() && !singleKernelBody.empty()) {
-                    std::string macroBlock = "// User macro definitions from source file\n";
-                    for (const auto &macro : userMacroDefines) {
-                        macroBlock += macro + "\n";
-                    }
-                    macroBlock += "\n";
-                    kernelBodyWithMacros = macroBlock + singleKernelBody;
-                }
+                if (!singleKernelBody.empty())
+                    kernelBodyWithMacros = userMacroAndPrologueBlock() + singleKernelBody;
 
                 // Port var names (indexed by tensor order) for IR-sourced builtin
                 // resolution (get_arg_per_round_size_in_dim) inside runPipeline.
