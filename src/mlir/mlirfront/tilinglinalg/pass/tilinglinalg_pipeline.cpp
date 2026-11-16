@@ -828,8 +828,17 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
     // (it runs later inside a pass), so instance() throws — the allocator is empty
     // then, so the catch is a safe no-op. Subsequent runs reuse the persisted
     // singleton and reset it before the host allocation pass repopulates it.
+    //
+    // GAP-125ece (KCO-BISECT): the KERNELCONFIGOFFLOAD per-tile plan rides the same
+    // singleton and needs the same reset. addCoreOffloadTile upserts on (col, row,
+    // direction, flow) and the kernel-side emitter takes the FIRST plan entry per
+    // tile, so without this every later kernel of a multi-kernel program armed its
+    // core MM2S with kernel #0's BD length (UNet KCO: gemm_kacc_960x320x512 sent 5120 B
+    // windows while its host shim S2MM waited for 8192 B -> wait_io TIMEOUT hang at the
+    // first switch to a kernel with a different output window).
     try {
         ResourceMgr::instance()->coreMemAllocator().reset();
+        ResourceMgr::instance()->coreOffloadPlan().clear();
     } catch (...) {
         // Singleton not yet initialized on the first pipeline run; nothing to reset.
     }
