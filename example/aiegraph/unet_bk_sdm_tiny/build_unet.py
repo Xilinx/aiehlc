@@ -324,6 +324,15 @@ def aie_conv(a, emod, out: Path, hdr: Path):
             # P4w: weights of the kincore layers go into weights.bin already in the kacc chunk layout
             nb = ua.prelayout_weights(Path(out_dir) / "weights.bin", sel)
             log(f"WPRE layers={len(sel)} bytes={nb} ({Path(out_dir) / 'weights.bin'})")
+        if a.keep_layout:
+            # P4a: keep the AIE layout between layers -- the A78 head split/merge + temb weight re-pack ops go
+            import keep_layout_rt
+            csrc = [q for q in sorted(Path(graph_path).parent.glob("*.c"))
+                    if "tvmgen_default_fused_" in q.read_text(errors="replace")]
+            assert len(csrc) == 1, csrc
+            t2, nt, na = keep_layout_rt.keep_layout_driver(f.read_text(), csrc[0].read_text(),
+                                                           Path(out_dir) / "weights.bin", log)
+            f.write_text(t2)
         log(f"graph_driver.c: {n} partition call sites -> unet_aie_conv ({n - len(lin) - len(att)}) + "
             f"unet_aie_linear ({len(lin)})" + (f" + unet_aie_attn ({len(att)})" if att else ""))
         return r
@@ -370,6 +379,10 @@ def main(argv=None) -> int:
     ap.add_argument("--attn-fa", action="store_true",
                     help="GFA (P2): with --aie conv,linear,attn, every attention group (QK bmm, softmax, PV bmm) runs as "
                          "ONE flash-attention (online softmax, fa_attn.py) on the AIE; the TVM softmax call is removed")
+    ap.add_argument("--keep-layout", action="store_true",
+                    help="P4a (needs --attn-fa): keep the AIE layout between layers (keep_layout_rt.py) -- FA packs read "
+                         "the linear outputs by stride (TVM head split/merge ops removed), temb dense weights pre-packed "
+                         "in weights.bin (TVM per-call W*s re-pack removed)")
     ap.add_argument("--aie", choices=("none", "conv", "conv,linear", "conv,linear,attn"), default="none",
                     help="conv,linear (PDN): also the partition's linear layers (dense) on the AIE (needs --kincore); "
                          "conv,linear,attn (GATT): also the attention bmm layers (cls=attn) -> unet_aie_attn, "
@@ -418,6 +431,9 @@ def main(argv=None) -> int:
         # PH_COREEN is counted only by a runtime built with -DAIEHLC_PROFILING=1 (as P2/P3)
         os.environ["AIEHLC_PROFILING"] = "1"
         os.environ["EXTRA_DEFS"] = (os.environ.get("EXTRA_DEFS", "") + " -DAIEHLC_PROFILING=1").strip()
+    if a.keep_layout and not a.attn_fa:
+        log("--keep-layout needs --attn-fa")
+        return 2
     if a.kincore_layers != "all" and not a.kincore:
         log("--kincore-layers needs --kincore")
         return 2
