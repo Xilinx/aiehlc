@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -356,7 +357,7 @@ def test_modes_header_turns_off_only_the_unused_modes():
         assert f"#define AIEK_MODE_{m} 0" in out
     on = modes_header(cfg, {"MMT"})               # an opt-in mode (default 0) turns on when used
     assert "#define AIEK_MODE_MMT 1" in on and "#define AIEK_MODE_GEMMQ 0" in on
-    assert "#define AIEK_MODE_ITEMS (" in out     # derived macros untouched
+    assert re.search(r"#define AIEK_MODE_ITEMS\s*\\?\s*\(AIEK_MODE_DW", out)  # derived macros untouched (any line wrap)
 
 
 @has_cc
