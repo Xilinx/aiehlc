@@ -771,7 +771,11 @@ def patch_driver(text: str, sel: list) -> tuple:
     sel = [c for c in sel if c.get("kind") != "attn"]
     i = text.index("static uint8_t kernel_ws[")
     # GATT: the attn declaration / PROF branch only when there are attn sites (--aie conv,linear stays byte-identical)
-    text = text[:i] + DECL + (DECL_ATTN if att else "") + (prof_c_attn() if att else PROF_C) + "\n" + text[i:]
+    fam = bool(att) and all(c.get("fa") is not None for c in att)   # GFA: fused flash-attention sites
+    if fam:
+        import fa_attn
+    text = text[:i] + DECL + ((fa_attn.DECL_FA if fam else DECL_ATTN) if att else "") + \
+        (prof_c_attn() if att else PROF_C) + "\n" + text[i:]
     exp_body = "    for (uint64_t i = 0; i < n; ++i) d[i] = (uint32_t)src[i] << 16;\n}\n"
     assert text.count(exp_body) == 1, text.count(exp_body)
     text = text.replace(exp_body, "    XTime e0_, e1_;\n    XTime_GetTime(&e0_);\n" + exp_body[:-2] +
@@ -822,7 +826,35 @@ def patch_driver(text: str, sel: list) -> tuple:
         text = _patch_attn_site(text, c)
         n += 1
     assert text.count("    unet_aie_attn(") == len(att)
+    if fam:
+        text = _remove_fa_softmax(text, att)
     return text, n
+
+
+SOFTMAX_RE = re.compile(r"    GRAPH_PROF_BEGIN\((\d+)\);\n    (tvmgen_default_fused_nn_softmax\w*)\(args, codes, 2, 0, 0, 0\);\n"
+                        r"    GRAPH_PROF_END\(\1, \"[^\"]*\"\);\n")
+
+
+def _remove_fa_softmax(text: str, att: list) -> str:
+    """GFA: the TVM softmax call between a group's QK site and its PV site is fused into the AIE attention:
+    exactly one per group, removed (no PROF part, no CPU time)"""
+    groups = {}
+    for c in att:
+        groups.setdefault(c["group"], {})[c["role"]] = c
+    nrm = 0
+    for g, d in sorted(groups.items()):
+        a = text.index("    unet_aie_attn(%d, args, 3, 0, %d);" % (d["qk"]["cid"], d["qk"]["fa"]))
+        b = text.index("    unet_aie_attn(%d, args, 3, 1, %d);" % (d["pv"]["cid"], d["pv"]["fa"]))
+        assert a < b, (g, a, b)
+        hits = list(SOFTMAX_RE.finditer(text, a, b))
+        assert len(hits) == 1, (g, len(hits))
+        m = hits[0]
+        text = text[:m.start()] + "    /* GFA: %s (call %s) fused into AIE attention group %d */\n" % (
+            m.group(2), m.group(1), g) + text[m.end():]
+        nrm += 1
+    assert nrm == len(groups) and not re.search(r"\btvmgen_default_fused_nn_softmax\w*\(args, ",
+                                                text.split("float *graph_run(void)")[1]), "softmax call left in graph_run"
+    return text
 
 
 def _patch_attn_site(text: str, c: dict) -> str:
@@ -838,6 +870,13 @@ def _patch_attn_site(text: str, c: dict) -> str:
     assert cm and (nxt < 0 or cm.start() < nxt), (c["onnx"], c["node"])
     calls = re.findall(r"(?:aie_)?(tvmgen_\w+)\(args, codes, (\d+), 0, 0, 0\);", cm.group(2))
     assert calls and all(s == c["symbol"] and int(k) == c["nargs"] for s, k in calls), (calls, c["symbol"])
+    if c.get("fa") is not None:  # GFA: role 0 = QK (pack Q, K), role 1 = PV (pack V, launch, write O)
+        rep = ("    GRAPH_PROF_BEGIN(%s);\n    UP_AIE_BEGIN(%s);\n"
+               "    unet_aie_attn(%d, args, %d, %d, %d);   /* fa %s g%d %s */\n"
+               "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie unet_aie_attn %d\");\n"
+               % (cm.group(1), cm.group(1), c["cid"], c["nargs"], int(c["role"] == "pv"), c["fa"], c["role"],
+                  c["group"], c["onnx"].replace("*/", "*_/"), cm.group(1), cm.group(1), c["cid"]))
+        return text[:cm.start()] + rep + text[cm.end():]
     g = c["geo"]
     rep = ("    GRAPH_PROF_BEGIN(%s);\n    UP_AIE_BEGIN(%s);\n"
            "    unet_aie_attn(%d, args, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d);   /* %s g%d %s */\n"
@@ -2516,7 +2555,7 @@ extern "C" int unet_aie_attn(int cid, void *args, int nargs, int qk, int swap, i
 
 
 def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, ctrlpkt: str = "off",
-                      lin: list = (), att: list = ()) -> Path:
+                      lin: list = (), att: list = (), fa: list = ()) -> Path:
     """--kincore: aiek_unetconv.cc = one gemm_kacc instance per distinct (ch, K, px) + host unet_aie_conv;
     lin (PDN): (N, K, Mp, pxs) per linear layer -> + host unet_aie_linear"""
     spec = spec.replace('"out ', '"export    unet_aie_conv\\n"\n        "export    unet_aie_stats\\n"\n' +
@@ -2537,17 +2576,25 @@ def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, c
     if ctrlpkt == "aot":
         head = CTRLPKT_PRAGMAS + head
     ktext = "\n\n".join(kacc_kernel_text(*s) for s in shapes)
+    if fa:  # GFA (--attn-fa): flash-attention prologue (static helpers) before the kernels, one kernel per class
+        import fa_attn
+        head = head + fa_attn.fa_prologue(fa) + "\n"
+        ktext = ktext + "\n\n" + "\n\n".join(fa_attn.fa_kernel_text(c) for c in fa)
     host = kt_select(HOST_CC, False)
     # replace the 64x64-tile uc_conv (host K-sum) by the one-launch version up to its epilogue
     i0 = host.index("static int uc_conv(")
     i1 = host.index('extern "C" int unet_aie_conv(')  # GPOOL: epilogue fused into the kacc scatter
-    host = host[:i0] + (kacc_host(shapes, lin, [c["geo"] for c in att]) if att else kacc_host(shapes, lin)) + host[i1:]
+    host = host[:i0] + (kacc_host(shapes, lin, [c["geo"] for c in att]) if att and not fa else kacc_host(shapes, lin)) + host[i1:]
     if lin:  # PDN: unet_aie_linear before unet_aie_conv
         j = host.index('extern "C" int unet_aie_conv(int cid')
         host = host[:j] + LINEAR_HOST.lstrip("\n") + host[j:]
     if att:  # GATT: unet_aie_attn before unet_aie_conv
         j = host.index('extern "C" int unet_aie_conv(int cid')
-        host = host[:j] + ATTN_HOST.lstrip("\n") + host[j:]
+        if fa:
+            import fa_attn
+            host = host[:j] + fa_attn.fa_host(fa).lstrip("\n") + host[j:]
+        else:
+            host = host[:j] + ATTN_HOST.lstrip("\n") + host[j:]
     # drop the 64x64-port state the one-launch path does not use (no unused-static warnings)
     a0, a1 = host.index("static int uc_alloc(void) {"), host.index("static long uc_numel(")
     host = host[:a0] + host[a1:]

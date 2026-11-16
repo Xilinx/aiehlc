@@ -214,6 +214,18 @@ def aie_conv(a, emod, out: Path, hdr: Path):
         att = ua.map_attn(part, work)
         if len(att) != natt_part:
             raise SystemExit(f"mapped {len(att)} attn layers, partition has {natt_part}")
+    fa = []
+    if a.attn_fa:
+        # GFA (P2): each attention group = ONE flash-attention (online softmax) on the AIE; TVM softmax removed
+        if not att:
+            raise SystemExit("--attn-fa needs --aie conv,linear,attn")
+        import fa_attn
+        fa = fa_attn.fa_classes(att)
+        for c in att:
+            c["launches"] = fa[c["fa"]]["launches"] if c["role"] == "pv" else 0
+        for k in fa:
+            log(f"GFA class {k['idx']} {k['name']} split={k['split']} nkv={k['nkv']} kvl={k['kvl']} units={k['units']} "
+                f"launches/site={k['launches']}")
     if a.kincore:
         # P4bg: one launch per layer from kplan.py (K in the core) -- the partition.json N (64x64x64
         # tile launches) does not apply on this path
@@ -236,7 +248,7 @@ def aie_conv(a, emod, out: Path, hdr: Path):
         sel = sel + lin
         planned = sum(c["launches"] for c in sel + att)
         shapes = sorted({(c["N"], c["K"], c["M"]) for c in convsel} | {(c["N"], c["K"], c["pxs"]) for c in lin} |
-                        set(ua.attn_shapes(att)))
+                        (set() if fa else set(ua.attn_shapes(att))))
         log(f"KINCORE layers={len(sel) + len(att)} launches_planned={planned} kernel=bf16_gemm_kacc; "
             f"shapes={len(shapes)} (old 64x64x64 launches {part['N']})")
     else:
@@ -272,7 +284,7 @@ def aie_conv(a, emod, out: Path, hdr: Path):
         kcc = ua.write_kernel_kacc(out / "aiek_src", p.spec(), shapes, warm=(a.launch_opt == "warm"),
                                    ctrlpkt=a.ctrlpkt,
                                    lin=[(c["N"], c["K"], -(-c["M"] // 64) * 64, c["pxs"]) for c in lin],
-                                   **({"att": att} if att else {}))
+                                   **({"att": att} if att else {}), **({"fa": fa} if fa else {}))
     else:
         kcc = ua.write_kernel(out / "aiek_src", p.spec(), max(c["M"] * c["N"] for c in sel),
                               warm=(a.launch_opt == "warm"), ctrlpkt=a.ctrlpkt, ktimer=a.ktimer)
@@ -335,6 +347,9 @@ def main(argv=None) -> int:
     ap.add_argument("--onnx", required=True, type=Path)
     ap.add_argument("--real-io", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--attn-fa", action="store_true",
+                    help="GFA (P2): with --aie conv,linear,attn, every attention group (QK bmm, softmax, PV bmm) runs as "
+                         "ONE flash-attention (online softmax, fa_attn.py) on the AIE; the TVM softmax call is removed")
     ap.add_argument("--aie", choices=("none", "conv", "conv,linear", "conv,linear,attn"), default="none",
                     help="conv,linear (PDN): also the partition's linear layers (dense) on the AIE (needs --kincore); "
                          "conv,linear,attn (GATT): also the attention bmm layers (cls=attn) -> unet_aie_attn, "
