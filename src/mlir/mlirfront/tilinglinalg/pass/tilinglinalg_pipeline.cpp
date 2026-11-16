@@ -554,6 +554,10 @@ static void attachTensorRoutingInfo(OpBuilder &builder, ArrayRef<routing::create
         const auto &split = splitModel.tensorSplits[i];
         routing::createscheduletensor decl = decls[i];
         decl.setPpDepthAttr(builder.getI64IntegerAttr(split.pingPong));
+        if (split.windowBytes > 0) {
+            decl->setAttr(routing::kScheduleWindowBytesAttr, builder.getI64IntegerAttr(split.windowBytes));
+            llvm::outs() << "[TilingLinalg] tensor_" << i << " window_bytes=" << split.windowBytes << "\n";
+        }
         if (!split.layoutTransform.empty()) {
             decl.setLayoutTransformAttr(builder.getStringAttr(split.layoutTransform));
             llvm::outs() << "[TilingLinalg] tensor_" << i << " layout_transform=" << split.layoutTransform << "\n";
@@ -1021,6 +1025,11 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
                     blockBytes *= v;
                 bufSize = static_cast<uint32_t>(std::min<int64_t>(blockBytes, bufSize));
             }
+            // A trace-routed port's core window is capped at its traced block
+            // (routing.window_bytes, see computeCoreIterations / window_init),
+            // so charge that instead of the kernel-wide maximum.
+            if (info && info->windowBytes > 0 && static_cast<uint64_t>(info->windowBytes) < bufSize)
+                bufSize = static_cast<uint32_t>(info->windowBytes);
             totalBufferBytes += ppDepth * bufSize;
         }
 

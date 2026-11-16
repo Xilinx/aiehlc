@@ -65,6 +65,32 @@ kernel_stamp() {
     } | sha256sum | cut -d' ' -f1
 }
 
+# check_kernel_stack <prx>: the BCF stack is [0x70000, buffer area start). CoreMemAllocator
+# shrinks it from the default 32 KB when the port buffers do not fit above 0x78000, so
+# compare chess's "Maximum stack size" (kernel.calltree) with the BCF _stack size.
+# rc 1 = stack overflow (hard error); unknown bound = warning only.
+check_kernel_stack() {
+    local prx="$1" bcfname bcf ct st max
+    bcfname=$(sed -nE 's/.*id="bridge.cfg" value="([^"]+)".*/\1/p' "$prx" | head -1)
+    bcf="$(dirname "$prx")/${bcfname:-aieml.bcf}"
+    ct="${BUILD_DIR}/kernel.calltree"
+    [ -f "$bcf" ] || return 0
+    st=$(awk '$1=="_stack"{print strtonum($4); exit}' "$bcf")
+    [ -n "$st" ] || return 0
+    max=$(sed -nE 's/^Maximum stack size *: *([0-9]+).*/\1/p' "$ct" 2>/dev/null | head -1)
+    if [ -z "$max" ] || grep -qiE 'recurs|indirect|unknown callee|function pointer' "$ct" 2>/dev/null; then
+        [ "$st" -lt 32768 ] && echo "[hostcompile] WARNING: core stack is ${st} B (buffers moved into the stack area) and the kernel's stack bound is unknown (${ct})"
+        return 0
+    fi
+    echo "[hostcompile] core stack: kernel needs ${max} B, BCF reserves ${st} B ($(basename "$bcf"))"
+    if [ "$max" -gt "$st" ]; then
+        echo "Error: kernel stack ${max} B exceeds the ${st} B core stack; the port buffers took the rest of data memory."
+        echo "       Use smaller blocks, or raise AIEHLC_DM_MIN_STACK (bytes) so the allocator keeps more stack."
+        return 1
+    fi
+    return 0
+}
+
 compile_one_kernel() {
     local kernel_func_name="${1:-compute_kernel}"
 
@@ -102,6 +128,7 @@ compile_one_kernel() {
 
     cd "${WORKLOCAL_DIR}"
 
+    local kc_rc=0
     if [[ "${USE_LLVM_AIE:-false}" == "true" ]] && [[ -n "${LLVM_AIE_PATH:-}" ]] \
        && [[ -x "${LLVM_AIE_PATH}/bin/clang++" ]]; then
         echo "[hostcompile] Using llvm-aie (${LLVM_AIE_PATH})"
@@ -114,6 +141,7 @@ compile_one_kernel() {
             --output-dir "${BUILD_DIR}" \
             --use-llvm-aie \
             --ld-script "${WORKLOCAL_DIR}/main.ld.script"
+        kc_rc=$?
     else
         local prx_file
         if [ -f "${WORKLOCAL_DIR}/aieml.prx" ]; then
@@ -129,8 +157,11 @@ compile_one_kernel() {
             --debug-output \
             --output-dir "${BUILD_DIR}" \
             --prx "${prx_file}"
+        kc_rc=$?
+        if [ ${kc_rc} -eq 0 ] && [ -f "${prx_file}" ]; then
+            check_kernel_stack "${prx_file}" || { rm -f "${BUILD_DIR}/kernel.o"; kc_rc=1; }
+        fi
     fi
-    local kc_rc=$?
     if [ ${kc_rc} -eq 0 ] && [ -f "${BUILD_DIR}/kernel.o" ]; then
         echo "${kstamp}" > "${BUILD_DIR}/kernel.stamp"
     fi

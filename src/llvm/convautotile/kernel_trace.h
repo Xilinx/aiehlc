@@ -163,6 +163,10 @@ struct KernelOnlyResult {
     std::map<std::string, double> est_ms;
     // Per routed kernel, per port variable: the traced blocks and options.
     std::map<std::string, std::map<std::string, PortBlock>> blocks;
+    // Per routed kernel, per port var: the traced block in bytes. TilingLinalg
+    // caps that port's core window at it (else a port whose block is smaller
+    // than its per-core slice gets one slice-sized window -> lock deadlock).
+    std::map<std::string, std::map<std::string, int64_t>> window_bytes;
 };
 
 // Kernel-only sources: analyze, derive, verify, and rewrite `src` into the
