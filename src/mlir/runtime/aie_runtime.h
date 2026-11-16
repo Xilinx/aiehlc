@@ -380,6 +380,8 @@ struct_event __Runtime_launch_kernel_group_ctrl(XAie_DevInst *dev, __Runtime_Ctr
 
 void __Runtime_phase_cycles(unsigned long long *cyc, unsigned int *calls);
 void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls);
+// GAP-RT1: always-on wait_io time in generic-timer ticks (the XTime counter; aie_host_split.h ahs_now)
+void __Runtime_host_split_wait_ticks(unsigned long long *ticks, unsigned int *calls);
 void __Runtime_ctrl_kernel_pkt_set(const void *blob, unsigned int bytes);
 // Encode a kernel ELF once into the blob __Runtime_ctrl_kernel_pkt_set takes
 // (malloc'd; NULL on failure) -- for callers that reload one kernel often.

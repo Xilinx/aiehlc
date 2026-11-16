@@ -442,6 +442,24 @@ extern "C" int unet_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold
         *cold_tiles = g_uc_cold_tiles;
     return 0;
 }
+/* GAP-RT1: per-site aie_host split (pack / scatter / dma / wait) -> PROF aie_host_split (aie_host_split.h).
+ * The site index comes from graph_driver's UP_AIE_BEGIN; wait = the runtime's always-on wait_io ticks. */
+#ifndef UC_HS_DEFINED
+#define UC_HS_DEFINED 1
+#include "aie_host_split.h"
+void __Runtime_host_split_wait_ticks(unsigned long long *ticks, unsigned int *calls); /* C++ linkage, aie_runtime.h */
+static ahs_table g_ahs;
+static inline unsigned long long uc_hs_wait(void) {
+    unsigned long long t = 0ULL;
+    unsigned int n = 0U;
+    __Runtime_host_split_wait_ticks(&t, &n);
+    return t;
+}
+#endif
+extern "C" void unet_aie_host_split_site(int site) { ahs_set_site(&g_ahs, site); }
+extern "C" int unet_aie_host_split_line(int site, char *buf, int n) {
+    return ahs_format(&g_ahs, site, (double)COUNTS_PER_SECOND, buf, (size_t)n);
+}
 
 /*KT+*/static unsigned long long g_kt_max = 0, g_kt_all = 0; // KTIMER: sum over launches of max-core / all-core cycles
 static int g_kt_n = 0, g_kt_bad = 0;                    // launches read, core tails without the magic word
@@ -711,7 +729,9 @@ def kt_select(text: str, ktimer: bool) -> str:
 def write_kernel(kdst: Path, spec: str, maxacc: int, warm: bool = False, ctrlpkt: str = "off",
                  ktimer: bool = False) -> Path:
     spec = spec.replace('"out ', '"export    unet_aie_conv\\n"\n        "export    unet_aie_stats\\n"\n'
-                        '        "export    unet_aie_launch_stats\\n"\n' +
+                        '        "export    unet_aie_launch_stats\\n"\n'
+                        '        "export    unet_aie_host_split_site\\n"\n'
+                        '        "export    unet_aie_host_split_line\\n"\n' +
                         ('        "export    unet_aie_ktimer_stats\\n"\n' if ktimer else '') +
                         '        "export    unet_aie_split_stats\\n"\n        "out ', 1)
     assert "export    unet_aie_conv" in spec, spec
@@ -835,6 +855,8 @@ PROF_C = r"""
  * graph_bf16_expand time goes to the site that follows it. unet_prof_print() from main.c. */
 #include "aie_timer.h"
 int unet_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles);
+void unet_aie_host_split_site(int site);                   /* GAP-RT1: kernel archive (aie_host_split.h) */
+int unet_aie_host_split_line(int site, char *buf, int n);
 #define UP_MAX 1024
 static unsigned long long up_ticks[UP_MAX], up_exp_ticks[UP_MAX], up_pending_exp;
 static double up_aie_ms[UP_MAX];
@@ -847,8 +869,9 @@ static unsigned up_n, up_exp_calls;
 #define GRAPH_PROF_END(i, tag) do { XTime t1_; XTime_GetTime(&t1_);                      \
         up_ticks[i] += t1_ - graph_prof_t0_##i; up_tag[i] = (tag);                        \
         if ((unsigned)(i) + 1U > up_n) up_n = (unsigned)(i) + 1U; } while (0)
-#define UP_AIE_BEGIN(i) double up_a0_##i = 0.0; unet_aie_launch_stats(&up_a0_##i, 0, 0)
-#define UP_AIE_END(i) do { double a1_ = 0.0; unet_aie_launch_stats(&a1_, 0, 0); up_aie_ms[i] += a1_ - up_a0_##i; } while (0)
+#define UP_AIE_BEGIN(i) double up_a0_##i = 0.0; unet_aie_host_split_site(i); unet_aie_launch_stats(&up_a0_##i, 0, 0)
+#define UP_AIE_END(i) do { double a1_ = 0.0; unet_aie_launch_stats(&a1_, 0, 0); up_aie_ms[i] += a1_ - up_a0_##i; \
+        unet_aie_host_split_site(-1); } while (0)
 void unet_prof_print(double graph_run_ms, double aie_wall_ms) {
     const double tk = 1000.0 / (double)COUNTS_PER_SECOND;
     double tot = 0.0, cpu = 0.0, aieh = 0.0, exp_ms = 0.0, aie_in = 0.0;
@@ -868,6 +891,11 @@ void unet_prof_print(double graph_run_ms, double aie_wall_ms) {
                    up_tag[i] + 18, a78 + e, e, site, up_aie_ms[i]);
         else
             printf("PROF part=%u op=%s ms=%.3f bf16_expand_ms=%.3f\n", i, op, a78 + e, e);
+        if (is_aie) { /* GAP-RT1: PROF aie_host_split part=<i> kind=<attn|conv|linear> pack_ms= scatter_ms= ... */
+            char hs_[192];
+            if (unet_aie_host_split_line((int)i, hs_, (int)sizeof hs_) > 0)
+                printf("%s\n", hs_);
+        }
         tot += a78 + e;
         exp_ms += e;
         aie_in += is_aie ? up_aie_ms[i] : 0.0;
@@ -885,6 +913,13 @@ void unet_prof_print(double graph_run_ms, double aie_wall_ms) {
            "cpu_ms=%.3f aie_host_ms=%.3f bf16_expand_ms=%.3f (calls=%u tail=%.3f) aie_ms_in_sites=%.3f\n",
            tot, den > 0.0 ? tot / den : 0.0, graph_run_ms, aie_wall_ms, ns, cpu, aieh, exp_ms, up_exp_calls, tail,
            aie_in);
+    {
+        char hs_[192];
+        if (unet_aie_host_split_line(-1, hs_, (int)sizeof hs_) > 0)
+            printf("%s\n", hs_);
+        else
+            printf("PROF aie_host_split_total host_split_n=0\n");
+    }
 }
 """
 
@@ -1546,6 +1581,7 @@ static int uc_kacc_launch(int N, int K, int M, int32_t *kw, int32_t *kx, int32_t
 static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, int sw, int ph, int pw) {
     XTime ut0; /* [UCL] per-layer split: host pre-tiling (W re-tile + im2col) | AIE window | host post */
     XTime_GetTime(&ut0);
+    ahs_begin(&g_ahs, AHS_KIND_CONV);
     if (nargs < 4)
         return -2;
     const uc_dlt *x = (const uc_dlt *)argv[0], *w = (const uc_dlt *)argv[1], *y = (const uc_dlt *)argv[nargs - 1];
@@ -1846,6 +1882,8 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     uc_ysentinel(g_ky, (size_t)M * N * 4); // sentinel: unwritten -> NaN -> counted
     XTime lt0, lt1;
     XTime_GetTime(&lt0);
+    const unsigned long long hw0 = uc_hs_wait();
+    ahs_add_span(&g_ahs, AHS_PACK, ut0, lt0);
     const unsigned long long sp0 = uc_pmc();
 #if UC_WARM
     unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
@@ -1867,7 +1905,9 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     }
 #endif
     const unsigned long long sp3 = uc_pmc();
+    const unsigned long long hw1 = uc_hs_wait();
     XTime_GetTime(&lt1);
+    ahs_add_window(&g_ahs, (unsigned long long)(lt1 - lt0), hw1 - hw0);
     if (lrc != 0)
         return lrc;
     g_sp_pre += sp1 - sp0;
@@ -1948,6 +1988,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     {
         XTime ut3;
         XTime_GetTime(&ut3);
+        ahs_add_span(&g_ahs, AHS_SCATTER, lt1, ut3);
         const double us = 1e6 / (double)COUNTS_PER_SECOND;
         /* GPOOL: [UCL] is recorded here and printed by unet_aie_split_stats() after graph_run (a printf per
          * layer cost ~3.5 ms of A78 time inside the site) */
@@ -2002,6 +2043,7 @@ static unsigned long long g_uc_whook_tiles = 0, g_uc_whook_all = 0; /* m-tiles d
 static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
     XTime ut0;
     XTime_GetTime(&ut0);
+    ahs_begin(&g_ahs, AHS_KIND_LINEAR);
     int wzc_ = 0;
     if (nargs < 3)
         return -2;
@@ -2171,9 +2213,12 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
     uc_ysentinel(g_ky, ybytes); // sentinel: unwritten -> NaN -> counted
     XTime la0, la1; /* GHL: [UCL] split of the site, aie = all its launch windows */
     XTime_GetTime(&la0);
+    ahs_add_span(&g_ahs, AHS_PACK, ut0, la0);
+    unsigned long long hs_win = 0ULL; /* GAP-RT1: sum of the launch windows; rest of [la0, la1] = loop glue -> dma */
     for (int s = 0; s < S; s++) {
         XTime lt0, lt1;
         XTime_GetTime(&lt0);
+        const unsigned long long hw0 = uc_hs_wait();
         const unsigned long long sp0 = uc_pmc();
 #if UC_WARM
         unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
@@ -2224,7 +2269,10 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
         }
 #endif
         const unsigned long long sp3 = uc_pmc();
+        const unsigned long long hw1 = uc_hs_wait();
         XTime_GetTime(&lt1);
+        ahs_add_window(&g_ahs, (unsigned long long)(lt1 - lt0), hw1 - hw0);
+        hs_win += (unsigned long long)(lt1 - lt0);
         if (lrc != 0) {
             g_kw = kw_pool;
             return lrc;
@@ -2249,6 +2297,8 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
     }
     g_kw = kw_pool;
     XTime_GetTime(&la1);
+    if ((unsigned long long)(la1 - la0) > hs_win)
+        ahs_add(&g_ahs, AHS_DMA, (unsigned long long)(la1 - la0) - hs_win);
     g_uc_macs += (unsigned long long)M * N * K; /* real rows only (M, not Mp) */
 #if UC_NEON
 #if UC_WHOOK
@@ -2291,6 +2341,7 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
     {
         XTime ut3;
         XTime_GetTime(&ut3);
+        ahs_add_span(&g_ahs, AHS_SCATTER, la1, ut3);
         const double us = 1e6 / (double)COUNTS_PER_SECOND;
         const int li = g_aie_launches - 1; /* GHL: [UCL] of the site's last launch; fast = 4 (linear) | 2 zero-copy W */
         if (li >= 0 && li < UC_UCL_MAX) {
@@ -2333,12 +2384,19 @@ ATTN_HOST = r"""
  * centred over the REAL keys per head (softmax is shift-invariant per query row; pad rows stay 0). Softmax stays
  * on the CPU (TVM). */
 #include "aie_kacc_pack.h"
+#ifndef UC_HS_DEFINED /* GAP-RT1: standalone (x86 harness) -> local split table, no runtime wait counter */
+#define UC_HS_DEFINED 1
+#include "aie_host_split.h"
+static ahs_table g_ahs;
+static inline unsigned long long uc_hs_wait(void) { return 0ULL; }
+#endif
 static float *g_ua_kc = nullptr;    /* one head's centred keys [N][K] (QK^T) */
 static uint16_t *g_ua_yb = nullptr; /* one head's bf16 output [M][N] */
 static size_t g_ua_kcap = 0, g_ua_ycap = 0;
 static unsigned g_ua_sites = 0;
 static int uc_attn(void *const *argv, int nargs, int qk, int swap, int CHP, int PXP, int Kp, int kp, int kch,
                    int splitpx, int S, int chs, int pxs, int tr) {
+    ahs_begin(&g_ahs, AHS_KIND_ATTN);
     if (nargs != 3)
         return -2;
     const uc_dlt *x = (const uc_dlt *)argv[0], *w = (const uc_dlt *)argv[1], *y = (const uc_dlt *)argv[2];
@@ -2380,6 +2438,8 @@ static int uc_attn(void *const *argv, int nargs, int qk, int swap, int CHP, int 
     int32_t *const kw = g_kw, *const kx = g_kx, *const ky = g_ky;
     const size_t wbytes = wel * 2, xbytes = xel * 2, ybytes = yel * 4;
     for (int h = 0; h < H; h++) {
+        XTime ht0, ht1, ht2, ht3; /* GAP-RT1: head split pack [ht0, ht1) | launches | scatter [ht2, ht3) */
+        XTime_GetTime(&ht0);
         const float *xh = X + (size_t)h * M * K, *wh = Wt + (size_t)h * N * K;
         if (qk) { /* PKC kc_bf16out_pad64: keys centred over the N real keys (fp64 mean per column) */
             for (int k = 0; k < K; k++) {
@@ -2395,9 +2455,12 @@ static int uc_attn(void *const *argv, int nargs, int qk, int swap, int CHP, int 
         /* W side = instance channels (rows of W, or of X when swapped), X side = pixels; both [rows][K], k stride 1 */
         akp_pack((uint16_t *)kw, swap ? xh : wh, CHP, CHR, kp, K, kch, K, 1, 1, 0);
         akp_pack((uint16_t *)kx, swap ? wh : xh, PXP, PXR, kp, K, kch, K, 1, 0, 0);
+        XTime_GetTime(&ht1);
+        ahs_add_span(&g_ahs, AHS_PACK, ht0, ht1);
         for (int s = 0; s < S; s++) {
             XTime lt0, lt1;
             XTime_GetTime(&lt0);
+            const unsigned long long hw0 = uc_hs_wait();
             if (s == 0)
                 uc_sync_pre(kw, wbytes, kx, xbytes, ky, ybytes);
             int32_t *Ws = kw + (splitpx ? 0 : (size_t)s * chs * kp / 2);
@@ -2406,12 +2469,15 @@ static int uc_attn(void *const *argv, int nargs, int qk, int swap, int CHP, int 
             const int lrc = uc_kacc_launch(chs, Kp, pxs, Ws, Xs, Ys);
             if (s == S - 1)
                 uc_sync_post(ky, ybytes);
+            const unsigned long long hw1 = uc_hs_wait();
             XTime_GetTime(&lt1);
+            ahs_add_window(&g_ahs, (unsigned long long)(lt1 - lt0), hw1 - hw0);
             g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
             g_aie_launches++;
             if (lrc != 0)
                 return lrc;
         }
+        XTime_GetTime(&ht2);
         for (int s = 0; s < S; s++) { /* launch s: Y block -> yb [M][N] (bf16) */
             const int p0 = splitpx ? s * pxs : 0, c0 = splitpx ? 0 : s * chs;
             const int pr = PXR - p0 < pxs ? PXR - p0 : pxs, cr = CHR - c0 < chs ? CHR - c0 : chs;
@@ -2426,6 +2492,8 @@ static int uc_attn(void *const *argv, int nargs, int qk, int swap, int CHP, int 
             const uint32_t u = (uint32_t)yb[i] << 16;
             memcpy(yh + i, &u, 4);
         }
+        XTime_GetTime(&ht3);
+        ahs_add_span(&g_ahs, AHS_SCATTER, ht2, ht3);
     }
     g_uc_macs += (unsigned long long)H * M * N * K;
     g_ua_sites++;
@@ -2455,6 +2523,8 @@ def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, c
                         ('        "export    unet_aie_linear\\n"\n' if lin else '') +
                         ('        "export    unet_aie_attn\\n"\n' if att else '') +
                         '        "export    unet_aie_launch_stats\\n"\n'
+                        '        "export    unet_aie_host_split_site\\n"\n'
+                        '        "export    unet_aie_host_split_line\\n"\n'
                         '        "export    unet_aie_split_stats\\n"\n        "out ', 1)
     assert "export    unet_aie_conv" in spec, spec
     kdst.mkdir(parents=True, exist_ok=True)

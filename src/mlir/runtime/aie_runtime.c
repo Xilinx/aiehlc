@@ -131,6 +131,10 @@ static inline unsigned long long __rt_prof_now(void) { return __rt_pmccntr() - g
     } while (0)
 #endif
 
+#include "aie_host_split.h"
+/* GAP-RT1: always-on wait_io time in generic-timer ticks (XTime clock), independent of AIEHLC_PROFILING */
+static unsigned long long g_hs_wait_ticks = 0ULL;
+static unsigned int g_hs_wait_calls = 0U;
 static unsigned long long g_wait_io_cycles = 0ULL;
 static unsigned int g_wait_io_calls = 0U;
 static unsigned long long g_wait_io_iters = 0ULL;
@@ -203,6 +207,12 @@ void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls) {
         *cycles = g_wait_io_cycles;
     if (calls)
         *calls = g_wait_io_calls;
+}
+void __Runtime_host_split_wait_ticks(unsigned long long *ticks, unsigned int *calls) {
+    if (ticks)
+        *ticks = g_hs_wait_ticks;
+    if (calls)
+        *calls = g_hs_wait_calls;
 }
 void __Runtime_wait_io_iters(unsigned long long *iters) {
     if (iters)
@@ -8567,6 +8577,7 @@ void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
     rt_sb_commit();
     (void)rt_sb_ack_wait();
     unsigned long long __wio_t0 = RT_PROF_TIC();
+    const unsigned long long __hs_t0 = ahs_now();
     XAie_LocType tile = io_event.io.tile_loc;
     uint8_t channel = io_event.io.channel_id;
     XAie_DmaDirection dir = io_event.io.direction;
@@ -8642,6 +8653,8 @@ void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
         }
     }
 #endif
+    g_hs_wait_ticks += ahs_now() - __hs_t0;
+    g_hs_wait_calls++;
     RT_PROF_ADD(g_wait_io_cycles, g_wait_io_calls, __wio_t0);
 }
 
