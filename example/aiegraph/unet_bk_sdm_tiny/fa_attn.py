@@ -14,7 +14,9 @@ rescale, PV mmul, bf16 hi/lo 1/l finalize), Br = Bc = 32, 4x4 mesh:
                   80-wide halves (5 KB): unit = head (64 rows), core pn = query block pn>>1, output half pn&1.
                   qk row = [Q0h0 Q0h1 Q1h0 Q1h1 | K_b h0, K_b h1 ...], v row = [V_b h0, V_b h1 ...],
                   o row = [O0h0 O0h1 O1h0 O1h1]; S = Q_h0 K_h0^T + Q_h1 K_h1^T (second pass starts from S).
-v3: q port row = the unit's 4 Q (sub-)blocks only; K and V share the second port as one stream per HEAD
+v5 (one global routing() per aiehlc multi-kernel program: FA must use gemm_kacc's topology): q = row broadcast,
+row pm = query block pm (split: block pm>>1) of the 4 heads; kv = column broadcast, column pn = head pn's stream;
+o = gather o[pm][pn]. v3: q port row = the unit's 4 Q (sub-)blocks only; K and V share the second port as one stream per HEAD
 ([K_b V_b] per key block b; split: [K_b h0, K_b h1, V_b h0, V_b h1]). A launch = chunk c x 4 heads (mesh row = head),
 so the kv rows of a head group are packed once and shared by every chunk's launch (no K/V replication; the KO
 aiehlc has no row broadcast for a size-1 port dim, 0ee6397).
@@ -56,7 +58,7 @@ def fa_classes(att: list) -> list:
         if split:
             assert N == 64, N
             units, upr = H, 1
-            qkrow, vrow, orow = 4 * E, 4 * nkv * E, 4 * E
+            qkrow, vrow, orow = 8 * E, 4 * nkv * E, 4 * E
         else:
             assert N % 128 == 0, N
             units, upr = H * N // 128, N // 128
@@ -283,10 +285,11 @@ static inline void fin(void *) {}
 FA_KERNEL = r"""__global__ void @K@(aie::port<input_window_int16 *, aie::IFM, aie::shape<4, @QKROW@>> qk_@K@,
                     aie::port<input_window_int16 *, aie::WEIGHTS, aie::shape<4, @VROW@>> v_@K@,
                     aie::port<output_window_int16 *, aie::OFM, aie::shape<4, @OROW@>> o_@K@) {
-    // GFA class H=@H@ N=@N@ M=@M@ D=@D@ (fa_attn.py): mesh row pm = one unit, core pn = @PNDOC@
+    // GFA class H=@H@ N=@N@ M=@M@ D=@D@ (fa_attn.py) v5, gemm_kacc routing topology: q = row broadcast (row pm holds
+    // the 4 heads' blocks), kv = column broadcast (column pn = one head's K/V stream), o = gather; core = @PNDOC@
     const int pm = aie::program_id(0);
     const int pn = aie::program_id(1);
-    for (int j = 0; j < 4; j++) {
+    for (int j = 0; j < @NQB@; j++) {
         const int16_t *qb = (const int16_t *)aie::load_buffer(qk_@K@, {pm, j * @E@}, {1, @E@});
         if (@QSEL@)
             @NS@::setq(qb, @QHALF@);
@@ -306,27 +309,27 @@ FA_KERNEL = r"""__global__ void @K@(aie::port<input_window_int16 *, aie::IFM, ai
 }
 """
 
-BODY_FULL = r"""        const int16_t *kb = (const int16_t *)aie::load_buffer(v_@K@, {pm, (2 * b) * @E@}, {1, @E@});
+BODY_FULL = r"""        const int16_t *kb = (const int16_t *)aie::load_buffer(v_@K@, {pn, (2 * b) * @E@}, {1, @E@});
         @NS@::qkb(kb, b, 0);
         aie::release(v_@K@);
         @NS@::softb(b);
-        const int16_t *vb = (const int16_t *)aie::load_buffer(v_@K@, {pm, (2 * b + 1) * @E@}, {1, @E@});
+        const int16_t *vb = (const int16_t *)aie::load_buffer(v_@K@, {pn, (2 * b + 1) * @E@}, {1, @E@});
         @NS@::pvb(vb);
         aie::release(v_@K@);"""
 
-BODY_SPLIT = r"""        const int16_t *k0 = (const int16_t *)aie::load_buffer(v_@K@, {pm, (4 * b) * @E@}, {1, @E@});
+BODY_SPLIT = r"""        const int16_t *k0 = (const int16_t *)aie::load_buffer(v_@K@, {pn, (4 * b) * @E@}, {1, @E@});
         @NS@::qkb(k0, b, 0);
         aie::release(v_@K@);
-        const int16_t *k1 = (const int16_t *)aie::load_buffer(v_@K@, {pm, (4 * b + 1) * @E@}, {1, @E@});
+        const int16_t *k1 = (const int16_t *)aie::load_buffer(v_@K@, {pn, (4 * b + 1) * @E@}, {1, @E@});
         @NS@::qkb(k1, b, 1);
         aie::release(v_@K@);
         @NS@::softb(b);
-        const int16_t *v0 = (const int16_t *)aie::load_buffer(v_@K@, {pm, (4 * b + 2) * @E@}, {1, @E@});
-        if ((pn & 1) == 0)
+        const int16_t *v0 = (const int16_t *)aie::load_buffer(v_@K@, {pn, (4 * b + 2) * @E@}, {1, @E@});
+        if ((pm & 1) == 0)
             @NS@::pvb(v0);
         aie::release(v_@K@);
-        const int16_t *v1 = (const int16_t *)aie::load_buffer(v_@K@, {pm, (4 * b + 3) * @E@}, {1, @E@});
-        if ((pn & 1) == 1)
+        const int16_t *v1 = (const int16_t *)aie::load_buffer(v_@K@, {pn, (4 * b + 3) * @E@}, {1, @E@});
+        if ((pm & 1) == 1)
             @NS@::pvb(v1);
         aie::release(v_@K@);"""
 
@@ -350,9 +353,9 @@ def fa_kernel_text(c: dict) -> str:
               VROW=c["vrow"], OROW=c["orow"], H=c["H"], N=c["N"], M=c["M"], D=c["D"])
     body = _sub(BODY_SPLIT if c["split"] else BODY_FULL, kv)
     if c["split"]:
-        kv.update(PNDOC="query block pn>>1, output half pn&1", QSEL="(j >> 1) == (pn >> 1)", QHALF="j & 1")
+        kv.update(PNDOC="head pn, query block pm>>1, output half pm&1", QSEL="(j >> 1) == pn", QHALF="j & 1", NQB=8)
     else:
-        kv.update(PNDOC="query block pn", QSEL="j == pn", QHALF="0")
+        kv.update(PNDOC="head pn, query block pm", QSEL="j == pn", QHALF="0", NQB=4)
     kv["BODY"] = body
     return _sub(FA_KERNEL, kv)
 
@@ -492,12 +495,14 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
                                 kp += 8;
                             }
                 }
-            /* Q blocks of unit (chunk u, head h) = q row u*H + h: block qb (split: sub-block (qb, hh)); qidx order = d8, r8, d&7, r&7 */
-            for (int u = 0; u < npu; u++) {
-                uint16_t *qp = QK + (size_t)(u * H + h) * c.qkrow;
-                for (int qb = 0; qb < (c.split ? 2 : 4); qb++)
-                    for (int hh = 0; hh < nh; hh++) {
-                        const float *q0 = qh + (size_t)(u * 128 + qb * 32) * D + hh * dq;
+            /* v5 Q: query block qb (32 rows) of head h -> launch l = (qb/4)*(H/4) + h/4, q row pm = qb%4, slot h%4;
+             * split (N=64): q rows pm = 2qb, 2qb+1 both hold sub-blocks (h%4)*2 + hq of query block qb */
+            for (int qb = 0; qb < N / 32; qb++)
+                for (int rep = 0; rep < (c.split ? 2 : 1); rep++) {
+                    const int l = c.split ? h / 4 : (qb / 4) * (H / 4) + h / 4, pm = c.split ? qb * 2 + rep : qb % 4;
+                    for (int hq = 0; hq < nh; hq++) {
+                        uint16_t *qp = QK + (size_t)(l * 4 + pm) * c.qkrow + (size_t)((h % 4) * nh + hq) * E;
+                        const float *q0 = qh + (size_t)(qb * 32) * D + hq * dq;
                         for (int d8 = 0; d8 < dq / 8; d8++)
                             for (int r8 = 0; r8 < 4; r8++) {
 #if UC_NEON
@@ -521,7 +526,7 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
 #endif
                             }
                     }
-            }
+                }
         }
         return 0;
     }
@@ -579,36 +584,36 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
         if (lrc != 0)
             return lrc;
     }
-    /* O: same sub-block order as Q (sequential reads) */
+    /* v5 O: o row pm, block h%4 of launch l; non-split = query block qb (pm = qb%4, l = (qb/4)*(H/4) + h/4),
+     * split = (query block pm>>1, half pm&1) of launch h/4 */
     for (int h = 0; h < H; h++) {
         float *yh = Y + (size_t)h * N * D;
-        for (int u = 0; u < npu; u++) {
-            const uint16_t *op = O + (size_t)(u * H + h) * c.orow;
-            for (int qb = 0; qb < (c.split ? 2 : 4); qb++)
-                for (int hh = 0; hh < nh; hh++) {
-                    float *y0 = yh + (size_t)(u * 128 + qb * 32) * D + hh * dq;
-                    for (int d8 = 0; d8 < dq / 8; d8++)
-                        for (int r8 = 0; r8 < 4; r8++) {
+        for (int ob = 0; ob < (c.split ? 4 : N / 32); ob++) {
+            const int qb = c.split ? ob >> 1 : ob, hh = c.split ? ob & 1 : 0;
+            const int l = c.split ? h / 4 : (qb / 4) * (H / 4) + h / 4, pm = c.split ? ob : qb % 4;
+            const uint16_t *op = O + (size_t)(l * 4 + pm) * c.orow + (size_t)(h % 4) * E;
+            float *y0 = yh + (size_t)(qb * 32) * D + hh * dq;
+            for (int d8 = 0; d8 < dq / 8; d8++)
+                for (int r8 = 0; r8 < 4; r8++) {
 #if UC_NEON
-                            uint16x8_t t[8];
-                            for (int dd = 0; dd < 8; dd++)
-                                t[dd] = vld1q_u16(op + dd * 8);
-                            fa_tr8(t);
-                            for (int rr = 0; rr < 8; rr++) {
-                                float *yd = y0 + (size_t)(r8 * 8 + rr) * D + d8 * 8;
-                                vst1q_f32(yd, vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(t[rr]), 16)));
-                                vst1q_f32(yd + 4, vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(t[rr]), 16)));
-                            }
-                            op += 64;
+                    uint16x8_t t[8];
+                    for (int dd = 0; dd < 8; dd++)
+                        t[dd] = vld1q_u16(op + dd * 8);
+                    fa_tr8(t);
+                    for (int rr = 0; rr < 8; rr++) {
+                        float *yd = y0 + (size_t)(r8 * 8 + rr) * D + d8 * 8;
+                        vst1q_f32(yd, vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(t[rr]), 16)));
+                        vst1q_f32(yd + 4, vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(t[rr]), 16)));
+                    }
+                    op += 64;
 #else
-                            for (int dd = 0; dd < 8; dd++) {
-                                float *yc = y0 + (size_t)(r8 * 8) * D + d8 * 8 + dd;
-                                for (int rr = 0; rr < 8; rr++)
-                                    yc[(size_t)rr * D] = fa_bf2f(op[rr]);
-                                op += 8;
-                            }
+                    for (int dd = 0; dd < 8; dd++) {
+                        float *yc = y0 + (size_t)(r8 * 8) * D + d8 * 8 + dd;
+                        for (int rr = 0; rr < 8; rr++)
+                            yc[(size_t)rr * D] = fa_bf2f(op[rr]);
+                        op += 8;
+                    }
 #endif
-                        }
                 }
         }
     }
