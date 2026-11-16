@@ -1547,6 +1547,38 @@ static int uc_scatter16(const float *Ys, int P, int N, int tr, int mbase, int mv
                 for (int nq = 0; nq < 16; nq += 4) {
                     float32x4_t v0 = vld1q_f32(src[nq][h] + off), v1 = vld1q_f32(src[nq + 1][h] + off),
                                 v2 = vld1q_f32(src[nq + 2][h] + off), v3 = vld1q_f32(src[nq + 3][h] + off);
+                    if (yb == 1) { /* P4a keep-layout: planar NCHW output (GN input): px m0..+3 of one channel are
+                                    * 4 contiguous floats -> no transpose; residual (et 2+rb) in NCHWc block rb */
+                        const float32x4_t vv[4] = {v0, v1, v2, v3};
+                        for (int k = 0; k < 4; k++) {
+                            const int n = nt + nq + k;
+                            float *o = yout + (size_t)n * M + m0;
+                            float32x4_t a = vv[k];
+                            if (nv == 4)
+                                badv = vaddq_u32(badv, vshrq_n_u32(vmvnq_u32(vcaleq_f32(a, lim)), 31));
+                            for (int e = 0; e < ne_; e++) {
+                                if (et[e] == 0) {
+                                    a = vaddq_f32(a, vdupq_n_f32(ep[e][n]));
+                                } else {
+                                    const int rb = et[e] >= 2 ? et[e] - 2 : 1;
+                                    const float *r = ep[e] + (size_t)(n / rb) * M * rb + (size_t)m0 * rb + n % rb;
+                                    float rv[4] = {r[0], 0.0f, 0.0f, 0.0f};
+                                    for (int t = 1; t < 4; t++)
+                                        rv[t] = (mt + mq + t < mvalid) ? r[(size_t)t * rb] : 0.0f;
+                                    a = vaddq_f32(a, vld1q_f32(rv));
+                                }
+                            }
+                            if (nv == 4)
+                                vst1q_f32(o, a);
+                            else {
+                                float tmp[4];
+                                vst1q_f32(tmp, a);
+                                for (int t = 0; t < nv; t++)
+                                    o[t] = tmp[t];
+                            }
+                        }
+                        continue;
+                    }
                     uc_tr4(v0, v1, v2, v3); /* vt = n nt+nq..+3 of px m0+t */
                     const size_t o0 = ob[nq >> 2] + (size_t)m0 * ds;
                     if (nv == 4) {
@@ -1985,8 +2017,10 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
             return -5;
         if (ne == N && e->ndim == 5)
             et[ne_] = 0;
-        else if (ne == (long)M * N && e->ndim == 5 && (int)e->shape[4] == yb)
+        else if (ne == (long)M * N && e->ndim == 5 && (int)e->shape[4] == yb && yb != 1)
             et[ne_] = 1;
+        else if (ne == (long)M * N && e->ndim == 5 && yb == 1 && UC_NEON) /* P4a planar out, NCHWc residual */
+            et[ne_] = 2 + (int)e->shape[4];
         else
             return -5;
         ep[ne_++] = (const float *)e->data;
@@ -1995,7 +2029,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
     const float *Y = (const float *)g_ky; // [N][M] fp32 (NCHW)
     int bad = 0;
 #if UC_NEON
-    if (yb % 4 == 0) {
+    if (yb % 4 == 0 || yb == 1) { /* P4a: yb == 1 = planar NCHW (keep_layout_rt.py label) */
         bad = uc_scatter16(Y, M, N, tr, 0, M, yout, M, yb, ep, et, ne_); /* GHL: 16x16 tiles */
         N_ = 0; /* scalar loop below skipped */
     }

@@ -25,7 +25,8 @@ from pathlib import Path
 import numpy as np
 
 PROF_RE = re.compile(r"    GRAPH_PROF_BEGIN\((\d+)\);\n(.*?)    GRAPH_PROF_END\(\1, \"([^\"]*)\"\);\n", re.S)
-ARG_RE = re.compile(r"    args\[(\d+)\]\.v_handle = &tensors\[(\d+)\];\n")
+ARG_RE = re.compile(r"    args\[(\d+)\]\.v_handle = &(?:tensors\[(\d+)\]|(g_kl_\w+));\n")
+LBL_RE = re.compile(r"    (g_kl_\w+) = tensors\[(\d+)\];(?: \1\.data = tensors\[(\d+)\]\.data;)?")
 BUF_RE = re.compile(r"    tensors\[(\d+)\]\.data = (buf_\d+|g_wscratch \+ \d+);\n")
 SHAPE_RE = re.compile(r"    shape_store\[(\d+)\]\[(\d+)\] = (\d+);\n")
 FN_RE = re.compile(r"(?:aie_)?tvmgen_default_fused_(\w+)\(args, codes, (\d+), 0, 0, 0\);")
@@ -37,10 +38,13 @@ def _calls(text: str) -> list:
     """graph_run call blocks in order: idx, prof span, op tag, fused fn, args (tensor ids), segment start."""
     body0 = text.index("float *graph_run(void)")
     out, seg = [], body0
+    lbl = {"g_kl_x_t": -1}   # P4a labels -> the tensor whose buffer they point at
+    for m in LBL_RE.finditer(text, body0):
+        lbl[m.group(1)] = int(m.group(3) or m.group(2))
     for m in PROF_RE.finditer(text, body0):
         args = {}
         for a in ARG_RE.finditer(text, seg, m.start()):
-            args[int(a.group(1))] = int(a.group(2))
+            args[int(a.group(1))] = int(a.group(2)) if a.group(2) else lbl[a.group(3)]
         fm = FN_RE.search(m.group(2))
         site = re.search(r"unet_aie_(conv|linear|attn)\((\d+), args, (\d+)(?:, (\d+), (\d+))?", m.group(2))
         nargs = int(fm.group(2)) if fm else (int(site.group(3)) if site else 0)
@@ -326,8 +330,148 @@ def fa_pass(text: str, csrc: str, wbin: Path, log=print) -> tuple:
     return text, ngrp
 
 
+# ------------------------------------------------------------------------------------------------ transformer out
+PO_FN = re.compile(r"^reshape_add_reshape_transpose_layout_transform(_\d+)?$")
+PO_BODY = re.compile(r"T_layout_trans_1\)\[.*\] = \(\(\(float\*\)p0_1\)\[cse_var_1\] \+ \(\(float\*\)p1_1\)\[cse_var_1\]\);")
+
+
+def projout_pass(text: str, csrc: str, log=print) -> tuple:
+    """linear (ff out, [M][C]) -> reshape_add_reshape_transpose_layout_transform (+ residual [M][C], -> NCHWc) -> AIE
+    1x1 conv (proj_out): the residual add goes into the linear site's scatter epilogue ([M][N] residual, argument
+    order kept: (y + bias) + res as TVM), the conv reads the [M][C] buffer as NHWC (= NCHWc with one channel block
+    of C: a DLTensor label, its im2col already re-tiles every element) -> the layout op is gone."""
+    sh = _shapes(text)
+    n = 0
+    decl = []
+    while True:
+        calls = _calls(text)
+        js = [i for i, c in enumerate(calls) if c["fn"] and PO_FN.match(c["fn"])]
+        if not js:
+            break
+        j = js[0]
+        c = calls[j]
+        assert PO_BODY.search(_tvm_body(csrc, c["fn"])), ("proj_out body", c["fn"])
+        tl, tr_, to = c["args"]
+        lin, cv = calls[j - 1], calls[j + 1]
+        assert lin["site"] and lin["site"].startswith("unet_aie_linear(") and lin["args"][-1] == tl, lin
+        assert cv["site"] and cv["site"].startswith("unet_aie_conv(") and cv["args"][0] == to, cv
+        assert _consumers(calls, j - 1, tl) == [j] and _consumers(calls, j, to) == [j + 1], (tl, to)
+        Mx, C = sh[tl][-2], sh[tl][-1]
+        assert sh[tr_][-2:] == [Mx, C] and int(np.prod(sh[tr_])) == Mx * C, (sh[tr_], sh[tl])
+        o = sh[to]
+        assert len(o) == 5 and o[0] == 1 and o[1] * o[4] == C and o[2] * o[3] == Mx, o
+        # body: the out NCHWc element (cb, p, ci) = in[p][cb*CB + ci]  (check one index expression)
+        H_, W_ = o[2], o[3]
+        # linear site: one more epilogue arg (the residual) before the output
+        na = len(lin["args"])
+        seg0, seg1 = lin["seg"], lin["span"][1]
+        blk = text[seg0:seg1]
+        old_out = "    args[%d].v_handle = &tensors[%d];\n" % (na - 1, tl)
+        assert blk.count(old_out) == 1, ("lin out arg", lin["idx"])
+        blk = blk.replace(old_out, "    args[%d].v_handle = &tensors[%d];   /* P4a: residual into the scatter */\n"
+                          "    args[%d].v_handle = &tensors[%d];\n" % (na - 1, tr_, na, tl))
+        m = re.search(r"unet_aie_linear\((\d+), args, %d, " % na, blk)
+        assert m, ("lin call", lin["idx"])
+        blk = blk[:m.start()] + "unet_aie_linear(%s, args, %d, " % (m.group(1), na + 1) + blk[m.end():]
+        # conv site: x = NHWC label of the linear output
+        cblk = text[cv["seg"]:cv["span"][1]]
+        old_x = "    args[0].v_handle = &tensors[%d];\n" % to
+        assert cblk.count(old_x) == 1, ("conv x arg", cv["idx"])
+        nm = "g_kl_nhwc_%d" % cv["idx"]
+        decl.append("static DLTensor %s;\nstatic int64_t %s_shape[5] = {1, 1, %d, %d, %d};\n" % (nm, nm, H_, W_, C))
+        cblk = cblk.replace(old_x, "    %s = tensors[%d]; %s.ndim = 5; %s.shape = %s_shape;   /* P4a: [M][C] as NHWC */\n"
+                            "    args[0].v_handle = &%s;\n" % (nm, tl, nm, nm, nm, nm))
+        rblk = "    /* P4a keep-layout: call [%d] %s removed -- residual add in the linear scatter, conv reads NHWC */\n" % (
+            c["idx"], c["fn"])
+        text = text[:seg0] + blk + text[seg1:c["span"][0]] + rblk + text[c["span"][1]:cv["seg"]] + cblk + \
+            text[cv["span"][1]:]
+        n += 1
+        log(f"KL proj_out [{c['idx']}] {c['fn']}: linear [{lin['idx']}] += residual t{tr_}, conv [{cv['idx']}] reads "
+            f"t{tl} as NHWC 1x1x{H_}x{W_}x{C}")
+    if n:
+        i = text.index("float *graph_run(void)")
+        i = text.rindex("\n", 0, i) + 1
+        text = text[:i] + "/* P4a keep-layout: NHWC labels of linear outputs read by AIE convs */\n" + "".join(decl) + \
+            "\n" + text[i:]
+    return text, n
+
+
+# ------------------------------------------------------------------------------------------------ conv outputs
+CO_FN = re.compile(r"^layout_transform(_transpose)?_reshape(_\d+)?$")
+
+
+def convout_pass(text: str, csrc: str, log=print) -> tuple:
+    """AIE conv -> layout_transform_reshape (NCHWc -> planar NCHW, GroupNorm input) or layout_transform_transpose_reshape
+    (NCHWc -> [HW][C], transformer input): the conv's scatter (which already re-tiles every output element) writes
+    the consumer's layout directly -- planar = NCHWc label with block 1 (unet_aie uc_scatter16 yb == 1 branch),
+    [HW][C] = NHWC = NCHWc label with one block of C -- into the layout op's output buffer; the op is gone."""
+    sh = _shapes(text)
+    n = 0
+    decl = []
+    skipped = set()
+    while True:
+        calls = _calls(text)
+        js = [i for i, c in enumerate(calls) if c["fn"] and CO_FN.match(c["fn"]) and i > 0 and calls[i - 1]["site"]
+              and calls[i - 1]["site"].startswith("unet_aie_conv(") and calls[i - 1]["args"][-1] == c["args"][0]
+              and _consumers(calls, i - 1, c["args"][0]) == [i] and c["idx"] not in skipped]
+        if not js:
+            break
+        j = js[0]
+        c, cv = calls[j], calls[j - 1]
+        tin, tout = c["args"][0], c["args"][-1]
+        assert len(c["args"]) == 2, c
+        bufs = _bufs(text)
+        if any(bufs.get(t) == bufs[tout] for t in cv["args"][1:-1]):
+            # the conv's epilogue operand lives in the buffer it would now write (TVM reused it for the layout op
+            # output): writing early would clobber it -> leave this layout op in place
+            skipped.add(c["idx"])
+            log(f"KL conv out [{cv['idx']}] -> [{c['idx']}] {c['fn']}: SKIP (epilogue operand shares buffer {bufs[tout]})")
+            continue
+        assert _consumers(calls, j - 1, tin) == [j], ("conv out used elsewhere", tin)
+        xi = sh[tin]
+        assert len(xi) == 5 and xi[0] == 1, xi
+        O, OH, OW = xi[1] * xi[4], xi[2], xi[3]
+        assert int(np.prod(sh[tout])) == O * OH * OW, (sh[tout], xi)
+        body = _tvm_body(csrc, c["fn"])
+        nhwc = "_transpose_" in c["fn"]
+        if nhwc:
+            # out [HW][C] row-major: T_reshape_1[(p * C) + c]
+            assert sh[tout][-2:] == [OH * OW, O] and re.search(r"T_reshape_1\)\[\(+ax0_ax1_fused \* %d\)" % O, body), \
+                ("nhwc body", c["fn"], sh[tout])
+            # epilogue of an NHWC-labelled output: per-channel only (a residual would need the same block)
+            for t in cv["args"][2:-1]:
+                assert int(np.prod(sh[t])) == O, ("conv residual with NHWC out", cv["idx"], t)
+            lab = (1, 1, OH, OW, O)
+        else:
+            # out = planar NCHW (+ reshape label [1, G, C/G*HW]): T_reshape_1[(g * X) + i] walks the output in order
+            assert len(sh[tout]) == 3 and sh[tout][0] == 1 and re.search(r"T_reshape_1\)\[\(+(?:\(ax0_ax1_fused \* %d\)|cse_var_1)"
+                                                                          % (sh[tout][2]), body), ("planar body", c["fn"], sh[tout])
+            lab = (1, O, OH, OW, 1)
+        cblk = text[cv["seg"]:cv["span"][1]]
+        na = len(cv["args"])
+        old_y = "    args[%d].v_handle = &tensors[%d];\n" % (na - 1, tin)
+        assert cblk.count(old_y) == 1, ("conv y arg", cv["idx"])
+        nm = "g_kl_y_%d" % cv["idx"]
+        decl.append("static DLTensor %s;\nstatic int64_t %s_shape[5] = {%d, %d, %d, %d, %d};\n" % ((nm, nm) + lab))
+        cblk = cblk.replace(old_y, "    %s = tensors[%d]; %s.data = tensors[%d].data; %s.shape = %s_shape;   /* P4a: %s */\n"
+                            "    args[%d].v_handle = &%s;\n"
+                            % (nm, tin, nm, tout, nm, nm, "NHWC out" if nhwc else "planar NCHW out", na - 1, nm))
+        rblk = "    /* P4a keep-layout: call [%d] %s removed -- the AIE conv [%d] writes this layout */\n" % (
+            c["idx"], c["fn"], cv["idx"])
+        text = text[:cv["seg"]] + cblk + text[cv["span"][1]:c["span"][0]] + rblk + text[c["span"][1]:]
+        n += 1
+        log(f"KL conv out [{cv['idx']}] -> [{c['idx']}] {c['fn']}: {'NHWC' if nhwc else 'planar'} label {lab} into t{tout}")
+    if n:
+        i = text.index("float *graph_run(void)")
+        i = text.rindex("\n", 0, i) + 1
+        text = text[:i] + "/* P4a keep-layout: AIE conv output labels */\n" + "".join(decl) + "\n" + text[i:]
+    return text, n
+
+
 def keep_layout_driver(text: str, csrc: str, wbin: Path, log=print) -> tuple:
     text, nt = temb_pass(text, csrc, wbin, log)
     text, na = fa_pass(text, csrc, wbin, log)
-    log(f"KEEP_LAYOUT_RT temb_sites={nt} attn_groups={na}")
+    text, npo = projout_pass(text, csrc, log)
+    text, nco = convout_pass(text, csrc, log)
+    log(f"KEEP_LAYOUT_RT temb_sites={nt} attn_groups={na} proj_out={npo} conv_out={nco}")
     return text, nt, na
