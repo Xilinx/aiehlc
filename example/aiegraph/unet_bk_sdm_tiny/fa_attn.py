@@ -383,6 +383,37 @@ static inline float fa_bf2f(uint16_t h) {
     memcpy(&f, &u, 4);
     return f;
 }
+#if UC_NEON
+/* 4 x fp32 -> bf16 round-to-nearest-even (bit-identical to fa_f2bf for finite values) */
+static inline uint16x4_t fa_f2bf4(float32x4_t v) {
+    uint32x4_t u = vreinterpretq_u32_f32(v);
+    const uint32x4_t lsb = vandq_u32(vshrq_n_u32(u, 16), vdupq_n_u32(1u));
+    u = vaddq_u32(u, vaddq_u32(lsb, vdupq_n_u32(0x7fffu)));
+    return vshrn_n_u32(u, 16);
+}
+static inline uint16x8_t fa_f2bf8(float32x4_t a, float32x4_t b) { return vcombine_u16(fa_f2bf4(a), fa_f2bf4(b)); }
+/* in-place 8x8 transpose of 16-bit lanes: r[i][j] -> r[j][i] */
+static inline void fa_tr8(uint16x8_t r[8]) {
+    const uint16x8x2_t t0 = vtrnq_u16(r[0], r[1]), t1 = vtrnq_u16(r[2], r[3]), t2 = vtrnq_u16(r[4], r[5]),
+                       t3 = vtrnq_u16(r[6], r[7]);
+    const uint32x4x2_t u0 = vtrnq_u32(vreinterpretq_u32_u16(t0.val[0]), vreinterpretq_u32_u16(t1.val[0]));
+    const uint32x4x2_t u1 = vtrnq_u32(vreinterpretq_u32_u16(t0.val[1]), vreinterpretq_u32_u16(t1.val[1]));
+    const uint32x4x2_t u2 = vtrnq_u32(vreinterpretq_u32_u16(t2.val[0]), vreinterpretq_u32_u16(t3.val[0]));
+    const uint32x4x2_t u3 = vtrnq_u32(vreinterpretq_u32_u16(t2.val[1]), vreinterpretq_u32_u16(t3.val[1]));
+#define FA_T1(a, b) vreinterpretq_u16_u64(vtrn1q_u64(vreinterpretq_u64_u32(a), vreinterpretq_u64_u32(b)))
+#define FA_T2(a, b) vreinterpretq_u16_u64(vtrn2q_u64(vreinterpretq_u64_u32(a), vreinterpretq_u64_u32(b)))
+    r[0] = FA_T1(u0.val[0], u2.val[0]);
+    r[4] = FA_T2(u0.val[0], u2.val[0]);
+    r[1] = FA_T1(u1.val[0], u3.val[0]);
+    r[5] = FA_T2(u1.val[0], u3.val[0]);
+    r[2] = FA_T1(u0.val[1], u2.val[1]);
+    r[6] = FA_T2(u0.val[1], u2.val[1]);
+    r[3] = FA_T1(u1.val[1], u3.val[1]);
+    r[7] = FA_T2(u1.val[1], u3.val[1]);
+#undef FA_T1
+#undef FA_T2
+}
+#endif
 static int fa_alloc(int k) {
     if (g_fa_qk[k])
         return 0;
@@ -448,8 +479,13 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
                                 const int j = b * 32 + j4 * 4 + jj, c0 = hh * dq + d8 * 8;
                                 if (j < M) {
                                     const float *kr = kh + (size_t)j * D + c0, *mr = mu + c0;
+#if UC_NEON
+                                    vst1q_u16(kp, fa_f2bf8(vsubq_f32(vld1q_f32(kr), vld1q_f32(mr)),
+                                                           vsubq_f32(vld1q_f32(kr + 4), vld1q_f32(mr + 4))));
+#else
                                     for (int dd = 0; dd < 8; dd++)
                                         kp[dd] = fa_f2bf(kr[dd] - mr[dd]);
+#endif
                                 } else
                                     for (int dd = 0; dd < 8; dd++)
                                         kp[dd] = 0;
@@ -463,13 +499,27 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
                     for (int hh = 0; hh < nh; hh++) {
                         const float *q0 = qh + (size_t)(u * 128 + qb * 32) * D + hh * dq;
                         for (int d8 = 0; d8 < dq / 8; d8++)
-                            for (int r8 = 0; r8 < 4; r8++)
+                            for (int r8 = 0; r8 < 4; r8++) {
+#if UC_NEON
+                                const float32x4_t sc = vdupq_n_f32(lg2e);
+                                uint16x8_t t[8];
+                                for (int rr = 0; rr < 8; rr++) {
+                                    const float *qs = q0 + (size_t)(r8 * 8 + rr) * D + d8 * 8;
+                                    t[rr] = fa_f2bf8(vmulq_f32(vld1q_f32(qs), sc), vmulq_f32(vld1q_f32(qs + 4), sc));
+                                }
+                                fa_tr8(t);
+                                for (int dd = 0; dd < 8; dd++)
+                                    vst1q_u16(qp + dd * 8, t[dd]);
+                                qp += 64;
+#else
                                 for (int dd = 0; dd < 8; dd++) {
                                     const float *qc = q0 + (size_t)(r8 * 8) * D + d8 * 8 + dd;
                                     for (int rr = 0; rr < 8; rr++)
                                         qp[rr] = fa_f2bf(qc[(size_t)rr * D] * lg2e);
                                     qp += 8;
                                 }
+#endif
+                            }
                     }
             }
         }
@@ -493,8 +543,12 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
                             const int j0 = b * 32 + j8 * 8;
                             const float *vr = vh + (size_t)(hh * dq + d4 * 4 + dd) * M + j0;
                             if (j0 + 8 <= M)
+#if UC_NEON
+                                vst1q_u16(vp, fa_f2bf8(vld1q_f32(vr), vld1q_f32(vr + 4)));
+#else
                                 for (int jj = 0; jj < 8; jj++)
                                     vp[jj] = fa_f2bf(vr[jj]);
+#endif
                             else
                                 for (int jj = 0; jj < 8; jj++)
                                     vp[jj] = j0 + jj < M ? fa_f2bf(vr[jj]) : 0;
@@ -534,13 +588,27 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
                 for (int hh = 0; hh < nh; hh++) {
                     float *y0 = yh + (size_t)(u * 128 + qb * 32) * D + hh * dq;
                     for (int d8 = 0; d8 < dq / 8; d8++)
-                        for (int r8 = 0; r8 < 4; r8++)
+                        for (int r8 = 0; r8 < 4; r8++) {
+#if UC_NEON
+                            uint16x8_t t[8];
+                            for (int dd = 0; dd < 8; dd++)
+                                t[dd] = vld1q_u16(op + dd * 8);
+                            fa_tr8(t);
+                            for (int rr = 0; rr < 8; rr++) {
+                                float *yd = y0 + (size_t)(r8 * 8 + rr) * D + d8 * 8;
+                                vst1q_f32(yd, vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(t[rr]), 16)));
+                                vst1q_f32(yd + 4, vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(t[rr]), 16)));
+                            }
+                            op += 64;
+#else
                             for (int dd = 0; dd < 8; dd++) {
                                 float *yc = y0 + (size_t)(r8 * 8) * D + d8 * 8 + dd;
                                 for (int rr = 0; rr < 8; rr++)
                                     yc[(size_t)rr * D] = fa_bf2f(op[rr]);
                                 op += 8;
                             }
+#endif
+                        }
                 }
         }
     }
