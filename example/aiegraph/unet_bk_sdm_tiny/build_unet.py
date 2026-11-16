@@ -23,6 +23,7 @@ then receives exactly the 4 bytes whose crc32 is part of unet_in.crc32.
 """
 import argparse
 import json
+import re
 import os
 import shutil
 import sys
@@ -506,7 +507,9 @@ def main(argv=None) -> int:
         return 1
     if a.aie != "none":
         drv = (Path(rep.elf).parent / "graph_driver.c").read_text()
-        got = (drv.count("    unet_aie_conv("), drv.count("    unet_aie_linear("), drv.count("    unet_aie_attn("))
+        # P4a --keep-layout: an FA group's QK / PV site = unet_aie_attn_kl role 3 (K pack) / role 6 (launch + O)
+        nkl = len(re.findall(r"    unet_aie_attn_kl\(\d+, [36], ", drv))
+        got = (drv.count("    unet_aie_conv("), drv.count("    unet_aie_linear("), drv.count("    unet_aie_attn(") + nkl)
         if got != n_patched:
             log(f"build FAILED: linked driver has {got} unet_aie_conv/unet_aie_linear/unet_aie_attn call sites, "
                 f"expected {n_patched}")
