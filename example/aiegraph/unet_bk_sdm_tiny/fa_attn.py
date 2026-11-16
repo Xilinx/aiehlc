@@ -413,6 +413,7 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
     if (fa_alloc(k) != 0)
         return -1;
     uint16_t *QK = g_fa_qk[k], *V = g_fa_v[k], *O = g_fa_o[k];
+    const int nh = c.split ? 2 : 1, npu = c.split ? 1 : c.upr; /* d halves per block, units per head */
     if (role == 0) { /* x = Q [H][N][D], w = K [H][M][D] */
         if ((int)x->shape[0] != H || (int)x->shape[1] != N || (int)x->shape[2] != D || (int)w->shape[0] != H ||
             (int)w->shape[1] != M || (int)w->shape[2] != D)
@@ -422,55 +423,52 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
         for (int h = 0; h < H; h++) {
             const float *kh = K + (size_t)h * M * D, *qh = Q + (size_t)h * N * D;
             /* PKC: keys centred over the M real keys (per column mean) */
+            float *mu = g_fa_mu;
             for (int d = 0; d < D; d++)
-                g_fa_mu[d] = 0.0f;
-            for (int j = 0; j < M; j++)
+                mu[d] = 0.0f;
+            for (int j = 0; j < M; j++) {
+                const float *kr = kh + (size_t)j * D;
                 for (int d = 0; d < D; d++)
-                    g_fa_mu[d] += kh[(size_t)j * D + d];
+                    mu[d] += kr[d];
+            }
+            const float im = 1.0f / (float)M;
             for (int d = 0; d < D; d++)
-                g_fa_mu[d] *= 1.0f / (float)M;
-            const int u0 = c.split ? h : h * c.upr;
+                mu[d] *= im;
+            const int u0 = h * npu;
             uint16_t *kd = QK + (size_t)u0 * c.qkrow + 4 * E;
-            if (!c.split) {
-                for (int b = 0; b < nkv; b++)
-                    for (int jj = 0; jj < 32; jj++) {
-                        const int j = b * 32 + jj;
-                        uint16_t *kb = kd + (size_t)b * E;
-                        for (int d = 0; d < D; d++)
-                            kb[fa_kidx(jj, d, dq)] = j < M ? fa_f2bf(kh[(size_t)j * D + d] - g_fa_mu[d]) : 0;
-                    }
-                for (int u = 1; u < c.upr; u++) /* every unit (mesh row) of this head carries its K */
-                    memcpy(QK + (size_t)(u0 + u) * c.qkrow + 4 * E, kd, (size_t)nkv * E * 2);
-                for (int u = 0; u < c.upr; u++) {
-                    uint16_t *qd = QK + (size_t)(u0 + u) * c.qkrow;
-                    for (int qb = 0; qb < 4; qb++)
-                        for (int r = 0; r < 32; r++) {
-                            const float *qr = qh + (size_t)(u * 128 + qb * 32 + r) * D;
-                            uint16_t *qo = qd + (size_t)qb * E;
-                            for (int d = 0; d < D; d++)
-                                qo[fa_qidx(d, r)] = fa_f2bf(qr[d] * lg2e);
-                        }
-                }
-            } else {
-                for (int b = 0; b < nkv; b++)
-                    for (int hh = 0; hh < 2; hh++) {
-                        uint16_t *kb = kd + (size_t)(2 * b + hh) * E;
-                        for (int jj = 0; jj < 32; jj++) {
-                            const int j = b * 32 + jj;
-                            for (int d = 0; d < dq; d++)
-                                kb[fa_kidx(jj, d, dq)] =
-                                    j < M ? fa_f2bf(kh[(size_t)j * D + hh * dq + d] - g_fa_mu[hh * dq + d]) : 0;
-                        }
-                    }
-                uint16_t *qd = QK + (size_t)u0 * c.qkrow;
-                for (int qb = 0; qb < 2; qb++)
-                    for (int hh = 0; hh < 2; hh++) {
-                        uint16_t *qo = qd + (size_t)(qb * 2 + hh) * E;
-                        for (int r = 0; r < 32; r++) {
-                            const float *qr = qh + (size_t)(qb * 32 + r) * D + hh * dq;
-                            for (int d = 0; d < dq; d++)
-                                qo[fa_qidx(d, r)] = fa_f2bf(qr[d] * lg2e);
-                        }
+            /* K block (b, half hh): kidx order = j4, d8, j&3, d&7 -> sequential writes */
+            uint16_t *kp = kd;
+            for (int b = 0; b < nkv; b++)
+                for (int hh = 0; hh < nh; hh++)
+                    for (int j4 = 0; j4 < 8; j4++)
+                        for (int d8 = 0; d8 < dq / 8; d8++)
+                            for (int jj = 0; jj < 4; jj++) {
+                                const int j = b * 32 + j4 * 4 + jj, c0 = hh * dq + d8 * 8;
+                                if (j < M) {
+                                    const float *kr = kh + (size_t)j * D + c0, *mr = mu + c0;
+                                    for (int dd = 0; dd < 8; dd++)
+                                        kp[dd] = fa_f2bf(kr[dd] - mr[dd]);
+                                } else
+                                    for (int dd = 0; dd < 8; dd++)
+                                        kp[dd] = 0;
+                                kp += 8;
+                            }
+            for (int u = 1; u < npu; u++) /* every unit (mesh row) of this head carries its K */
+                memcpy(QK + (size_t)(u0 + u) * c.qkrow + 4 * E, kd, (size_t)nkv * nh * E * 2);
+            /* Q blocks: non-split unit u = rows u*128.., block qb; split: sub-block (qb, hh). qidx order = d8, r8, d&7, r&7 */
+            for (int u = 0; u < npu; u++) {
+                uint16_t *qp = QK + (size_t)(u0 + u) * c.qkrow;
+                for (int qb = 0; qb < (c.split ? 2 : 4); qb++)
+                    for (int hh = 0; hh < nh; hh++) {
+                        const float *q0 = qh + (size_t)(u * 128 + qb * 32) * D + hh * dq;
+                        for (int d8 = 0; d8 < dq / 8; d8++)
+                            for (int r8 = 0; r8 < 4; r8++)
+                                for (int dd = 0; dd < 8; dd++) {
+                                    const float *qc = q0 + (size_t)(r8 * 8) * D + d8 * 8 + dd;
+                                    for (int rr = 0; rr < 8; rr++)
+                                        qp[rr] = fa_f2bf(qc[(size_t)rr * D] * lg2e);
+                                    qp += 8;
+                                }
                     }
             }
         }
@@ -484,20 +482,25 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
     float *Y = (float *)y->data;
     for (int h = 0; h < H; h++) {
         const float *vh = VT + (size_t)h * D * M;
-        const int u0 = c.split ? h : h * c.upr;
-        uint16_t *vd = V + (size_t)u0 * c.vrow;
+        const int u0 = h * npu;
+        uint16_t *vd = V + (size_t)u0 * c.vrow, *vp = vd;
+        /* V block (b, half hh): vidx order = d4, j8, d&3, j&7 -> sequential writes */
         for (int b = 0; b < nkv; b++)
-            for (int hh = 0; hh < (c.split ? 2 : 1); hh++) {
-                uint16_t *vb = vd + (size_t)(c.split ? 2 * b + hh : b) * E;
-                for (int d = 0; d < dq; d++) {
-                    const float *vr = vh + (size_t)(hh * dq + d) * M;
-                    for (int jj = 0; jj < 32; jj++) {
-                        const int j = b * 32 + jj;
-                        vb[fa_vidx(d, jj)] = j < M ? fa_f2bf(vr[j]) : 0;
-                    }
-                }
-            }
-        for (int u = 1; u < (c.split ? 1 : c.upr); u++)
+            for (int hh = 0; hh < nh; hh++)
+                for (int d4 = 0; d4 < dq / 4; d4++)
+                    for (int j8 = 0; j8 < 4; j8++)
+                        for (int dd = 0; dd < 4; dd++) {
+                            const int j0 = b * 32 + j8 * 8;
+                            const float *vr = vh + (size_t)(hh * dq + d4 * 4 + dd) * M + j0;
+                            if (j0 + 8 <= M)
+                                for (int jj = 0; jj < 8; jj++)
+                                    vp[jj] = fa_f2bf(vr[jj]);
+                            else
+                                for (int jj = 0; jj < 8; jj++)
+                                    vp[jj] = j0 + jj < M ? fa_f2bf(vr[jj]) : 0;
+                            vp += 8;
+                        }
+        for (int u = 1; u < npu; u++)
             memcpy(V + (size_t)(u0 + u) * c.vrow, vd, (size_t)c.vrow * 2);
     }
 #if UC_CTRLPKT
@@ -521,29 +524,22 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
         if (lrc != 0)
             return lrc;
     }
+    /* O: same sub-block order as Q (sequential reads) */
     for (int h = 0; h < H; h++) {
         float *yh = Y + (size_t)h * N * D;
-        if (!c.split) {
-            for (int u = 0; u < c.upr; u++) {
-                const uint16_t *od = O + (size_t)(h * c.upr + u) * c.orow;
-                for (int qb = 0; qb < 4; qb++)
-                    for (int r = 0; r < 32; r++) {
-                        float *yr = yh + (size_t)(u * 128 + qb * 32 + r) * D;
-                        const uint16_t *oo = od + (size_t)qb * E;
-                        for (int d = 0; d < D; d++)
-                            yr[d] = fa_bf2f(oo[fa_qidx(d, r)]);
-                    }
-            }
-        } else {
-            const uint16_t *od = O + (size_t)h * c.orow;
-            for (int qb = 0; qb < 2; qb++)
-                for (int hh = 0; hh < 2; hh++) {
-                    const uint16_t *oo = od + (size_t)(qb * 2 + hh) * E;
-                    for (int r = 0; r < 32; r++) {
-                        float *yr = yh + (size_t)(qb * 32 + r) * D + hh * dq;
-                        for (int d = 0; d < dq; d++)
-                            yr[d] = fa_bf2f(oo[fa_qidx(d, r)]);
-                    }
+        for (int u = 0; u < npu; u++) {
+            const uint16_t *op = O + (size_t)(h * npu + u) * c.orow;
+            for (int qb = 0; qb < (c.split ? 2 : 4); qb++)
+                for (int hh = 0; hh < nh; hh++) {
+                    float *y0 = yh + (size_t)(u * 128 + qb * 32) * D + hh * dq;
+                    for (int d8 = 0; d8 < dq / 8; d8++)
+                        for (int r8 = 0; r8 < 4; r8++)
+                            for (int dd = 0; dd < 8; dd++) {
+                                float *yc = y0 + (size_t)(r8 * 8) * D + d8 * 8 + dd;
+                                for (int rr = 0; rr < 8; rr++)
+                                    yc[(size_t)rr * D] = fa_bf2f(op[rr]);
+                                op += 8;
+                            }
                 }
         }
     }

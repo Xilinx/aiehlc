@@ -166,6 +166,18 @@ def test_lint_rules(tmp_path, kwargs, code):
     assert code in _codes(rep), rep.text()
 
 
+def test_lint_l017_prologue_helper_ok(tmp_path):
+    """GFA: a helper defined inside AIEHLC_KERNEL_PROLOGUE_BEGIN/END reaches kernel.cc -> no L017;
+    the same helper outside the block still is L017"""
+    pro = ("// AIEHLC_KERNEL_PROLOGUE_BEGIN\nstatic inline int helper(int x) { return x; }\n"
+           "// AIEHLC_KERNEL_PROLOGUE_END")
+    rep = lint.lint_source(_write(tmp_path, "k.cc", _kernel_src(top=pro, body_extra="int h = helper(s);")))
+    assert "L017" not in _codes(rep), rep.text()
+    rep = lint.lint_source(_write(tmp_path, "k2.cc", _kernel_src(top="static inline int helper(int x) { return x; }",
+                                                                 body_extra="int h = helper(s);")))
+    assert "L017" in _codes(rep), rep.text()
+
+
 def test_lint_l015_launch_without_partition(tmp_path):
     text = _kernel_src().replace("aieMesh mesh = device.partition({0, 4, 0, 6}, 4, 4);",
                                  "aieMesh mesh;")
