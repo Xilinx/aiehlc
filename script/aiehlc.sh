@@ -405,6 +405,16 @@ echo "aiehlc.sh: AIEHLC_BIN=${AIEHLC}"
 # compile aie-rt, if the local aie-rt exist
 if [ -d "${AIE_DRIVER_PARENT_DIR}/aie-rt/driver/" ] && [[ "$platform" != "sim" ]]; then
     USE_LOCAL_AIERT_BSP=1
+    # GAP-ALIB-RACE: build_hw_lib wipes and rebuilds the tree-shared thirdparty/alib (include/, lib/*.a,
+    # aie-rt objects); two aiehlc.sh runs on one tree (e.g. a full and a VERIFY UNet build in parallel)
+    # deleted each other's objects ("xaie_feature_config.h: No such file", rc=2). Hold an exclusive lock
+    # on the alib dir from here until this script exits, since the later host link reads alib/lib + include.
+    if command -v flock >/dev/null 2>&1; then
+        exec {AIEHLC_ALIB_LOCK_FD}>"${AIE_DRIVER_PARENT_DIR}/.aiehlc_alib.lock"
+        echo "aiehlc.sh: waiting for alib lock ${AIE_DRIVER_PARENT_DIR}.aiehlc_alib.lock"
+        flock "${AIEHLC_ALIB_LOCK_FD}"
+        echo "aiehlc.sh: alib lock held"
+    fi
     build_hw_lib \
         "${ARCH_APU_AINC}" \
         ${TOOL_PREFIX}gcc \
