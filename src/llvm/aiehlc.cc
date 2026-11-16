@@ -4160,6 +4160,64 @@ public:
                         kernelBlocksByKernel[kb.first] = kb.second;
                     for (auto &kd : ko.window_bytes)
                         traceWindowBytesByKernel[kd.first] = kd.second;
+                    // GAP-MKROUTE: aiehlc emits ONE routing() for the whole program. Kernels whose
+                    // port topologies ((role, distribution) per port) differ would silently run on
+                    // one kernel's stream routes and hang on the board -> hard build error.
+                    // Same rule as script/test/multikernel_routing_check.py (1fbf524).
+                    {
+                        std::map<std::string, std::vector<std::string>> topo;
+                        std::vector<std::string> order;
+                        std::string cur;
+                        const std::string kmark = "// ==== aiehlc trace -> routing: ";
+                        std::istringstream ls(src);
+                        for (std::string line; std::getline(ls, line);) {
+                            if (line.rfind(kmark, 0) == 0) {
+                                std::string rest = line.substr(kmark.size());
+                                size_t q = rest.find("'s ports");
+                                cur = q == std::string::npos ? rest : rest.substr(0, q);
+                                if (!topo.count(cur))
+                                    order.push_back(cur);
+                                topo[cur].clear();
+                                continue;
+                            }
+                            if (cur.empty() || line.rfind("//    ", 0) != 0)
+                                continue;
+                            size_t o = line.find(" (");
+                            if (o == std::string::npos)
+                                continue;
+                            std::string r = line.substr(o + 2);
+                            size_t c1 = r.find(", ");
+                            if (c1 == std::string::npos)
+                                continue;
+                            std::string role = r.substr(0, c1);
+                            if (role != "IFM" && role != "WEIGHTS" && role != "OFM")
+                                continue;
+                            size_t c2 = r.find(',', c1 + 2);
+                            if (c2 == std::string::npos)
+                                continue;
+                            topo[cur].push_back(role + "=" + r.substr(c1 + 2, c2 - c1 - 2));
+                        }
+                        std::map<std::vector<std::string>, std::vector<std::string>> groups;
+                        for (auto &k : order)
+                            groups[topo[k]].push_back(k);
+                        if (groups.size() > 1) {
+                            for (auto &g : groups) {
+                                std::string t, ks;
+                                for (auto &x : g.first)
+                                    t += (t.empty() ? "" : " ") + x;
+                                for (auto &k : g.second)
+                                    ks += (ks.empty() ? "" : ",") + k;
+                                llvm::errs() << "[KernelAnalysis] MKROUTE topology " << t << ": " << g.second.size()
+                                             << " kernel(s) " << ks << "\n";
+                            }
+                            llvm::errs() << "[KernelAnalysis] ERROR: MKROUTE kernels=" << order.size()
+                                         << " topologies=" << groups.size()
+                                         << ": aiehlc emits one routing() for all kernels of a program; kernels "
+                                            "with different port topologies would hang on the board. Give every "
+                                            "kernel the same port topology (or build them as separate programs).\n";
+                            std::exit(1);
+                        }
+                    }
                 }
                 // Hand-written GemmSpaces + aie::load_buffer / store_buffer: the
                 // GemmSpaces stay the authority; the kernel's traced blocks must
