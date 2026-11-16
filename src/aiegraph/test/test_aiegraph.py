@@ -96,9 +96,12 @@ def test_download_model_returns_convertible_model(tmp_path, monkeypatch):
     assert os.fspath(m) == str(m.onnx_path) and Path(m) == m.onnx_path   # path-like, as before
 
 
-def test_load_rejects_wrong_input(tmp_path):
-    with pytest.raises(ag.AiegraphError, match=r"supports image classifiers"):
-        ag.from_onnx(_onnx(tmp_path / "x.onnx", "data", (1, 3, 32, 32)))
+def test_load_rejects_wrong_input(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIEGRAPH_CACHE", str(tmp_path / "cache"))
+    # 93bdb0a relaxed model._normalize (any static input shape, used by the UNet parts): a 32x32 input is
+    # accepted now, not rejected as "supports image classifiers" (stale expectation fixed in GAP-B)
+    m = ag.from_onnx(_onnx(tmp_path / "x.onnx", "data", (1, 3, 32, 32)))
+    assert m.input_shape == [1, 3, 32, 32]
     with pytest.raises(ag.AiegraphError, match="unknown model"):
         ag.download_model("resnet9000")
     with pytest.raises(ag.AiegraphError, match="don't know how to load"):
