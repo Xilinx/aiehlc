@@ -290,6 +290,24 @@ def attn_shapes(att: list) -> list:
     return sorted({(c["geo"]["chs"], c["geo"]["Kp"], c["geo"]["pxs"]) for c in att})
 
 
+def keep_layout_plan(onnx_path, partition: dict, layers: list = ()) -> dict:
+    """GAP-B: the partition rows with ``keep_layout`` (aiegraph.partition.plan_keep_layout: output stays in the
+    AIE layout, Transpose/Reshape on the way are labels only, every consumer is a partition layer).
+    Tags the mapped ``layers`` (map_layers / map_linears / map_attn dicts, by ``onnx`` node name):
+    producer ``keep_layout=<layout>``, consumer ``keep_in=[producer node, ...]``. No row with the field ->
+    ``{"edges": [], ...}`` and the layers are not touched (the generated code stays byte-identical)."""
+    from aiegraph.partition import plan_keep_layout
+    rep = plan_keep_layout(onnx_path, partition)
+    by = {c.get("onnx"): c for c in layers}
+    for e in rep["edges"]:
+        if e["node"] in by:
+            by[e["node"]]["keep_layout"] = e["layout"]
+        for u in e["consumers"]:
+            if u in by:
+                by[u].setdefault("keep_in", []).append(e["node"])
+    return rep
+
+
 def check_data_arg0(layers_dir: Path, sel: list) -> None:
     """The TVM kernel's conv reads its activation from p0 (not a residual/temb arg)."""
     for sym in sorted({c["symbol"] for c in sel}):
