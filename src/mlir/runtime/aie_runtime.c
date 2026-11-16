@@ -2891,6 +2891,10 @@ void __Runtime_sync_for_cpu(XAie_DevInst *dev, void *ptr, size_t size) {
      * control-packet ack token, so draining here ran the whole deferred queue
      * inside the kernel-ELF load (measured: kload 28 -> 84 us). The emitted
      * __aie_launch drains after host_canonicalized instead. */
+    if (rt_nc_covers((uintptr_t)ptr, (uintptr_t)ptr + size)) {
+        __asm__ volatile("dsb sy" ::: "memory"); /* uncached: nothing to invalidate */
+        return;
+    }
     if (dev) {
         AieRC rc = XAie_MemSyncForCPUVAddr(dev, ptr, (uint64_t)size);
         AIEHLC_LOG(printf("[aie_runtime] sync_for_cpu(%p, %zu) via VAddr rc=%d\n", ptr, size, rc););
