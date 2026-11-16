@@ -102,6 +102,7 @@ TEMB_BODY = re.compile(r"ax0_ax1_fused < (\d+); .*?ax2_inner < 8; .*?\(ax0_ax1_f
 TEMB_C = r"""
 /* P4a keep-layout (keep_layout_rt.py): temb dense input x = t * sigmoid(t) (the weight is pre-packed in
  * weights.bin, so the old per-call W*s re-pack is gone) */
+#include <math.h>
 static float g_kl_x[4096] __attribute__((aligned(64)));
 static DLTensor g_kl_x_t;
 static void kl_temb_x(const DLTensor *t, const DLTensor *s, int k) {
@@ -125,9 +126,11 @@ def temb_pass(text: str, csrc: str, wbin: Path, log=print) -> tuple:
     w = np.memmap(wbin, dtype=np.uint16, mode="r+")
     n = 0
     saved = []
-    for c in list(calls):
-        if not (c["fn"] and TEMB_FN.match(c["fn"])):
-            continue
+    while True:
+        todo = [cc for cc in calls if cc["fn"] and TEMB_FN.match(cc["fn"])]
+        if not todo:
+            break
+        c = todo[0]
         inline_sig = c["fn"].startswith("sigmoid_squeeze_")
         body = _tvm_body(csrc, c["fn"])
         m = TEMB_BODY.search(body)
