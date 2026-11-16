@@ -11,6 +11,8 @@ and Shuhua's p1_cos.c compare (ref_unet_out) linked in.
 --aie conv : the conv layers of --partition (p35/partition.json) run on the AIE
              (gemm_bf16 64x64x64 tiles, unet_aie.py); the rest is TVM C on the A78.
              Prints aie_launches_planned=<N> (== partition.json N).
+partition rows may carry "keep_layout": true | "nhwc" (GAP-B, aiegraph.partition.plan_keep_layout): that
+             output stays in the AIE layout for its AIE consumers (Transpose/Reshape = labels) -> KEEP_LAYOUT line.
 --aie conv,linear,attn (GATT): also the partition's attention bmm layers (cls=attn, autopart --mode attn,
              aiegraph.partition.match_attention) -> unet_aie_attn sites (gemm_kacc, runtime operand pack
              src/mlir/runtime/aie_kacc_pack.h); PROF op=aie_host_attn<cid>. Softmax stays on the CPU. Needs --kincore.
@@ -180,6 +182,20 @@ def timestep_to_i32(src: Path, dst: Path) -> Path:
     return dst
 
 
+def keep_layout_step(ua, onnx_path, part: dict, layers: list, out: Path):
+    """GAP-B: partition rows with ``keep_layout`` -- the output stays in the AIE layout, Transposes / Reshapes
+    to its AIE consumers are labels only (aiegraph.partition.plan_keep_layout). Tags ``layers``, writes
+    <out>/keep_layout.json, prints KEEP_LAYOUT. None when no row has the field (build unchanged)."""
+    if not any(L.get("keep_layout") for L in part["layers"]):
+        return None
+    keep = ua.keep_layout_plan(onnx_path, part, layers)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "keep_layout.json").write_text(json.dumps(keep, indent=1))
+    log(f"KEEP_LAYOUT edges={keep['kept']} label_ops={keep['label_ops']} "
+        f"consumers={sum(len(e['consumers']) for e in keep['edges'])} ({out / 'keep_layout.json'})")
+    return keep
+
+
 def aie_conv(a, emod, out: Path, hdr: Path):
     """--aie conv: map partition layers, build the AIE archive on a carrier layer,
     patch every partition call site in graph_driver.c. Returns (main.c, n_sites)."""
@@ -226,6 +242,7 @@ def aie_conv(a, emod, out: Path, hdr: Path):
         for k in fa:
             log(f"GFA class {k['idx']} {k['name']} split={k['split']} nkv={k['nkv']} kvl={k['kvl']} units={k['units']} "
                 f"launches/site={k['launches']}")
+    keep = keep_layout_step(ua, a.onnx.resolve(), part, sel + lin + att, out)
     if a.kincore:
         # P4bg: one launch per layer from kplan.py (K in the core) -- the partition.json N (64x64x64
         # tile launches) does not apply on this path
@@ -326,6 +343,9 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     with open(hdr, "a") as f:
         f.write("#define UNET_AIE_PLANNED_LAUNCHES %d\n#define UNET_AIE_PLANNED_CALLS %d\n"
                 "#define UNET_TOTAL_GEMM_MACS %dULL\n" % (planned, len(sel) + len(att), int(part["total_gemm_macs"])))
+    if keep is not None:
+        with open(hdr, "a") as f:
+            f.write("#define UNET_KEEP_LAYOUT_EDGES %d\n" % keep["kept"])
     log(f"ktimer={'on' if a.ktimer else 'off'}")
     return ua.main_c(MAIN_C, ktimer=a.ktimer), (len(sel) - len(lin), len(lin), len(att))
 

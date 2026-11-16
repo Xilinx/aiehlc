@@ -28,7 +28,8 @@ from .report import PartitionPlan
 
 __all__ = ["run_partition", "reset_aie_rows", "plan_partition_launches",
            "ConvPattern", "match_conv", "conv_epilogue_ref", "AIEGRAPH_OP_KINDS",
-           "AttnPattern", "match_attention"]
+           "AttnPattern", "match_attention",
+           "KEEP_LAYOUTS", "LABEL_OPS", "parse_keep_layout", "plan_keep_layout"]
 
 #: Every op the aiegraph dialect defines (``td/aiegraphop.td``).
 AIEGRAPH_OP_KINDS = ("conv_bn_relu", "conv_bn", "residual_add_relu", "avgpool_fc")
@@ -392,3 +393,199 @@ def plan_partition_launches(model, partition, mode: str = "kincore") -> dict:
                 launches_planned=sum(p["launches"] for p in ok),
                 tile_launches=sum(p["tile_launches"] for p in ok),
                 fallbacks=[p["node"] for p in plans if p["mode"] != mode])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  keep_layout (GAP-B): an AIE output stays in the AIE layout for its consumers
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# partition.json schema: a layer row may carry
+#
+#   "keep_layout": true                     -> {"layout": "nchw"} (the kacc Y [N][M] image)
+#   "keep_layout": {"layout": "nchw"|"nhwc"}  ("nhwc" = the transposed kacc walk, Y^T [M][N])
+#   "keep_layout": false / absent           -> today's behaviour: the output goes back to the host layout
+#
+# Meaning: the layer's output tensor is NOT converted back to the host (TVM) layout; every consumer reached
+# through layout-only ops reads the AIE buffer as is. Transpose is a pure LABEL change (it permutes the logical
+# axes, the bytes do not move); Identity / Squeeze / Unsqueeze / Flatten / Reshape are labels too when they only
+# merge or split axes that are adjacent and in order in memory. The chain must end at layers of the same
+# partition (AIE), and the consumer's logical view must be the row-major order of the bytes (else the
+# consumer would need a real transpose = data movement). Anything else is an AiegraphError -- the layer would
+# have to go back to the host layout, so the field is rejected rather than silently ignored.
+
+#: Physical layouts an AIE conv / linear output can be kept in (logical axis order of the bytes, rank 4 NCHW).
+KEEP_LAYOUTS = {"nchw": (0, 1, 2, 3), "nhwc": (0, 2, 3, 1)}
+#: ONNX ops that are only a relabel of a kept AIE buffer (no data movement when the checks below hold).
+LABEL_OPS = ("Transpose", "Reshape", "Flatten", "Squeeze", "Unsqueeze", "Identity")
+
+
+def parse_keep_layout(row) -> dict | None:
+    """The ``keep_layout`` field of one partition layer row -> ``{"layout": name}`` or None (host layout)."""
+    v = row.get("keep_layout", False)
+    if v is False or v is None:
+        return None
+    if v is True:
+        return {"layout": "nchw"}
+    if isinstance(v, str):
+        v = {"layout": v}
+    if not isinstance(v, dict) or v.get("layout", "nchw") not in KEEP_LAYOUTS \
+            or set(v) - {"layout"}:
+        raise AiegraphError("partition", f"{row.get('node')}: keep_layout={v!r}",
+                            hint=f"true, false or {{\"layout\": one of {sorted(KEEP_LAYOUTS)}}}")
+    return {"layout": v.get("layout", "nchw")}
+
+
+def _groups(src: list, dst: list):
+    """Reshape src -> dst as a merge/split of adjacent axes (size-1 axes free): list of (src_axes, dst_axes)
+    groups in order, or None when it is not one (a real reshuffle)."""
+    i = j = 0
+    out = []
+    while i < len(src) or j < len(dst):
+        if i < len(src) and src[i] == 1 and (j >= len(dst) or dst[j] != 1):
+            out.append(([i], []))
+            i += 1
+            continue
+        if j < len(dst) and dst[j] == 1 and (i >= len(src) or src[i] != 1):
+            out.append(([], [j]))
+            j += 1
+            continue
+        if i >= len(src) or j >= len(dst):
+            return None
+        a, b, ps, pd = [i], [j], src[i], dst[j]
+        i += 1
+        j += 1
+        while ps != pd:
+            if ps < pd and i < len(src):
+                ps *= src[i]
+                a.append(i)
+                i += 1
+            elif pd < ps and j < len(dst):
+                pd *= dst[j]
+                b.append(j)
+                j += 1
+            else:
+                return None
+        out.append((a, b))
+    return out
+
+
+def _relabel(perm: tuple, src: list, dst: list):
+    """Physical axis order ``perm`` (memory order of the logical axes of ``src``) after a reshape to ``dst``;
+    None if the reshape is not a label (merged axes not adjacent + in order in memory)."""
+    gs = _groups(list(src), list(dst))
+    if gs is None:
+        return None
+    pos = {ax: k for k, ax in enumerate(perm)}      # logical axis -> memory position
+    keyed = []
+    for a, b in gs:
+        big = [x for x in a if src[x] != 1]
+        if big:
+            mp = [pos[x] for x in big]
+            if mp != list(range(mp[0], mp[0] + len(mp))):
+                return None                          # merged axes not contiguous / not in order in memory
+            key = mp[0]
+        else:
+            key = (pos[a[0]] if a else -1)
+        keyed.append((key, b))
+    # memory order of the new axes: groups sorted by memory position, axes of one group in order
+    order = []
+    for k, (key, b) in sorted(enumerate(keyed), key=lambda t: (t[1][0], t[0])):
+        order += b
+    return tuple(order)
+
+
+def _rowmajor(perm: tuple, shape: list) -> bool:
+    """The bytes (memory order ``perm`` of the logical axes) are the row-major image of ``shape``
+    (size-1 axes may sit anywhere)."""
+    big = [a for a in perm if shape[a] != 1]
+    return big == sorted(big)
+
+
+def plan_keep_layout(model, partition) -> dict:
+    """Check every ``keep_layout`` row of ``partition`` (dict / JSON path) on ``model`` (ONNX path / ModelProto).
+
+    Returns ``dict(edges=[{node, tensor, layout, label_ops, consumers, views}], label_ops=n, kept=n)``;
+    ``views``: per consumer the logical shape it reads. Raises AiegraphError if a kept output reaches a host op,
+    a non-label op, a graph output, or a consumer whose view is not the row-major order of the AIE buffer."""
+    from pathlib import Path
+    import onnx
+    doc = json.loads(Path(partition).read_text()) if isinstance(partition, (str, Path)) else partition
+    rows = [(r, parse_keep_layout(r)) for r in doc.get("layers", [])]
+    if not any(k for _, k in rows):
+        return dict(edges=[], label_ops=0, kept=0)
+    m = onnx.load(str(model)) if isinstance(model, (str, Path)) else model
+    shapes = {}
+
+    def _collect(g):
+        for v in list(g.value_info) + list(g.output) + list(g.input):
+            d = [x.dim_value if x.HasField("dim_value") else None for x in v.type.tensor_type.shape.dim]
+            if d and all(x for x in d):
+                shapes[v.name] = d
+    _collect(m.graph)
+    for n in m.graph.node:
+        if n.output and n.output[0] not in shapes:
+            m = onnx.shape_inference.infer_shapes(m)
+            _collect(m.graph)
+            break
+    nodes = {n.name: n for n in m.graph.node}
+    users = {}
+    for n in m.graph.node:
+        for t in n.input:
+            users.setdefault(t, []).append(n)
+    outs = {o.name for o in m.graph.output}
+    aie = {r["node"] for r in doc.get("layers", [])}
+    edges, nlabel = [], 0
+    for r, k in rows:
+        if not k:
+            continue
+        name = r["node"]
+        if name not in nodes:
+            raise AiegraphError("partition", f"keep_layout: node {name} not in the model")
+        t0 = nodes[name].output[0]
+        if t0 not in shapes or len(shapes[t0]) != 4:
+            raise AiegraphError("partition", f"{name}: keep_layout needs a rank-4 output, got {shapes.get(t0)}")
+
+        def fail(msg):
+            raise AiegraphError("partition", f"{name}: keep_layout {k['layout']}: {msg}",
+                                hint="drop keep_layout on this row (output goes back to the host layout) "
+                                     "or put the consumer on the AIE")
+        label_ops, cons, views = [], [], []
+        stack = [(t0, KEEP_LAYOUTS[k["layout"]])]
+        while stack:
+            t, perm = stack.pop()
+            if t in outs:
+                fail(f"tensor {t} is a graph output (host reads it)")
+            for u in users.get(t, []):
+                if u.name in aie:
+                    if not _rowmajor(perm, shapes[t]):
+                        fail(f"consumer {u.name} reads {t} as {shapes[t]} but the bytes are in axis order "
+                             f"{list(perm)}: that is a real transpose, not a label")
+                    cons.append(u.name)
+                    views.append(list(shapes[t]))
+                    continue
+                if u.op_type not in LABEL_OPS:
+                    fail(f"consumer {u.name} ({u.op_type}) runs on the host and needs the host layout")
+                if u.input[0] != t:
+                    fail(f"{u.name}: kept tensor {t} is not the data input")
+                o = u.output[0]
+                if o not in shapes:
+                    fail(f"{u.name}: output shape of {o} unknown")
+                if u.op_type == "Transpose":
+                    tp = [a.ints for a in u.attribute if a.name == "perm"]
+                    tp = list(tp[0]) if tp else list(range(len(perm)))[::-1]
+                    pos = {ax: q for q, ax in enumerate(perm)}
+                    # new logical axis i = old axis tp[i]; memory order of the new axes
+                    nperm = tuple(sorted(range(len(tp)), key=lambda i: pos[tp[i]]))
+                else:
+                    nperm = _relabel(perm, shapes[t], shapes[o])
+                    if nperm is None:
+                        fail(f"{u.name} ({u.op_type}) {shapes[t]} -> {shapes[o]} moves data in layout "
+                             f"{list(perm)} (merged axes not adjacent in memory)")
+                label_ops.append(u.name)
+                stack.append((o, nperm))
+        if not cons:
+            fail("no AIE consumer")
+        nlabel += len(label_ops)
+        edges.append(dict(node=name, tensor=t0, layout=k["layout"], label_ops=label_ops,
+                          consumers=cons, views=views))
+    return dict(edges=edges, label_ops=nlabel, kept=len(edges))
