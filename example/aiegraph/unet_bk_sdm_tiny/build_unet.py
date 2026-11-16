@@ -397,9 +397,10 @@ def main(argv=None) -> int:
                     help="warm (P5): aiehlc --skip-bss + ZFILL_WIDE/PMLOAD_WIDE/PM_WARM_SKIP: the conv "
                          "kernel is loaded once, later launches only reset the cores (CoreReset+Unreset), "
                          "rewrite .data/BDs/locks, enable and wait")
-    ap.add_argument("--ctrlpkt", choices=("off", "aot"), default="off",
+    ap.add_argument("--ctrlpkt", choices=("off", "aot", "aot-kco"), default="off",
                     help="aot (P2a): control-packet plan pragmas in aiek_unetconv.cc + "
-                         "__Runtime_ctrl_high_throughput_enable(1) before the first launch")
+                         "__Runtime_ctrl_high_throughput_enable(1) before the first launch; "
+                         "aot-kco: aot + #pragma KERNELCONFIGOFFLOAD (sets UNET_CTRLPKT_KCO=1, see unet_aie.CTRLPKT_KCO)")
     ap.add_argument("--ktimer", action="store_true",
                     help="gemm_bf16 reads the AIE core timer at entry/exit into a 4-word tail per C block "
                          "(ports b 80x64 / c 64x80, bf16_gemm_convin_ktimer.cc); main prints KTIMER. "
@@ -417,6 +418,11 @@ def main(argv=None) -> int:
                          "so no shell word-splitting. Missing or empty file -> error. Default: none")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
+    if a.ctrlpkt == "aot-kco":  # before unet_aie is imported: it reads UNET_CTRLPKT_KCO at import time
+        os.environ["UNET_CTRLPKT_KCO"] = "1"
+        a.ctrlpkt = "aot"
+    elif "unet_aie" not in sys.modules:
+        os.environ.pop("UNET_CTRLPKT_KCO", None)
     layer_cflags = ""
     if a.arm_layer_cflags_file is not None:
         try:

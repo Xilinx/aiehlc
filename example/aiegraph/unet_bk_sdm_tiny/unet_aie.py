@@ -22,6 +22,7 @@ TVM C on the A78 (bf16 weights expanded into g_wscratch, Steve's .bss scratch).
             the TVM kernel, and its weight is NOT expanded into g_wscratch.
 """
 import json
+import os
 import re
 from pathlib import Path
 
@@ -732,6 +733,11 @@ CTRLPKT_PRAGMAS = (  # --ctrlpkt aot (P2a): spelled as aiehlc prints them (src/l
     "#pragma CONTROL_PLAN_GROUP_REG_WRITE\n"
     "#pragma control_plan_dedicated_shim\n"
     "#pragma control_plan_shim_bd_ctrl\n")
+# --ctrlpkt aot-kco (build_unet.py) / UNET_CTRLPKT_KCO=1 in the env (kacc_bench.sh -> kacc_gemm.py): the same 5
+# pragmas + KERNELCONFIGOFFLOAD (the core programs its own DMA, .TM in kernel.lst); one switch for probe and full net
+CTRLPKT_KCO = os.environ.get("UNET_CTRLPKT_KCO", "0") == "1"
+if CTRLPKT_KCO:
+    CTRLPKT_PRAGMAS += "#pragma KERNELCONFIGOFFLOAD\n"
 CTRLPKT_NPRAGMAS = CTRLPKT_PRAGMAS.count("#pragma")
 
 
