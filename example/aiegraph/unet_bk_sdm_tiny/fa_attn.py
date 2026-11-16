@@ -14,7 +14,10 @@ rescale, PV mmul, bf16 hi/lo 1/l finalize), Br = Bc = 32, 4x4 mesh:
                   80-wide halves (5 KB): unit = head (64 rows), core pn = query block pn>>1, output half pn&1.
                   qk row = [Q0h0 Q0h1 Q1h0 Q1h1 | K_b h0, K_b h1 ...], v row = [V_b h0, V_b h1 ...],
                   o row = [O0h0 O0h1 O1h0 O1h1]; S = Q_h0 K_h0^T + Q_h1 K_h1^T (second pass starts from S).
-K/V are replicated per mesh row by the host (the KO aiehlc has no row broadcast for a size-1 port dim, 0ee6397).
+v3: q port row = the unit's 4 Q (sub-)blocks only; K and V share the second port as one stream per HEAD
+([K_b V_b] per key block b; split: [K_b h0, K_b h1, V_b h0, V_b h1]). A launch = chunk c x 4 heads (mesh row = head),
+so the kv rows of a head group are packed once and shared by every chunk's launch (no K/V replication; the KO
+aiehlc has no row broadcast for a size-1 port dim, 0ee6397).
 Block layouts (Maxwell fa_load.h): Q/O qidx(d,r) = ((d/8)*4 + r/8)*64 + (d%8)*8 + r%8,
 K kidx(j,d) = (((j/4)*(D/8) + d/8)*4 + j%4)*8 + d%8, V vidx(d,j) = (((d/4)*4 + j/8)*4 + d%4)*8 + j%8."""
 
@@ -49,14 +52,15 @@ def fa_classes(att: list) -> list:
         nkv = -(-M // 32)
         kvl = M - 32 * (nkv - 1)
         E = 32 * dq
+        assert H % 4 == 0, H
         if split:
             assert N == 64, N
             units, upr = H, 1
-            qkrow, vrow, orow = 4 * E + 2 * nkv * E, 2 * nkv * E, 4 * E
+            qkrow, vrow, orow = 4 * E, 4 * nkv * E, 4 * E
         else:
             assert N % 128 == 0, N
             units, upr = H * N // 128, N // 128
-            qkrow, vrow, orow = 4 * E + nkv * E, nkv * E, 4 * E
+            qkrow, vrow, orow = 4 * E, 2 * nkv * E, 4 * E
         assert units % 4 == 0, units
         out.append(dict(idx=i, H=H, N=N, M=M, D=D, split=int(split), dq=dq, nkv=nkv, kvl=kvl, E=E, units=units,
                         upr=upr, launches=units // 4, qkrow=qkrow, vrow=vrow, orow=orow,
@@ -302,26 +306,26 @@ FA_KERNEL = r"""__global__ void @K@(aie::port<input_window_int16 *, aie::IFM, ai
 }
 """
 
-BODY_FULL = r"""        const int16_t *kb = (const int16_t *)aie::load_buffer(qk_@K@, {pm, @E4@ + b * @E@}, {1, @E@});
-        const int16_t *vb = (const int16_t *)aie::load_buffer(v_@K@, {pm, b * @E@}, {1, @E@});
+BODY_FULL = r"""        const int16_t *kb = (const int16_t *)aie::load_buffer(v_@K@, {pm, (2 * b) * @E@}, {1, @E@});
         @NS@::qkb(kb, b, 0);
+        aie::release(v_@K@);
         @NS@::softb(b);
+        const int16_t *vb = (const int16_t *)aie::load_buffer(v_@K@, {pm, (2 * b + 1) * @E@}, {1, @E@});
         @NS@::pvb(vb);
-        aie::release(qk_@K@);
         aie::release(v_@K@);"""
 
-BODY_SPLIT = r"""        const int16_t *k0 = (const int16_t *)aie::load_buffer(qk_@K@, {pm, @E4@ + (2 * b) * @E@}, {1, @E@});
+BODY_SPLIT = r"""        const int16_t *k0 = (const int16_t *)aie::load_buffer(v_@K@, {pm, (4 * b) * @E@}, {1, @E@});
         @NS@::qkb(k0, b, 0);
-        aie::release(qk_@K@);
-        const int16_t *k1 = (const int16_t *)aie::load_buffer(qk_@K@, {pm, @E4@ + (2 * b + 1) * @E@}, {1, @E@});
+        aie::release(v_@K@);
+        const int16_t *k1 = (const int16_t *)aie::load_buffer(v_@K@, {pm, (4 * b + 1) * @E@}, {1, @E@});
         @NS@::qkb(k1, b, 1);
-        aie::release(qk_@K@);
+        aie::release(v_@K@);
         @NS@::softb(b);
-        const int16_t *v0 = (const int16_t *)aie::load_buffer(v_@K@, {pm, (2 * b) * @E@}, {1, @E@});
+        const int16_t *v0 = (const int16_t *)aie::load_buffer(v_@K@, {pm, (4 * b + 2) * @E@}, {1, @E@});
         if ((pn & 1) == 0)
             @NS@::pvb(v0);
         aie::release(v_@K@);
-        const int16_t *v1 = (const int16_t *)aie::load_buffer(v_@K@, {pm, (2 * b + 1) * @E@}, {1, @E@});
+        const int16_t *v1 = (const int16_t *)aie::load_buffer(v_@K@, {pm, (4 * b + 3) * @E@}, {1, @E@});
         if ((pn & 1) == 1)
             @NS@::pvb(v1);
         aie::release(v_@K@);"""
@@ -384,7 +388,7 @@ static int fa_alloc(int k) {
         return 0;
     const fa_cls &c = g_fa_cls[k];
     g_fa_qk[k] = (uint16_t *)__Runtime_Alloc((size_t)c.units * c.qkrow * 2);
-    g_fa_v[k] = (uint16_t *)__Runtime_Alloc((size_t)c.units * c.vrow * 2);
+    g_fa_v[k] = (uint16_t *)__Runtime_Alloc((size_t)c.H * c.vrow * 2); /* kv stream per head */
     g_fa_o[k] = (uint16_t *)__Runtime_Alloc((size_t)c.units * c.orow * 2);
     if (!g_fa_mu)
         g_fa_mu = (float *)aligned_alloc(64, 256 * 4);
@@ -434,12 +438,10 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
             const float im = 1.0f / (float)M;
             for (int d = 0; d < D; d++)
                 mu[d] *= im;
-            const int u0 = h * npu;
-            uint16_t *kd = QK + (size_t)u0 * c.qkrow + 4 * E;
-            /* K block (b, half hh): kidx order = j4, d8, j&3, d&7 -> sequential writes */
-            uint16_t *kp = kd;
+            /* K block (b, half hh) at kv stream slot b*2nh + hh of head h: kidx order = j4, d8, j&3, d&7 */
             for (int b = 0; b < nkv; b++)
-                for (int hh = 0; hh < nh; hh++)
+                for (int hh = 0; hh < nh; hh++) {
+                    uint16_t *kp = V + (size_t)h * c.vrow + (size_t)(b * 2 * nh + hh) * E;
                     for (int j4 = 0; j4 < 8; j4++)
                         for (int d8 = 0; d8 < dq / 8; d8++)
                             for (int jj = 0; jj < 4; jj++) {
@@ -453,11 +455,10 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
                                         kp[dd] = 0;
                                 kp += 8;
                             }
-            for (int u = 1; u < npu; u++) /* every unit (mesh row) of this head carries its K */
-                memcpy(QK + (size_t)(u0 + u) * c.qkrow + 4 * E, kd, (size_t)nkv * nh * E * 2);
-            /* Q blocks: non-split unit u = rows u*128.., block qb; split: sub-block (qb, hh). qidx order = d8, r8, d&7, r&7 */
+                }
+            /* Q blocks of unit (chunk u, head h) = q row u*H + h: block qb (split: sub-block (qb, hh)); qidx order = d8, r8, d&7, r&7 */
             for (int u = 0; u < npu; u++) {
-                uint16_t *qp = QK + (size_t)(u0 + u) * c.qkrow;
+                uint16_t *qp = QK + (size_t)(u * H + h) * c.qkrow;
                 for (int qb = 0; qb < (c.split ? 2 : 4); qb++)
                     for (int hh = 0; hh < nh; hh++) {
                         const float *q0 = qh + (size_t)(u * 128 + qb * 32) * D + hh * dq;
@@ -482,11 +483,10 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
     float *Y = (float *)y->data;
     for (int h = 0; h < H; h++) {
         const float *vh = VT + (size_t)h * D * M;
-        const int u0 = h * npu;
-        uint16_t *vd = V + (size_t)u0 * c.vrow, *vp = vd;
-        /* V block (b, half hh): vidx order = d4, j8, d&3, j&7 -> sequential writes */
+        /* V block (b, half hh) at kv stream slot b*2nh + nh + hh of head h: vidx order = d4, j8, d&3, j&7 */
         for (int b = 0; b < nkv; b++)
-            for (int hh = 0; hh < nh; hh++)
+            for (int hh = 0; hh < nh; hh++) {
+                uint16_t *vp = V + (size_t)h * c.vrow + (size_t)(b * 2 * nh + nh + hh) * E;
                 for (int d4 = 0; d4 < dq / 4; d4++)
                     for (int j8 = 0; j8 < 4; j8++)
                         for (int dd = 0; dd < 4; dd++) {
@@ -500,8 +500,7 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
                                     vp[jj] = j0 + jj < M ? fa_f2bf(vr[jj]) : 0;
                             vp += 8;
                         }
-        for (int u = 1; u < npu; u++)
-            memcpy(V + (size_t)(u0 + u) * c.vrow, vd, (size_t)c.vrow * 2);
+            }
     }
 #if UC_CTRLPKT
     if (!g_uc_ht) {
@@ -509,13 +508,15 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
         g_uc_ht = 1;
     }
 #endif
-    const size_t qkb = (size_t)c.units * c.qkrow * 2, vb = (size_t)c.units * c.vrow * 2, ob = (size_t)c.units * c.orow * 2;
+    const size_t qkb = (size_t)c.units * c.qkrow * 2, vb = (size_t)H * c.vrow * 2, ob = (size_t)c.units * c.orow * 2;
     for (int l = 0; l < c.launches; l++) {
         XTime lt0, lt1;
         XTime_GetTime(&lt0);
         if (l == 0)
             uc_sync_pre(QK, qkb, V, vb, O, ob);
-        const int lrc = uc_fa_launch(k, QK + (size_t)l * 4 * c.qkrow, V + (size_t)l * 4 * c.vrow, O + (size_t)l * 4 * c.orow);
+        /* launch l = chunk l / (H/4) x head group l % (H/4): q/o rows 4l.., kv rows of the head group */
+        const int lrc = uc_fa_launch(k, QK + (size_t)l * 4 * c.qkrow, V + (size_t)(l % (H / 4)) * 4 * c.vrow,
+                                     O + (size_t)l * 4 * c.orow);
         if (l == c.launches - 1)
             uc_sync_post(O, ob);
         XTime_GetTime(&lt1);
@@ -528,7 +529,7 @@ static int uc_fa(void *const *argv, int nargs, int role, int k) {
     for (int h = 0; h < H; h++) {
         float *yh = Y + (size_t)h * N * D;
         for (int u = 0; u < npu; u++) {
-            const uint16_t *op = O + (size_t)(h * npu + u) * c.orow;
+            const uint16_t *op = O + (size_t)(u * H + h) * c.orow;
             for (int qb = 0; qb < (c.split ? 2 : 4); qb++)
                 for (int hh = 0; hh < nh; hh++) {
                     float *y0 = yh + (size_t)(u * 128 + qb * 32) * D + hh * dq;
