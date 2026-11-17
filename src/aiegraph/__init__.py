@@ -64,7 +64,7 @@ __all__ = ["load", "from_onnx", "from_torch", "download_model", "ZOO", "Model",
            "run", "profile", "ALL", "PALMYRA", "VEK385", "RunReport", "ProfileReport",
            "PerfReport", "KernelOptResult",
            "compile", "guide", "doctor", "setup", "AiegraphError", "CheckReport",
-           "DetectReport", "BuildReport", "AIProtoResult", "offload_prototype",
+           "DetectReport", "BuildReport", "AIProtoResult", "offload_prototype", "ai_offload_prototype",
            "OffloadPrototype", "Prototypes", "KernelFormat"]
 
 
@@ -92,6 +92,12 @@ def offload_prototype(layer=None, *, region=None, entry: str = None):
         from .prototype import kernel_format
         return kernel_format()
     return current().offload_prototype(layer, region=region, entry=entry)
+
+
+def ai_offload_prototype(layer=None, **kw):
+    """``ag.ai_offload_prototype("layer4")`` on the current model: the backbone, then
+    ``claude -p`` fills its TODOs until ``prototype_check`` says it is correct."""
+    return current().ai_offload_prototype(layer, **kw)
 
 
 def offload_reset(layers=None):

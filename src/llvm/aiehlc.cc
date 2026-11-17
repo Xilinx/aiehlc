@@ -45,6 +45,7 @@
 #include "routingmanager.h"
 #include "convautotile/conv_desugar.h"
 #include "convautotile/kernel_trace.h"
+#include "convautotile/kernel_template.h"
 #include "convautotile/kernel_front.h"
 
 class AieFrontEnd;
@@ -1330,8 +1331,9 @@ public:
                                         innerTypeStr.find("char") != std::string::npos)
                                         bitWidth = 8;
                                     else if (innerTypeStr.find("int16") != std::string::npos ||
-                                             innerTypeStr.find("short") != std::string::npos)
-                                        bitWidth = 16;
+                                             innerTypeStr.find("short") != std::string::npos ||
+                                             innerTypeStr.find("bfloat16") != std::string::npos)
+                                        bitWidth = 16; // bfloat16: a 16-bit window (aie_block_io.h)
                                 } else if (ptype->isPointerType()) {
                                     // Plain pointer type (e.g. const int32_t*)
                                     clang::QualType pointee = ptype->getPointeeType();
@@ -4026,6 +4028,22 @@ public:
             }
         }
 
+        // C++ templates on __global__ kernels (convautotile/kernel_template.h):
+        // every `kernel<args><<<mesh>>>` launch selects an instance, substituted
+        // into the text before anything reads the kernel's shapes or body.
+        void applyKernelTemplates(std::string &src) {
+            convautotile::KernelTemplateResult tr = convautotile::instantiateKernelTemplates(src, userSourceDir);
+            if (!tr.found)
+                return;
+            for (auto &n : tr.notes)
+                llvm::outs() << "[KernelTemplate] instance " << n << "\n";
+            if (!tr.ok) {
+                for (auto &e : tr.errors)
+                    llvm::errs() << "[KernelTemplate] ERROR: " << e << "\n";
+                std::exit(1);
+            }
+        }
+
         // Lower the declarative conv2d model (aie::Conv2d + aie::Mapping +
         // aie::port<T, aie::IFM|WEIGHTS|OFM>) into the explicit GemmSpace form
         // before any other rewrite sees the text (src/llvm/convautotile/). The
@@ -4219,6 +4237,7 @@ public:
                 // Headers (`.h`) are left to Clang, as before.
                 checkSourceIncludes(SourceCodeString);
                 inlineSourceIncludes(SourceCodeString);
+                applyKernelTemplates(SourceCodeString);
                 applyConvAutoTiling(SourceCodeString);
 
                 // Collect user #define macros before any rewriting.
@@ -4472,6 +4491,12 @@ public:
                 ret += "typedef short int16;\n";
                 ret += "typedef input_window<int16> input_window_int16;\n";
                 ret += "typedef output_window<int16> output_window_int16;\n";
+                // bfloat16 windows are 16-bit (aie_block_io.h); only for sources that use
+                // them, so every other host.cc stays byte-identical.
+                if (SourceCodeString.find("_window_bfloat16") != std::string::npos) {
+                    ret += "typedef input_window<int16> input_window_bfloat16;\n";
+                    ret += "typedef output_window<int16> output_window_bfloat16;\n";
+                }
                 // Kernel intrinsic stubs (body is #ifdef KERNEL_COMPILE guarded)
                 ret += "typedef unsigned char uint8_t;\n";
                 ret += "typedef unsigned long uintptr_t;\n";

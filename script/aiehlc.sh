@@ -604,6 +604,18 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
         fi
     fi
 
+    # Dataflow consistency (script/test/flowcheck.py): does routing.cc deliver every
+    # dmaphop flow to exactly its consumers, with host.cc's shim IOs in place?
+    # RoutingHWVerify cannot see a flow re-paired onto another's consumers (an edited
+    # AIEHLC_DMAPHOP_IR_IN built clean that way and computed wrong data on the board).
+    # Non-fatal: reported loudly, the ELF is kept.
+    if [ -f "${WORKLOCAL_DIR}/dmaphopprovenacemap.json" ] && [ -f "${WORKLOCAL_DIR}/routing.cc" ]; then
+        if ! python3 "${AIEHLC_DIR}/script/test/flowcheck.py" "${WORKLOCAL_DIR}"; then
+            echo "    WARNING: flowcheck FAILED -- routing.cc does not deliver the dataflows above as the"
+            echo "    dmaphop IR intends; expect a hang or wrong data on the board."
+        fi
+    fi
+
     # --prettydebug: launch the live schedule-debug server (stdlib http.server) and
     # open the browser so the user can deploy/test + inspect tile DMA/core/event status
     # live. Runs in the foreground for the interactive debug session; Ctrl-C to stop.

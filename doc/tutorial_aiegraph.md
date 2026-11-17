@@ -205,7 +205,7 @@ failing layers on the A78 and leaves the report in `emod.offload_report`.
 print(ag.offload_prototype())                   # the file format and rules (no model needed)
 proto = emod.offload_prototype("layer4")        # TVM layer 4 (or region="layer1.0.conv1")
 print(proto)                                    # args[] in call order, roles, value facts, AIEK_SPEC
-proto.write("my_kernels/")                      # aiek_layer04.cc + aiek_layer04_ref.c
+proto.write("my_kernels/")                      # aiek_layer04.cc + _ref.c + test_aiek_layer04.cc
 # fill in the TODO(...)s, then
 print(emod.offload_check("layer4", "my_kernels/aiek_layer04.cc"))
 ```
@@ -221,6 +221,7 @@ to the layer -- what is the layer's is done, what is the algorithm's is yours:
 | `AIEK_ENTRY(aiek_layer04)` | all arguments -> `aiek_layer04_run` | -- |
 | `AIEK_SPEC(aiek_layer04, ...)` | proven against every call | -- |
 | `aiek_layer04_ref.c` | arguments, TVM layouts; for the conv + requantize layers of these int8 networks the **whole reference** (bit-exact) | the op, for any other layer |
+| `test_aiek_layer04.cc` | a standalone board test: `main()` + `#include "aiek_layer04.cc"`, all tensors bound in TVM call order, the entry called `AIEKT_ITERS` (5) times, each **timed**, one `[aiek_layer04] TEST PASS/FAIL` line | -- |
 
 So `proto.write("./")` then `emod.offload_check("./aiek_layer04.cc")` is READY
 as written (calibrate BIT-EXACT, whole-network emulation identical): the
@@ -233,7 +234,81 @@ ResNet-18 layers 1 and 4) and lints clean. For each argument the report shows
 (weight, bias, zero-point, requant multiplier / shift, unused) and facts over
 every call (`all zero` -> `require=zero`). Kernel frames exist for TVM NCHWc
 conv2d layers; any other op gets the entry + spec skeleton.
-CLI: `aiegraph prototype [layer1] [--region R] [--entry NAME] [--write DIR]`.
+
+**The test.** `test_aiek_layer04.cc` is an aiehlc *entry file* (as
+`test_conv2d.cc` is for the stem): aiehlc splices the `#include`d kernel in, and
+`main()` makes it an ELF instead of `libaiek_layer04.a`:
+
+```bash
+source script/aiehlc.sh --aie-version 5 --runtime-source-file $PWD/my_kernels/test_aiek_layer04.cc
+python3 script/test/apppaltest.py aout/worklocal/build/host
+```
+
+The path must be **absolute** (a relative one resolves to `/test_...cc`), and
+`aout/` lands in the current directory. If the deploy was built with `make TRACE=1`
+(`arm_build/layeriohex/` exists), `write` also emits `aiek_layer04_test_data.h`
+and copies that layer's first call's dumps `lNN_*_in.h` / `_out.h` beside it, so
+the test runs **TVM's real tensors** and byte-compares every output against
+**TVM's own result** (`TEST PASS golden`). A `static_assert` per tensor catches a
+stale dump at compile time. Without dumps it is a **smoke** test on seeded
+synthetic tensors (ranges follow each argument's role and `require=`): the entry
+returns `AIEK_OK`, every output gets written (outputs are poisoned before each
+call), and two launches give identical bytes. Until the `.cc` TODOs are
+filled the test FAILs with `entry returned -4`.
+
+Every call is **timed** (wall clock around the entry, i.e. what TVM's graph
+executor waits; `XTime`, as `test_conv2d.cc`, or `CLOCK_MONOTONIC` without the
+BSP): the first call is reported apart (partition init, staging allocation, ELF
+load), then min / mean / max of the repeats -- which is per-call latency
+*including* array configuration, since aiehlc re-programs the mesh on every
+launch -- GOPS for a conv frame, and under `aiehlc.sh --profiling` the PMU split
+`kload / bdcfg / coreen / startio / wait_io` per call. Machine-readable:
+`[aiek_layer04] PERF SUMMARY iters 5  first ..  min ..  mean ..  max ..  (ms)`.
+`-DAIEKT_ITERS=N` changes the count. Both forms build as generated
+(verified: layer 1 golden, layer 4 smoke). `write(dir, test=False)` /
+`--no-test` skip it.
+
+CLI: `aiegraph prototype [layer1] [--region R] [--entry NAME] [--write DIR] [--no-test]`.
+
+## 4c. Let Claude fill the backbone: `ai_offload_prototype`
+
+```python
+res = emod.ai_offload_prototype("layer4")        # backbone -> claude -p fills the TODOs
+print(res)                                       # CORRECT / NOT CORRECT + the gates
+emod.offload("layer4", res)                      # path-like: the filled aiek_layer04.cc
+print(emod.prototype_check("layer4", "my_kernels/"))   # the same verdict on any directory
+```
+
+It runs `offload_prototype(layer).write(...)` into
+`<workdir>/aiproto/layerNN_prototype/` (an existing directory is moved aside to
+`.prev-<time>`, never deleted), then gives `claude -p` the layer, its TVM C, the
+backbone and the current verdict. Claude may edit only that directory and run one
+command, `aiegraph protocheck`. After each round **our own** `prototype_check`
+decides; a failure goes back to the same session, at most `rounds=3` times:
+
+| gate | passes when |
+|---|---|
+| `todo` | no `TODO(` / `TODO:` marker left in `<entry>.cc` / `<entry>_ref.c` |
+| `kemu` | the kernel **and** host code, run on x86, give every output byte of TVM's own output (`make TRACE=1` dumps; without them `<entry>_ref` on synthetic tensors) |
+| `trace` | `aiehlc-convtile trace`: every `load_buffer` / `store_buffer` matches the derived DMA |
+| `check` | `offload_check` READY (lint, spec, reference bit-exact, whole network) |
+| `build` | last, once the others pass (`build=False` / `--no-build` skips): aiehlc builds `test_<entry>.cc` into a board ELF |
+
+**`kemu` is the gate that judges the kernel.** `offload_check` alone cannot:
+calibrate and emulate run the `_ref.c` reference, so an *unfilled* backbone
+with a complete reference is READY there. `kemu` (`src/aiegraph/kemu.py`)
+compiles your `<entry>.cc` with g++ under ASan. Each `aie::port` is a view of
+the host buffer the launch passed. `aie::load_buffer` gathers the requested
+block into an exactly-sized allocation, so ASan flags any read past it, and
+`aie::commit` scatters the block back. `kernel<<<mesh>>>(...)` runs the kernel
+once per core with `aie::program_id` set, with vector code going through
+`aie_api_x86emu.h`. A block held past the kernel's end, or outside the tensor,
+is an error. It takes ~2 s for the 7×7 stem, and catches wrong rounding, a
+wrong output offset, a missing commit and an out-of-block read. It models
+*which data* each core sees, not DMA timing, which is `trace`'s job.
+
+CLI: `aiegraph aiprototype layer4 [--rounds N] [--no-build] [--out DIR] [--model M]`,
+`aiegraph protocheck layer4 DIR [--build]` (exit 0 = correct).
 
 ## 4a. When a check says NOT READY: let Claude port the kernel
 
@@ -285,6 +360,8 @@ any kernel; it does not prove that aiehlc compiles it for AIE2PS -- `offload()`
 | `emod.detect(kernel)` | which layers fit |
 | `emod.offload_check(spec)` | x86 gates; never writes outside `<workdir>/aiek/` |
 | `emod.offload(spec, build=True, make=False, force=False)` | + aiehlc build + link gate + driver swap |
+| `emod.ai_offload_prototype(layer, rounds=3, build=True, model=None)` | `offload_prototype` backbone → `claude -p` fills the TODOs until `prototype_check` passes (section 4c) |
+| `emod.prototype_check(layer, dir, build=False)` | gates `todo` / `kemu` (kernel + host on x86 vs TVM) / `trace` / `check` [/ `build`] (section 4c) |
 | `emod.offload_AI_proto(layers, kernel, rounds=3, model=None)` | NOT READY → `claude -p` ports a copy until `offload_check` is READY (section 4a) |
 | `emod.run_local()` | build and run `main_local.elf` on x86 |
 | `emod.run(board="palmyra", host=None, *, elf=None, build=True, profile=False, netload=None, reboot=None, timeout=1800)` | run `main.elf` on a lab board, (re)building it if missing or older than the driver / `partition.json` / AIE archives; returns a `RunReport` (`.ok`, `.top1`, `.top5`, `.inference_ms`, AIE `ENTER`/`EXIT` counts, `.log`). `emod.run(ag.VEK385, "crimini2")` for a VEK385; `host` overrides `$PALIP` / `$VEK385IP`. Palmyra defaults to `--netload` (a 12–16 MB ELF fails JTAG `dow`); VEK385 powers off afterwards (its `-nonreboot` holds the board until killed). Refuses while another run of the same board script of yours is active. CLI: `aiegraph run [palmyra\|vek385] [HOST]` |

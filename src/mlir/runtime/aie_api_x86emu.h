@@ -18,6 +18,7 @@
 //   aie::load_v / load_unaligned_v / store_v / store_unaligned_v, aie::zeros, aie::concat,
 //   aie::shuffle_down_fill, aie::interleave_zip, aie::bit_and, aie::add
 //   aie::set_rounding / set_saturation (the SRS modes of to_vector)
+//   bfloat16 (global scalar type: fp32 upper half, round-to-nearest-even from float)
 // Anything else is a compile error in the harness -- extend this file.
 //
 // Alignment: load_v / store_v need the pointer aligned to the vector size
@@ -49,6 +50,29 @@
 // Accumulator tags are global in the AIE API (acc32, not aie::acc32).
 struct acc32 {};
 struct acc64 {};
+
+// bfloat16 (global, as chess's native type): the upper 16 bits of an IEEE fp32;
+// float -> bfloat16 rounds to nearest even (NaN stays NaN), bfloat16 -> float
+// is exact. Arithmetic goes through float, as a scalar bf16 expression does.
+struct bfloat16 {
+    uint16_t bits = 0;
+    bfloat16() = default;
+    bfloat16(float f) {
+        uint32_t u;
+        std::memcpy(&u, &f, 4);
+        if ((u & 0x7f800000u) == 0x7f800000u && (u & 0x7fffffu))
+            bits = (uint16_t)((u >> 16) | 0x40); // quiet NaN
+        else
+            bits = (uint16_t)((u + 0x7fffu + ((u >> 16) & 1u)) >> 16);
+    }
+    operator float() const {
+        const uint32_t u = (uint32_t)bits << 16;
+        float f;
+        std::memcpy(&f, &u, 4);
+        return f;
+    }
+};
+static_assert(sizeof(bfloat16) == 2, "bfloat16 is a 16-bit type");
 
 namespace aie {
 
