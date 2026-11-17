@@ -13,7 +13,8 @@ The root README.md is synced too. A listing is everything between
 and
     <!-- /code -->
 (paths relative to the repo root); it is replaced by a ```cpp block holding
-the whole file.
+the whole file. Options after the path shorten it: `nocomments`, `notimer`
+(e.g. `<!-- code: example/.../x.cc nocomments notimer -->`).
 """
 import argparse
 import re
@@ -22,13 +23,31 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-BLOCK = re.compile(r"(<!-- code: (?P<path>\S+) -->\n)(?P<body>.*?)(<!-- /code -->)", re.S)
+BLOCK = re.compile(r"(<!-- code: (?P<path>\S+)(?P<opts>(?: [a-z]+)*) -->\n)(?P<body>.*?)(<!-- /code -->)", re.S)
+
+
+def shorten(src, opts):
+    """Options after the path: `nocomments` drops // comments (whole lines and
+    trailing), `notimer` drops the XTime timing lines (declaration, the two
+    XTime_GetTime calls and the [BENCH] printf)."""
+    out = []
+    for line in src.splitlines():
+        if "notimer" in opts and ("XTime" in line or "[BENCH]" in line):
+            continue
+        if "nocomments" in opts:
+            if line.strip().startswith("//"):
+                continue
+            code = line.split("//", 1)[0]
+            if "//" in line and code.count('"') % 2 == 0:  # not inside a string literal
+                line = code.rstrip()
+        out.append(line)
+    return "\n".join(out)
 
 
 def render(md_text):
     def fill(m):
-        src = (REPO / m["path"]).read_text()
-        return f"{m.group(1)}```cpp\n{src.rstrip()}\n```\n{m.group(4)}"
+        src = shorten((REPO / m["path"]).read_text(), m["opts"].split())
+        return f"{m.group(1)}```cpp\n{src.rstrip()}\n```\n{m.group(5)}"
     return BLOCK.sub(fill, md_text)
 
 

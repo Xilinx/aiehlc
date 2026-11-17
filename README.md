@@ -64,25 +64,24 @@ the ping-pong buffers. There is no DMA, routing or buffer code to write.
 - `main()` checks the result bit-exactly against a CPU convolution
   (board: `PASS: 0 mismatches out of 802816`).
 
-<!-- code: example/tileprogram/ccode/simpleconv2dkernel_port_less.cc -->
+<!-- code: example/tileprogram/ccode/simpleconv2dkernel_port_less.cc nocomments notimer -->
 ```cpp
 #include "simpleconv2d_new_load.h"
-// Scalar twin of simpleconv2dkernel_port.cc: same ports, blocks and DMA, plain C++ MACs.
 __global__ void conv2d_spatial(aie::port<input_window_int8 *, aie::IFM, aie::shape<230, 230, 4>> win_a,
                                aie::port<input_window_int8 *, aie::WEIGHTS, aie::shape<64, 7, 7, 4>> win_b,
                                aie::port<output_window_int8 *, aie::OFM, aie::shape<112, 112, 64>> win_c) {
-    const int KH = 7, KW = 7, S = 2, C = 4;         // 7x7 stride-2 conv, 4 (aligned) channels
-    const int oh_t = 7, ow_t = 28, oc_t = 16;       // output block computed per round
-    const int ih_t = (oh_t - 1) * S + KH;           // 19: input footprint of one output block
-    const int iw_t = (ow_t - 1) * S + KW;           // 61
-    const int oh_core = 112 / aie::num_programs(0); // 28 output rows per mesh row
-    const int pid_h = aie::program_id(0);           // mesh row: which OH band
-    const int pid_c = aie::program_id(1);           // mesh col: which OC group
+    const int KH = 7, KW = 7, S = 2, C = 4;
+    const int oh_t = 7, ow_t = 28, oc_t = 16;
+    const int ih_t = (oh_t - 1) * S + KH;
+    const int iw_t = (ow_t - 1) * S + KW;
+    const int oh_core = 112 / aie::num_programs(0);
+    const int pid_h = aie::program_id(0);
+    const int pid_c = aie::program_id(1);
     const int8_t *w = aie::load_buffer(win_b, {pid_c * oc_t, 0, 0, 0}, {oc_t, KH, KW, C});
 
-    for (int i = 0; i < oh_core / oh_t; i++) {          // 4 row blocks
-        for (int j = 0; j < 112 / ow_t; j++) {          // 4 column blocks
-            const int oh0 = pid_h * oh_core + i * oh_t; // output block origin
+    for (int i = 0; i < oh_core / oh_t; i++) {
+        for (int j = 0; j < 112 / ow_t; j++) {
+            const int oh0 = pid_h * oh_core + i * oh_t;
             const int ow0 = j * ow_t;
             const int8_t *x = aie::load_buffer(win_a, {oh0 * S, ow0 * S, 0}, {ih_t, iw_t, C});
             int8_t *y = aie::store_buffer(win_c, {oh0, ow0, pid_c * oc_t}, {oh_t, ow_t, oc_t});
@@ -103,7 +102,6 @@ __global__ void conv2d_spatial(aie::port<input_window_int8 *, aie::IFM, aie::sha
     }
     aie::release(win_b);
 }
-// HOST: same data as simpleconv2dkernel_port.cc, then a golden check vs scalar_conv2d().
 int main() {
     aieSetDevice(0);
     aieArray device;
@@ -112,12 +110,8 @@ int main() {
     int8_t *input = (int8_t *)__Runtime_Alloc(in_n), *filter = (int8_t *)__Runtime_Alloc(w_n);
     int8_t *output = (int8_t *)__Runtime_Alloc(out_n), *ref = (int8_t *)__Runtime_Alloc(out_n);
     memset(output, 0, out_n);
-    init_conv2d_test_data(input, filter); // simpleconv2d_new_load.h
-    XTime t0, t1;
-    XTime_GetTime(&t0);
+    init_conv2d_test_data(input, filter);
     conv2d_spatial<<<mesh>>>(input, filter, output, M, N, K);
-    XTime_GetTime(&t1);
-    printf("[BENCH] aie_wall_ms=%.3f\n", 1.0 * (t1 - t0) / COUNTS_PER_SECOND * 1000.0);
     scalar_conv2d(input, filter, ref);
     int bad = 0;
     for (int i = 0; i < out_n; i++)
@@ -127,6 +121,9 @@ int main() {
 }
 ```
 <!-- /code -->
+
+(Comments and timing omitted here; the full file is
+[example/tileprogram/ccode/simpleconv2dkernel_port_less.cc](example/tileprogram/ccode/simpleconv2dkernel_port_less.cc).)
 
 Line-by-line walkthrough, figures of the tiling and of how the compiler gets
 from these calls to DMA, routing and C++:
