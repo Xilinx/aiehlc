@@ -315,4 +315,6 @@ REF=$WORK/host_seed2.png ./run_orange.sh $WORK/build/main.elf $WORK/img 2 25
 | 单独测一个 kernel | `kacc_bench.sh --gemm` / `--bmm` |
 | 看时间花在哪 | 板上日志里的 `LAUNCH split` 和 `PROF` 行 |
 
+现在第 5 步里，除了载入、转换和链接，offload 是 `build_unet.py` 在生成好的 `graph_driver.c` 上用正则改写的，并没有完全走 aiegraph。改成纯 aiegraph 调用的方案见 [`docs/plans/2026-11-16-aiegraph-group-offload-design.md`](../../docs/plans/2026-11-16-aiegraph-group-offload-design.md)。
+
 现在还没做完的：softmax 以外的 Norm（GroupNorm、LayerNorm）还在 A78 上（`--aie …,norm` 在 `unet_m3_int` 分支上），conv 的 im2col 还在 A78 上，层与层之间的数据都经过 DDR，每次启动都是同步的，只用了 144 个 tile 里的 16 个。
