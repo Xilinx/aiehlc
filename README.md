@@ -64,7 +64,7 @@ the ping-pong buffers. There is no DMA, routing or buffer code to write.
 - the full example also checks the result bit-exactly against a CPU
   convolution (board: `PASS: 0 mismatches out of 802816`).
 
-<!-- code: example/tileprogram/ccode/simpleconv2dkernel_port_less.cc nocomments notimer nocheck -->
+<!-- code: example/tileprogram/ccode/simpleconv2dkernel_port_less.cc nocomments notimer nocheck devicelast -->
 ```cpp
 #include "simpleconv2d_new_load.h"
 __global__ void conv2d_spatial(aie::port<input_window_int8 *, aie::IFM, aie::shape<230, 230, 4>> win_a,
@@ -103,14 +103,14 @@ __global__ void conv2d_spatial(aie::port<input_window_int8 *, aie::IFM, aie::sha
     aie::release(win_b);
 }
 int main() {
-    aieSetDevice(0);
-    aieArray device;
-    aieMesh mesh = device.partition({3, 6, 0, 6}, HW_ROWS, HW_COLS);
     const int in_n = INPUT_H_PAD * INPUT_W_PAD * INPUT_C_ALIGN, w_n = K * NUM_FILTERS, out_n = M * N;
     int8_t *input = (int8_t *)__Runtime_Alloc(in_n), *filter = (int8_t *)__Runtime_Alloc(w_n);
     int8_t *output = (int8_t *)__Runtime_Alloc(out_n), *ref = (int8_t *)__Runtime_Alloc(out_n);
     memset(output, 0, out_n);
     init_conv2d_test_data(input, filter);
+    aieSetDevice(0);
+    aieArray device;
+    aieMesh mesh = device.partition({3, 6, 0, 6}, HW_ROWS, HW_COLS);
     conv2d_spatial<<<mesh>>>(input, filter, output, M, N, K);
     return 0;
 }
@@ -230,39 +230,6 @@ bash script/runsim.sh \
 ```
 
 On success the sim ends with `Sucess: CPU result matches AIE.` / `Sim result: 0`.
-
-## rcom: ROCm/HIP GEMM Front End
-
-`rcom` is a standalone Python front end that reads a canonical ROCm/HIP int8
-GEMM source, recognizes it as a GEMM, and emits a CUDA-style `<name>.cc/.h`
-(the same dialect as `example/tileprogram/ccode/simplematmul2.cc`). It then
-hands the generated `.cc` to the unchanged `script/aiehlc.sh` pipeline to build
-host + kernel ELFs.
-
-```
-matmul_hip.cpp --(rcom.py)--> <name>.cc + <name>.h --(aiehlc.sh)--> aout/main.elf
-```
-
-The HIP kernel body is *recognized and templated* (the proven AIE cache-A /
-stream-B matmul), not translated line-for-line. v1 supports **int8 only** and
-defaults to the HW-validated `M=N=K=256`, `4x4` mesh config; `M/N/K` and mesh
-are overridable but deviations are heuristic (untested on HW) and emit a
-warning.
-
-```bash
-source script/setup.sh
-
-# One-shot: HIP source -> generated .cc/.h -> ELF (aout/main.elf)
-source script/rcom.sh --rocm-source-file example/tileprogram/rocm/matmul_hip.cpp --aie-version 5
-
-# Emit only (no build), e.g. for inspection:
-python3 src/tool/frontend/rcom.py example/tileprogram/rocm/matmul_hip.cpp \
-    --emit-only --out ./gen
-
-# Overrides: kernel name, mesh, dims
-python3 src/tool/frontend/rcom.py example/tileprogram/rocm/matmul_hip.cpp \
-    --name gemm --mesh 4x4 --M 256 --N 256 --K 256 --out ./gen
-```
 
 ## Runtime Debug Level
 

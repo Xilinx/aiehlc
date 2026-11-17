@@ -13,8 +13,8 @@ The root README.md is synced too. A listing is everything between
 and
     <!-- /code -->
 (paths relative to the repo root); it is replaced by a ```cpp block holding
-the whole file. Options after the path shorten it: `nocomments`, `notimer`, `nocheck`
-(e.g. `<!-- code: example/.../x.cc nocomments notimer nocheck -->`).
+the whole file. Options after the path shorten it: `nocomments`, `notimer`, `nocheck`,
+`devicelast` (e.g. `<!-- code: example/.../x.cc nocomments notimer nocheck -->`).
 """
 import argparse
 import re
@@ -30,7 +30,9 @@ def shorten(src, opts):
     """Options after the path: `nocomments` drops // comments (whole lines and
     trailing), `notimer` drops the XTime timing lines (declaration, the two
     XTime_GetTime calls and the [BENCH] printf), `nocheck` drops the golden
-    check (from the scalar_conv2d( reference call through the PASS / FAIL printf)."""
+    check (from the scalar_conv2d( reference call through the PASS / FAIL printf),
+    `devicelast` moves the device setup (aieSetDevice / aieArray / partition)
+    to just before the <<<mesh>>> launch."""
     out = []
     in_check = False
     for line in src.splitlines():
@@ -48,6 +50,15 @@ def shorten(src, opts):
             if "//" in line and code.count('"') % 2 == 0:  # not inside a string literal
                 line = code.rstrip()
         out.append(line)
+    if "devicelast" in opts:
+        # Move the device setup next to the launch: allocation needs no device
+        # (__Runtime_Alloc is an aligned host allocation).
+        dev = [l for l in out if l.strip().startswith(("aieSetDevice(", "aieArray device", "aieMesh mesh = device."))]
+        launch = next((k for k, l in enumerate(out) if "<<<mesh>>>" in l), None)
+        if dev and launch is not None:
+            rest = [l for l in out if l not in dev]
+            at = next(k for k, l in enumerate(rest) if "<<<mesh>>>" in l)
+            out = rest[:at] + dev + rest[at:]
     return "\n".join(out)
 
 
