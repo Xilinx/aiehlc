@@ -332,9 +332,9 @@ def aie_conv(a, emod, out: Path, hdr: Path):
             f"(weights equal by value), {sum(c['S'] for c in lin)} gemm_kacc launches")
         if len(lin) != nlin_part:
             raise SystemExit(f"mapped {len(lin)} linear layers, partition has {nlin_part}")
-    del onnx_model
     elif nlin_part:
         raise SystemExit(f"partition has {nlin_part} linear layers: build with --aie conv,linear")
+    del onnx_model
     if lin and not a.kincore:
         raise SystemExit("--aie conv,linear needs --kincore (gemm_kacc)")
     att = []
