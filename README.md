@@ -61,10 +61,10 @@ the ping-pong buffers. There is no DMA, routing or buffer code to write.
   columns) takes 16 of the 64 output channels -- 16 tiles in parallel;
 - each tile computes 4 x 4 blocks of 7 x 28 x 16 outputs, reading the 19 x 61 x 4
   input footprint of each (the halo) and its 16 filters once;
-- `main()` checks the result bit-exactly against a CPU convolution
-  (board: `PASS: 0 mismatches out of 802816`).
+- the full example also checks the result bit-exactly against a CPU
+  convolution (board: `PASS: 0 mismatches out of 802816`).
 
-<!-- code: example/tileprogram/ccode/simpleconv2dkernel_port_less.cc nocomments notimer -->
+<!-- code: example/tileprogram/ccode/simpleconv2dkernel_port_less.cc nocomments notimer nocheck -->
 ```cpp
 #include "simpleconv2d_new_load.h"
 __global__ void conv2d_spatial(aie::port<input_window_int8 *, aie::IFM, aie::shape<230, 230, 4>> win_a,
@@ -112,17 +112,12 @@ int main() {
     memset(output, 0, out_n);
     init_conv2d_test_data(input, filter);
     conv2d_spatial<<<mesh>>>(input, filter, output, M, N, K);
-    scalar_conv2d(input, filter, ref);
-    int bad = 0;
-    for (int i = 0; i < out_n; i++)
-        bad += output[i] != ref[i];
-    printf("%s: %d mismatches out of %d\n", bad ? "FAIL" : "PASS", bad, out_n);
     return 0;
 }
 ```
 <!-- /code -->
 
-(Comments and timing omitted here; the full file is
+(Comments, timing and the result check omitted here; the full file is
 [example/tileprogram/ccode/simpleconv2dkernel_port_less.cc](example/tileprogram/ccode/simpleconv2dkernel_port_less.cc).)
 
 Line-by-line walkthrough, figures of the tiling and of how the compiler gets

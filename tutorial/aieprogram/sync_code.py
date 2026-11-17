@@ -13,8 +13,8 @@ The root README.md is synced too. A listing is everything between
 and
     <!-- /code -->
 (paths relative to the repo root); it is replaced by a ```cpp block holding
-the whole file. Options after the path shorten it: `nocomments`, `notimer`
-(e.g. `<!-- code: example/.../x.cc nocomments notimer -->`).
+the whole file. Options after the path shorten it: `nocomments`, `notimer`, `nocheck`
+(e.g. `<!-- code: example/.../x.cc nocomments notimer nocheck -->`).
 """
 import argparse
 import re
@@ -29,9 +29,16 @@ BLOCK = re.compile(r"(<!-- code: (?P<path>\S+)(?P<opts>(?: [a-z]+)*) -->\n)(?P<b
 def shorten(src, opts):
     """Options after the path: `nocomments` drops // comments (whole lines and
     trailing), `notimer` drops the XTime timing lines (declaration, the two
-    XTime_GetTime calls and the [BENCH] printf)."""
+    XTime_GetTime calls and the [BENCH] printf), `nocheck` drops the golden
+    check (from the scalar_conv2d( reference call through the PASS / FAIL printf)."""
     out = []
+    in_check = False
     for line in src.splitlines():
+        if "nocheck" in opts and line.strip().startswith("scalar_conv2d("):  # the call, not a comment
+            in_check = True
+        if in_check:
+            in_check = "mismatches out of" not in line
+            continue
         if "notimer" in opts and ("XTime" in line or "[BENCH]" in line):
             continue
         if "nocomments" in opts:
