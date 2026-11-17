@@ -264,9 +264,31 @@ class EmbeddedModel:
         part = self.workdir / "layers" / "partition.json"
         if not part.is_file():
             return []
+        from .group import recorded_groups, reset_groups
+        refs = layers if isinstance(layers, (list, tuple, set)) else [layers]
+        gnames = [r for r in refs if isinstance(r, str) and r.startswith("group:")]
+        rest = [r for r in refs if not (isinstance(r, str) and r.startswith("group:"))]
+        if layers is not None and gnames and not rest:          # only groups named
+            dropped = reset_groups(self.workdir, names=gnames)
+            if dropped:
+                print(f"[aiegraph] offload reset: group {', '.join(dropped)} back on the CPU "
+                      f"(whole group)")
+            return [f"group:{n}" for n in dropped]
+        if layers is not None:
+            layers = rest if isinstance(layers, (list, tuple, set)) else rest[0]
         want = None if layers is None else set(self.resolve(layers))
+        if gnames:
+            reset_groups(self.workdir, names=gnames)
+        if want is None:
+            dropped = reset_groups(self.workdir)
+        elif recorded_groups(self.workdir):            # a member layer takes its whole group
+            calls = {c for l in self.layers if l.index in want for c in l.calls}
+            dropped = reset_groups(self.workdir, calls=calls)
+        else:
+            dropped = []
+        dropped = sorted(set(dropped) | {g.removeprefix("group:") for g in gnames})
         doc = json.loads(part.read_text())
-        reset = []
+        reset = [f"group:{n}" for n in dropped]
         for row in doc.get("layers", []):
             if row.get("target") != "aie" or (want is not None and row.get("index") not in want):
                 continue
@@ -275,8 +297,10 @@ class EmbeddedModel:
                        reason="offload reset (aiegraph): back on the APU")
             if f"layer{row.get('index')}" not in reset:
                 reset.append(f"layer{row.get('index')}")
-        if not reset:
-            return []
+        if not any(r.startswith("layer") for r in reset):
+            if reset:
+                print(f"[aiegraph] offload reset: {', '.join(reset)} back on the CPU (whole group)")
+            return reset
         targets = [r for r in doc["layers"] if r.get("target") == "aie"]
         doc["aie_count"], doc["cpu_count"] = len(targets), len(doc["layers"]) - len(targets)
         doc["aie_dirs"] = len({r["dir"] for r in targets})
@@ -289,6 +313,45 @@ class EmbeddedModel:
         self.last_build = None
         print(f"[aiegraph] offload reset: {', '.join(reset)} back on the CPU (driver regenerated)")
         return reset
+
+    # ── group offload (design 2026-11-16 §6, S2: graph-level checks + record) ──
+
+    def call_graph(self):
+        """The network as calls / tensors / storage, from ``<stem>_graph.json``."""
+        from .group import CallGraph
+        return CallGraph.load(self.workdir)
+
+    def group(self, calls, name: str = None):
+        """A group of whole TVM calls (``[31, 32, ...]``) with its boundary tensors."""
+        from .group import make_group
+        return make_group(self.call_graph(), calls, name)
+
+    def match(self, kind: str = "attention") -> list:
+        """Groups by pattern. ``"attention"``: every bmm -> softmax -> bmm core with its
+        Q/K/V layout calls and the O merge (data flow on graph.json)."""
+        from .group import attention_groups
+        if kind != "attention":
+            raise AiegraphError("group", f"match({kind!r})", hint="'attention'")
+        return attention_groups(self.call_graph())
+
+    @property
+    def groups(self) -> list:
+        """The groups ``layers/partition.json`` records."""
+        from .group import recorded_groups
+        return recorded_groups(self.workdir)
+
+    def offload_group(self, group, source=None, steps=(), record: bool = True):
+        """Place *steps* on *group*'s calls, run the placement / deletion / early-write
+        checks on the graph and record the group in ``layers/partition.json``.
+        Undo with ``offload_reset("group:<name>")`` (the whole group)."""
+        from .group import Group, make_group, plan_group, record_group
+        cg = self.call_graph()
+        if not isinstance(group, Group):
+            group = make_group(cg, group)
+        plan = plan_group(cg, group, steps)
+        if record:
+            record_group(self.workdir, plan, source)
+        return plan
 
     def offload_check(self, spec, source=None, verbose: bool = False) -> CheckReport:
         """lint + detect + calibrate + whole-network emulate, all on x86.
