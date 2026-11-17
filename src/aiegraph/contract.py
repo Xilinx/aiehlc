@@ -25,7 +25,8 @@ from pathlib import Path
 from . import _env
 from .errors import AiegraphError
 
-__all__ = ["KernelContract", "make_contract", "check_region", "CONSTRAINTS"]
+__all__ = ["KernelContract", "make_contract", "check_region", "CONSTRAINTS",
+           "Buf", "Step", "buf", "step", "BoundStep", "check_step", "check_steps", "load_steps"]
 
 #: constraint key -> allowed values (and the Region attribute it is checked on)
 CONSTRAINTS = {
@@ -139,3 +140,205 @@ def check_region(contract: KernelContract, region) -> list:
     if region.layer is None:
         out.append("no TVM call carries this region's weights")
     return out
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Group-offload steps: ag.step(...) checked against the source's AIEK_STEP
+#  (design docs/plans/2026-11-16-aiegraph-group-offload-design.md §5)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_DTYPE_ALIASES = {"fp32": "float32", "f32": "float32", "float": "float32", "fp16": "float16",
+                  "i8": "int8", "u8": "uint8", "i32": "int32"}
+
+
+@dataclass(frozen=True)
+class Buf:
+    """A boundary tensor as a step sees it (C: ``aiek_buf``).
+
+    ``shape`` is the logical extent; ``ld`` the elements between consecutive
+    rows (index ndim-2). ``ld == shape[-1]`` is dense; a head's column block of
+    a ``[N][H*D]`` linear output is ``shape=(N, D), ld=H*D`` -- strided."""
+
+    shape: tuple
+    dtype: str = "float32"
+    ld: int = None
+    name: str = ""
+    tensor: object = None          # graph tensor id (tensors[i]) once groups exist
+
+    def __post_init__(self):
+        shape = tuple(int(d) for d in self.shape)
+        if not shape or any(d <= 0 for d in shape):
+            raise AiegraphError("step", f"buffer {self.name or '?'}: shape {self.shape}",
+                                hint="positive extents, at least one dim")
+        object.__setattr__(self, "shape", shape)
+        dt = _DTYPE_ALIASES.get(self.dtype, self.dtype)
+        object.__setattr__(self, "dtype", dt)
+        ld = shape[-1] if self.ld is None else int(self.ld)
+        if ld < shape[-1]:
+            raise AiegraphError("step", f"buffer {self.name or '?'}: ld={ld} < last extent "
+                                f"{shape[-1]} (rows would overlap)")
+        object.__setattr__(self, "ld", ld)
+
+    @property
+    def dense(self) -> bool:
+        return len(self.shape) < 2 or self.ld == self.shape[-1]
+
+    def __str__(self) -> str:
+        return (f"{self.name or 'buf'} {self.dtype}{list(self.shape)}"
+                + ("" if self.dense else f" ld={self.ld}"))
+
+
+def buf(shape, dtype="float32", ld=None, name="", tensor=None) -> Buf:
+    """``ag.buf((1024, 64), ld=320)`` -- a (possibly strided) step buffer."""
+    return Buf(tuple(shape), dtype, ld, name, tensor)
+
+
+def _as_buf(x, who: str) -> Buf:
+    if isinstance(x, Buf):
+        return x
+    if all(hasattr(x, a) for a in ("shape", "dtype")):     # a group boundary tensor / ndarray
+        return Buf(tuple(x.shape), str(x.dtype), getattr(x, "ld", None),
+                   getattr(x, "name", "") or "", getattr(x, "tensor", None))
+    raise AiegraphError("step", f"{who}: {x!r} is not a buffer",
+                        hint="ag.buf(shape, dtype, ld=) or a group's boundary tensor")
+
+
+def _as_list(x) -> tuple:
+    if x is None:
+        return ()
+    if isinstance(x, (list, tuple)):
+        return tuple(x)
+    return (x,)
+
+
+@dataclass(frozen=True)
+class Step:
+    """``ag.step(name, reads=, writes=, consts=, weights=)`` -- what the user
+    says one step of a group does. Checked against the source's AIEK_STEP."""
+
+    name: str
+    reads: tuple = ()
+    writes: tuple = ()
+    consts: dict = field(default_factory=dict)
+    weights: object = None
+
+    def __repr__(self) -> str:
+        c = ", ".join(f"{k}={v!r}" for k, v in self.consts.items())
+        return (f"step {self.name}: reads [{', '.join(map(str, self.reads))}] "
+                f"writes [{', '.join(map(str, self.writes))}] consts {{{c}}}")
+
+
+def step(name: str, reads=None, writes=None, consts=None, weights=None) -> Step:
+    if not isinstance(name, str) or not name.isidentifier():
+        raise AiegraphError("step", f"step name {name!r}", hint="the C entry name of the step")
+    r = tuple(_as_buf(x, f"{name} reads") for x in _as_list(reads))
+    w = tuple(_as_buf(x, f"{name} writes") for x in _as_list(writes))
+    c = dict(consts or {})
+    for k, v in c.items():
+        if not isinstance(k, str) or not k.isidentifier():
+            raise AiegraphError("step", f"{name}: const name {k!r}")
+        if isinstance(v, bool) or not isinstance(v, (int, float)) and not hasattr(v, "__index__") \
+                and not hasattr(v, "__float__"):
+            raise AiegraphError("step", f"{name}: const {k}={v!r} is not a number")
+    return Step(name, r, w, c, weights)
+
+
+@dataclass
+class BoundStep:
+    """A Step that matched its AIEK_STEP: constants in the C order."""
+
+    step: Step
+    spec: object                    # aiekernel StepSpec
+    const_values: tuple             # (int | float, ...) in consts() order
+
+    @property
+    def name(self) -> str:
+        return self.step.name
+
+
+def _check_bufs(sname: str, what: str, have: tuple, want: list) -> list:
+    out = []
+    if len(have) != len(want):
+        return [f"{sname}: {what} {len(have)} buffer(s) but AIEK_STEP({sname}) declares "
+                f"{what}({', '.join(map(str, want)) or 0}) -- {len(want)}"]
+    for b, s in zip(have, want):
+        tag = f"{sname}: {what}[{s.index}]" + (f" ({s.name})" if s.name else "")
+        if s.dtype and b.dtype != s.dtype:
+            out.append(f"{tag} is {b.dtype}, AIEK_STEP wants {s.dtype}")
+        if s.dense and not b.dense:
+            out.append(f"{tag} is strided ({b}: ld={b.ld} != last extent {b.shape[-1]}) but "
+                       f"AIEK_STEP marks it dense -- the step would ignore ld and read the wrong rows")
+    return out
+
+
+def check_step(spec, st: Step) -> list:
+    """Every way *st* disagrees with *spec* (a StepSpec); empty = consistent."""
+    if spec.entry != st.name:
+        return [f"step {st.name} checked against AIEK_STEP({spec.entry})"]
+    out = _check_bufs(st.name, "reads", st.reads, spec.reads)
+    out += _check_bufs(st.name, "writes", st.writes, spec.writes)
+    have, want = list(st.consts), list(spec.const_names)
+    if set(have) != set(want):
+        miss = [n for n in want if n not in have]
+        extra = [n for n in have if n not in want]
+        out.append(f"{st.name}: consts {have} but AIEK_STEP declares consts({', '.join(want)})"
+                   + (f"; missing {miss}" if miss else "") + (f"; unknown {extra}" if extra else ""))
+    else:
+        for c in spec.consts:
+            v = st.consts[c.name]
+            if c.type == "int" and not (isinstance(v, int) or hasattr(v, "__index__")):
+                if not (isinstance(v, float) and v.is_integer()):
+                    out.append(f"{st.name}: const {c.name}={v!r} but AIEK_STEP declares it :int")
+    return out
+
+
+def _const_values(spec, st: Step) -> tuple:
+    vals = []
+    for c in spec.consts:
+        v = st.consts[c.name]
+        vals.append(int(v) if c.type == "int" else float(v))
+    return tuple(vals)
+
+
+def load_steps(source) -> dict:
+    """``{entry: StepSpec}`` for every AIEK_STEP in *source* (path, spliced
+    like aiehlc reads it)."""
+    src = Path(source)
+    if not src.is_file():
+        raise AiegraphError("step", f"{source} does not exist")
+    _env.frontend("")
+    from frontend.tvmrelay.aiekernel.spec import SpecError, load_source, parse_steps
+    try:
+        specs = parse_steps(load_source(src))
+    except SpecError as exc:
+        raise AiegraphError("step", f"{src.name}: {exc}",
+                            hint="include/aie_user_kernel.h documents the AIEK_STEP grammar") from None
+    return {s.entry: s for s in specs}
+
+
+def check_steps(source, steps) -> list:
+    """Check every ``ag.step`` in *steps* against the AIEK_STEPs in *source*
+    (a path or a ``{entry: StepSpec}`` from :func:`load_steps`). Returns the
+    :class:`BoundStep` list; raises :class:`AiegraphError` listing every
+    mismatch -- arity, const names / types, dtype, a strided buffer handed to
+    a dense step."""
+    specs = source if isinstance(source, dict) else load_steps(source)
+    bound, bad = [], []
+    for st in _as_list(steps):
+        if not isinstance(st, Step):
+            raise AiegraphError("step", f"{st!r} is not an ag.step(...)")
+        spec = specs.get(st.name)
+        if spec is None:
+            bad.append(f"{st.name}: no AIEK_STEP({st.name}) in the source "
+                       f"(has: {', '.join(sorted(specs)) or 'none'})")
+            continue
+        problems = check_step(spec, st)
+        if problems:
+            bad += problems
+        else:
+            bound.append(BoundStep(st, spec, _const_values(spec, st)))
+    if bad:
+        raise AiegraphError("step", "; ".join(bad),
+                            hint="ag.step(...) and the source's AIEK_STEP must describe one call")
+    return bound
