@@ -64,7 +64,7 @@ the ping-pong buffers. There is no DMA, routing or buffer code to write.
 - the full example also checks the result bit-exactly against a CPU
   convolution (board: `PASS: 0 mismatches out of 802816`).
 
-<!-- code: example/tileprogram/ccode/simpleconv2dkernel_port_less.cc nocomments notimer nocheck devicelast -->
+<!-- code: example/tileprogram/ccode/simpleconv2dkernel_port_less.cc nocomments notimer nocheck devicelast; after init_conv2d_test_data(: kernel call to parallel compute in 4x4 tiles -->
 ```cpp
 #include "simpleconv2d_new_load.h"
 __global__ void conv2d_spatial(aie::port<input_window_int8 *, aie::IFM, aie::shape<230, 230, 4>> win_a,
@@ -108,6 +108,7 @@ int main() {
     int8_t *output = (int8_t *)__Runtime_Alloc(out_n), *ref = (int8_t *)__Runtime_Alloc(out_n);
     memset(output, 0, out_n);
     init_conv2d_test_data(input, filter);
+    // kernel call to parallel compute in 4x4 tiles
     aieSetDevice(0);
     aieArray device;
     aieMesh mesh = device.partition({3, 6, 0, 6}, HW_ROWS, HW_COLS);

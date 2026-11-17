@@ -14,7 +14,9 @@ and
     <!-- /code -->
 (paths relative to the repo root); it is replaced by a ```cpp block holding
 the whole file. Options after the path shorten it: `nocomments`, `notimer`, `nocheck`,
-`devicelast` (e.g. `<!-- code: example/.../x.cc nocomments notimer nocheck -->`).
+`devicelast`; after a `;`, `after <anchor>: <text>` adds a `// <text>` line after
+the line containing <anchor> (e.g.
+`<!-- code: example/.../x.cc nocomments notimer; after foo(: what foo does -->`).
 """
 import argparse
 import re
@@ -23,7 +25,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-BLOCK = re.compile(r"(<!-- code: (?P<path>\S+)(?P<opts>(?: [a-z]+)*) -->\n)(?P<body>.*?)(<!-- /code -->)", re.S)
+BLOCK = re.compile(r"(<!-- code: (?P<path>\S+)(?P<opts>[^\n]*?) -->\n)(?P<body>.*?)(<!-- /code -->)", re.S)
 
 
 def shorten(src, opts):
@@ -62,9 +64,24 @@ def shorten(src, opts):
     return "\n".join(out)
 
 
+def annotate(src, notes):
+    """`after <anchor>: <text>` inserts `// <text>` after the first line containing
+    <anchor>, with that line's indentation (a comment of the listing only)."""
+    lines = src.split("\n")
+    for note in notes:
+        anchor, text = note.split(":", 1)
+        anchor = anchor.strip()[len("after "):].strip()
+        at = next(k for k, l in enumerate(lines) if anchor in l)
+        indent = lines[at][: len(lines[at]) - len(lines[at].lstrip())]
+        lines.insert(at + 1, f"{indent}// {text.strip()}")
+    return "\n".join(lines)
+
+
 def render(md_text):
     def fill(m):
-        src = shorten((REPO / m["path"]).read_text(), m["opts"].split())
+        opts, *notes = m["opts"].split(";")
+        src = shorten((REPO / m["path"]).read_text(), opts.split())
+        src = annotate(src, [n for n in notes if n.strip().startswith("after ")])
         return f"{m.group(1)}```cpp\n{src.rstrip()}\n```\n{m.group(5)}"
     return BLOCK.sub(fill, md_text)
 
