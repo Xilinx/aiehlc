@@ -353,21 +353,39 @@ class EmbeddedModel:
             record_group(self.workdir, plan, source)
         return plan
 
-    def offload_check(self, spec, source=None, verbose: bool = False) -> CheckReport:
+    def offload_check(self, spec, source=None, verbose: bool = False,
+                      check: str = "network", inputs: dict = None) -> CheckReport:
         """lint + detect + calibrate + whole-network emulate, all on x86.
-        ``offload_check("layer1", "k.cc")`` or any spec ``offload`` takes."""
+        ``offload_check("layer1", "k.cc")`` or any spec ``offload`` takes.
+        ``check="group"``: the group-level x86 check instead of calibrate + emulate
+        (every call of the layer vs ``<entry>_ref``, cos >= 0.999, nonfinite == 0;
+        ``inputs={graph entry id: array}`` real activations, else seeded)."""
         _env.frontend("")
-        from frontend.tvmrelay.aiekernel.flow import check
+        from frontend.tvmrelay.aiekernel.flow import check as flow_check
         groups, args = self._kernel_args(spec, source)
-        print(f"[aiegraph] offload_check {', '.join(Path(a).name for a in args)}: "
-              f"lint, detect, calibrate vs TVM, whole-network emulation (x86)...")
-        raw = check(self.workdir, args, verbose=verbose)
+        checker = self._checker(check, inputs)
+        print(f"[aiegraph] offload_check {', '.join(Path(a).name for a in args)}: lint, detect, "
+              + ("group-level check vs TVM (x86)..." if checker else
+                 "calibrate vs TVM, whole-network emulation (x86)..."))
+        raw = flow_check(self.workdir, args, verbose=verbose, checker=checker)
         return CheckReport("offload_check", raw, groups)
 
+    @staticmethod
+    def _checker(check: str, inputs: dict = None):
+        if check == "network":
+            return None
+        if check == "group":
+            from .groupcheck import layer_checker
+            return layer_checker(inputs=inputs)
+        raise AiegraphError("offload", f"check={check!r}", hint="'network' or 'group'")
+
     def offload(self, spec, source=None, build: bool = True, make: bool = False,
-                force: bool = False, verbose: bool = False) -> CheckReport:
+                force: bool = False, verbose: bool = False, check: str = "network",
+                inputs: dict = None) -> CheckReport:
         """``offload_check`` + aiehlc build + link gate + driver swap.
 
+        ``check="group"``: gates 3-4 are the group-level x86 check (see
+        ``offload_check``), binding -- not combinable with ``force``.
         ``offload("layer1", False)`` undoes it: the layer(s) go back on the CPU
         (= ``offload_reset("layer1")``); returns the layer names reset."""
         if source is False:
@@ -380,8 +398,12 @@ class EmbeddedModel:
         groups, args = self._kernel_args(spec, source)
         print(f"[aiegraph] offload {', '.join(Path(a).name for a in args)}: checks, then "
               f"aiehlc build (~2 min the first time, cached after)...")
+        checker = self._checker(check, inputs)
+        if checker is not None and force:
+            raise AiegraphError("offload", "force=True with check='group'",
+                                hint="the group check is binding; fix the step instead")
         raw = offload(self.workdir, args, build=build, make=make, force=force,
-                      image=self.image, verbose=verbose)
+                      image=self.image, verbose=verbose, checker=checker)
         return CheckReport("offload", raw, groups)
 
     def offload_AI_proto(self, spec, source, *, rounds: int = 3, model: str = None,
