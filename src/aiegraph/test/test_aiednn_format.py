@@ -2,7 +2,11 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Memory formats: every nhwc-operand primitive gives its dense result, transposed, bit for bit."""
+"""Memory formats (aiednn_format_t): every primitive that takes an nhwc operand gives the bytes of its dense
+result, transposed -- bit for bit, through whichever path create picked (canon / native / wrap).
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_format.py
+"""
 
 from __future__ import annotations
 
@@ -44,7 +48,9 @@ def nchw(x):
 
 
 def run(lib, fn, args, bufs, fmts, out_args):
-    """Create with descriptors in formats fmts, execute with dense bufs; returns ({arg: dense result}, impl)."""
+    """create with descriptors args (("md", shape, dt, arg) entries become MDs in format fmts[arg]),
+    execute with bufs (dense arrays; the nhwc ones are transposed going in and out); returns ({arg: dense
+    result}, impl)"""
     cargs, keep = [], []
     for a in args:
         if isinstance(a, tuple) and a and a[0] == "md":
@@ -122,7 +128,8 @@ def test_conv_int8_residual(lib):
 @pytest.mark.parametrize("fmts", [{S: "nhwc", D: "nhwc"}, {S: "nhwc"}, {D: "nhwc"}], ids=["both", "src", "dst"])
 @pytest.mark.parametrize("k,s,epi", [(3, 1, "q"), (3, 2, "q"), (5, 1, "q"), (3, 1, "f32")])
 def test_depthwise(lib, fmts, k, s, epi):
-    """Depthwise on dwblk: with nhwc gather / scatter, on-core requant and host epilogue."""
+    """depthwise on dwblk: (image, channel, band) items gathered from / scattered to nhwc, through the on-core
+    requant (q) and the host epilogue (f32 dst)"""
     N, Cc, H = 2, 24, 13
     x, w = i8((N, Cc, H, H)), i8((Cc, 1, k, k))
     sc, b = f32((Cc,), 1e-4, 1e-3), f32((Cc,), -1, 1)
@@ -137,7 +144,8 @@ def test_depthwise(lib, fmts, k, s, epi):
 
 @pytest.mark.parametrize("k,cin,s", [(3, 16, 1), (7, 3, 2), (1, 32, 2)], ids=["3x3", "stem", "1x1s2"])
 def test_conv_u8_zero_point(lib, k, cin, s):
-    """The framework int8 conv (u8 with a zero point): zp+ writes its padded copy nhwc."""
+    """the framework int8 conv (u8 activations with a zero point): zp+'s shifted, padded copy is written nhwc and
+    its symmetric problem runs on the native AIE path"""
     N, O, H = 1, 32, 12
     x = RNG.integers(0, 256, (N, cin, H, H)).astype(np.uint8)
     w = i8((O, cin, k, k))
@@ -152,7 +160,8 @@ def test_conv_u8_zero_point(lib, k, cin, s):
 
 @pytest.mark.parametrize("fdst,fsrc1", [("nhwc", "nhwc"), ("nhwc", "dense"), ("dense", "nhwc")])
 def test_conv_requant_binary_formats(lib, fdst, fsrc1):
-    """Residual block conv (+qres) with the skip possibly in the other format than dst."""
+    """PT2E / ONNX's residual block conv: zp+ conv -> requant -> add the skip -> requant, one primitive (+qres); the
+    skip (src1) may sit in the other format than dst when the graph kept that edge dense"""
     N, Cc, O, H = 1, 16, 16, 9
     x = RNG.integers(0, 256, (N, Cc, H, H)).astype(np.uint8)
     w, r = i8((O, Cc, 3, 3)), RNG.integers(0, 256, (N, O, H, H)).astype(np.uint8)
@@ -275,7 +284,8 @@ def test_get_size_and_set_format(lib):
 
 @pytest.mark.parametrize("k,cin,hw", [(1, 160, 7), (1, 32, 14), (3, 16, 7)], ids=["1x1_7x7", "1x1_14x14", "3x3"])
 def test_nhwc_conv_uses_the_dense_entries(lib, k, cin, hw):
-    """An nhwc conv launches the same AIE entries as the dense one."""
+    """an nhwc conv must launch the same AIE entries as the dense one: a 1x1 on direct conv (CONV mode) lives in
+    another library ELF than its GEMMQ / MMT (mobilenet_v2 PT2E on the board: +7 megakernel switches, +16 ms)"""
     O = 96
     x, w = i8((1, cin, hw, hw)), i8((O, cin, k, k))
     sc, b = f32((O,), 1e-4, 1e-3), f32((O,), -1, 1)

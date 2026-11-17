@@ -1,9 +1,12 @@
 /* Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Which optional modes the GEMM megakernel (gemm_uk.cc) compiles; this default enables all of them.
- * A per-app build (dnn_build modes="auto") shadows it with its own aie_modes_cfg.h. Plain GEMM
- * (opcodes 0x00 / 0xA0) is always in. */
+ * Which optional modes the GEMM megakernel (gemm_uk.cc) compiles. This default enables all of
+ * them. A per-app build (aiegraph dnn_build, modes="auto") writes its own aie_modes_cfg.h next to
+ * the aiehlc entry, where it shadows this one: the app runs once on x86 with call counting, and
+ * only the modes of the entries it called (each AIEK_SPEC's `modes` line) stay in the core
+ * program. The host's implementation list is cut to the same entries, so it never sends an
+ * opcode the core no longer decodes. Plain GEMM (opcodes 0x00 / 0xA0) is always in. */
 #ifndef AIE_MODES_CFG_H
 #define AIE_MODES_CFG_H
 
@@ -29,7 +32,8 @@
 #define AIEK_MODE_CONV 1 /* direct conv: the core gathers the im2col tile from a raw input region */
 #endif
 #ifndef AIEK_MODE_MMT
-/* opt-in: with it, every mode together overflows the core's 16 KB program memory */
+/* opt-in (dnn_build modes="auto" turns it on when the app calls mmt_blk_s8s8): with it, every mode
+ * together overflows the core's 16 KB program memory */
 #define AIEK_MODE_MMT 0 /* AIE_MODE_OP_MMT: pre-tiled short-K int8 GEMM on mlir-aie's micro-kernel */
 #endif
 #ifndef AIEK_MODE_FVEC

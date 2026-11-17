@@ -2,8 +2,10 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * wq_app -- grouped weight-only quantization on the AIE (wq:): 8-bit activations x 4- / 8-bit
- * grouped weights, f32 result vs ref: to 1e-5 of the output's magnitude.
+ * wq_app -- grouped weight-only quantization on the AIE (impl wq:, aiednn_rt_wq.h, the GEMM ELF's WQ
+ * mode): 8-bit activations x 4- / 8-bit weights with per-group scales (and zero points), the LLM linear
+ * layer. Each case runs with the default dispatch and with the ref: filter; the f32 results must agree to
+ * 1e-5 of the output's magnitude ("WQCHK"), times per call in "OPTIME". Deterministic inputs.
  *
  *   PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/wq_app.cc --target x86 --run
  *   ... --target vek280 --run --board <host> --vitis-settings <.../settings64.sh>

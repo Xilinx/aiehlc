@@ -2,11 +2,19 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * ops_app -- every aiednn primitive once; int8 GEMM family checked bit for bit vs ref:,
- * every op prints an "OP" checksum line for board vs x86 comparison.
+ * ops_app -- every aiednn primitive once, on the board or x86.
+ *
+ * The int8 GEMM family (convolution, deconvolution, matmul, inner product)
+ * dispatches to the AIE composites; each is re-run with the ref: filter and
+ * compared bit for bit ("OPCHK ... mismatches=0"). Every primitive prints
+ * "OP <name> impl=<impl> sum=<> asum=<>" over its output, so a board log can
+ * be compared with an x86 run of the same app (aiegraph/test/test_dnn.py,
+ * compare_ops_logs). Deterministic inputs (LCG), no data files.
  *
  *   PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/ops_app.cc --target x86 --run
- *   ... --target vek280 --run --board <host> --vitis-settings <.../settings64.sh>
+ *   ... --target vek280 --run --board galerina13 --vitis-settings <.../settings64.sh>
+ *
+ * doc/design/aiednn.md section 8.
  ******************************************************************************/
 #include "aiednn.h"
 
@@ -59,7 +67,8 @@ static void report(const char *name, aiednn_primitive_t p, const aiednn_memory_d
     printf("OP %s impl=%s sum=%.9e asum=%.9e\n", name, aiednn_primitive_impl_info(p), s, a);
 }
 
-// pp, not p: argument evaluation order is unspecified, create must set p before it is read.
+// pp, not p: the create call is another argument of the same call, and C++ leaves the
+// evaluation order of arguments unspecified -- a by-value p could be read before create sets it.
 static int run(const char *name, aiednn_status_t cst, aiednn_primitive_t *pp, int nargs, const aiednn_exec_arg_t *args,
                const aiednn_memory_desc_t *dmd, const void *dst) {
     if (cst != aiednn_success) {

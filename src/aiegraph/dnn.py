@@ -2,7 +2,34 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""``ag.dnn_build(app)``: an aiednn application -> one ELF, kernels from the library."""
+"""``ag.dnn_build(app)``: an aiednn application -> one ELF, kernels from the library.
+
+An aiednn app (``include/aiednn.h``) never names a kernel; it creates
+primitives from tensor descriptors and the runtime (``src/aiednn/aiednn_rt.cc``)
+dispatches over an implementation list. This module writes that list from the
+kernel library and builds the app around it:
+
+1. read which primitive kinds the app creates (``aiednn_matmul_primitive_create``
+   -> the ``dense`` op family);
+2. ``kernel_lib(root)`` -> the runnable, numerics-verified kernels whose
+   ``AIEK_SPEC`` ``target`` names the board and that serve those families
+   (an s8 x s8 -> s32 GEMM block also serves conv2d, via the runtime's im2col).
+   aiehlc links ONE kernel library per ELF in this tree, so the source serving
+   the most families wins (direct matches break ties); an exact tie is an error
+   unless ``kernels=`` narrows it;
+3. generate ``aiednn_impl_list.cc`` -- one ``aiednn_impl_t`` per kernel, its
+   argument dtypes/dims straight from the ``AIEK_SPEC`` (``*`` -> any, a NAME ->
+   a symbol bound consistently), specificity = fixed dims;
+4. generate the aiehlc entry ``<app>_aiednn.cc``: ``#include`` the kernel
+   source(s) FIRST (aiehlc wants the kernel above anything that reaches its
+   launch), then the runtime, the list, the app;
+5. ``target="vek280"``: ``aiehlc.sh --aie-version 2 --warm-launch`` in the output dir (it
+   writes ``aout/`` relative to the cwd) -> ``aout/main.elf``; ``run()`` stages
+   it and drives ``vek280_mlir_aie/run_vek280.py``.
+   ``target="x86"``: the same app + runtime with each kernel's x86
+   ``AIEK_REFERENCE`` as its entry, built with the host g++ and run -- the
+   dispatch and the app logic, checked without Vitis or a board.
+"""
 
 from __future__ import annotations
 
@@ -56,7 +83,8 @@ PRIMITIVES = {"aiednn_matmul_primitive_create": ("aiednn_matmul", "dense"),
               "aiednn_grouped_matmul_create": ("aiednn_matmul", "dense"),
               "aiednn_rnn_forward_create": ("aiednn_rnn", "dense"),
               "aiednn_rnn_backward_create": ("aiednn_rnn", "dense"),
-              # sdpa's AIE modes (sdpa_blk, bf16x3) live in gemm_uk.cc, the conv2d family's source
+              # sdpa's AIE modes (sdpa_blk, bf16x3) live in gemm_uk.cc, the conv2d family's source:
+              # "dense" picked matmul_uk.cc for an sdpa-only app, which then ran ref:sdpa
               "aiednn_sdpa_forward_create": ("aiednn_sdpa", "conv2d"),
               "aiednn_sdpa_forward_create_attr": ("aiednn_sdpa", "conv2d"),
               # linear attention: the chunked form's f32 GEMMs run on the GEMM ELF's bf16x3 (gemm_uk.cc)
@@ -75,7 +103,7 @@ KIND_OF = {"dense": "aiednn_matmul", "conv2d": "aiednn_convolution"}
 ENTRY_KIND = {"pool_blk_s8s32": "aiednn_pooling", "lut_blk_s8": "aiednn_eltwise",
               "elt_blk_s8s32": "aiednn_binary", "sdpa_blk_s8s32": "aiednn_sdpa", "bf16_blk_f32": "aiednn_matmul",
               "fvec_blk_f32": "aiednn_eltwise", "wq_blk_s8f32": "aiednn_matmul",
-              "fpool_blk_f32": "aiednn_pooling"}   # fvec: the runtime binds it to eltwise / binary / softmax / norms
+              "fpool_blk_f32": "aiednn_pooling"}  # fvec: the runtime binds it to eltwise / binary / softmax / norms by signature
 _DT = {"int8": "aiednn_s8", "uint8": "aiednn_u8", "int32": "aiednn_s32", "float32": "aiednn_f32"}
 TARGETS = {"vek280": {"aie_version": "2", "runner": "vek280_mlir_aie/run_vek280.py",
                       # one resident kernel: loaded + launched once, later launches only re-arm the
@@ -86,6 +114,9 @@ TARGETS = {"vek280": {"aie_version": "2", "runner": "vek280_mlir_aie/run_vek280.
                       "host_opt": "-O3",
                       "stage": "/proj/xsjsswstaff/{user}/vek280_mlir_aie"},
            # VEK385 / AIE2PS: an A78 host; script/test/appvek385.py copies the ELF itself (no stage dir)
+           # and reads USERNAME / VEK385IP (+ VEK385_REV, VEK385_CONSOLE) from the environment.
+           # --warm-launch matters more here: an ELF load is MMIO at ~372 ns / write (a megakernel switch
+           # 65 -> 21 ms with it; skill aiednnvek385)
            "vek385": {"aie_version": "5", "runner": "script/test/appvek385.py",
                       "aiehlc_args": ("--warm-launch", "--persistent"),
                       "host_opt": "-O3"},
@@ -113,6 +144,7 @@ class DnnBuild:
     segments: list = None               # several megakernels: [{name, first, last, modes, cost}] (_plan_megakernels)
     mk_of_op: list = None               # op index -> segment (the implementation list's table)
     mk_need: dict = None                # modes="library": entry -> mask of the library ELFs that hold its modes
+    force_ref: list = None              # op indices created on ref: (a light op not worth a megakernel switch)
 
     def __repr__(self) -> str:
         ks = ", ".join(f"aie:{e.name} ({e.contract.source.name})" for e in self.kernels) or "none (ref: only)"
@@ -128,7 +160,9 @@ class DnnBuild:
 
 
 def needed_families(text: str) -> dict:
-    """aiednn primitive kind -> kernel-library op family"""
+    """aiednn primitive kind -> kernel-library op family, for every create call
+    in *text* that an AIE kernel can serve (the GEMM family). A matmul with grouped weight scales
+    (attr.wei_scales) is its own family, "wq": only the GEMM ELF's WQ mode serves it."""
     fams = {kind: fam for call, (kind, fam) in PRIMITIVES.items() if re.search(rf"\b{call}\s*\(", text)}
     if re.search(r"\bwei_scales\b", text) and "aiednn_matmul" in fams:
         fams["aiednn_matmul_wq"] = "wq"
@@ -140,7 +174,8 @@ def creates_primitives(text: str) -> bool:
 
 
 def is_gemm_block(spec) -> bool:
-    """An s8 x s8 -> s32 GEMM block"""
+    """An s8 x s8 -> s32 GEMM block: the runtime's blocked matmul and im2col
+    convolution run on it, so it serves the conv2d family as well."""
     a = spec.args
     return (len(a) == 3 and [x.kind for x in a] == ["in", "param", "out"]
             and [x.dtype for x in a] == ["int8", "int8", "int32"] and all(len(x.dims) == 2 for x in a))
@@ -149,7 +184,7 @@ def is_gemm_block(spec) -> bool:
 #: entries that only serve the runtime's composites (no primitive of their own): they ride along
 #: with their source but do not count when choosing a source
 HELPER_ENTRIES = {"gemm_q_s8s8", "gemm_kc_s8s32", "dwq_blk_s8s8", "conv_kc_s8s32", "conv_q_s8s8",
-                  "sdpa_blk_s8s32", "bf16_blk_f32", "fvec_blk_f32"}   # sdpa rides with the GEMM source
+                  "sdpa_blk_s8s32", "bf16_blk_f32", "fvec_blk_f32"}  # sdpa rides with the GEMM source: its family is not one dispatch picks a source by
 
 
 def covers(entry) -> dict:
@@ -164,7 +199,8 @@ def covers(entry) -> dict:
 
 
 def _pick_kernels(lib, families: set, kernels, board: str) -> tuple:
-    """Kernels for *board* that serve the most of *families*, from ONE source (one aiehlc library per ELF)."""
+    """Kernels for *board* that serve the most of *families*, from ONE source
+    (one aiehlc library per ELF). Returns (picked, report lines)."""
     why = []
     cand = []
     for e in lib:
@@ -240,7 +276,12 @@ def _mesh_dims(spec, mesh) -> dict:
 
 def impl_list_source(picked: list, x86: bool, mesh=None, count: bool = False, mk_of_op=None,
                      mk_need=None) -> str:
-    """C++ for ``aiednn_impl_list[]``."""
+    """C++ for ``aiednn_impl_list[]``. *x86*: entries are the ``<entry>_ref``. *mesh*: (rows,
+    cols) of the array the kernels are built for; the specs' ``mesh`` dims are scaled to it.
+    *count*: every entry goes through a counting thunk, and the program prints
+    ``AIEDNN_ENTRY_USED <entry> <calls>`` per entry at exit (``dnn_build(modes="auto")``).
+    *mk_need*: entry -> mask of library megakernels holding its modes; such an entry goes through a
+    thunk that calls ``aiednn_megakernel_need(mask)`` first (``dnn_build(modes="library")``)."""
     decls, rows, thunks, needs = [], [], [], []
     for e in picked:
         spec = e.contract.spec
@@ -315,7 +356,7 @@ def impl_list_source(picked: list, x86: bool, mesh=None, count: bool = False, mk
             f'extern "C" const int aiednn_impl_count = {count};\n')
 
 
-def _entry_source(app: Path, picked: list, impl_cc: Path, mesh=None) -> str:
+def _entry_source(app: Path, picked: list, impl_cc: Path, mesh=None, force_ref=None) -> str:
     root = _env.repo_root()
     lines = ["// Generated by aiegraph/dnn.py: the aiehlc entry for an aiednn app. Do not edit.",
              "// Kernel source(s) first: aiehlc must see the kernel before anything that",
@@ -326,6 +367,8 @@ def _entry_source(app: Path, picked: list, impl_cc: Path, mesh=None) -> str:
     for d in os.environ.get("AIEDNN_DEFINES", "").split():
         name, _, val = d.partition("=")
         lines.append(f"#define {name} {val or 1}")
+    if force_ref:  # ops the app creates under the ref: filter (_light_islands; the app's force_ref())
+        lines.append(f"#define AIEDNN_FORCE_REF_OPS {{{', '.join(map(str, force_ref))}}}")
     lines += [f'#include "{s}"' for s in dict.fromkeys(e.contract.source for e in picked)]
     lines += [f'#include "{root / "src" / "aiednn" / "aiednn_rt.cc"}"',
               f'#include "{impl_cc.name}"',
@@ -351,8 +394,9 @@ def _vitis_prefix(vitis_settings) -> str:
                              "or source Vitis first")
 
 
-#: board apps' heap (_HEAP_SIZE; the BSP default 128 MB is too small for large f32 composites).
-#: dnn_build(heap=) overrides; 0 keeps the BSP's.
+#: board apps' heap (_HEAP_SIZE in the BSP linker script, 128 MB by default): gemm+ composites' column
+#: buffers, bf16x3's 6K operands and the constant-weight caches outgrow 128 MB on large f32 layers
+#: (a conv3d hit out_of_memory); VEK280's low DDR region is 2 GB. dnn_build(heap=) overrides; 0 keeps the BSP's.
 APP_HEAP_BYTES = 0x20000000
 
 
@@ -385,7 +429,9 @@ def _build_board(rep: DnnBuild, entry: Path, aiehlc_args, vitis_settings, verbos
         subprocess.run(["bash", "-c", cmd], stdout=None if verbose else log,
                        stderr=subprocess.STDOUT if not verbose else None)
     build = rep.out / "aout" / "worklocal" / "build"
-    # with per-model segments only kernel_mk* reach the cores; a library build has none and every map counts
+    # per-model segments (kernel_mk0..): only those ELFs reach the cores -- the app selects one before its
+    # first launch -- so the union build of every mode (kernel.map) may be over budget. A library build has
+    # no kernel_mk0: its ELF 0 IS kernel.o, and every map counts.
     pm, st = core_program_memory(build), core_stack(build)
     if "kernel_mk0.map" in pm:
         pm = {m: n for m, n in pm.items() if m.startswith("kernel_mk")}
@@ -467,7 +513,10 @@ _USED = re.compile(r"^AIEDNN_ENTRY_USED (\w+) (\d+)$", re.M)
 
 
 def entry_usage(app: Path, picked: list, out: Path, headers=(), timeout: int = 1800) -> dict:
-    """Build *app* for x86 with the board's kernel choice"""
+    """Build *app* for x86 with the board's kernel choice (each entry's reference in its place,
+    every entry counted) and run it: {entry: calls}. The runtime's dispatch is the board's, so
+    the counts say which entries -- and so which megakernel modes -- the board run will use,
+    including helpers a composite calls internally (gemm_q_s8s8 inside im2col+)."""
     out.mkdir(parents=True, exist_ok=True)
     rep = DnnBuild(app, "x86", out, picked)
     impl_cc = out / "aiednn_impl_list.cc"
@@ -495,20 +544,39 @@ def usage_by_op(log_text: str) -> dict:
     return out
 
 
-#: core program memory (bytes) and stack of the GEMM megakernel per optional mode (from kernel.map).
-#: Program memory adds per mode; per-mode buffers share `dwb`, so stack takes the largest.
+#: core program memory (bytes) and stack of the GEMM megakernel per optional mode, measured from
+#: kernel.map of the board builds (2026-11-11): base = plain GEMM + K chain. Program memory adds per
+#: mode; the per-mode buffers share `dwb`, so stack takes the largest (GEMMQ's rows add). A mode
+#: missing here (a new one) is costed at MODE_UNKNOWN until measured.
 MK_PM_BASE, MK_STACK_BASE = 4464, 10848
 MK_PM_LIMIT, MK_STACK_LIMIT = 16384 - 512, 32768 - 1024        # margins: libc / call frames
+# Re-fit 2026-11-13 from ten galerina13 8x4 kernel*.map totals of today's gemm_uk.cc (resnet18 /
+# mobilenet_v2 per-app segments + the seven library ELFs): POOL grew with the vector pool (3,792),
+# LUT + STEPS share their table code (2,688 together), SDPA measured (6,896). The old values under-
+# costed CONV+GEMMQ+LUT+POOL+STEPS by 2.5 KB and run_models' resnet18 segment overflowed (16,896 B).
+# GEMMQ is the anchor of the fit; DWQ / MMT / WQ / FPOOL keep their earlier (still consistent) values.
 MODE_PM = {"GEMMQ": 2944, "DW": 1024, "POOL": 3792, "DWQ": 2640, "CONV": 3008,
            "ELTWISE": 960, "LUT": 1344, "STEPS": 1344, "MMT": 2272, "SDPA": 6896, "BF16": 1632,
-           "WQ": 6432 - 4464,   # kernel.map of WQ alone + base
-           "FPOOL": 8432 - 4464,   # FPOOL (+ ARGMAX for max backward) alone + base
-           # entries that cannot fit even alone are left out of a per-app build (_restrict_to_usage)
-           "FVEC": 15232 - 4464}  # FVEC alone
+           "WQ": 6432 - 4464,   # WQ: kernel.map of WQ alone + base, galerina13
+           "FPOOL": 8432 - 4464,   # FPOOL (+ ARGMAX for max backward): kernel.map alone + base, galerina13
+           # FVEC: GEMMQ + FVEC measured 32,496 B (muscaria17, 2026-11-12): the scalar-float version
+           # pulls softfloat and does not fit a core program; entries that cannot fit even alone are
+           # left out of a per-app build (_restrict_to_usage). The interpreter version is ~11,300.
+           "FVEC": 15232 - 4464}  # FVEC alone, galerina13 2026-11-16 (was 14976 on 11-13)
 MODE_STACK_ADD = {"GEMMQ": 2528, "CONV": 800}                   # locals of the mode's code
 MODE_DWB = {"DWQ": 8192, "LUT": 8192, "STEPS": 8192, "CONV": 16384, "MMT": 5120, "FVEC": 7680}
-#: cost of one megakernel switch (ELF reload on the next launch)
+#: one megakernel switch (ELF reload on the next launch), measured on muscaria18 2026-11-11: a switch
+#: launch 0.58-0.73 ms vs 0.11 ms resident. Segments switch once per model run per boundary.
 MK_SWITCH_MS = 0.5
+#: per board: what one switch costs; VEK385 loads an ELF over MMIO (~372 ns / write): 20-27 ms measured
+#: (portobello13, 2026-11-15/16), so an op that would sit alone in another megakernel costs ~50 ms there
+SWITCH_MS = {"vek280": MK_SWITCH_MS, "vek385": 25.0}
+#: modes whose ops are small per launch (a row program, a table, per-element steps): on a board where a switch
+#: costs more than such an op can save (SWITCH_MS >= ISLAND_SWITCH_MS), an op needing only these modes and not
+#: covered by the heavy megakernel runs on ref: instead of forcing a switch (tiny_llama's 8 int8 RMS norms on
+#: FVEC: 92.7 ms on VEK385 vs ~1.8 ms each on the host)
+LIGHT_MODES = frozenset({"FVEC", "LUT", "STEPS", "ELTWISE", "FPOOL"})
+ISLAND_SWITCH_MS = 5.0
 MODE_UNKNOWN = (3000, 8192)
 
 
@@ -520,7 +588,10 @@ def megakernel_cost(modes) -> tuple:
 
 
 def plan_segments(op_modes: list) -> list:
-    """Split the op sequence into contiguous segments whose mode union fits one core program"""
+    """Split the op sequence into contiguous segments whose mode union fits one core program
+    (megakernel_cost under MK_*_LIMIT): [(first op, last op, modes)]. Greedy longest segments --
+    optimal in count, since a subset of a fitting mode set fits too. Ops needing no mode (CPU ops,
+    plain GEMM) join the current segment."""
     def fits(ms):
         pm, st = megakernel_cost(ms)
         return pm <= MK_PM_LIMIT and st <= MK_STACK_LIMIT
@@ -538,20 +609,30 @@ def plan_segments(op_modes: list) -> list:
     return segs
 
 
-#: The library's fixed megakernel set (modes="library"): the runtime switches between these ELFs on demand
-#: (aiednn_megakernel_need); ELF 0 is resident at the first launch. Every set fits MK_PM_LIMIT / MK_STACK_LIMIT.
+#: The library's fixed megakernel set (modes="library"): every app, whatever primitives it creates,
+#: links these core programs and the runtime switches between them on demand -- an entry with
+#: optional modes loads the first ELF holding all of them (aiednn_megakernel_need) unless the resident
+#: one does. ELF 0 is the default (resident at the first launch). Grouped by what runs next to what:
+#: the CNN body (convs, depthwise, pools, residual adds) in one, activations / tables / short-K in the
+#: other, so a model switches rarely. Every set fits MK_PM_LIMIT / MK_STACK_LIMIT (test_dnn checks); measured
+#: (muscaria18, 2026-11-11): cnn + ELTWISE was 16,000 B of 16,384 once DWQ went vector, so ELTWISE
+#: (standalone binary ops) lives in "act" only.
+# Sized from linked kernel.map (2026-11-12, 8x4 with the vector requant / pool / sdpa): the earlier 4-set
+# split measured cnn 18,288 / act 17,840 / attn 17,616 B -- over the 16,384 B core. Five smaller sets;
+# every entry's modes are in at least one (library_need), dnn_build refuses any map over the limit.
 LIBRARY_MEGAKERNELS = (("cnn", ("GEMMQ", "CONV", "POOL", "DW")),                 # convs, pools
-                       ("dwq", ("GEMMQ", "DW", "DWQ", "MMT")),                   # depthwise blocks
+                       ("dwq", ("GEMMQ", "DW", "DWQ", "MMT")),                   # mobilenet-style blocks (13,328 B)
                        ("act", ("GEMMQ", "ELTWISE", "LUT", "STEPS", "POOL")),    # per-element ops
                        ("attn", ("GEMMQ", "SDPA", "ELTWISE")),                   # transformer blocks
-                       ("float", ("BF16", "GEMMQ", "POOL", "ELTWISE")),          # bf16 / f32 (bf16x3) GEMMs
-                       ("fvec", ("FVEC",)),   # f32 pointwise / softmax / norms
-                       ("wq", ("GEMMQ", "WQ", "ELTWISE", "FPOOL")))   # grouped weight-only quant
+                       ("float", ("BF16", "GEMMQ", "POOL", "ELTWISE")),          # bf16 / f32 (bf16x3) GEMMs (14,032 B)
+                       ("fvec", ("FVEC",)),                                      # f32 pointwise / softmax / norms / ROWPROG / training rows (15,232 B)
+                       ("wq", ("GEMMQ", "WQ", "ELTWISE", "FPOOL")))              # grouped weight-only quant (LLM linears), f32 pooling
 # FVEC fills a core program by itself (the vector-program interpreter, aie_modes_fvec.h): with GEMMQ it overflows
 
 
 def library_need(entries: dict, sets=LIBRARY_MEGAKERNELS) -> dict:
-    """entry -> bitmask of the library ELFs (index in *sets*) that compile all of the entry's modes"""
+    """entry -> bitmask of the library ELFs (index in *sets*) that compile all of the entry's modes;
+    entries without optional modes run on any ELF and are left out. *entries*: entry -> modes."""
     need = {}
     for entry, ms in entries.items():
         if not ms:
@@ -565,7 +646,8 @@ def library_need(entries: dict, sets=LIBRARY_MEGAKERNELS) -> dict:
 
 
 def modes_header(default: str, on: set) -> str:
-    """aie_modes_cfg.h with only the modes in *on* enabled"""
+    """aie_modes_cfg.h with only the modes in *on* enabled: the default header (all on) with
+    every other ``#define AIEK_MODE_<X> 1`` turned to 0 (derived macros stay as they are)"""
     def sub(m):  # 0 and 1 both ways: an opt-in mode (default 0, e.g. MMT) turns on when the app uses it
         return f"#define AIEK_MODE_{m.group(1)} {1 if m.group(1) in on else 0}"
     text = re.sub(r"#define AIEK_MODE_([A-Z0-9_]+) [01](?=\s)", sub, default)
@@ -573,7 +655,8 @@ def modes_header(default: str, on: set) -> str:
 
 
 def _restrict_to_usage(picked: list, used: dict) -> tuple:
-    """(entries kept, modes on): an entry with optional modes stays only if the app called it"""
+    """(entries kept, modes on): an entry with optional modes stays only if the app called it;
+    entries without (plain GEMM, K chaining) cost no core program memory and always stay"""
     keep = [e for e in picked if not e.contract.spec.modes or used.get(e.contract.spec.entry, 0)]
     # an entry whose own modes exceed a core program can run in no megakernel: leave it out (dispatch
     # serves those primitives with the next implementation), as the library build does
@@ -596,7 +679,16 @@ def dnn_build(app, target: str = "vek280", out=None, root=None, kernels=None, ai
               vitis_settings=None, run: bool = False, board: str = None, timeout: int = 120,
               verbose: bool = False, emulate: str = "vek280", headers=(), mesh=None,
               modes: str = "auto", heap: int = APP_HEAP_BYTES) -> DnnBuild:
-    """Build an aiednn app for *target* with kernels from the library at *root* (default ``src/aietensorop``)"""
+    """Build an aiednn app for *target* with kernels from the library at *root*
+    (default ``src/aietensorop``); ``run=True`` also runs it (x86 here, or the
+    board named by *board* for vek280). ``target="x86"`` selects kernels as
+    for the board *emulate* and runs their x86 references in their place.
+    *headers*: extra directories whose ``*.h`` the app includes (generated
+    data headers); copied next to the aiehlc entry / added with ``-I``. *mesh*: (rows, cols)
+    of AIE cores the kernels run on (default 4x4; gemm_uk.cc: 6x4 too). *modes* (board
+    targets): ``"auto"`` runs the app on x86 first (:func:`entry_usage`) and builds the
+    megakernel with only the modes of the entries it called (``aie_modes_cfg.h``; the
+    implementation list is cut to the same entries); ``"all"`` compiles every mode."""
     if target not in TARGETS:
         raise AiegraphError("dnn_build", f"target={target!r}", hint=f"one of {', '.join(TARGETS)}")
     app = Path(app).resolve()
@@ -636,7 +728,7 @@ def dnn_build(app, target: str = "vek280", out=None, root=None, kernels=None, ai
                                 hint="target='x86' runs it on the ref: implementations; the AIE "
                                      "kernels serve the GEMM family (matmul, inner product, (de)convolution)")
         entry = out / f"{app.stem}_aiednn.cc"
-        entry.write_text(_entry_source(app, picked, impl_cc, mesh))
+        entry.write_text(_entry_source(app, picked, impl_cc, mesh, rep.force_ref))
         # the runtime's own headers LAST: an app dir can hold stale copies of them from an
         # earlier build, and a stale aiednn_rt_gemm.h next to a current aiednn_rt.cc fails to compile
         _copy_headers([e.contract.source.parent for e in picked] + [app.parent] + [Path(h) for h in headers]
@@ -665,7 +757,8 @@ def dnn_build(app, target: str = "vek280", out=None, root=None, kernels=None, ai
 
 
 def _apply_usage(rep: DnnBuild, app: Path, picked: list, out: Path, headers) -> list:
-    """modes="auto": the entries the app calls on x86 decide the megakernel's modes"""
+    """modes="auto": the entries the app calls on x86 decide the megakernel's modes; any failure
+    of that run falls back to every mode (the build must not depend on it)"""
     try:
         used = entry_usage(app, picked, out / "usage_x86", headers)
     except (AiegraphError, OSError, subprocess.TimeoutExpired) as exc:
@@ -674,15 +767,17 @@ def _apply_usage(rep: DnnBuild, app: Path, picked: list, out: Path, headers) -> 
     keep, on = _restrict_to_usage(picked, used)
     allm = sorted({m for e in picked for m in e.contract.spec.modes})
     rep.modes, rep.kernels = tuple(on), keep
-    _plan_megakernels(rep, app, keep, out / "usage_x86")
-    print(f"[aiegraph] dnn_build: megakernel modes {' '.join(on) or '(GEMM only)'}; dropped "
-          f"{' '.join(m for m in allm if m not in on) or 'none'} (app run on x86: "
+    _plan_megakernels(rep, app, keep, out / "usage_x86")   # may narrow rep.modes / rep.kernels (islands on ref:)
+    print(f"[aiegraph] dnn_build: megakernel modes {' '.join(rep.modes) or '(GEMM only)'}; dropped "
+          f"{' '.join(m for m in allm if m not in rep.modes) or 'none'} (app run on x86: "
           + ", ".join(f"{k} {n}" for k, n in sorted(used.items()) if n) + ")")
-    return keep
+    return rep.kernels
 
 
 def _plan_library(rep: DnnBuild, picked: list, lib=()) -> None:
-    """modes="library": every entry stays and the fixed LIBRARY_MEGAKERNELS are built"""
+    """modes="library": every entry stays and the fixed LIBRARY_MEGAKERNELS are built (ELF 0 as the
+    default kernel.o, the rest as variants); entries with modes get a need-mask in the impl list.
+    An entry whose modes no set holds is left out of the library (dispatch then picks another impl)."""
     sets = library_sets(lib, rep.target)
     held = set().union(*(set(ms) for _, ms in sets))
     out = [e for e in picked if not set(e.contract.spec.modes) <= held]
@@ -700,25 +795,62 @@ def _plan_library(rep: DnnBuild, picked: list, lib=()) -> None:
 
 
 def library_sets(lib, board: str) -> tuple:
-    """LIBRARY_MEGAKERNELS without the modes only entries for other boards declare"""
+    """LIBRARY_MEGAKERNELS without the modes only entries for other boards declare: a mode whose every
+    AIEK_SPEC excludes *board* (vek385: MMT, an AIE-ML-only micro-kernel) must not be compiled into
+    its ELFs. Same sets, same order (mk_need masks index them)."""
     mine = {m for e in lib if board in e.contract.spec.targets for m in e.contract.spec.modes}
     other = {m for e in lib if board not in e.contract.spec.targets for m in e.contract.spec.modes} - mine
     return tuple((n, tuple(m for m in ms if m not in other)) for n, ms in LIBRARY_MEGAKERNELS)
 
 
+def _light_islands(op_modes: list) -> list:
+    """ops needing only LIGHT_MODES that the megakernel of the heavy modes (plus as many light modes as fit, the
+    most used first) does not cover: on a board with expensive switches they run on ref: (no switch)"""
+    heavy = set().union(*[ms - LIGHT_MODES for ms in op_modes]) if op_modes else set()
+    if not heavy:
+        return []                     # a light-only app: its megakernels are all there is
+    def fits(ms):
+        pm, st = megakernel_cost(ms)
+        return pm <= MK_PM_LIMIT and st <= MK_STACK_LIMIT
+    base = set(heavy)
+    uses = {}
+    for ms in op_modes:
+        for m in ms & LIGHT_MODES:
+            uses[m] = uses.get(m, 0) + 1
+    for m in sorted(uses, key=lambda m: -uses[m]):
+        if fits(base | {m}):
+            base.add(m)
+    return [i for i, ms in enumerate(op_modes) if ms and not (ms - LIGHT_MODES) and not ms <= base]
+
+
 def _plan_megakernels(rep: DnnBuild, app: Path, keep: list, udir: Path) -> None:
-    """several megakernels when the app's modes do not fit one core program"""
+    """several megakernels when the app's modes do not fit one core program: segments over the op
+    sequence (plan_segments) -> rep.segments, op -> segment in rep.mk_of_op (the implementation
+    list's table), aie_modes_cfg_<k>.h + megakernels.json for the multi-ELF build"""
     log = udir / "run.log"
     by_op = usage_by_op(log.read_text()) if log.is_file() else {}
     m = re.search(r"#define NOPS (\d+)", app.read_text(errors="replace"))
     nops = int(m.group(1)) if m else (max(by_op) + 1 if by_op else 0)
     modes_of = {e.contract.spec.entry: set(e.contract.spec.modes) for e in keep}
     op_modes = [set().union(*[modes_of.get(e, set()) for e, n in by_op.get(i, {}).items() if n]) for i in range(nops)]
+    if SWITCH_MS.get(rep.target, MK_SWITCH_MS) >= ISLAND_SWITCH_MS:
+        rep.force_ref = _light_islands(op_modes)
+        for i in rep.force_ref:
+            op_modes[i] = set()
+        if rep.force_ref:
+            print(f"[aiegraph] dnn_build: {len(rep.force_ref)} light ops on ref: rather than a "
+                  f"~{SWITCH_MS[rep.target]:.0f} ms megakernel switch each way on {rep.target}: ops {rep.force_ref}")
+            # their modes leave the build too: a mode no AIE op uses still costs core program memory
+            # (resnet18 on VEK385: GEMMQ POOL CONV + an unused FVEC = 22,884 B, refused)
+            left = set().union(*op_modes) if op_modes else set()
+            rep.kernels = [e for e in keep if not e.contract.spec.modes or set(e.contract.spec.modes) & left]
+            rep.modes = tuple(m for m in rep.modes if m in left)
     segs = plan_segments(op_modes) if nops else []
     if len(segs) <= 1:   # the app's modes fit one core program: today's single-megakernel build
         rep.segments, rep.mk_of_op = None, None
         return
-    # one core program per DISTINCT mode set
+    # one core program per DISTINCT mode set: a model alternating f32 rows and int8 tables (tiny_llama:
+    # 41 segments of 3 kinds) builds 3 ELFs, not 41 (each ~1 min of xchesscc); the switches stay
     distinct = list(dict.fromkeys(tuple(sorted(ms)) for _, _, ms in segs))
     rep.segments = [dict(name=f"mk{k}", first=min(a for a, _, m in segs if tuple(sorted(m)) == ms),
                          last=max(b for _, b, m in segs if tuple(sorted(m)) == ms), modes=list(ms),
@@ -770,7 +902,8 @@ def run_app(rep: DnnBuild, board: str = None, timeout: int = 120) -> DnnBuild:
 
 
 def _run_vek385(rep: DnnBuild, board: str, user: str, timeout: int) -> str:
-    """VEK385: script/test/appvek385.py (JTAG dow + UART capture; it scp's the ELF itself)."""
+    """VEK385: script/test/appvek385.py (JTAG dow + UART capture; it scp's the ELF itself).
+    The board is power cycled, its PDI programmed (VEK385_REV=b: boot + PLD PDIs)."""
     repo = _env.repo_root()
     host = board.split("@")[-1]
     env = dict(os.environ, USERNAME=board.split("@")[0] if "@" in board else user, VEK385IP=host,
@@ -791,7 +924,10 @@ _OP_LINE = re.compile(r"^OP (\S+) impl=(\S+) sum=(\S+) asum=(\S+)")
 
 
 def compare_ops_logs(a, b, rtol: float = 1e-5) -> list:
-    """Differences between two ``ops_app`` logs (e.g. board vs x86); empty list = they agree."""
+    """Differences between two ``ops_app`` logs (e.g. board vs x86): the same
+    primitives in the same order, the same implementation picked, and output
+    sums within *rtol* (the board's newlib libm and glibc may differ in the last
+    ulp of transcendental functions). Empty list = they agree."""
     def ops(text):
         return [m.groups() for m in map(_OP_LINE.match, Path(text).read_text(errors="replace")
                                         .replace("\r", "").splitlines()) if m]

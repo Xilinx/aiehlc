@@ -4,22 +4,40 @@
  *
  * aiednn_rt_gemmx.h -- gemm+ composites: operators reduced to plain GEMMs on the matmul dispatch.
  *
- * Data movement (im2col / col2im, transposes, widening) runs on the host; every multiply-accumulate runs in
- * an inner matmul A [M, K] x B [K, N] -> C [M, N] (s32 for s8 x s8, else f32). A composite accepts only when
- * the inner matmul would run on the AIE (AIEDNN_GEMMX_ANY_INNER=1 also accepts a ref: inner).
- * Exact for s8; within the inner floating GEMM's tolerance otherwise.
+ * The operator's data movement (im2col / col2im, transposes, type widening) runs on the host; every
+ * multiply-accumulate runs in an inner matmul A [M, K] x B [K, N] -> C [M, N] (C s32 for s8 x s8,
+ * else f32) that dispatch picks for that shape. A composite accepts only when the inner matmul would
+ * run on the AIE -- s8 x s8 on the GEMM block today, f32 / bf16 on a floating GEMM mode -- so with
+ * the default preference (aiednn_prefer_aie) an operator the AIE can compute this way runs there.
+ * AIEDNN_GEMMX_ANY_INNER=1 also accepts a ref: inner matmul: it checks the composites' data
+ * movement in workstation emulation, where no floating GEMM mode exists.
+ * Results: exact for s8 (int32 sums); within the inner floating GEMM's tolerance otherwise.
  *
- *   gemm+conv   convolution forward (floating 1-3 D, s8 3-D), backward data and backward weights
- *   gemm+deconv deconvolution forward (floating 1-3 D, s8 3-D) via col2im
- *   gemm+ip     inner product backward data and backward weights
- *   zp+         2-D conv / matmul / inner product with a u8 src or an s8 src zero point: the symmetric s8
- *               problem with an exact per-channel correction in rt_prob.acc_add
- *   gemm+mm     matmul / inner product with asymmetric int8 src, corrected on the host (gx_zp)
- *   gemm+sdpa   attention with floating Q / K / V: S = Q K^T and O = P V as GEMMs, softmax on the host
- *   gemm+rnnbwd RNN / LSTM / GRU backward with the big products as GEMMs over all steps
- *   gemm+rnn    RNN / LSTM / GRU inference: input projection over all steps, recurrent GEMM per step
- *   dequant     matmul / inner product with group-quantized weights and a floating src: weights to f32
- *   cvt         matmul / inner product with operand types no GEMM mode takes: widened to f32
+ *   gemm+conv   convolution forward (floating 1-3 D, s8 3-D: 2-D s8 is im2col's), backward data and
+ *               backward weights (+ bias), any groups / stride / padding / dilation
+ *   gemm+deconv deconvolution forward (floating 1-3 D, s8 3-D: 2-D s8 is col2im's): per (image, group)
+ *               W' [Og*nk, Cg] x src [Cg, positions], scattered into dst (col2im), then the epilogue
+ *   gemm+ip     inner product backward data (dy W) and backward weights (dy^T x, + bias)
+ *   zp+         2-D conv / matmul / inner product with a u8 src or an s8 src zero point: rewritten as the
+ *               symmetric s8 problem (conv src pre-padded with zp - shift, padding 0) with the exact
+ *               per-channel correction in rt_prob.acc_add, then dispatched like any s8 problem -- the tuned
+ *               im2col / direct / depthwise / n-tile paths, on-core requant included (acc_add folds into
+ *               the fixed-point bias). Ranks above gemm+conv / gemm+mm, which stay for 3-D and leftovers
+ *   gemm+mm     matmul / inner product with a u8 src or an s8 src zero point (asymmetric int8):
+ *               shifted to s8, the exact per-column correction added on the host (gx_zp)
+ *   gemm+sdpa   attention with floating Q / K / V: per (batch, head) S = Q K^T and O = P V as GEMMs,
+ *               scale / mask / causal / softmax on the host (sdpablk, the int8 mode, ranks above it)
+ *   gemm+rnnbwd RNN / LSTM / GRU backward: BPTT (aiednn_rt_rnn_bwd.h) with W x, dW, dx and dU as GEMMs over all
+ *               steps (only the recurrence stays per step)
+ *   gemm+rnn    RNN / LSTM / GRU inference: per (layer, direction) one input-projection GEMM over all
+ *               steps, one recurrent GEMM per step (+ U_o (r * h) for the reset-before GRU); the
+ *               gates on the host (aiednn_rt_rnn.h's formulas)
+ *   dequant     matmul / inner product with group-quantized (attr.wei_scales) weights and a floating
+ *               src: the weights dequantized to f32 once per execute, then the same problem (epilogue
+ *               included) on the f32 weights through dispatch -- int4 / int8 groups, MXFP4 / MXFP8
+ *   cvt         matmul / inner product whose operand types no GEMM mode takes (f16, f8, mixed floating
+ *               types, integer weights decompressed by the output scales): src and weights widened to
+ *               f32, then the same problem through dispatch
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_ntile.h (rt_env_on),
  * aiednn_rt_bwd.h (bwd_geo), aiednn_rt_nd.h (RT_D_*), aiednn_rt_rnn.h (rnn_gates / rnn_sig).
@@ -90,8 +108,9 @@ static int gx_gemm(const gx_types *t, int64_t M, int64_t N, int64_t K, const voi
     if (dispatch(&g, &in, &b, 1) != aiednn_success)
         return AIEK_ERR_ARGS;
     void *ptr[3] = {(void *)A, (void *)B, C};
-    /* the inner B is a temporary, never constant weights: a reused scratch address would hit stale cached
-     * blocks */
+    /* the inner B is a temporary (im2col columns, converted copies), never the model's constant weights:
+     * the constant-weight cache keys packed blocks by pointer, so a reused scratch address would hand a
+     * later call stale blocks (the outer primitive's flag must not reach it) */
     const int cw = g_exec_const_w;
     g_exec_const_w = b_is_weights ? cw : 0; /* B the primitive's own (constant) weights: cacheable */
     const int rc = run_sub(in, &g, &b, ptr);
@@ -110,10 +129,12 @@ static const void *gx_view(aiednn_data_type_t sdt, const void *src, int64_t off,
     return buf;
 }
 
-// ── src zero points and u8 src ─────────
-/* x' = x - shift (128 for u8, else 0) is s8; padding is filled with zp - shift, so the exact accumulator
- * sum_valid (x - zp) w = inner + (shift - zp) * sum_all w[o]: one constant per output channel.
- * Weight zero points stay ref:. */
+// ── src zero points and u8 src (frameworks' asymmetric int8: onnxruntime QDQ, PT2E) ─────────
+/* The AIE GEMM takes s8 x s8. src x (u8 or s8, zero point zp): x' = x - shift (shift 128 for u8, else 0)
+ * is s8; padding is filled with zp - shift. Then inner = sum_valid (x - shift) w + sum_pad (zp - shift) w,
+ * and the exact accumulator sum_valid (x - zp) w = inner + (shift - zp) * sum_all w[o]: the padded taps
+ * cancel, so the correction is one constant per output channel. The epilogue then runs on the exact
+ * int32 -- bit-exact against ref:. Weight zero points stay ref:. */
 typedef struct {
     int on; /* a shift or a zero point: the corrected path */
     int shift, zp;
@@ -540,8 +561,10 @@ static const void *gx_head_rows(aiednn_data_type_t dt, const void *base, int bsh
     return buf;
 }
 
-/* e^x for x <= 0 in float, as the FVEC core computes it (aie_fv_exp): Cody-Waite reduction, degree-7
- * polynomial, 2^n from the exponent bits; -inf gives exactly 0 */
+/* e^x for x <= 0 in float, as the FVEC core computes it (aie_modes_fvec.h aie_fv_exp): n = round(x / ln 2) by
+ * the round-to-nearest trick, r = x - n ln 2 in two parts (Cody-Waite), e^r a degree-7 polynomial (truncation
+ * < 3e-9, one more term than the core), 2^n from the exponent bits. Plain float code the A72 compiler vectorizes; -inf
+ * (a masked score) gives exactly 0 */
 static inline float gx_expf(float x) {
     const float xc = x < -87.3f ? -87.3f : x;
     const float tn = xc * 1.44269504089f + 12582912.0f, nf = tn - 12582912.0f;
@@ -563,7 +586,10 @@ static inline float gx_expf(float x) {
     return x == -INFINITY ? 0.0f : q * s2;
 }
 
-/* one f32 score row a[0..n) -> P = softmax(a) in float (within ~1e-6 relative of double) */
+/* one f32 score row a[0..n) -> P = softmax(a) in float: within ~1e-6 relative of the double rows, inside the
+ * f32 contract the bf16x3 GEMMs around it already set. On the A72 the max / exp / sum / scale passes are NEON,
+ * 4 lanes: the compiler leaves the polynomial scalar, and scalar float rows measured what the double ones did
+ * (vit_b_16 sdpa_softmax 190 ms either way, ~23 cycles per score at 675 MHz) */
 #if defined(__aarch64__)
 #include <arm_neon.h>
 static inline float32x4_t gx_expf4(float32x4_t x) {
@@ -685,7 +711,8 @@ static void gx_sdpa_softmax(const rt_prob *p, void *const *ptr, int64_t B, int64
     }
 }
 
-/* the (b, h) heads [bh0, bh1): scores, softmax, P V -- each GEMM pass deferred (b16q_defer) */
+/* the (b, h) heads [bh0, bh1): scores, softmax, P V -- each GEMM pass deferred (b16q_defer) so the bf16 mode
+ * runs a group's heads in a few n-tile launches instead of several launches per head */
 static int gx_sdpa_heads(const rt_prob *p, void *const *ptr, const gx_types *t, int64_t bh0, int64_t bh1, float *Sall,
                          float *Oall, char *Qb, char *Kb, char *Vb, char *Pb, double *row) {
     const aiednn_memory_desc_t *q = &p->md[0], *k = &p->md[1], *v = &p->md[2], *d = &p->md[3];
@@ -862,7 +889,8 @@ static int gx_zpq(const rt_prob *p, rt_prob *q, gx_zp *z, int64_t *pad /* t, b, 
     }
     if (p->kind != aiednn_matmul)
         return p->kind == aiednn_inner_product;
-    /* matmul: 2-D, or batched activations with weights shared over the batch: one correction per channel */
+    /* matmul: 2-D, or batched activations [.., M, K] with weights shared over the batch (an nn.Linear on
+     * [B, S, D]: weights [1, .., K, N]) -- one correction per output channel either way */
     if (s->ndims < 2 || w->ndims != s->ndims)
         return 0;
     for (int i = 0; i < w->ndims - 2; i++)
@@ -901,8 +929,9 @@ static int run_gx_zp(const rt_impl *self, aiednn_primitive *prim, void *const *p
         return AIEK_ERR_ARGS;
     const aiednn_memory_desc_t *s = &p->md[0], *w = rt_md(p, AIEDNN_ARG_WEIGHTS);
     const int ip = p->kind == aiednn_inner_product, conv = p->kind == aiednn_convolution;
-    /* the correction per output channel: (shift - zp) * the sum of that channel's weights (rows of W for
-     * conv / inner product / transposed matmul, columns for a plain matmul) */
+    /* the correction per output channel: (shift - zp) * the sum of that channel's weights; rows of W are
+     * output channels for conv / inner product / a transposed matmul ([N, K], ONNX Gemm transB), columns
+     * for a plain matmul ([K, N]) */
     const int rows = conv || ip || p->transposed;
     const int wl = p->kind == aiednn_matmul ? w->ndims - 2 : 0; /* a matmul's weight matrix: its last two dims */
     const int64_t O = rows ? w->dims[wl] : w->dims[wl + 1], Kw = md_numel(w) / O;

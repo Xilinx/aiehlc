@@ -1,6 +1,7 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""aiednn linear attention (ref: and gemm+linattn) against a float64 recurrence."""
+"""aiednn linear attention (gated delta rule): Gated DeltaNet, KDA, gated linear attention, DeltaNet -- ref: and
+the chunked gemm+linattn against a float64 recurrence written here, independently of the C runtime."""
 from __future__ import annotations
 
 import ctypes as C
@@ -108,7 +109,8 @@ def test_linear_attention(lib, name, state):
 
 
 def test_steep_per_channel_gates_take_host_steps(lib):
-    """Per-channel gates too steep for float in a chunk run as host steps, same results."""
+    """per-channel gates spanning more than float carries in a chunk (here -8 per token: 128 over 16 tokens) run
+    those chunks as host steps -- same results"""
     q, k, v, _, beta, h0 = make(1, 1, 40, 16, 8, True, True, True, True)
     g = np.full((1, 1, 40, 16), -8.0, np.float32)
     g[..., ::2] = -0.05

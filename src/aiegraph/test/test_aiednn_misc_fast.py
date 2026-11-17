@@ -2,7 +2,12 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Typed f32 dropout and grid sample paths are bit-identical to a numpy replica of ref:'s arithmetic."""
+"""The typed f32 fast paths of dropout and grid sample (aiednn_rt_misc.h) are bit-identical to ref:'s
+arithmetic: a numpy replica of the same splitmix64 stream / the same double expressions, compared
+exactly (test_aiednn_misc.py checks both against PyTorch within tolerances).
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_misc_fast.py
+"""
 from __future__ import annotations
 
 import ctypes as C

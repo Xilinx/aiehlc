@@ -4,7 +4,14 @@
 ###############################################################################
 """ops.html: the operators aiednn supports, where each runs, and which other DNN libraries ship them.
 
-Read from doc/design/aiednn.md's parity scoreboard and from the sources (aiednn.h, kernel_lib, ref: impls).
+Nothing is hand-copied into this script, so the page follows the tree:
+  * the comparison table is the parity scoreboard in doc/design/aiednn.md (the section headed
+    "Parity scoreboard"): its first column names the libraries that ship the operator, the next the AIE
+    implementations for inference (the scoreboard's training and board-time columns and its backward-pass
+    clauses are left out);
+  * the inventory is read from the sources: every create function in include/aiednn.h, the AIE
+    kernel entries of the kernel library (aiegraph.kernel_lib over src/aietensorop, with their
+    AIEK_SPEC boards), and every ref: (host CPU) implementation name in src/aiednn.
 
     PYTHONPATH=src python3 example/aiednn/models/viz_ops.py    # writes worklocal/aiednn/models/ops.html
 """
@@ -21,7 +28,7 @@ DOC = REPO / "doc" / "design" / "aiednn.md"
 
 
 def _md_table(text: str, heading: str) -> tuple:
-    """(title, header cells, rows) of the first markdown table under the matching ## heading."""
+    """(section title, header cells, rows) of the first markdown table under the ## heading containing *heading*"""
     i = next(k for k, ln in enumerate(text.splitlines()) if ln.startswith("## ") and heading in ln)
     lines = text.splitlines()[i:]
     title = lines[0][3:].strip()
@@ -68,7 +75,7 @@ def _libs(cell: str, names: list) -> dict:
 
 
 def _where(cell: str) -> str:
-    """aie | partial | host | none for an inference cell."""
+    """aie | partial | host | none for an inference cell: the scoreboard bolds what stays on ref:"""
     c = cell.strip()
     if c in ("--", "—", "-"):
         return "none"
@@ -80,7 +87,7 @@ def _where(cell: str) -> str:
 
 
 def _no_backward(cell: str) -> str:
-    """The cell without its backward-pass / training clauses."""
+    """the cell without its backward-pass / training clauses (split at ';' and top-level ',')"""
     drop = re.compile(r"\b(bwd|backward|training|train|BPTT|dK|dV)\b")
     keep = [c for c in re.split(r";\s*", cell) if not drop.search(c)]
     keep = [", ".join(p for p in re.split(r",\s*(?![^()]*\))", c) if not drop.search(p)) for c in keep]
@@ -132,7 +139,7 @@ def main() -> Path:
     for r in rows:
         if len(r) < 4:
             continue
-        # inference only
+        # inference only: training-only operators (dropout, CTC loss) and "training" attributions leave the label
         op = re.sub(r"\s*training\)", ")", re.sub(r"(Dropout, |, CTC loss)", "", r[0]))
         inf = re.sub(r"\s*\(dropout [\d.]+, grid_sample [\d.]+\)", "", _no_backward(r[1]))
         recs.append(dict(op=op, libs=_libs(op, libs), inf=inf, w_inf=_where(inf)))

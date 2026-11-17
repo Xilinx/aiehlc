@@ -2,7 +2,11 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Typed f32 resampling and LRN paths are byte-identical to the generic loops, on ref:."""
+"""The typed f32 host paths of resampling and LRN, forward and backward (aiednn_rt_ops.h,
+aiednn_rt_bwd.h), are byte-identical to the generic loops (AIEDNN_REF_GENERIC=1 forces those), on ref:.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_ref_fast.py
+"""
 from __future__ import annotations
 
 import ctypes as C

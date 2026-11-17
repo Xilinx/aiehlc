@@ -5,9 +5,11 @@
  * aiednn_rt_sparse.h -- matmul with a CSR-encoded sparse src: dst [M, N] = A [M, K] x W [K, N] (+ bias), A given
  * as values [nnz], column indices [nnz] s32 and row pointers [M + 1] s32 (SRC, SRC_INDICES, SRC_POINTERS).
  *
- * Two implementations, both exact for integers:
- *   densify+<matmul impl> -- scatter A into a dense [M, K] block and run the matmul dispatch on it.
- *   ref:sparse_matmul     -- per row, each nonzero times its weight row (double accumulators).
+ * Two implementations, both exact for integers and summing in the same order for floats as their dense
+ * counterpart would:
+ *   densify+<matmul impl> -- scatter A into a dense [M, K] block and run the matmul dispatch on it (the AIE
+ *                            GEMM: s8 blocked, f32 bf16x3). Pays for the zeros, wins while A is not very sparse.
+ *   ref:sparse_matmul     -- per row, each nonzero times its weight row (double accumulators): work ~ nnz x N.
  * Under aiednn_prefer_fastest densify+ refuses below RT_SPARSE_DENSIFY_MIN density (nnz / (M K)).
  *
  * Needs, from the including TU: aiednn_rt_internal.h and the create helpers of aiednn_rt.cc.

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  ******************************************************************************/
 // --aiednn-export-plan="out=<file>": every func.func as a JSON op list, in block
-// order, for aiegraph.dnn_mlir.from_plan.
+// order, for aiegraph.dnn_mlir.from_plan (which rebuilds the executable graph).
 //
 //   {"funcs": [{"name": "m", "args": [0], "results": [17],
 //               "values": [{"id": 0, "shape": [1,3,224,224], "dtype": "f32"}, ...],

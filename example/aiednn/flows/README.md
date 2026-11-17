@@ -32,7 +32,7 @@ deeper references are:
 | # | Way in | Who uses it | Entry point | This directory | What it prints |
 |---|---|---|---|---|---|
 | 1 | **C primitive API**: describe tensors, create primitives, execute | apps, runtimes, other compilers | `include/aiednn.h` | [`1_c_api/`](1_c_api/) | implementation per primitive, PASS vs `ref:` |
-| 2 | **`torch.compile(model, backend="aiednn")`** | PyTorch users | `aiegraph.dnn_torch_backend` → graph API | [`2_torch_compile/`](2_torch_compile/) | partitions + implementations, PASS vs eager |
+| 2 | **`torch.compile(model, backend="aiednn")`**, and **`torch.export` -> a board program** (`--export`) | PyTorch users | `aiegraph.dnn_torch_backend` → graph API; `aiegraph.dnn_export` → the model compiler (flow 4) | [`2_torch_compile/`](2_torch_compile/) | partitions + implementations, PASS vs eager; with `--export`: the C app / board ELF, PASS vs PyTorch |
 | 3 | **ONNX**: `OnnxGraph`, or the ONNX Runtime plugin EP | ONNX / ORT users | `aiegraph.dnn_onnx_graph`, `aiegraph.dnn_ort_ep` → graph API | [`3_onnx/`](3_onnx/) | partitions, PASS vs onnxruntime CPU |
 | 4 | **Offline model compiler**: a whole model → fused primitive sequence → board app | per-model deployment, benchmarks | `aiegraph.dnn_torch` + `dnn_mlir` | [`4_model_compiler/`](4_model_compiler/) | primitives on the AIE, GEMMs checked exact, PASS vs PyTorch |
 
@@ -54,6 +54,7 @@ plain `aiednn.h` calls. Flow 1 is those calls written by hand.
 
 ```bash
 python example/aiednn/flows/2_torch_compile/run.py --model resnet18
+python example/aiednn/flows/2_torch_compile/run.py --export --model resnet18 [--target vek385 --board <host>]   # torch.export
 python example/aiednn/flows/3_onnx/run.py --onnx worklocal/tvmrelay_deploy/resnet18-v1-7.int8.qdq.onnx
 python example/aiednn/flows/4_model_compiler/run.py --model resnet18          # int8, the MLIR pipeline
 ```

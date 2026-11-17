@@ -2,7 +2,19 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""The aiednn MLIR dialect as the whole-model IR (src/mlir/mlirfront/frontend/aiednn)."""
+"""The aiednn MLIR dialect as the whole-model IR (src/mlir/mlirfront/frontend/aiednn).
+
+    text, store = to_mlir(g)                  # AGraph -> aiednn MLIR + constant store
+    text = opt(text, "--canonicalize")        # aiednn-opt: verify / run passes
+    g2 = from_mlir(text, store)               # aiednn-opt --aiednn-export-plan -> AGraph
+
+One op per aiednn primitive (``aiednn.conv``, ``aiednn.reorder``, ...), SSA
+tensors inside a ``func.func``; constants are ``aiednn.const {index = N}`` into
+*store* (weights never enter the IR); each op's location is its fx node name;
+fused epilogues are ``output_scales`` + ``#aiednn.post_op<...>`` attributes.
+Floats are written with 9 significant digits and come back as their f32 bits,
+so the round trip is bit-exact (test_dnn_mlir.py). doc/design/aiednn.md §11.
+"""
 
 from __future__ import annotations
 
@@ -115,7 +127,7 @@ class _Emitter:
             if at.get("scales") is not None:
                 attrs["output_scales"] = "array<f32: " + ", ".join(_f(s) for s in np.ravel(at["scales"])) + ">"
             if at.get("post"):
-                ab = lambda p: (p[2], p[3]) if p[0] == "eltwise" else (p[3], p[4]) if len(p) > 3 else (0.0, 0.0)
+                ab = lambda p: (p[2], p[3]) if p[0] == "eltwise" else (p[3], p[4]) if len(p) > 3 else (0.0, 0.0)  # noqa: E731
                 pos = [f'#aiednn.post_op<"{p[0]}", "{p[1]}", {_f32(ab(p)[0])}, {_f32(ab(p)[1])}>' for p in at["post"]]
                 attrs["post_ops"] = "[" + ", ".join(pos) + "]"
             if at.get("dst_scale"):
@@ -183,8 +195,12 @@ class _Emitter:
         return [ex["SRC"]], {"offsets": _i64s(arrs[0][1]), "steps": _i64s(arrs[1][1])}, None
 
     def _rope(self, o, ex):
-        return ([ex["SRC"], ex["ROPE_COS"], ex["ROPE_SIN"]],
-                {"interleaved": f"{_by(o.create, 'int')[0][1]} : i64"}, None)
+        a = {"interleaved": f"{_by(o.create, 'int')[0][1]} : i64"}
+        at = next((i[1] for i in o.create if i[0] == "attr"), None)
+        if at is not None and at.get("dst_scale"):          # folded quantize (create_attr)
+            a["dst_scale"] = _f32(at["dst_scale"])
+            a["dst_zero_point"] = f"{int(at.get('dst_zp', 0))} : i64"
+        return [ex["SRC"], ex["ROPE_COS"], ex["ROPE_SIN"]], a, None
 
     def _shuffle(self, o, ex):
         return [ex["SRC"]], {"axis": f"{_by(o.create, 'int')[0][1]} : i64",
@@ -230,6 +246,12 @@ class _Emitter:
         if at is not None and at.get("dst_scale"):          # folded quantize (create_attr)
             a["dst_scale"] = _f32(at["dst_scale"])
             a["dst_zero_point"] = f"{int(at.get('dst_zp', 0))} : i64"
+        if at is not None and at.get("src_scales"):         # 8-bit q / k / v (int8 attention)
+            sc = list(at["src_scales"]) + list(at.get("src_scales_23") or [0.0, 0.0])
+            a["src_scales"] = "array<f32: " + ", ".join(t if any(c in t for c in ".en") else t + ".0"
+                                                         for t in (_f(v) for v in sc)) + ">"   # 0 -> 0.0
+        if at is not None and at.get("flags"):
+            a["flags"] = f"{int(at['flags'])} : i64"
         return [ex["SRC"], ex["SRC_1"], ex["SRC_2"]], a, None
 
 
@@ -276,7 +298,8 @@ def opt(text: str, *args: str) -> str:
 
 
 def export_plan(text: str, passes=()) -> dict:
-    """run *passes* and export the plan in ONE aiednn-opt process"""
+    """run *passes* and export the plan in ONE aiednn-opt process: the printed IR is
+    not exact for f32 arrays (MLIR prints them in short decimal form), the plan is"""
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "plan.json"
         opt(text, *passes, f"--aiednn-export-plan=out={p}")
@@ -294,7 +317,8 @@ def _geom(a) -> dict:
 
 
 def from_mlir(text: str, store: list, name: str | None = None, mode: str | None = None, passes=()) -> AGraph:
-    """the executable AGraph of the (first) func in aiednn MLIR *text*, after *passes* (aiednn-opt flags)."""
+    """the executable AGraph of the (first) func in aiednn MLIR *text*, after *passes*
+    (aiednn-opt flags, e.g. "--aiednn-fuse-epilogue")"""
     plan = export_plan(text, passes)
     fn = plan["funcs"][0]
     if mode is None:
@@ -331,7 +355,7 @@ def from_plan(fn: dict, store: list, name: str, mode: str) -> AGraph:
         a.pop("aiednn.inplace", None)
         create, ex = _rebuild(kind, a, opnds, o.get("segments"), y, g)
         fnname = _FN[kind]
-        if (kind in _GEMM or kind in ("batch_norm", "layer_norm", "sdpa")) and any(c[0] == "attr" for c in create):
+        if (kind in _GEMM or kind in ("batch_norm", "layer_norm", "sdpa", "rope")) and any(c[0] == "attr" for c in create):
             fnname = fnname.replace("_create", "_create_attr")
         g.op(o["loc"], fnname, create, ex, y)
         for n in o.get("locs", [])[1:]:                 # source ops a fusion pass folded into it
@@ -410,7 +434,9 @@ def _rebuild(kind, a, opnds, seg, y, g):  # noqa: C901 -- one branch per op, mir
     if kind == "slice":
         return [md(x), md(y), ("i64s", list(a["offsets"])), ("i64s", list(a["steps"]))], list(simple.items())
     if kind == "rope":
-        return ([md(x), md(opnds[1]), md(opnds[2]), md(y), ("int", int(a["interleaved"]))],
+        at = ([("attr", dict(scales=None, post=[], dst_scale=_fl(a["dst_scale"]),
+                             dst_zp=int(a.get("dst_zero_point", 0))))] if "dst_scale" in a else [])
+        return ([md(x), md(opnds[1]), md(opnds[2]), md(y), ("int", int(a["interleaved"]))] + at,
                 [("SRC", x), ("ROPE_COS", opnds[1]), ("ROPE_SIN", opnds[2]), ("DST", y)])
     if kind in ("batch_norm", "layer_norm", "group_norm"):
         parts = _segments(opnds, seg)
@@ -435,16 +461,26 @@ def _rebuild(kind, a, opnds, seg, y, g):  # noqa: C901 -- one branch per op, mir
                 [(("multi", i), t) for i, t in enumerate(opnds)] + [("DST", y)])
     if kind == "sdpa":
         q, k_, v = opnds[:3]
+        at = None
+        if "dst_scale" in a or "src_scales" in a or "flags" in a:
+            at = dict(scales=None, post=[], dst_scale=_fl(a["dst_scale"]) if "dst_scale" in a else 0.0,
+                      dst_zp=int(a.get("dst_zero_point", 0)), flags=int(a.get("flags", 0)))
+            if "src_scales" in a:
+                sc = [_fl(v) for v in a["src_scales"]]
+                at.update(src_scales=sc[:2], src_scales_23=sc[2:4])
         return ([md(q), md(k_), md(v), ("null",), md(y), ("float", _fl(a["scale"])),
                  ("int", int(bool(a["causal"])) | (int(a.get("layout", 0)) << 1))]   # layout: AIEDNN_SDPA_*_BSHD
-                + ([("attr", dict(scales=None, post=[], dst_scale=_fl(a["dst_scale"]),
-                                  dst_zp=int(a.get("dst_zero_point", 0))))] if "dst_scale" in a else []),
+                + ([("attr", at)] if at else []),
                 [("SRC", q), ("SRC_1", k_), ("SRC_2", v), ("DST", y)])
     raise AiegraphError("dnn_mlir", f"no rebuild rule for aiednn.{kind}")
 
 
-#: the default aiednn pipeline: fuse epilogues, keep activations int8 between GEMMs, plan the arena.
-# quantize-residual must precede quantize-before-maxpool
+#: the default aiednn pipeline: clean up, fuse epilogues, keep activations int8
+#: between GEMMs, clean up again (canonicalize folds the reorders the requant
+#: folding exposed; cse merges identical quantizations of one tensor), then plan
+#: the activation arena (liveness reuse + in-place eltwise)
+# quantize-residual before quantize-before-maxpool: once a skip's int8 copy is the max-pool's only
+# consumer (resnet's stem pool feeds layer1's conv and its residual), the pool can move to int8
 PIPELINE = ("--canonicalize", "--cse", "--aiednn-fuse-norm-relu", "--aiednn-sink-permute", "--aiednn-fuse-epilogue", "--aiednn-quantize-residual", "--cse",
             "--aiednn-quantize-through-views", "--cse",
             "--aiednn-quantize-before-maxpool", "--aiednn-fold-requant", "--aiednn-fold-head-permute",
@@ -476,7 +512,11 @@ def _slice_range(g, op, n_axis_len):
 
 
 def split_gemm_slices(g: AGraph) -> int:
-    """Split a GEMM whose result only feeds N-axis slices into one GEMM per slice; returns GEMMs split."""
+    """A GEMM (constant transposed weights [.., N, K], optional constant bias) whose result only feeds
+    slices along its N axis becomes one GEMM per slice, each writing the slice's tensor directly: the
+    weight rows, bias and per-channel output scales are cut the same way. Exact (each output channel is
+    computed alone), and the slices leave the host (gpt2's c_attn -> q / k / v: 36 slices). Returns the
+    number of GEMMs split."""
     n_split = 0
     i = 0
     while i < len(g.ops):
@@ -589,7 +629,9 @@ def _match_rmsnorm(g, prod, i):
 
 
 def fuse_rmsnorm(g: AGraph) -> int:
-    """Fuse an unfused RMSNorm into one layer norm; returns the number fused."""
+    """x * rsqrt(mean(x ** 2) + eps) * w (an unfused RMSNorm: pow, mean, add, rsqrt, mul, mul) -> one layer norm
+    with AIEDNN_USE_SCALE | AIEDNN_RMS_NORM; --aiednn-fold-norm-quant then gives it the int8 dst the next GEMM
+    reads. Returns the number fused."""
     n = 0
     while True:
         prod = _producers(g)
@@ -657,7 +699,10 @@ def _rope_op(op, name, src, cos, sin, dst):
 
 
 def fuse_rope(g: AGraph) -> int:
-    """the rotate-half rotary embedding chain"""
+    """the rotate-half rotary embedding chain (mul, slice, neg, slice, concat, mul, add) -> aiednn_rope_create,
+    bit-identical (its documented arithmetic order is mul, mul, add). When x is a head permute
+    [B, S, H, D] -> [B, H, S, D] read by nothing else, the rope moves in front of it on [B, S, H, D] with cos /
+    sin transposed the same way, so --aiednn-fold-head-permute can fold the permute into sdpa. Returns the count."""
     n = 0
     while True:
         prod = _producers(g)
@@ -693,7 +738,9 @@ REWRITES = ("split_gemm_slices", "fuse_rmsnorm", "fuse_rope")   # AGraph rewrite
 
 
 def optimize(g: AGraph, passes=PIPELINE, keep_ir: Path | None = None, rewrites=REWRITES) -> AGraph:
-    """*g* through the aiednn MLIR pipeline; returns the executable graph."""
+    """*g* through the aiednn MLIR pipeline; returns the executable graph.
+    *keep_ir*: also write the input and optimized IR there (<name>.in.mlir / .opt.mlir).
+    *rewrites*: the AGraph rewrites run first (they need constant values, which the MLIR only references)."""
     for r in rewrites:
         globals()[r](g)
     text, store = to_mlir(g)

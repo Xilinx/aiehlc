@@ -2,7 +2,14 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""gemm+ composites (aiednn_rt_gemmx.h) against ref:: s8 bit-exact, float allclose."""
+"""gemm+ composites (aiednn_rt_gemmx.h): operators reduced to GEMMs on the matmul dispatch, against
+ref: on the same inputs. s8 problems run their GEMMs on the AIE block (emulated here) and must be
+bit-exact; floating problems need a floating GEMM mode on the AIE, which workstation emulation does
+not have, so AIEDNN_GEMMX_ANY_INNER=1 lets them run with a ref: inner GEMM to check the data
+movement (allclose: the sums are reassociated).
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_gemmx.py
+"""
 
 from __future__ import annotations
 
@@ -280,7 +287,8 @@ def test_sdpa_as_gemms(lib, any_inner, mask, causal, sq, skv, layout):
 
 @pytest.mark.parametrize("mask,causal", [(False, False), (True, False), (False, True)])
 def test_sdpa_float_softmax_rows(lib, mask, causal):
-    """gemm+sdpa's f32 softmax rows are as close to ref: as the double rows."""
+    """gemm+sdpa's f32 softmax rows run in float (gx_softmax_row_f32: the FVEC core's exp); on vit-, bert-
+    and gpt2-shaped heads the result is as close to ref: as with the double rows (AIEDNN_SDPA_DOUBLE_SOFTMAX)"""
     B, H, S, D = 1, 3, 197, 64
     q, k, v = (RNG.uniform(-2, 2, (B, H, S, D)).astype(np.float32) for _ in range(3))
     lg = (B, H, S, D)
@@ -297,14 +305,17 @@ def test_sdpa_float_softmax_rows(lib, mask, causal):
         _, dbl, _ = both(lib, "aiednn_sdpa_forward_create", args, bufs, [ARG["dst"]])
     finally:
         del os.environ["AIEDNN_SDPA_DOUBLE_SOFTMAX"]
-    # the bf16x3 GEMMs set the error; the float rows must not add to it
+    # at this size the bf16x3 GEMMs set the error (~2e-6 absolute for outputs of order 1, with either
+    # softmax): the float rows must not add to it
     e_f, e_d = np.abs(got[0] - want[0]).max(), np.abs(dbl[0] - want[0]).max()
     assert e_f <= 5e-6 and e_d <= 5e-6, (e_f, e_d)
     assert e_f <= 1.25 * e_d + 2e-7, (e_f, e_d)
 
 
 def test_switching_execute_tries_ref_once(lib):
-    """aiednn_prefer_fastest after an ELF switch trials ref: once and keeps the faster; outputs stay exact."""
+    """aiednn_prefer_fastest: an execute that reloaded a core ELF (here faked: AIEDNN_TEST_MK_SWITCH) also times
+    the primitive's ref: candidate and keeps it when it beats the AIE run plus one switch back -- a small int8
+    matmul does. Outputs stay bit-exact, and the trial runs once per primitive"""
     a = RNG.integers(-128, 128, (32, 64)).astype(np.int8)
     b = RNG.integers(-128, 128, (64, 48)).astype(np.int8)
     want = a.astype(np.int32) @ b.astype(np.int32)
@@ -358,7 +369,8 @@ def test_conv_src_zero_point_on_the_aie(lib, case, sdt, zp):
 @pytest.mark.parametrize("kind", ["matmul", "matmul_t", "ip"])
 @pytest.mark.parametrize("sdt,zp", [("u8", 113), ("u8", 0), ("s8", 5)])
 def test_matmul_src_zero_point_on_the_aie(lib, kind, sdt, zp):
-    """Asymmetric activations x symmetric s8 weights with a quantizing epilogue: bit-exact vs ref:."""
+    """asymmetric activations x symmetric s8 weights, with a quantizing epilogue (scales, bias, ReLU,
+    s8 dst): bit-exact against ref:"""
     from aiegraph.dnn_ctypes import attr
     M, K, N = 9, 200, 70
     x = (RNG.integers(0, 256, (M, K)).astype(np.uint8) if sdt == "u8" else RNG.integers(-128, 128, (M, K)).astype(np.int8))
@@ -381,7 +393,9 @@ def test_matmul_src_zero_point_on_the_aie(lib, kind, sdt, zp):
 
 @pytest.mark.parametrize("const_w", [0, 1])
 def test_composites_with_constant_weights_take_fresh_inputs(lib, const_w):
-    """Constant weights: the composite's inner temporaries must never key the constant-weight cache."""
+    """a primitive whose weights are a model constant (what the graph API / models set), executed on two
+    different inputs: the composite's inner GEMM sees temporaries as its B, which the constant-weight
+    cache must never key (it did: stale packed im2col blocks, wrong and run-dependent results)"""
     from aiegraph.dnn_ctypes import attr
     x0 = RNG.integers(0, 256, (1, 3, 40, 40)).astype(np.uint8)
     w = RNG.integers(-128, 128, (16, 3, 7, 7)).astype(np.int8)
@@ -412,7 +426,8 @@ def test_composites_with_constant_weights_take_fresh_inputs(lib, const_w):
 
 
 def test_rnn_constant_weights_cache_the_weights_only(lib):
-    """gemm+rnn under set_constant_weights: W / U cached, h never; equal to ref:."""
+    """gemm+rnn under set_constant_weights: W / U (the primitive's own) may be cached by the inner float
+    GEMM, the per-step h never is -- three different inputs, each equal to ref: within the GEMM's tolerance"""
     T, N, H = 4, 2, 16
     u = lambda *s: RNG.uniform(-0.6, 0.6, s).astype(np.float32)
     W, U, B = u(1, 1, H, 4, H), u(1, 1, H, 4, H), u(1, 1, 4, H)
@@ -441,7 +456,8 @@ def test_rnn_constant_weights_cache_the_weights_only(lib):
 
 
 def test_zp_weight_sums_cached_for_constant_weights(lib):
-    """zp+ with constant weights caches the weight sums; results byte for byte equal."""
+    """zp+ with constant weights computes the per-channel weight sums once (prim->wsum): the cached second
+    execute equals the first and the non-constant run byte for byte"""
     x = RNG.integers(0, 256, (1, 16, 10, 10)).astype(np.uint8)
     w = RNG.integers(-60, 60, (24, 16, 3, 3)).astype(np.int8)
     from aiegraph.dnn_ctypes import attr
@@ -466,7 +482,8 @@ def test_zp_weight_sums_cached_for_constant_weights(lib):
 @pytest.mark.parametrize("sdt,zp", [("s8", 5), ("u8", 113)])
 @pytest.mark.parametrize("tr", [0, 1])
 def test_batched_linear_with_src_zero_point_on_the_aie(lib, sdt, zp, tr):
-    """An int8 nn.Linear on [B, S, D]: zp+ with the batch folded into M, bit-identical to ref:."""
+    """an int8 nn.Linear on [B, S, D] (PT2E: affine src, per-channel weights shared over the batch): zp+ over the
+    blocked GEMM with the batch folded into M -- bit-identical to ref:matmul"""
     from aiegraph.dnn_ctypes import attr
     B, S_, K, N = 2, 70, 96, 40
     x = (RNG.integers(0, 256, (B, S_, K)).astype(np.uint8) if sdt == "u8"
@@ -484,7 +501,8 @@ def test_batched_linear_with_src_zero_point_on_the_aie(lib, sdt, zp, tr):
 
 @pytest.mark.parametrize("case", CASES)
 def test_deconv_backward_as_convolutions(lib, any_inner, case):
-    """conv+deconvbwd: deconvolution backward data / weights as convolutions, ref:'s gradients."""
+    """conv+deconvbwd: deconvolution backward data = convolution forward of dy, backward weights = convolution
+    backward weights with the roles exchanged (weights transposed per group) -- ref:'s gradients"""
     sp, k, s, pl, pr, d, g = case
     N, Cc, O = 2, 4, 6
     ys = tuple((sp[i] - 1) * s[i] - pl[i] - pr[i] + (k[i] - 1) * (d[i] + 1) + 1 for i in range(len(sp)))

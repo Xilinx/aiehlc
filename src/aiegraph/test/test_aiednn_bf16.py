@@ -1,4 +1,6 @@
-"""Float matmul on the GEMM ELF's bf16 mode (bf16blk:, bf16x3:) through ctypes on the x86 build."""
+"""Float matmul on the GEMM ELF's bf16 mode (aie_modes_bf16.h, aiednn_rt_bf16.h): bf16 x bf16
+(bf16blk:) and f32 x f32 as a bf16x3 split (bf16x3:), through ctypes on the x86 build (the kernel's
+x86 reference, f32 accumulation in K order, stands in for the AIE)."""
 from __future__ import annotations
 
 import ctypes as C
@@ -55,7 +57,8 @@ def test_bf16_matmul_on_aie(lib, sa, sw, transposed):
 
 @pytest.mark.parametrize("sa,sw,transposed", [((20, 1000), (1000, 50), 0), ((3, 7, 130), (3, 40, 130), 1)])
 def test_f32_matmul_as_bf16x3(lib, sa, sw, transposed):
-    """f32 as a bf16x3 split in one K-concatenated bf16 GEMM: near f32 accuracy."""
+    """f32 = hi + mid + lo (bf16 each): the six significant products in one K-concatenated bf16 GEMM --
+    near f32 accuracy (a plain bf16 GEMM would be ~1e-3 off)"""
     a = RNG.uniform(-2, 2, sa).astype(np.float32)
     w = RNG.uniform(-2, 2, sw).astype(np.float32)
     wm = np.swapaxes(w, -1, -2) if transposed else w
@@ -83,7 +86,8 @@ def test_mixed_and_zero_points_stay_off(lib):
 @pytest.mark.parametrize("sa,sw,transposed", [((1, 128), (128, 512), 0),            # a recurrent step: M = 1
                                               ((2, 3, 130), (2, 40, 130), 1)])     # batched [N][K] weights
 def test_f32_constant_weights_cached(lib, sa, sw, transposed):
-    """set_constant_weights: the split W' is built once and reused; each new src stays right."""
+    """set_constant_weights: the split W' is built once per (pointer, shape) and reused; every execute with
+    a new src stays right (the A side is re-split each call)"""
     w = RNG.uniform(-2, 2, sw).astype(np.float32)
     oshape = tuple(sa[:-1]) + (sw[-2] if transposed else sw[-1],)
     prim, st = lib.create("aiednn_matmul_forward_create", C.byref(md(sa, "f32")), C.byref(md(sw, "f32")), None,

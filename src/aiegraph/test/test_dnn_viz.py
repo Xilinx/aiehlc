@@ -2,7 +2,13 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Model-flow HTML (``aiegraph.dnn_viz``) for lowered aiednn graphs, on x86."""
+"""Model-flow HTML (``aiegraph.dnn_viz``) for lowered aiednn graphs, on x86.
+
+    python3 -m pytest -q src/aiegraph/test/test_dnn_viz.py
+
+Random weights: the page is written, self-contained (no http(s) src / href), lists
+every primitive, and its per-op byte figures follow from the tensor shapes.
+"""
 
 from __future__ import annotations
 
@@ -121,7 +127,10 @@ def test_board_log_and_routing(tmp_path):
 
 
 def test_fused_ops_and_megakernel_view(lib, tmp_path):
-    """MLIR-optimized int8 graph: folded source ops, AIE entries and per-mode totals in the page."""
+    """MLIR-optimized int8 graph: every primitive lists the source ops a pass folded into it
+    (FusedLoc -> ExportPlan locs), every AIE op the megakernel entries / opcodes it called on
+    x86, and the megakernel section adds them up per mode; a board build dir's aie_modes_cfg.h
+    says which modes it compiled"""
     from aiegraph import dnn_mlir as dm
     if dm.aiednn_opt_path() is None:
         pytest.skip("aiednn-opt not built")

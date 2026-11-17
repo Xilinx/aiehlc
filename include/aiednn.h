@@ -13,9 +13,25 @@
  *   aiednn_primitive_execute(mm, A, B, C);           // or _execute_args(...)
  *   aiednn_primitive_destroy(mm);
  *
- * Tensors are dense row-major (NCHW for the spatial ops), batch included.
- * Dispatch: the most specific accepting implementation wins (most fixed dims in its
- * AIEK_SPEC), composites over AIE kernels next, CPU `ref:` last. See doc/design/aiednn.md.
+ * Operator set: the common forward / inference primitives of deep-learning
+ * operator libraries -- convolution, deconvolution, matmul, inner product, eltwise
+ * (pointwise unary), binary (pointwise binary, comparisons, select),
+ * reduction, pooling, resampling, softmax, batch / layer / RMS / group /
+ * instance normalization, LRN, PReLU, concat, sum, reorder (transpose +
+ * quantize / dequantize), shuffle and scaled dot-product attention. Tensors
+ * are dense row-major (NCHW for the spatial ops), batch included. Not
+ * provided: RNNs, backward / training passes, FP8 / MX block scaling.
+ * doc/design/aiednn.md section 8 has the survey and the per-op data types.
+ *
+ * Dispatch walks an implementation list: every implementation linked
+ * into the binary is asked whether it accepts the problem; the most specific
+ * acceptor wins (most fixed dims in its AIEK_SPEC), composites over AIE
+ * kernels next, the CPU reference `ref:` implementations last, so any valid
+ * problem runs. aiednn_set_verbose(1) prints one line per decision.
+ *
+ * The AIE implementations and their accepted shapes are generated at build
+ * time from the AIEK_SPECs of the kernel library (ag.kernel_lib /
+ * aiegraph.dnn); see doc/design/aiednn.md.
  ******************************************************************************/
 #ifndef AIEDNN_H
 #define AIEDNN_H
@@ -28,7 +44,7 @@ extern "C" {
 #endif
 
 #define AIEDNN_MAX_NDIMS 6
-#define AIEDNN_MAX_SRCS 64 /* concat / sum inputs */
+#define AIEDNN_MAX_SRCS 64 /* concat / sum inputs (densenet121 concatenates up to 33) */
 
 typedef enum {
     aiednn_success = 0,
@@ -48,7 +64,8 @@ typedef enum {
     aiednn_f16 = 6,     /* IEEE binary16 */
     aiednn_f8_e5m2 = 7, /* OCP FP8 E5M2 (inf, NaN) */
     aiednn_f8_e4m3 = 8, /* OCP FP8 E4M3 "fn" (no inf, max 448, NaN 0x7f) */
-    aiednn_s4 = 9,      /* two per byte, element 2i in the low nibble */
+    aiednn_s4 = 9,      /* two per byte, element 2i in the low nibble; weights of matmul / inner
+                           product (decompressed with the output scales) and reorder */
     aiednn_u4 = 10,
     aiednn_e8m0 = 11,    /* OCP MX scale: 2^(b - 127), 0xff NaN; group weight scales (attr.wei_scales) */
     aiednn_f4_e2m1 = 12, /* OCP MX FP4: 0, 0.5, 1, 1.5, 2, 3, 4, 6 (+ sign), two per byte like s4 */
@@ -253,8 +270,9 @@ typedef enum {
 #define AIEDNN_ARG_STATE_OUT 55    /* linear attention: final state */
 #define AIEDNN_ARG_MULTIPLE_SRC 64 /* concat / sum input i is AIEDNN_ARG_MULTIPLE_SRC + i */
 
-/* Element layout; dims are always logical ([N, C, H, W]). dense = row-major over dims;
- * nhwc = 4-D only, the bytes of a dense [N, H, W, C]. */
+/* How a descriptor's elements are laid out. dims are always logical ([N, C, H, W] for an activation):
+ * dense = row-major over dims; nhwc = 4-D only, the bytes of a dense [N, H, W, C] (channels innermost, what the
+ * AIE GEMM / conv paths read and write, so consecutive nhwc convolutions skip the host transposes). */
 typedef enum {
     aiednn_format_dense = 0,
     aiednn_format_nhwc = 1,
@@ -298,7 +316,8 @@ typedef struct {
  *                                           binary(alg, v, src1[broadcast to dst])
  *   dst = v                                 f32 dst, or integer dst:
  *         saturate(round_even(v / dst_scale) + dst_zero_point)
- * The channel is dim 1 for (de)conv and
+ * in one pass over the result -- dequantize + bias + ReLU + residual add +
+ * requantize without separate primitives. The channel is dim 1 for (de)conv and
  * the last dim for matmul / inner product. A binary post-op's src1 is passed at
  * execute as AIEDNN_ARG_ATTR_POST_OP_SRC(k). */
 #define AIEDNN_MAX_POST_OPS 4
@@ -309,13 +328,16 @@ typedef struct {
 typedef enum {
     aiednn_post_op_eltwise = 1,
     aiednn_post_op_binary = 2,
-    /* requantize to q_data_type (q_scale / q_zero_point), dequantize, then binary with the dequantized src1
-     * (add / sub / mul / max / min; src1 scale alpha, zero point beta). Later post-ops are eltwise. Bit-identical
-     * to the int8-dst primitive then aiednn_binary_create_attr. GEMM family; at most one per primitive. */
+    /* requantize, then binary: the value so far is first stored as the q_data_type code with q_scale /
+     * q_zero_point (as a dst of that type would be), dequantized again, then combined with the dequantized
+     * src1 (alg add / sub / mul / max / min; src1 scale alpha, zero point beta, as binary). Later post-ops are
+     * eltwise. = the primitive with that int8 dst, then aiednn_binary_create_attr, bit for bit (PT2E's
+     * conv -> quantize -> dequantize -> add [-> relu] -> quantize). GEMM family; at most one per primitive. */
     aiednn_post_op_requant_binary = 3,
-    /* requantize to q_data_type, dequantize, then eltwise alg (alpha, beta); later post-ops are eltwise.
-     * Bit-identical to the int8-dst primitive then aiednn_eltwise_forward_create_attr. GEMM family; at most one
-     * requant post-op. */
+    /* requantize, then eltwise: the value so far is stored as the q_data_type code with q_scale / q_zero_point,
+     * dequantized, then eltwise alg (alpha, beta); later post-ops are eltwise. = the primitive with that int8 dst,
+     * then aiednn_eltwise_forward_create_attr, bit for bit (PT2E's conv -> Q -> DQ -> hardtanh / hardswish /
+     * sigmoid -> Q). The tail is a 256-entry table per primitive. GEMM family; at most one requant post-op. */
     aiednn_post_op_requant_eltwise = 4,
 } aiednn_post_op_kind_t;
 
@@ -347,31 +369,42 @@ typedef struct {
      * g = K / wei_scales.dims[0]. ndims 0: none. wei_scales: f32 / bf16 / f16 / e8m0, [K / g, N]
      * (shared by every batch), passed at execute as AIEDNN_ARG_ATTR_WEI_SCALES; wei_zero_points
      * (optional, needs wei_scales): s8 / u8 / s4 / u4 / s32, the same shape, as
-     * AIEDNN_ARG_ATTR_WEI_ZERO_POINTS. Floating src, or s8 / u8 src with integer weights (floating dst);
-     * weights any type but s32. */
+     * AIEDNN_ARG_ATTR_WEI_ZERO_POINTS. Floating src (on the AIE through dequant: f32, then the float GEMM), or s8 /
+     * u8 src with integer weights (floating dst; on the AIE wq: when the group is a multiple of 64);
+     * weights any type but s32 (s4 / u4 / s8 / u8 for
+     * int4 / int8 group quantization, f4_e2m1 or f8 with e8m0 scales for MXFP4 / MXFP8). ref:. */
     aiednn_memory_desc_t wei_scales;
     aiednn_memory_desc_t wei_zero_points;
     /* binary (aiednn_binary_create_attr), per tensor: an s8 / u8 source i is dequantized first,
      * real_i = (src_i - src_zero_points[i]) * src_scales[i] (src_scales[i] 0: the codes as is) */
     float src_scales[2];
     int32_t src_zero_points[2];
-    /* the same for sources 2 and 3 (sdpa: src_scales[0] Q, [1] K, src_scales_23[0] V). Layer norm, softmax and
-     * sdpa dequantize an s8 / u8 source with a scale > 0 as it is read: f32((code - zero point) * scale). */
+    /* the same for sources 2 and 3 (sdpa: src_scales[0] Q, [1] K, src_scales_23[0] V). Also read by layer norm,
+     * softmax and sdpa: an s8 / u8 source with a scale > 0 is dequantized as it is read (bit-identical to a
+     * separate dequantize reorder in front: f32((code - zero point) * scale)), so a framework's DQ -> op is one
+     * primitive. Appended: positional initializers of the fields above are unchanged. */
     float src_scales_23[2];
     int32_t src_zero_points_23[2];
     /* AIEDNN_ATTR_* opt-ins (0: every implementation dispatch may pick is exact w.r.t. ref:) */
     unsigned flags;
 } aiednn_attr_t;
 
-/* attr.flags: an AIE implementation within one quantization code of ref: may serve the primitive. */
+/* attr.flags: an AIE implementation within one quantization code of ref: may serve the primitive (the quantized
+ * binary mul on FVEC: the f32 product of the dequantized sources is not correctly rounded on the core). For a
+ * graph at fusion level 2; level 1 (bit-identical) leaves it unset. */
 #define AIEDNN_ATTR_TOLERANCE_1CODE 1u
+/* attr.flags on an sdpa with s8 Q / K / V (attr src_scales): the attention may run as int8 GEMMs with the softmax
+ * weights quantized to 8 bits per row (gemm+sdpa8) -- within a few codes of the f32 attention, not bit-identical */
+#define AIEDNN_ATTR_TOLERANCE_INT8_ATTN 4u
 
 typedef struct aiednn_primitive *aiednn_primitive_t;
 
 aiednn_status_t aiednn_memory_desc_init(aiednn_memory_desc_t *md, int ndims, const int64_t *dims,
                                         aiednn_data_type_t data_type);
-/* nhwc: 4-D only; every primitive accepts it on any 4-D operand. A reorder between a dense and an nhwc
- * descriptor converts. */
+/* nhwc: 4-D only. Every primitive accepts nhwc on any 4-D operand: element-wise kinds (eltwise, binary, prelu,
+ * sum, concat, softmax, shuffle, reduction, reorder) for free when their 4-D operands agree; convolution on its
+ * AIE paths natively; anything else through a host conversion (correct, not faster than dense). A reorder
+ * between a dense and an nhwc descriptor converts. */
 aiednn_status_t aiednn_memory_desc_set_format(aiednn_memory_desc_t *md, aiednn_format_t format);
 /* bytes of a buffer for md (4-bit types packed two per byte) */
 size_t aiednn_memory_desc_get_size(const aiednn_memory_desc_t *md);
@@ -410,8 +443,9 @@ aiednn_status_t aiednn_inner_product_forward_create(aiednn_primitive_t *p, const
  * split / merge permutes around attention folded in (--aiednn-fold-head-permute) */
 #define AIEDNN_SDPA_QKV_BSHD 2
 #define AIEDNN_SDPA_DST_BSHD 4
-/* Q, K and V are slices of one packed projection output [B, S, 3, H, D]: pass that buffer as each of QUERY,
- * KEY and VALUE; the descriptors stay the logical [B, H, S, D] (same S, H, D for all three). */
+/* Q, K and V are slices of one packed projection output [B, S, 3, H, D] (a fused qkv linear: GPT-2's c_attn,
+ * ViT's qkv): pass that buffer as each of QUERY, KEY and VALUE; the descriptors stay the logical [B, H, S, D]
+ * (same S, H, D for all three). Replaces the split / reshape / permute in front of attention. */
 #define AIEDNN_SDPA_QKV_PACKED 8
 /* the same with the quantizing reorder after it folded in (--aiednn-fold-norm-quant): dst s8 / u8,
  * attr with dst_scale / dst_zero_point only; bit-identical to the f32 sdpa + reorder */
@@ -507,8 +541,8 @@ aiednn_status_t aiednn_pooling_forward_create(aiednn_primitive_t *p, aiednn_alg_
  * src [T, K] holds the tokens grouped by expert (group e's rows follow group e - 1's); weights
  * [E, K, N] ([E, N, K] when transposed), bias [E, N] or NULL, dst [T, N]. The rows per group come at
  * execute, AIEDNN_ARG_GROUP_SIZES (s32 [E], sum <= T; rows past the sum are not written). Each
- * group is a matmul dispatched on its own shape. attr: output scales and eltwise post-ops (no binary
- * post-op), as matmul. */
+ * group is a matmul dispatched on its own shape -- an int8 group runs on the AIE GEMM like any
+ * matmul. attr: output scales and eltwise post-ops (no binary post-op), as matmul. */
 aiednn_status_t aiednn_grouped_matmul_create(aiednn_primitive_t *p, const aiednn_memory_desc_t *src,
                                              const aiednn_memory_desc_t *weights, const aiednn_memory_desc_t *bias,
                                              const aiednn_memory_desc_t *dst, int weights_transposed,
@@ -545,7 +579,8 @@ aiednn_status_t aiednn_grid_sample_backward_create(aiednn_primitive_t *p, const 
  *   h <- Diag(a_t) h;  u_t = beta_t (v_t - h^T k_t);  h <- h + k_t u_t^T;  dst_t = scale h^T q_t
  * Gated DeltaNet: gate [B, H, T]; KDA: gate [B, H, T, Dk] with AIEDNN_LA_GATE_PER_CHANNEL; AIEDNN_LA_NO_DELTA:
  * u_t = v_t, no beta (gated linear attention, RetNet with a constant gate). q, k [B, H, T, Dk]; v, dst
- * [B, H, T, Dv]; beta [B, H, T]; STATE / STATE_OUT optional [B, H, Dk, Dv]. Keys are used as given. */
+ * [B, H, T, Dv]; beta [B, H, T]; STATE / STATE_OUT optional [B, H, Dk, Dv]. Keys are used as given (models
+ * L2-normalize them before). f32 runs the chunked form's GEMMs on the AIE (gemm+linattn). */
 #define AIEDNN_LA_GATE_PER_CHANNEL 1
 #define AIEDNN_LA_NO_DELTA 2
 aiednn_status_t aiednn_linear_attention_create(aiednn_primitive_t *p, const aiednn_memory_desc_t *q,
@@ -603,7 +638,8 @@ aiednn_status_t aiednn_gated_mlp_create(aiednn_primitive_t *p, const aiednn_memo
  * dynamic quantize / dequantize: the scales (and optional zero points) are tensors given at execute
  * (AIEDNN_ARG_SCALES / AIEDNN_ARG_ZERO_POINTS), per tensor ([1], axis -1) or per channel along axis
  * ([dims[axis]]). f32 / bf16 / f16 src -> s8 / u8 dst: dst = sat(nearbyint(src / scale) + zp); s8 / u8 / s32 src ->
- * floating dst: dst = (src - zp) * scale -- the reorder's arithmetic. */
+ * floating dst: dst = (src - zp) * scale -- the reorder's arithmetic. Per tensor it runs as that reorder, created
+ * with the run-time values (on the AIE where the reorder is: dynq+steps: / dynq+lut:). */
 aiednn_status_t aiednn_gen_index_create(aiednn_primitive_t *p, const aiednn_memory_desc_t *dst, int axis);
 aiednn_status_t aiednn_dynamic_quantize_create(aiednn_primitive_t *p, const aiednn_memory_desc_t *src,
                                                const aiednn_memory_desc_t *dst, const aiednn_memory_desc_t *scales,
@@ -612,7 +648,7 @@ aiednn_status_t aiednn_dynamic_quantize_create(aiednn_primitive_t *p, const aied
 aiednn_status_t aiednn_rope_create(aiednn_primitive_t *p, const aiednn_memory_desc_t *src,
                                    const aiednn_memory_desc_t *cos, const aiednn_memory_desc_t *sin,
                                    const aiednn_memory_desc_t *dst, int interleaved);
-/* rope with quantized operands: x / cos / sin given as s8 / u8 codes
+/* rope with quantized operands (a framework graph's QDQ RoPE in one primitive): x / cos / sin given as s8 / u8 codes
  * with attr.src_scales[0] / src_scales[1] / src_scales_23[0] (+ the matching zero points) are dequantized as read; an
  * s8 / u8 dst is quantized by attr.dst_scale / dst_zero_point. Bit-identical to the dequantizing reorders, the f32
  * rope and the quantizing reorder. No post-ops, no flags. */
@@ -672,7 +708,7 @@ aiednn_status_t aiednn_sdpa_varlen_create(aiednn_primitive_t *p, const aiednn_me
                                           float scale, int causal);
 
 /* the same over a compressed (8-bit) K / V cache: K / V s8 or u8, dequantized as gathered, K = (k - kv_zps[0]) *
- * kv_scales[0], V with [1] (kv_zps NULL = 0) */
+ * kv_scales[0], V with [1] (kv_zps NULL = 0) -- LLM decode against an int8 KV cache */
 aiednn_status_t aiednn_sdpa_varlen_create_kvq(aiednn_primitive_t *p, const aiednn_memory_desc_t *q,
                                               const aiednn_memory_desc_t *k, const aiednn_memory_desc_t *v,
                                               const aiednn_memory_desc_t *dst, const aiednn_memory_desc_t *seq_q,
@@ -680,7 +716,7 @@ aiednn_status_t aiednn_sdpa_varlen_create_kvq(aiednn_primitive_t *p, const aiedn
                                               const aiednn_memory_desc_t *page_table, float scale, int causal,
                                               const float *kv_scales, const int32_t *kv_zps);
 
-/* AUGRU / linear-before-reset AUGRU: the GRU cell with the
+/* AUGRU / linear-before-reset AUGRU (DIEN's interest evolution layer; oneDNN's augru): the GRU cell with the
  * update gate scaled by an attention score per step and sequence, u' = (1 - a[t, n]) u, then
  * h = u' h_prev + (1 - u') o. attention [T, N] or [T, N, 1], bound as AIEDNN_ARG_AUGRU_ATTENTION. The other
  * tensors as aiednn_rnn_forward_create (no iter_c). Forward / inference. */
@@ -705,7 +741,9 @@ aiednn_status_t aiednn_rnn_backward_create(aiednn_primitive_t *p, aiednn_alg_kin
 
 /* ── N-D convolution / deconvolution / pooling (1..3 spatial dims) ──────────
  * src [N, C, (D,) (H,) W], weights [O, C/groups, (KD,) (KH,) KW], dst [N, O, ...]; entry i of every
- * array is spatial dim i in src order (1-D uses [0] only, 2-D [0..1]). */
+ * array is spatial dim i in src order (1-D uses [0] only, 2-D [0..1]). 1-D runs as 2-D with H = 1,
+ * so it takes the same implementations (the AIE composites included); 2-D is the 2-D create; 3-D
+ * runs on ref:. */
 #define AIEDNN_MAX_SPATIAL 3
 typedef struct aiednn_conv_nd_params {
     int64_t strides[AIEDNN_MAX_SPATIAL];
@@ -737,7 +775,8 @@ aiednn_status_t aiednn_pooling_forward_create_nd(aiednn_primitive_t *p, aiednn_a
                                                  const aiednn_pool_nd_params_t *pp);
 
 /* ── training: backward passes and the training forward of the normalizations ──
- * Floating types. Gradients use the AIEDNN_ARG_DIFF_* tags; the forward tensors a gradient needs
+ * oneDNN's propagation kinds, as separate create functions. Every one runs on ref: in double
+ * (floating types). Gradients use the AIEDNN_ARG_DIFF_* tags; the forward tensors a gradient needs
  * keep their own tags (SRC, WEIGHTS, DST, MEAN, VARIANCE, SCALE). Shapes as the forward's; the
  * convolution family takes the N-D parameters (1..3 spatial dims). */
 aiednn_status_t aiednn_convolution_backward_data_create(aiednn_primitive_t *p, const aiednn_memory_desc_t *diff_src,
@@ -836,15 +875,18 @@ aiednn_status_t aiednn_batch_normalization_forward_inference_create(aiednn_primi
                                                                     const aiednn_memory_desc_t *dst, float eps,
                                                                     unsigned flags);
 
-/* The same with the quantizing reorder after it folded in: src f32, dst s8 / u8, attr carries only
- * dst_scale / dst_zero_point. dst = saturate(round_even((float)bn(x) / dst_scale) + dst_zero_point). */
+/* The same with the quantizing reorder that follows it folded in (--aiednn-fold-norm-quant):
+ * src f32, dst s8 / u8, attr carries only dst_scale / dst_zero_point (no scales, no post-ops).
+ * dst = saturate(round_even((float)bn(x) / dst_scale) + dst_zero_point): bit-identical to the
+ * f32 batch norm followed by the f32 -> s8 / u8 reorder, without the f32 tensor in between. */
 aiednn_status_t aiednn_batch_normalization_forward_inference_create_attr(aiednn_primitive_t *p,
                                                                          const aiednn_memory_desc_t *src,
                                                                          const aiednn_memory_desc_t *dst, float eps,
                                                                          unsigned flags, const aiednn_attr_t *attr);
 
 /* normalizes over the last dim; SCALE / SHIFT [last dim]; AIEDNN_RMS_NORM: RMSNorm. The _attr
- * form folds the quantizing reorder in, as for batch norm. */
+ * form folds the quantizing reorder after it in, as for batch norm: f32 src, s8 / u8 dst, attr with
+ * dst_scale / dst_zero_point only; bit-identical to the f32 layer norm + reorder. */
 aiednn_status_t aiednn_layer_normalization_forward_inference_create_attr(aiednn_primitive_t *p,
                                                                          const aiednn_memory_desc_t *src,
                                                                          const aiednn_memory_desc_t *dst, float eps,
@@ -867,9 +909,10 @@ aiednn_status_t aiednn_concat_create(aiednn_primitive_t *p, int n, const aiednn_
                                      const aiednn_memory_desc_t *dst);
 
 /* int8 concat: s8 / u8 sources each with (scales[i], zero_points[i] or NULL = 0) into an s8 / u8 dst with
- * (dst_scale, dst_zero_point) -- dequantize -> concat -> quantize as one primitive. */
+ * (dst_scale, dst_zero_point) -- dequantize -> concat -> quantize as one primitive (a 256-entry table per source,
+ * exact); a source already in dst's quantization is copied. */
 /* reorder + post-ops: the reorder (an integer src dequantized by scale / zero_point) into f32, then attr's
- * post-ops and dst quantization. */
+ * post-ops and dst quantization (binary add with src1 = dst's old value is oneDNN's reorder + sum). */
 aiednn_status_t aiednn_reorder_create_attr(aiednn_primitive_t *p, const aiednn_memory_desc_t *src,
                                            const aiednn_memory_desc_t *dst, const int *perm, float scale,
                                            int32_t zero_point, const aiednn_attr_t *attr);
@@ -919,8 +962,10 @@ aiednn_status_t aiednn_primitive_set_constant_weights(aiednn_primitive_t primiti
 /* zero the counters aiednn_print_stats reports (e.g. between a warm-up run and the timed run) */
 void aiednn_stats_reset(void);
 
-/* Model-compiler hook, not part of the primitive contract: called before op i; per-op counting and,
- * with an op -> megakernel table, switches the resident megakernel. Optional. */
+/* MODEL-COMPILER HOOK (doc/design/aiednn.md §0), not part of the primitive contract: an app emitted
+ * by the model compiler calls it before its op i. It feeds per-op usage counting and, in a build
+ * whose implementation list carries an op -> megakernel table (dnn_build modes="auto"), switches the
+ * resident megakernel. Never required: without it, or without the table, it does nothing. */
 void aiednn_op_begin(int i);
 
 /* The implementation dispatch picked: "aie:<kernel>", a composite such as
@@ -938,23 +983,32 @@ void aiednn_set_verbose(int level);
  * "aie:"); NULL clears it. For checking an AIE result against the reference. */
 void aiednn_set_impl_filter(const char *prefix);
 
-/* Autotune: the first execute of each problem signature times every acceptor and keeps the fastest
- * for that signature. In-place primitives are not timed. aiednn_autotune_dump prints the choices
- * ("AIEDNN_TUNE <sig> <kind> <impl>" lines); aiednn_autotune_load preloads them (returns how many). */
+/* Measured implementation choice. Dispatch ranks the implementations that accept a problem by how
+ * specific they are; with autotune on, the first execute of each problem signature (kind, types,
+ * dims, geometry, epilogue shape) times every acceptor -- AIE paths and ref: -- and keeps the
+ * fastest, for that primitive and every later one with the same signature. All are bit-exact, so
+ * the result does not change. In-place primitives (dst overlapping an input) are not timed.
+ * aiednn_autotune_dump prints the choices ("AIEDNN_TUNE <sig> <kind> <impl>" lines);
+ * aiednn_autotune_load preloads such lines (returns how many), so an app can ship a board's choices
+ * and skip the timing runs. */
 void aiednn_set_autotune(int on);
 
-/* aiednn_prefer_aie (default): every problem an AIE implementation can compute runs on the AIE, and
- * autotuning chooses only among AIE implementations. aiednn_prefer_fastest: acceptors may decline where
- * ref: is faster and autotuning may pick ref:. Read at create. */
+/* What a query for an operator returns. aiednn_prefer_aie (default): every problem an AIE
+ * implementation can compute runs on the AIE -- acceptors no longer decline shapes where ref: was
+ * measured faster (an f32 -> s8 quantize, a global pool), and autotuning chooses only among the AIE
+ * implementations. aiednn_prefer_fastest: those cost refusals apply and autotuning may pick ref:.
+ * Read at create. */
 typedef enum { aiednn_prefer_aie = 0, aiednn_prefer_fastest = 1 } aiednn_preference_t;
 void aiednn_set_preference(aiednn_preference_t preference);
 aiednn_preference_t aiednn_get_preference(void);
 
 /* ── streams, caller-owned workspace, async execute ─────────────────────────
- * Executes on one stream complete in order. A caller workspace is 64-byte aligned host memory of
- * >= aiednn_primitive_get_workspace_size bytes, untouched until the stream is waited; the execute then
- * allocates nothing (persistent caches are filled by the first execute). workspace NULL: the library
- * allocates. */
+ * Executes on one stream complete in order (this version runs each at enqueue). A caller workspace is
+ * any 64-byte aligned host memory of >= aiednn_primitive_get_workspace_size bytes, untouched until the
+ * stream is waited: the execute then takes every temporary from it and allocates nothing (caches that
+ * outlive an execute -- packed constant weights, step tables -- are filled by the first execute that
+ * needs them). The size is measured by one sizing run on library-owned buffers, cached per
+ * implementation. workspace NULL: the library allocates, as aiednn_primitive_execute_args. */
 typedef struct aiednn_stream *aiednn_stream_t;
 aiednn_status_t aiednn_stream_create(aiednn_stream_t *stream, unsigned flags); /* flags 0 */
 aiednn_status_t aiednn_stream_wait(aiednn_stream_t stream);                    /* first error since the last wait */

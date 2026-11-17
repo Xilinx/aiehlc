@@ -1,4 +1,28 @@
-"""The prebuilt aiednn library: build once, link any app at compile time."""
+"""The prebuilt aiednn library: build once, link any app at compile time.
+
+``build_library(target="vek280")`` builds the aiednn runtime, its implementation list and the fixed
+megakernel set (``dnn.LIBRARY_MEGAKERNELS``: cnn / act / attn / float, each a prebuilt kernel ELF
+embedded in the archive) into ONE static library, and lays out a self-contained distribution:
+
+    <dist>/include/aiednn.h           the API (create = the query: dispatch picks the implementation,
+                                      aiednn_primitive_impl_candidates lists every one that can serve)
+    <dist>/lib/libaiednn.a            runtime + impl list + kernel ELFs + AIE runtime + routing
+    <dist>/lib/libxaiengine*.a        aie-rt (a copy: aiehlc.sh wipes its own on every run)
+    <dist>/lib/bsp/                   the board support libraries the final link needs
+    <dist>/lib/lscript.ld             the board's linker script
+    <dist>/link.mk                    AIEDNN_CXX / AIEDNN_CXXFLAGS / AIEDNN_LDFLAGS / AIEDNN_LIBS
+
+An app is then plain C/C++ against ``aiednn.h`` -- no aiehlc, no kernel source, no per-app build of
+the AIE side::
+
+    include <dist>/link.mk
+    app.elf: app.o
+            $(AIEDNN_CXX) -o $@ app.o $(AIEDNN_LDFLAGS) $(AIEDNN_LIBS)
+
+How it is built: ``dnn_build(modes="library")`` on an entry WITHOUT ``main()`` -- aiehlc then archives
+instead of linking (hostlibrarymode) -- with every kernel of the board; the link line hostcompile.sh
+prints for such an archive names exactly the libraries and script the distribution copies.
+"""
 from __future__ import annotations
 
 import re

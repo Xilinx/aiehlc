@@ -5,8 +5,9 @@
  * aiednn_rt_fused.h -- fused transformer primitives the graph fusion patterns land on:
  *   gated MLP   dst = (act(src W_gate) * (src W_up)) W_down          (LLaMA / Mistral SwiGLU, GeGLU)
  *   RoPE        dst = src * cos + rotate(src) * sin                   (half-split LLaMA / HF, interleaved GPT-J)
- * gated MLP: gemm+gmlp runs its three GEMMs on the AIE, the gating on the host; ref: in double. RoPE: f32
- * arithmetic in the unfused chain's order, bit-identical to the three ops.
+ * gated MLP: gemm+gmlp runs its three GEMMs on the AIE (f32 as bf16x3 through gx_gemm), the gating on the host;
+ * ref: in double. RoPE: f32 arithmetic in the unfused chain's order (x*cos, rotated*sin, add -- each rounded to
+ * f32), so it is bit-identical to the framework's three ops.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_gemmx.h and the create helpers of aiednn_rt.cc.
  ******************************************************************************/
@@ -148,7 +149,8 @@ static inline float rope_ld(const rt_prob *p, int i, const void *base, int64_t o
     return (float)((v - (double)p->dq_zp[i]) * (double)p->dq_sc[i]);
 }
 
-/* attr form: dequantize, f32 rope, quantize in one pass, bit-identical to the three primitives */
+/* the attr form: dequantizing reorders, the f32 rope (the same float operations), a quantizing reorder -- one pass,
+ * bit-identical to those three primitives */
 static int rope_quantized(const rt_prob *p, void *const *ptr, int64_t Dh, int64_t rows, int64_t h, int inter) {
     const aiednn_memory_desc_t *s = &p->md[0], *d = &p->md[1], *cm = &p->md[2], *sm = &p->md[3];
     const int q8 = d->data_type == aiednn_s8 || d->data_type == aiednn_u8;

@@ -5,11 +5,17 @@
  * aiednn_rt_mmt.h -- short-K convolutions (K <= 128, integer epilogue, no residual) on the GEMM
  * ELF's MMT mode (aie_modes_mmt.h: mlir-aie's matmul micro-kernel, opcode 0x4D).
  *
- * MMT gives a core 128 rows x 32 channels of int8 per launch for K <= 128 (the GEMM block pads K to 512).
- * A rows go in pre-tiled (aie_mmt_pack_a), each column's B with the requant constants (aie_mmt_pack_b /
- * aie_mmt_pack_q), and the int8 result lands in o8 [M][N] as run_q_pipe's does, bit for bit.
+ * The GEMM block pads K to 512 and gives a core 32 rows x 32 channels per launch, so a 1x1 conv
+ * with K = 16..128 (most of mobilenet / efficientnet / regnet) uses a quarter of a launch or less.
+ * MMT gives a core 128 rows x 32 channels of int8 per launch for K <= 128: one launch covers
+ * 128 * rows x 32 * cols outputs. A rows go in pre-tiled (aie_mmt_pack_a), each column's B with
+ * the requant constants (aie_mmt_pack_b / aie_mmt_pack_q from the layer's fixed-point epilogue,
+ * rt_fx_q), and the int8 result lands in o8 [M][N] as run_q_pipe's does; the caller's pipe then
+ * scatters it. Bit for bit the int8 GEMM + rt_fx_q that run_q_pipe computes.
  *
- * Not taken: no MMT entry or mode, K > 128, a residual, or a channel aie_mmt_pack_q refuses.
+ * Not taken (the caller continues with its own path): no MMT entry or the mode compiled out of
+ * the core (aiednn_gemm_mmt_available), K > 128, a residual, or a channel whose staged requant
+ * could leave int32 (aie_mmt_pack_q refuses).
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_gemm.h, aie_modes_mmt.h.
  ******************************************************************************/
@@ -131,8 +137,9 @@ static int run_mmt(const rt_impl *self, const rt_epi *E, int64_t M, int64_t N, i
             return AIEK_ERR_PARAM;
     g_phase[RT_PH_BPACK] += rt_ticks() - tb0;
     if (aiednn_gemm_mmt_n_start && ntile_mblocks(1, 0)) {
-        /* the n-tile path bypasses the entry: call it once with no arguments (launches nothing) so the
-         * usage run counts the MMT mode */
+        /* the n-tile path launches through aiednn_gemm_mmt_n_start, not the entry: call the entry once with
+         * no arguments (it returns AIEK_ERR_ARGS, launching nothing) so dnn_build(modes="auto")'s usage run
+         * counts the MMT mode in */
         (void)g->entry(nullptr, 0);
         return run_mmt_n(self, M, N, K, col, rows, cols, mk, bbuf, o8);
     }

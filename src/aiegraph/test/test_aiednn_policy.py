@@ -2,7 +2,12 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Dispatch preference (aiednn_set_preference) and aiednn_primitive_impl_candidates."""
+"""Dispatch preference (aiednn_set_preference) and the candidate query
+(aiednn_primitive_impl_candidates): by default a query returns the AIE implementation whenever one
+can compute the problem; aiednn_prefer_fastest restores the measured "ref: is faster" refusals.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_policy.py
+"""
 
 from __future__ import annotations
 
@@ -84,7 +89,9 @@ def test_autotune_stays_on_the_aie(lib, capfd):
 
 
 def test_steps_tables_follow_the_dst_scale(lib):
-    """Two batch norms with equal statistics and different dst scales must not share steps: tables."""
+    """two f32 batch norms -> s8 with equal statistics (an untrained model's: mean 0, var 1, gamma 1,
+    beta 0) and different dst scales: the steps: table cache must not hand the second the first one's
+    tables (it keyed on the statistics only, so densenet121's batch norms of one width shared them)"""
     from aiegraph.dnn_ctypes import attr
     x = np.linspace(-4, 4, 16 * 32 * 32, dtype=np.float32).reshape(1, 16, 32, 32)   # steps: wants long channel runs
     st = {ARG["mean"]: np.zeros(16, np.float32), ARG["variance"]: np.ones(16, np.float32),

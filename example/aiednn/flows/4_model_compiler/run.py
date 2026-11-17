@@ -3,10 +3,18 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Flow 4 -- the offline model compiler: dnn_torch -> aiednn MLIR pipeline -> ctypes run or C app.
+"""Flow 4 -- the offline model compiler (the direct path, what run_models.py does per model).
 
-    python example/aiednn/flows/4_model_compiler/run.py [--model resnet18] [--mode f32|int8] [--no-mlir]
-    python example/aiednn/flows/4_model_compiler/run.py --app [--target vek280 --board <host> --vitis-settings <...>]
+aiegraph.dnn_torch lowers the PyTorch model to an AGraph: f32, or int8 calibrated on the input. The aiednn
+MLIR pipeline (aiegraph.dnn_mlir, aiednn-opt) then fuses epilogues, folds requantization, sinks permutes and
+plans memory. The result is a fused primitive sequence that calls only include/aiednn.h. On the workstation
+it runs through ctypes; for a board it becomes a C app, and ag.dnn_build compiles it with aiehlc into an
+ELF that carries the AIE megakernel.
+
+    python example/aiednn/flows/4_model_compiler/run.py [--model resnet18] [--mode f32|int8] [--no-mlir]  # ctypes
+    python example/aiednn/flows/4_model_compiler/run.py --app                                # C app, x86
+    python example/aiednn/flows/4_model_compiler/run.py --app --target vek280 --board <host> \\
+        --vitis-settings <.../Vitis/settings64.sh>          # C app -> board ELF -> run on the board
 """
 import argparse
 import sys
@@ -35,7 +43,7 @@ def main() -> int:
     a = ap.parse_args()
     m, x = model_and_input(a.model)
     mlir = not a.no_mlir
-    if not a.app:                                            # workstation emulation
+    if not a.app:                                            # workstation emulation, through ctypes
         lib = AiednnLib.build(OUT / "lib")
         r = dt.model_test(m, x, a.mode, lib, a.model, mlir=mlir)
         print(f"{r.ops} primitives, {r.on_aie} on the AIE; integer GEMMs bit-exact: "
@@ -45,7 +53,7 @@ def main() -> int:
         print(f"{'PASS' if r.ok else 'FAIL'}: flow 4 model compiler [{a.model}] ({a.mode}{', mlir' if mlir else ''}), "
               f"rel err vs PyTorch {r.relerr:.2e}, top-1 {r.top1} (reference {r.ref_top1})")
         return 0 if r.ok else 1
-    import aiegraph as ag
+    import aiegraph as ag                                    # a C app, built into a board ELF
     d = OUT / f"flow4_{a.model}_{a.mode}"
     g, ref, yf = dt.references(m, x, a.mode, a.model, mlir=mlir)
     app = dt.emit_app(g, d, ref, dt.TOL[a.mode], dt._top1(yf, g.top1_range)[0])

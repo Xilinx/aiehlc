@@ -3,7 +3,15 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Flow 3 -- ONNX via OnnxGraph and via the ORT plugin EP, checked against onnxruntime's CPU EP.
+"""Flow 3 -- ONNX models, two ways into the same partition graph API:
+
+  a) aiegraph.dnn_onnx_graph.OnnxGraph: one graph op per ONNX node, no onnxruntime needed. Unsupported
+     partitions run through onnx's reference evaluator.
+  b) The ONNX Runtime plugin execution provider (aiegraph.dnn_ort_ep): GetCapability = get_partitions,
+     Compile = partition_compile, Compute = compiled_partition_execute. ORT's CPU EP runs the rest.
+     Needs onnxruntime >= 1.23, and its C headers are fetched once.
+
+Both are checked against onnxruntime's CPU EP. Workstation emulation.
 
     python example/aiednn/flows/3_onnx/run.py [--model resnet18 | --onnx file.onnx] [--no-ep]
 """
@@ -31,17 +39,17 @@ def main() -> int:
     ap.add_argument("--onnx", default=None, help="an existing .onnx file (e.g. an int8 QDQ model) instead of --model")
     ap.add_argument("--no-ep", action="store_true", help="only the OnnxGraph importer")
     a = ap.parse_args()
-    if a.onnx:
+    if a.onnx:                                           # an ONNX file as given; its input fed the zoo image
         path = Path(a.onnx)
         x = model_and_input("resnet18")[1] if a.model == "tiny" else model_and_input(a.model)[1]
-    else:
+    else:                                                # export the PyTorch model
         m, x = model_and_input(a.model)
         path = Path(tempfile.mkdtemp()) / f"{a.model}.onnx"
         torch.onnx.export(m, (x,), str(path), input_names=["x"], output_names=["y"], opset_version=17)
     cpu = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     xin, yout = cpu.get_inputs()[0].name, cpu.get_outputs()[0].name
     want = cpu.run(None, {xin: x.numpy()})[0]
-    tol = 0.05 if a.onnx else 1e-4                       # int8 QDQ: ORT float-vs-integer spread
+    tol = 0.05 if a.onnx else 1e-4                       # an int8 QDQ model: onnxruntime's float-vs-integer spread
     ok = True
 
     og = OnnxGraph.load(build_graph_lib(REPO / "worklocal" / "aiednn" / "flows_graphlib"), path)   # a)

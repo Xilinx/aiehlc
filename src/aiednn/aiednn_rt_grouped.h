@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * aiednn_rt_grouped.h -- grouped matmul (mixture-of-experts): one matmul per group of rows, each
- * dispatched on its own [rows, K] x [K, N] shape at execute (group sizes are run-time data).
+ * dispatched on its own [rows, K] x [K, N] shape at execute (the group sizes are run-time data), so
+ * an int8 group takes the AIE blocked GEMM and a tiny one whatever dispatch prefers for it.
  *
  * Needs, from the including TU: aiednn_rt_internal.h and dispatch / the create helpers of aiednn_rt.cc.
  ******************************************************************************/

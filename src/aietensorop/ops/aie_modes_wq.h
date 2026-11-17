@@ -12,7 +12,8 @@
  * the C buffer; the next round starts a fresh int32 sum. Group size g = 64 * gr (g = 64 .. 16320), and a
  * group may span launches (K > 512): the descriptor's phase byte says how many rounds of the current
  * group the previous launches already summed, and the int32 accumulator carries over like 0xA0.
- * The int32 partials are exact; the f32 part is within f32 rounding of ref:, not bit-exact.
+ * The int32 partials are exact; the f32 products / sums are the hardware's (fp32 emulation), so the
+ * result is within f32 rounding of ref: (a tolerance, not bit-exact).
  *
  * Launch layout (per mesh column's B block, rows of K bytes; a core reads 64 bytes of every row per
  * round): rows 0..31 the column's 32 channels (as the plain GEMM), row 100 bytes [64 kr, +64) the f32

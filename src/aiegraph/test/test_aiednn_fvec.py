@@ -2,7 +2,15 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""FVEC mode: f32 eltwise, binary, softmax and layer / RMS norm vs ref: within |d| <= 1e-5 + 1e-5 |ref|."""
+"""FVEC mode (aie_modes_fvec.h / aiednn_rt_fvec.h): f32 eltwise, binary, softmax and layer / RMS norm
+on the AIE, against ref: on the same inputs within the mode's contract |d| <= 1e-5 + 1e-5 |ref|.
+
+The library build's GEMM-ELF entries run their x86 references here (gemm_uk_ref.c: aie_modes_fvec.h's
+plain C), so this checks the host side -- items, padding, broadcasts, gamma / beta, the unpacking --
+and test_fvec_core_vector_code the core's vector code through the AIE-API emulation.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_fvec.py
+"""
 
 from __future__ import annotations
 
@@ -133,7 +141,8 @@ def test_unsupported_stays_on_ref(lib):
 
 
 def test_fvec_core_vector_code(tmp_path):
-    """aie_modes_fvec.h's vector code within the contract for every op, through the AIE-API emulation."""
+    """aie_modes_fvec.h's vector code (exp, inv / invsqrt as the AIE-ML API computes them) within the
+    contract for every op, through src/mlir/runtime/aie_api_x86emu.h"""
     exe = tmp_path / "fvec"
     subprocess.run(["g++", "-std=c++20", "-O1", "-DAIE_FVEC_EMU", f"-I{REPO / 'src' / 'mlir' / 'runtime'}",
                     f"-I{REPO / 'src' / 'aietensorop' / 'ops'}", "-o", str(exe),
@@ -209,7 +218,8 @@ def test_binary_per_channel(lib, alg, s1):
 
 
 def test_prefer_fastest_refusals(lib):
-    """aiednn_prefer_fastest moves some FVEC ops to ref:; prefer_aie keeps all."""
+    """aiednn_prefer_fastest: binary with a per-element operand and layer norm go to ref: (measured faster);
+    a per-channel operand (ROWPROG) and the transcendental eltwise stay on FVEC; prefer_aie keeps all"""
     s0, s1 = (2, 24, 28, 28), (1, 24, 1, 1)
     x = RNG.uniform(-4, 4, s0).astype(np.float32)
     def impl_of(shape1, kind):
@@ -539,7 +549,8 @@ def test_layer_norm_backward_on_fvec(lib, rms, flags, shape):
                                       ("binary_add", [("swish", 1.0, 0)])])
 @pytest.mark.parametrize("bshape", [(2, 16, 9, 9), (1, 16, 1, 1)])
 def test_f32_binary_with_eltwise_post_ops_on_fvec(lib, alg, post, bshape):
-    """An f32 binary with eltwise post-ops is one FVEC program, within the contract."""
+    """an f32 binary with eltwise post-ops (SquaredDifference = sub + square): the binary's program and each post-op's,
+    one FVEC program -- within the contract of ref:'s chain"""
     from aiegraph.dnn_ctypes import attr
     s = (2, 16, 9, 9)
     x, y = RNG.uniform(-2, 2, s).astype(np.float32), RNG.uniform(-2, 2, bshape).astype(np.float32)
@@ -554,7 +565,8 @@ def test_f32_binary_with_eltwise_post_ops_on_fvec(lib, alg, post, bshape):
 @pytest.mark.parametrize("flags", [0, 1, 1 | 2])
 @pytest.mark.parametrize("shape", [(3, 2048), (2, 5, 1000), (4, 4096)])
 def test_layer_norm_wide_rows_on_fvec(lib, rms, flags, shape):
-    """Layer / RMS norm over rows wider than one FVEC item or not a multiple of 16."""
+    """layer / RMS norm inference over rows wider than one FVEC item (llama's 2048 / 4096) or not a multiple of 16:
+    chunked ROWSUM statistics and ROWPROG passes -- within the f32 contract of ref:"""
     D = shape[-1]
     x = (RNG.uniform(-3, 3, shape) + 0.5).astype(np.float32)
     fl = (flags & (1 if rms else 3)) | rms
@@ -586,7 +598,9 @@ def test_pow_non_integer_exponent_on_fvec(lib, a, b):
 @pytest.mark.parametrize("ddt,zp", [("s8", 0), ("u8", 100)])
 @pytest.mark.parametrize("rms,D", [(0, 768), (8, 512)])
 def test_layer_norm_int8_dst_on_fvec(lib, rms, D, ddt, zp):
-    """Layer / RMS norm -> s8 / u8: on fvec: within one code with the tolerance flag, else ref:."""
+    """layer / RMS norm -> s8 / u8 (the norm-quant fold of gpt2 / tiny_llama): with AIEDNN_ATTR_TOLERANCE_1CODE the f32
+    rows run on fvec: and the unpack quantizes them as the reorder does -- every code within one of ref:'s, almost
+    all equal; without the flag the problem stays on ref: (bit-exact)"""
     from aiegraph.dnn_ctypes import attr
     shape = (1, 128, D)
     x = (RNG.uniform(-3, 3, shape) + 0.5).astype(np.float32)

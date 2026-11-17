@@ -5,13 +5,17 @@
  * aiednn_rt_sdpa.h -- sdpablk:<aie sdpa block>: scaled dot-product attention on the GEMM ELF's SDPA
  * mode (aie_modes_sdpa.h, opcode 0x5D), one (batch, head, query block) per core.
  *
- * Q, K, V quantized per tensor on the host (step = max|x| / 127; s8 taken as is). The core computes
- * exact int32 scores, softmax from a 2^x table and the weighted V; the host dequantizes as ref:sdpa.
- * Not bit-exact: tolerance RT_SDPA_TOL (codes).
+ * Q, K and V are quantized per tensor on the host (dynamic, symmetric: step = max|x| / 127; an s8
+ * tensor is taken as is, step 1). The core computes the exact int32 scores, softmax weights from a
+ * 2^x table (relative error < 2e-5) and the weighted V; the host dequantizes and stores exactly as
+ * ref:sdpa does (the integer destination's nearbyint(o / dst_scale) + zp). Not bit-exact against
+ * ref:sdpa -- f32 inputs lose their low bits to the int8 steps, and the softmax is a table -- so the
+ * declared tolerance is RT_SDPA_TOL (int8 destinations, in codes) and the model tests' relative error.
  *
- * Accepted: f32 or s8 Q / K / V (f32 only into an int8 destination), no mask tensor (causal ok),
- * Skv <= AIE_SDPA_MAX_KV, D and Dv <= 255, one query row's K and V plus a query fitting an item.
- * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_itemsn.h, aie_modes_sdpa.h.
+ * Accepted: f32 or s8 Q / K / V -- f32 only into a quantized int8 destination (an f32 result stays
+ * on ref:, which keeps its precision) -- no mask tensor (causal is fine), Skv <= AIE_SDPA_MAX_KV, D and Dv
+ * <= 255, one query row's K and V plus a query fitting an item. Needs, from the including TU:
+ * aiednn_rt_internal.h, aiednn_rt_itemsn.h, aie_modes_sdpa.h.
  ******************************************************************************/
 #ifndef AIEDNN_RT_SDPA_H
 #define AIEDNN_RT_SDPA_H
@@ -166,7 +170,7 @@ static int run_sdpablk(const rt_impl *self, aiednn_primitive *prim, void *const 
         sh++;
     const double m = nearbyint(c * ldexp(1.0, sh));
     if (!(c > 0) || m >= 2147483648.0)
-        return AIEK_ERR_PARAM; // a score step the int32 multiplier cannot hold
+        return AIEK_ERR_PARAM; // a score step the int32 multiplier cannot hold (never seen: scale ~ 1/sqrt(D))
     const int32_t geom[8] = {(int32_t)s.qb,     (int32_t)s.Skv, (int32_t)s.D, (int32_t)s.Dv,
                              p->causal ? 1 : 0, (int32_t)m,     sh,           0};
     const int64_t total = s.B * s.H * s.nqb;
@@ -186,7 +190,7 @@ static int run_sdpablk(const rt_impl *self, aiednn_primitive *prim, void *const 
         return AIEK_ERR_ALLOC;
     const int64_t shape_i[2] = {NI, RT_ITEM_BYTES}, shape_g[1] = {8}, shape_o[2] = {NI, RT_ITEM_OUT};
     for (int64_t base = 0; base < total;) {
-        /* one launch shares a descriptor: items with the same query-row count */
+        /* one launch shares a descriptor: items with the same query-row count (the last block may be short) */
         const int64_t rows0 = s.Sq - (base % s.nqb) * s.qb < s.qb ? s.Sq - (base % s.nqb) * s.qb : s.qb;
         int64_t n_items = 0;
         const uint64_t tp0 = rt_ticks();

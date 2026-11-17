@@ -2,7 +2,12 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""``ag.dnn_build``: the aiednn implementation list and the x86 target."""
+"""``ag.dnn_build``: the aiednn implementation list and the x86 target.
+
+    python3 -m pytest -q src/aiegraph/test/test_dnn.py
+
+Needs gcc/g++ for the x86 build; no TVM, onnx, Vitis or board.
+"""
 
 from __future__ import annotations
 
@@ -98,7 +103,9 @@ def test_gemm_block_spec_scales_rows_and_items():
 
 @pytest.mark.skipif(not shutil.which("clang++"), reason="needs clang++")
 def test_runtime_has_no_narrowing_in_braces():
-    """The runtime has no brace-initializer narrowing (an error in aiehlc's C++20 frontend)."""
+    """aiehlc's clang frontend parses the runtime as C++20 and makes narrowing in a brace
+    initializer an ERROR (g++ only warns): an int64 size in an aiek_tensor initializer broke
+    every board build once"""
     import subprocess
     res = subprocess.run(["clang++", "-std=c++20", "-Werror=c++11-narrowing", "-fsyntax-only",
                           f"-I{REPO / 'include'}", f"-I{REPO / 'src' / 'aiednn'}",
@@ -113,7 +120,8 @@ _A72_GXX = Path("/proj/custbuilds/SWIP/2026.2_1027_1626/installs/lin64/2026.2/Vi
 
 @pytest.mark.skipif(not _A72_GXX.is_file(), reason="needs the Vitis aarch64-none-elf-g++")
 def test_runtime_compiles_for_the_board_cpu():
-    """Includes in the runtime's __aarch64__ branch are not hidden inside the x86 #else."""
+    """the runtime has an __aarch64__ branch (cycle counters) the x86 tests never compile: an include
+    placed inside the x86 #else left rt_phi undeclared on the board and broke every model build"""
     import subprocess
     res = subprocess.run([str(_A72_GXX), "-std=c++20", "-O2", "-fsyntax-only", f"-I{REPO / 'include'}",
                           f"-I{REPO / 'src' / 'aiednn'}", f"-I{REPO / 'src' / 'aietensorop' / 'ops'}",
@@ -122,7 +130,9 @@ def test_runtime_compiles_for_the_board_cpu():
 
 @has_cc
 def test_activation_int8_table_matches_the_formula(tmp_path):
-    """The GELU / swish int8 step table returns exactly the formula's codes, including at every step."""
+    """GELU / swish -> s8 / u8 epilogues look codes up in a step table (aiednn_rt_geluq.h); it must
+    return exactly what f(y) / ds + zp rounds to, including the doubles right at every step, where
+    the formula itself is not monotone (1 - p loses bits for negative y)"""
     import subprocess
     src = tmp_path / "actq.cc"
     src.write_text("""#include "aiednn_rt_geluq.h"
@@ -153,7 +163,9 @@ int main() {
 
 @has_cc
 def test_quantize_without_divide_matches_the_divide(tmp_path):
-    """ref:'s f32 -> 8-bit quantize equals sat(nearbyint(f / scale) + zp) for every float tested."""
+    """ref:'s f32 -> s8 / u8 quantize (rt_quant8 in aiednn_rt_ops.h: norm int8 tails, reorder_contig) multiplies
+    by 1 / scale and divides only near a rounding tie; it must equal sat(nearbyint(f / scale) + zp) for every
+    float: every 509th bit pattern (NaN, inf, -0.0, denormals) and +-50 ulps around 601 exact ties per scale"""
     import re
     import subprocess
     ops = (REPO / "src" / "aiednn" / "aiednn_rt_ops.h").read_text()
@@ -253,7 +265,9 @@ def test_selection_by_family_and_board():
                                                      "elt_s8s32", "gemm_kc_s8s32", "gemm_q_s8s8", "gemm_s8s32", "lut8",
                                                      "mmt_s8s8", "pool_s8s32", "fpool_f32", "sdpa_s8s32"] + (["fvec_f32"] if HAS_FVEC else []))
     assert any("conv2dstem: AIEK_SPEC target vek385, not vek280" in w for w in why)
-    # the source with more entries serving the app's families wins; naming conv2dstem still picks it
+    # VEK385 (design section 33): conv2dstem_uk.cc and gemm_uk.cc both serve conv2d directly; the source with
+    # more entries serving the app's families wins (the general GEMM library over a one-shape kernel), so a
+    # conv-only (or sdpa-only) app builds; naming conv2dstem still picks it
     picked, _ = _pick_kernels(lib, {"dense"}, None, "vek385")
     assert [e.name for e in picked] == ["matmul_s8"]                 # matmul_uk.cc targets vek385 too
     picked, why = _pick_kernels(lib, {"conv2d"}, None, "vek385")
@@ -320,7 +334,8 @@ LUT_APP = REPO / "example" / "aiednn" / "lut_app.cc"
 
 @has_cc
 def test_x86_lut_app_8bit_ops_on_the_aie_modes(tmp_path):
-    """lut: / eltblk: / redblk: / steps: take every op of lut_app and match ref: byte for byte."""
+    """lut: / eltblk: / redblk: / steps: (the GEMM ELF's table, eltwise, pool and step-table
+    modes) take every op of lut_app and match ref: byte for byte"""
     rep = ag.dnn_build(LUT_APP, target="x86", out=tmp_path / "o", run=True, timeout=600)
     assert rep.ok and rep.run_ok, rep
     text = rep.run_log.read_text()
@@ -333,7 +348,8 @@ def test_x86_lut_app_8bit_ops_on_the_aie_modes(tmp_path):
 
 
 def test_gemm_megakernel_entries_declare_their_modes():
-    """Each optional gemm_uk.cc mode is dropped only with every entry that needs it."""
+    """each optional mode of gemm_uk.cc belongs to the entries that send its opcode (AIEK_SPEC
+    `modes`): a per-app build drops a mode only with every entry that needs it"""
     lib = ag.kernel_lib(REPO / "src" / "aietensorop", quiet=True)
     want = {"gemm_s8s32": (), "gemm_kc_s8s32": (), "gemm_q_s8s8": ("GEMMQ",), "dw_s8s32": ("DW",),
             "dwq_s8s8": ("DW", "DWQ"), "pool_s8s32": ("POOL",), "elt_s8s32": ("ELTWISE",), "lut8": ("LUT", "STEPS"),
@@ -362,7 +378,8 @@ def test_modes_header_turns_off_only_the_unused_modes():
 
 @has_cc
 def test_entry_usage_counts_the_entries_an_app_calls(tmp_path):
-    """dnn_build(modes="auto") builds the megakernel from the entries the app calls."""
+    """dnn_build(modes="auto") builds the megakernel from the entries the app calls on x86;
+    lut_app uses the table / eltwise / pool modes and no GEMM"""
     from aiegraph.dnn import _pick_kernels, _restrict_to_usage, entry_usage, needed_families
     lib = ag.kernel_lib(REPO / "src" / "aietensorop", quiet=True)
     picked, _ = _pick_kernels(lib, set(needed_families(LUT_APP.read_text()).values()), None, "vek280")
@@ -375,7 +392,9 @@ def test_entry_usage_counts_the_entries_an_app_calls(tmp_path):
 
 
 def test_megakernel_segments_fit_the_core_program():
-    """Several megakernels per app: greedy contiguous segments under program-memory and stack limits."""
+    """several megakernels per app when the modes do not fit one core program: contiguous op
+    segments, greedy (fewest), each under the program-memory and stack limits; ops needing no mode
+    stay in the current segment"""
     from aiegraph.dnn import MK_PM_LIMIT, MK_STACK_LIMIT, megakernel_cost, plan_segments
     assert megakernel_cost(set()) == (4464, 10848)
     one = [{"GEMMQ"}, set(), {"GEMMQ", "DW"}, {"DWQ"}]
@@ -391,7 +410,8 @@ def test_megakernel_segments_fit_the_core_program():
 
 @has_cc
 def test_usage_is_counted_per_op(tmp_path):
-    """The usage run's per-op entry counts add up to the per-entry totals and plan into segments."""
+    """the usage run logs which entries each op of an emitted model app called (aiednn_op_begin):
+    the per-op counts add up to the per-entry totals, and the op modes plan into segments"""
     sys.path.insert(0, str(REPO / "example" / "aiednn" / "models"))
     import zoo
     from aiegraph import dnn_torch as dt
@@ -412,7 +432,8 @@ def test_usage_is_counted_per_op(tmp_path):
 
 
 def test_library_megakernels_fit_and_cover_every_entry():
-    """modes="library": the fixed ELF set fits and routes entries through aiednn_megakernel_need."""
+    """modes="library": the fixed ELF set fits the core program, every entry with optional modes runs
+    on at least one ELF, and the impl list routes those entries through aiednn_megakernel_need"""
     from aiegraph.dnn import (LIBRARY_MEGAKERNELS, MK_PM_LIMIT, MK_STACK_LIMIT, _pick_kernels,
                               library_need, megakernel_cost)
     from aiegraph.dnn import CORE_PM_BYTES
@@ -441,7 +462,8 @@ def test_library_megakernels_fit_and_cover_every_entry():
 
 
 def test_core_program_memory_overflow_is_read_from_the_maps(tmp_path):
-    """dnn_build refuses a megakernel over the 16 KB program memory."""
+    """a megakernel whose modes outgrow the 16 KB program memory still links; dnn_build reads the
+    kernel*.map PM totals and refuses the ELF (core_program_memory / CORE_PM_BYTES)"""
     from aiegraph.dnn import CORE_PM_BYTES, core_program_memory
     pm = "Section summary for memory 'PM':\n\n      .text  File\n ----------\n      {n}  kernel.o\n ----------\n      {n}  Total\n"
     (tmp_path / "kernel.map").write_text("Section summary for memory 'DM':\n 28684 Total\n" + pm.format(n=29968))
@@ -452,7 +474,8 @@ def test_core_program_memory_overflow_is_read_from_the_maps(tmp_path):
 
 
 def test_core_stack_frame_is_read_from_the_maps(tmp_path):
-    """dnn_build refuses a kernel stack frame too close to DM_stack."""
+    """the kernel's stack frame against DM_stack: a frame that runs into the statics below the stack
+    gives wrong pixels and no error, so dnn_build refuses it (core_stack / CORE_STACK_MARGIN)"""
     from aiegraph.dnn import CORE_STACK_MARGIN, core_stack
     t = ("Memory map for memory 'DM_stack':\n\n    0x00070000..0x00077fff (     32768 items) : Stack\n"
          "  gemm_s8s32 (Function, Global, .text) (stack frame size = {f}\n  main (stack frame size = 160\n")
@@ -464,10 +487,42 @@ def test_core_stack_frame_is_read_from_the_maps(tmp_path):
 
 
 def test_emit_autotune_lines():
-    """emit_app(autotune=): "tune" dumps the table; a saved table is preloaded."""
+    """emit_app(autotune=): "tune" turns aiednn_set_autotune on for the warm-up run and dumps the table;
+    a saved table is preloaded line by line (non-AIEDNN_TUNE lines dropped)"""
     from aiegraph import dnn_torch as dt
     assert dt._autotune_lines(None) == []
     assert "aiednn_set_autotune(1)" in "".join(dt._autotune_lines("tune"))
     txt = "".join(dt._autotune_lines("noise\nAIEDNN_TUNE 0a6 2 ref:convolution\nAIEDNN_TUNE 6f8 8 poolblk:aie:pool_s8s32\n"))
     assert "aiednn_autotune_load(tuned)" in txt and "noise" not in txt
     assert txt.count("AIEDNN_TUNE") == 2
+
+
+def test_light_islands_stay_on_the_host_where_switches_are_slow():
+    """an op needing only a light mode the heavy megakernel cannot hold (gpt2's 24 int8 FVEC norms between bf16
+    attention and int8 GEMMs) goes to ref: on a board with slow ELF loads: one segment instead of 25"""
+    from aiegraph.dnn import _light_islands, plan_segments
+    ops = []
+    for _ in range(24):
+        ops += [{"FVEC"}, set(), {"BF16"}, set()]       # norm, int8 GEMM (no mode), bf16x3 attention, GEMM
+    assert len(plan_segments(ops)) > 20
+    forced = _light_islands(ops)
+    assert len(forced) == 24 and all(ops[i] == {"FVEC"} for i in forced)
+    assert len(plan_segments([set() if i in forced else ms for i, ms in enumerate(ops)])) == 1
+    assert _light_islands([{"FVEC"}, {"LUT"}]) == []              # light-only app: nothing to keep resident
+
+
+def test_islands_on_ref_leave_the_build(tmp_path):
+    """a mode only the islands used is not compiled: resnet18 on VEK385 kept FVEC for ops sent to ref: and its one
+    ELF (GEMMQ POOL CONV FVEC, 22,884 B) was refused for core program memory"""
+    from types import SimpleNamespace as NS
+    from aiegraph.dnn import DnnBuild, _plan_megakernels
+    ent = lambda name, *modes: NS(contract=NS(spec=NS(entry=name, modes=list(modes))))
+    gemm, conv, fvec = ent("gemm_s8s32"), ent("conv_q_s8s8", "GEMMQ", "CONV"), ent("fvec_f32", "FVEC")
+    app = tmp_path / "m_app.cc"
+    app.write_text("#define NOPS 3\n")
+    (tmp_path / "run.log").write_text("AIEDNN_ENTRY_OP conv_q_s8s8 0 1\nAIEDNN_ENTRY_OP fvec_f32 1 1\n"
+                                      "AIEDNN_ENTRY_OP gemm_s8s32 2 1\n")
+    rep = DnnBuild(app, "vek385", tmp_path, [gemm, conv, fvec], modes=("CONV", "FVEC", "GEMMQ"))
+    _plan_megakernels(rep, app, rep.kernels, tmp_path)
+    assert rep.force_ref == [1] and rep.segments is None
+    assert rep.modes == ("CONV", "GEMMQ") and rep.kernels == [gemm, conv]

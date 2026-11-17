@@ -4,9 +4,12 @@
  *
  * aiednn_rt_phead.h -- dequantized sources: an s8 / u8 input read through its scale and zero point.
  *
- * With attr.src_scales[i] > 0 (attr.src_scales_23 for sources 2, 3) create dispatches the f32 problem and
- * execute dequantizes the source into scratch as f32((code - zp) * scale), bit-identical to a separate
- * dequantize reorder.
+ * A quantized framework graph feeds float ops through a dequantize: DQ -> layer_norm, DQ -> softmax,
+ * DQ x3 -> sdpa (PT2E, ONNX QDQ). With attr.src_scales[i] > 0 on such a create (attr.src_scales_23 for
+ * sources 2, 3) the op takes the 8-bit tensor directly: create dispatches the f32 problem, execute
+ * dequantizes the source into scratch -- f32((code - zp) * scale), the dequantize reorder's arithmetic, so
+ * the result is bit-identical to the two primitives -- and runs it. One primitive, one pass less over memory
+ * for the graph (aiednn_graph.h reads through the DQ instead of keeping it as a partition).
  *
  * Needs, from the including TU: aiednn_rt_internal.h.
  ******************************************************************************/

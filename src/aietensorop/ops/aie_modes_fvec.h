@@ -4,28 +4,38 @@
  *
  * aie_modes_fvec.h -- FVEC: f32 vector programs and row operations as a mode of the GEMM ELF, opcode 0xF5.
  *
- * One item per core: IN is the core's 4 KB item gathered from its A rows (n <= 1024 floats), OUT its 4 KB C tile,
+ * The floating counterpart of LUT / STEPS (8-bit results only). One item per core as the other item
+ * modes: IN is the core's 4 KB item gathered from its A rows (n <= 1024 floats), OUT its 4 KB C tile,
  * AUX AIE_FVEC_AUX floats copied out of the core's B rows.
  *
- *   AIE_FV_PROG   elementwise: a small vector program per 16 lanes (below), built by the host
- *                 (aie_fvec_prog). AUX: the second operand element for element (binary) in [0, 1024),
- *                 the program at AIE_FVEC_PROGAT.
+ *   AIE_FV_PROG   elementwise: a small vector program per 16 lanes (below) -- every unary eltwise
+ *                 algorithm and binary op is a program the host builds (aie_fvec_prog), so the core
+ *                 holds each primitive once: exp, 1/x, 1/sqrt(x), log, and the fp32 product. AUX: the
+ *                 second operand element for element (binary) in [0, 1024), the program at AIE_FVEC_PROGAT.
  *   AIE_FV_SOFTMAX / LOGSOFTMAX / LNORM / RMSNORM   rows of rowlen; norms take eps = alpha, 1/rowlen =
  *                 beta and gamma / beta rows in AUX (flags).
  *   AIE_FV_ROWPROG  the program over rows of rowlen with R2 / R3 = that row's constants (AUX[2r], AUX[2r + 1]):
- *                 R1 = R2, or with AIE_FV_F_ELEM the AUX element and the constants at AIE_FVEC_ROWAT.
- *   AIE_FV_ROWSUM   ROWPROG, but each row writes the sum of its results (one f32 at out[row]).
- *   AIE_FV_RMAX / RSUM   row reductions (max; sum * beta: sum or mean), one f32 per row at out[row].
+ *                 per-channel affine (batch norm), PReLU, binary with a per-channel operand. R1 = R2, or with
+ *                 AIE_FV_F_ELEM the AUX element (a second operand per element) and the constants at
+ *                 AIE_FVEC_ROWAT: softmax backward, training batch norm.
+ *   AIE_FV_ROWSUM   ROWPROG, but each row writes the sum of its results (one f32 at out[row]): the row
+ *                 statistics of the training ops (sum y dy, sum (x - mean)^2).
+ *   AIE_FV_RMAX / RSUM   row reductions (max; sum * beta: sum or mean), one f32 per row at out[row]:
+ *                 the softmax / norm passes stopped early (global pooling, trailing-axis reductions).
  *
  * Program: R0 = x, R1 = the AUX element (binary), R2, R3 scratch; the result is R0. Instruction words
  * (uint32) op | d << 8 | a << 12 | b << 16, b a register or a constant index; constants K[] f32.
  * Layout at AIE_FVEC_PROGAT: int32 nins, int32 nconst, f32 K[nconst], uint32 ins[nins].
  *
- * Code size is the constraint (16 KB program memory for the whole megakernel): heavy helpers are out of
- * line, no scalar float arithmetic (it pulls in softfloat), reductions are shuffle_down_rotate trees.
+ * Code size is the constraint (the core program memory is 16 KB for the whole megakernel): every heavy
+ * helper is out of line, there is no scalar float arithmetic (it pulls in softfloat), and reductions are
+ * shuffle_down_rotate trees. An earlier per-op version measured 32 KB in place.
  *
- * Contract: |got - ref| <= 1e-5 + 1e-5 |ref| (ref: in double), not bit-exact. 1/x and 1/sqrt(x) are
- * aie::inv / aie::invsqrt plus one Newton step; log(x) is Newton on e^y = x.
+ * Accuracy, not bit-exactness -- the contract is |got - ref| <= 1e-5 + 1e-5 |ref| (ref: in double):
+ * exp is 2^n e^r (Cody-Waite reduction around the fp32 round-to-nearest trick, degree-6 e^r), 1/x and 1/sqrt(x) are
+ *aie::inv / aie::invsqrt plus one Newton step, log(x) is Newton on e^y = x from the exponent, products go through the
+ *AIE-ML fp32 emulation (AIE2_FP32_EMULATION_ACCURACY_FAST). test/fvec_test.cc runs every program through the AIE-API
+ *emulation (which models aie::inv / aie::invsqrt step for step).
  *
  * Descriptor in B row 127 (first 64 bytes): [0] 0xF5  [1] mesh column  [2] op  [3] flags
  *   [4..7] alpha f32  [8..11] beta f32;  core in mesh row r: 4 bytes at AIE_FVEC_ENTRY(r) = {n LE16,
@@ -522,8 +532,9 @@ static inline int aie_fvec_prog_bwd(int f, float a, float b, aie_fv_prog_t *p) {
         if (f == AIE_FVF_SELU)
             aie_fvp_c(p, AIE_FVI_MULC, 0, 0, b);
         break;
-    /* sigmoid derivatives never as 1 - s or 1 - t^2 (cancellation): with e = e^-z and s = 1 / (1 + e),
-     * s (1 - s) = e s^2 and 1 - tanh(z / 2)^2 = 4 e s^2 */
+    /* sigmoid derivatives never as 1 - s or 1 - t^2 (cancellation: 0.8 of the contract on the board for
+     * tanh): with e = e^-z and s = 1 / (1 + e), sigmoid(-z) = e s exactly, so s (1 - s) = e s^2 and
+     * 1 - tanh(z / 2)^2 = 4 e s^2 */
     case AIE_FVF_LOGISTIC: /* e s^2, z = x */
     case AIE_FVF_TANH:     /* 4 e s^2, z = 2x */
         aie_fvp_c(p, AIE_FVI_MULC, 2, 0, f == AIE_FVF_TANH ? -2.0f : -1.0f), aie_fvp_i(p, AIE_FVI_EXP, 2, 2, 0);
@@ -660,8 +671,9 @@ AIE_FV_OUTLINE static aie_fv aie_fv_mul(aie_fv a, aie_fv b) { return aie::mul(a,
 
 /* e^x: n = round(x / ln 2), r = x - n ln 2 in two parts (Cody-Waite: n * LN2_HI is exact), e^r a
  * degree-6 Taylor polynomial on |r| <= ln 2 / 2 (error < 1.3e-7), 2^n from the exponent bits.
- * n comes from the fp32 round-to-nearest trick (t + 1.5 * 2^23), not aie::to_fixed: AIE-ML converts
- * through bf16, which can put n one off. */
+ * n comes from the fp32 round-to-nearest trick (t + 1.5 * 2^23: its low mantissa bits are n), not
+ * aie::to_fixed: AIE-ML converts through bf16, which rounds t to 8 bits, puts n one off and |r| past
+ * ln 2 / 2, where the polynomial is 1e-4 off (measured on the board: tanh / log beyond the contract) */
 AIE_FV_OUTLINE static aie_fv aie_fv_exp(aie_fv x) {
     x = aie::max(aie::min(x, aie_fv_bc(88.3f)), aie_fv_bc(-87.3f));
     const aie_fv tn = aie::add(aie_fv_mul(x, aie_fv_bc(1.44269504089f)), aie_fv_bc(12582912.0f));

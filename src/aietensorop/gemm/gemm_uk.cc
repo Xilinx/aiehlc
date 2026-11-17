@@ -4,18 +4,27 @@
  *
  * gemm_uk -- int8 x int8 -> int32 GEMM block for VEK280, as an aiednn kernel.
  *
- * As matmul_uk.cc (aie::mmul<8,8,8>), but the accumulators leave the array as
- * exact int32, row-major per core tile.
+ * Same core as matmul_uk.cc (aie::mmul<8,8,8> over 8x8 packed tiles, k rounds
+ * accumulated in core memory) but the accumulators leave the array as int32,
+ * row-major per core tile, instead of being saturated to int8. Exact, so a
+ * larger K can be split into blocks and summed on the host -- the property
+ * aiednn's blocked matmul and im2col convolution rely on.
  *
  * Logical block (the AIEK_SPEC): A [32*HW_ROWS][512] s8, B [128][512] s8 -> C [32*HW_ROWS][128]
- * s32, on HW_ROWS x 4 cores -> a 32x32 int32 tile per core.
+ * s32, on HW_ROWS x 4 cores (gemm.h; default 4x4, `dnn_build(mesh=(6, 4))` builds 6x4) -> a
+ * 32x32 int32 tile per core. The specs' `mesh` lines name the dims that scale.
  *
- * K must equal the program's B row count N (512): aiehlc offsets each column's B chunk by
- * tile * N bytes while the BD strides by K (skill gemmnonsquareb).
+ * K is 512 on purpose, equal to the program's B row count N: aiehlc offsets
+ * each mesh column's B chunk by tile * N bytes while the BD inside strides by
+ * K, so a B with N != K is read from the wrong rows (columns 1..3 got padding
+ * and returned zeros on the board with K = 576). Skill gemmnonsquareb.
  *
- * The program is all-int8, so C is the int32 result's bytes ([128][512] int8) and each
- * column's B tile must be 128 rows: the entry puts column j's 32 real B rows at rows
- * j*128 .. j*128+31 of a zeroed [512][512] staging buffer.
+ * aiehlc's kernel codegen gives all windows one element type, so the program
+ * is all-int8 and C is the int32 result's BYTES: [128][512] int8. That makes
+ * each core column's C tile 128 bytes wide, so its B tile must be 128 rows:
+ * the entry puts the 32 real B rows of column j at rows j*128 .. j*128+31 of a
+ * [512][512] staging buffer whose other rows stay zero, and the core computes
+ * only the first quarter of its B tile. Cost: 4x the B traffic per launch.
  ******************************************************************************/
 #include "gemm.h"
 // AIEHLC_KERNEL_PROLOGUE_BEGIN
@@ -36,7 +45,9 @@
  * travel in the item's tail past the <= 49 weight bytes (DW_WBYTES) instead */
 #define DWQ_STASH 4084
 #define DWQ_STASH_N 12
-/* core cycle stamp (diagnostic, default off): a GEMMQ launch writes its cycles into C row 0 bytes 64..67 */
+/* core cycle stamp (diagnostic, default off): a GEMMQ launch writes the cycles from its first window to
+ * its output into C row 0 bytes 64..67 of every core (unused by the int8 C); gemm_q_post sums core
+ * (0, 0)'s, aiednn_kernel_stats prints them. Tested with `if`. */
 #ifndef AIEDNN_KCYC
 #define AIEDNN_KCYC 0
 #endif
@@ -96,7 +107,8 @@ __global__(gemm_policy) void gemm_s8s32(aie::port<input_window_int8 *, RowBA> wi
     alignas(aie::vector_decl_align) int8_t b_strip[eff_k * 8];
     alignas(aie::vector_decl_align) int32_t acc[tile_rows * real_cols];
     // K chaining (0xA0 / d[2] bit 0): acc carries a partial sum from the previous launch of the
-    // persistent kernel. Its address escapes, so accumulate-only stores are not dead at return.
+    // persistent kernel (same stack frame every call). Its address escapes, so the stores of an
+    // accumulate-only launch are not dead at return.
     static int32_t *volatile acc_keep;
     acc_keep = acc;
     alignas(aie::vector_decl_align) int32_t local_out[tile_rows * real_cols]; // = tile_rows * tile_cols bytes
@@ -478,7 +490,8 @@ extern "C" void aiednn_kernel_stats(void) {
         printf("aiednn_kernel_stats: core (0,0) per GEMMQ launch: %.0f cycles first window -> output (%llu launches)\n",
                (double)g_kcyc[0] / g_kcyc[2], (unsigned long long)g_kcyc[2]);
 #if defined(AIEHLC_PROFILING) && AIEHLC_PROFILING
-    // PMU phase shares (aiehlc.sh --profiling); PMU cycles are A72 clock, so only ratios compare to ms
+    // where launch_ms goes (aiehlc.sh --profiling): the runtime's PMU phases since the last reset, as
+    // shares -- PMU cycles run at the A72 clock, not cntfrq, so only the ratios are comparable to ms
     unsigned long long ph[4] = {0, 0, 0, 0}, wio = 0;
     unsigned int phc[4] = {0, 0, 0, 0}, wioc = 0;
     __Runtime_phase_cycles(ph, phc);
@@ -504,9 +517,12 @@ extern "C" void aiednn_kernel_stats_reset(void) {
 #endif
 }
 
-/* Memtile-resident B (#pragma memtile_staging(weights)): aiednn_gemm_weights_key names the next launch's
- * B block (0 = not cacheable). On a memtile hit only the per-launch tail rows 96..127 are written and
- * synced; on a miss the whole block is copied. */
+/* Memtile-resident B (#pragma memtile_staging(weights), aie_runtime.c): the runtime names the B block
+ * of the next launch (aiednn_gemm_weights_key: weights pointer, n-block, k-block; 0 = not a cacheable
+ * block). If the mem tiles hold that block (__Runtime_memtile_weights_cached: an LRU of two blocks
+ * per channel), only the per-launch tail rows 96..127 (descriptor, residual, R) are written, flushed
+ * and re-read from DDR, and the whole-buffer B cache sync is skipped; on a miss the whole block is
+ * copied, so the staging buffer holds it whenever the runtime streams it. */
 static uint64_t g_wkey_next, g_wkey_last;
 extern "C" void aiednn_gemm_weights_key(uint64_t key) { g_wkey_next = key; }
 
@@ -517,7 +533,8 @@ static int b_rows_in(const int8_t *b) {
     g_wkey_next = 0;
     int hit = 0;
 #if defined(AIEHLC_ASYNC_LAUNCH)
-    /* the runtime's LRU decides; a miss streams the whole block from DDR */
+    /* the runtime's LRU (two blocks per channel for <= 64 KB chunks) decides, not "same as the last
+     * launch": a miss -- eviction, partition re-init -- streams the whole block from DDR */
     hit = key && __Runtime_memtile_weights_cached(key);
     __Runtime_memtile_weights_key(key, 32);
     __Runtime_memtile_weights_head(real); /* a GEMM core skips rows real .. 95: a miss moves real + tail rows */
@@ -574,8 +591,10 @@ static int gemm_s8s32_run(const int8_t *a, const int8_t *b, int32_t *c) {
     return AIEK_OK;
 }
 
-/* One K block of a chained GEMM (opcodes 0 / 0xA0): flags bit 0 = start from the core's accumulators,
- * bit 1 = more blocks follow (C is not copied). Needs the persistent kernel. */
+/* One K block of a chained GEMM (opcodes 0 / 0xA0, d[2] bit 0 = continue): flags bit 0 = start
+ * from the core's accumulators (the previous launch's partial sum), bit 1 = more blocks follow
+ * (accumulate only; C is not copied). The final block returns the whole-K int32 sum, so the host
+ * adds nothing. Needs the persistent kernel: acc survives between launches. */
 static int gemm_bufs(aieArray &device) { // the launch buffers, allocated once for the process
     if (!g_gemm_a) {
         g_gemm_a = (int8_t *)device.alloc(M * K * 4);
@@ -1075,7 +1094,8 @@ static int dw_blk_run(const int8_t *items, const int32_t *geom, int32_t *out) {
 
 /* Depthwise + integer requant with 3 items per core (0xD8, d[11] = 2): item r*HW_COLS+c in A as
  * in dw_blk_run, items DW_ITEMS + 2*(r*HW_COLS+c) + q (q = 0, 1) in rows 16r + 8q .. +7 of column
- * c's B block (no weights in this mode). Output int8 [3*DW_ITEMS][DW_OUT]. */
+ * c's B block (no weights in this mode). Output int8 [3*DW_ITEMS][DW_OUT]: one launch moves the
+ * same bytes as a single-item one and returns three bands (mobilenet / efficientnet / convnext). */
 static int dwq_blk_run(const int8_t *items, const int32_t *geom, int8_t *out) {
     aieArray device;
     aieMesh mesh = device.partition(GEMM_PARTITION, HW_ROWS, HW_COLS);
@@ -1361,8 +1381,11 @@ AIEK_SPEC(elt_blk_s8s32,
     "out   int32 [16,1024]  dst\n");
 // clang-format on
 
-/* Several megakernels (_binary_kernel_gemm_s8s32__mk<k>_*): aiednn_megakernel_select(k) makes the next
- * launch load + start ELF k; host program, routing and windows are shared. No-op in a single-ELF build. */
+/* Several megakernels (aie_modes_cfg_<k>.h; hostcompile.sh embeds the core ELF of each as
+ * _binary_kernel_gemm_s8s32__mk<k>_*): aiednn_megakernel_select(k) (the runtime's aiednn_op_begin, or a
+ * library primitive) makes the next launch load + start ELF k (persist_transform's host_first) instead
+ * of re-arming the shim BDs; host program, routing and windows are the same for all. A single-ELF
+ * build has none of the symbols: a no-op. */
 #if defined(AIEHLC_ASYNC_LAUNCH)
 #define AIEDNN_MK_MAX 8
 #define AIEDNN_MK_DECL(k) extern "C" unsigned char _binary_kernel_gemm_s8s32__mk##k##_start[] __attribute__((weak));
@@ -1392,8 +1415,9 @@ extern "C" void aiednn_megakernel_select(int k) {
     aiednn_megakernel_switches++; /* a per-op segment plan's switch counts too (dnn_build modes="auto") */
     __aie_persist_select_elf(elf);
 }
-/* library megakernels: the calling entry's modes are in the ELFs in *mask* (bit k = ELF k). Keep the
- * resident one if it is among them, else load the lowest. */
+/* library megakernels: the calling entry's modes are compiled into the ELFs in *mask* (bit k = ELF k,
+ * from the generated implementation list). Keep the resident one if it is among them, else load the
+ * lowest. Counted in aiednn_megakernel_switches (a switch costs ~0.5 ms: ELF reload + start). */
 extern "C" long aiednn_megakernel_switches = 0;
 extern "C" void aiednn_megakernel_need(unsigned mask) {
     unsigned char *cur = aiednn_mk_resident();
@@ -1409,8 +1433,9 @@ extern "C" void aiednn_megakernel_need(unsigned mask) {
 }
 #endif
 
-/* is the MMT mode compiled into the core (aie_modes_cfg.h; opt-in, or AIEK_LIB_MODE_MMT in a
- * library build)? The entry links either way. */
+/* is the MMT mode compiled into the core (aie_modes_cfg.h; opt-in)? The entry exists either way,
+ * so every build links; the runtime routes to it only when this says 1. A library build (several
+ * ELFs, dnn_build modes="library") has it if any ELF does: AIEK_LIB_MODE_MMT, host-side only. */
 #ifdef AIEK_LIB_MODE_MMT
 #define AIEK_HOST_MODE_MMT AIEK_LIB_MODE_MMT
 #else
@@ -1648,10 +1673,15 @@ AIEK_SPEC(gemm_blk_s8s32,
     "out   int32 [128,128]  dst\n");
 // clang-format on
 
-/* n GEMM tiles per launch (persistent build only): A tiles go into aiednn_gemm_ntile_stage_a() (m blocks
- * outer, k blocks inner), aiednn_gemm_ntile_start() streams nm x nkb tiles and aiednn_gemm_ntile_c(mb)
- * is m block mb's result. nkb == 1: one shared B block re-emitted from the mem tile; nkb > 1: B block kb
- * per tile, K chained on the core (0xA0), ending in int32 C (which 0) or int8 requant (which 1). */
+/* n GEMM tiles per launch (persist_transform's host_tile_n_start; the persistent build only): the
+ * runtime packs A tiles straight into aiednn_gemm_ntile_stage_a() (m blocks outer, k blocks inner),
+ * aiednn_gemm_ntile_start() streams nm x nkb tiles in one launch and aiednn_gemm_ntile_c(mb) is m
+ * block mb's result. nkb == 1: every tile shares one B block, re-emitted from the mem tile (and
+ * cached there by aiednn_gemm_weights_key); nkb > 1: tile (mb, kb) streams B block kb through the
+ * mem tile, whose descriptor row chains the K blocks on the core (0xA0, continue for kb > 0) and
+ * ends in a plain GEMM (which 0: int32 C) or the integer requant (which 1: int8 C, qp as
+ * gemm_q_s8s8 without the residual). The kernel body is the one above: a persistent core takes
+ * one tile per window set. */
 #if defined(AIEHLC_NTILE_LAUNCH)
 #define NT_MAX 32 /* tiles per launch: the mem tile start queue's repeat count (8 windows each) */
 static int8_t *g_nt_a, *g_nt_b, *g_nt_c;
@@ -1987,8 +2017,9 @@ extern "C" int aiednn_gemm_dwq_n_finish(int8_t *out) {
  * [GEMM_M][AIE_BF16_K], w = n W tiles bf16 [GEMM_N][AIE_BF16_K] (channels x K), flags[t] = tile t's
  * bf16_blk_run flags (bit 0 continue the previous tile's accumulators, bit 1 more K follows). Every tile
  * streams its own B block through the mem tile (b_step one block), whose descriptor row carries the
- * opcode and flags. Tile t's f32 [GEMM_M][GEMM_N] is aiednn_gemm_bf16_n_c(t) after
- * aiednn_gemm_bf16_n_finish (meaningful where flags[t] has no bit 1). */
+ * opcode and flags, so K chains and unrelated GEMMs (attention heads) share a launch. Tile t's f32
+ * [GEMM_M][GEMM_N] is aiednn_gemm_bf16_n_c(t) after aiednn_gemm_bf16_n_finish (meaningful where flags[t]
+ * has no bit 1). The single-tile entry is unchanged. */
 static int8_t *g_b16n_b;
 static int64_t g_b16n_blocks;
 static int g_b16n_n;

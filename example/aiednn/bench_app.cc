@@ -2,8 +2,13 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * bench_app -- per-primitive scoreboard: dispatched impl, its time, ref:'s time
- * and byte mismatches, one line per problem.
+ * bench_app -- the per-primitive scoreboard: one line per problem with the
+ * implementation dispatch picked, its time, ref:'s time on the same problem and
+ * the byte mismatches between the two. Covers every AIE mode of the GEMM
+ * megakernel (plain GEMM, GEMMQ, CONV, DW, DWQ, POOL, ELTWISE, LUT, STEPS, MMT)
+ * and the primitives that still run on ref: (listed so the gaps stay visible).
+ * Problems alternate between the library megakernels (dnn_build modes="library"),
+ * so the run also exercises the ELF switching (mk_switches per line).
  *
  *   BENCH <name> impl=<impl> aie=<0|1> t_ms=<steady> t_first_ms=<first> ref_ms=<steady>
  *         speedup=<ref/t> mismatches=<n> of <bytes> mk_switches=<n>
@@ -80,7 +85,8 @@ typedef struct {
 
 typedef aiednn_status_t (*mk_fn)(aiednn_primitive_t *, const prob *);
 
-/* default dispatch, then ref:, on the same problem; args[ndst] is DST */
+/* default dispatch, then ref:, on the same problem: times (first call, mean of REPS after it) and
+ * byte mismatches; args[ndst] is DST */
 static void bench(const char *name, mk_fn mk, const prob *pb, int nargs, aiednn_exec_arg_t *args, int ndst) {
     char impl[160] = "?";
     double first[2] = {0, 0}, steady[2] = {0, 0};
@@ -125,7 +131,7 @@ static void bench(const char *name, mk_fn mk, const prob *pb, int nargs, aiednn_
             fd = fd < 0 ? i : fd;
             bad++;
         }
-    if (bad) { /* first differing bytes; how many ref: 127 / 0 bytes differ */
+    if (bad) { /* the first few differing bytes, and how many of ref:'s 127 / 0 bytes differ */
         long hi = 0, hibad = 0, zero = 0, zerobad = 0, shown = 0;
         for (long i = 0; i < n; i++) {
             const int r = (int8_t)g_out[1][i], a = (int8_t)g_out[0][i];
@@ -140,7 +146,7 @@ static void bench(const char *name, mk_fn mk, const prob *pb, int nargs, aiednn_
     if (bad) /* first differing byte and the largest byte difference (8-bit dst) */
         printf("BENCHDIFF %s first=%ld aie=%d ref=%d max_byte_diff=%d\n", name, fd, (int)(int8_t)g_out[0][fd],
                (int)(int8_t)g_out[1][fd], maxd);
-    /* fvec: contract |aie - ref| <= 1e-5 + 1e-5 |ref| */
+    /* fvec: (f32 on the AIE) is held to |aie - ref| <= 1e-5 + 1e-5 |ref| (fvec_app.cc), not to bytes */
     double worst = -1;
     if (bad && pb->d.data_type == aiednn_f32 && strncmp(impl, "fvec:", 5) == 0) {
         const float *fa = (const float *)g_out[0], *fr = (const float *)g_out[1];
@@ -189,7 +195,7 @@ static aiednn_status_t mk_resample(aiednn_primitive_t *p, const prob *c) {
     return aiednn_resampling_forward_create(p, c->alg, &c->s, &c->d);
 }
 
-/* int8 conv -> s8, per-channel scales + ReLU */
+/* int8 conv -> s8, per-channel scales + ReLU + requantize (the quantized model layer) */
 static void conv_q(const char *name, int64_t n, int64_t c, int64_t h, int64_t o, int64_t k, int64_t s, int64_t groups) {
     prob pb;
     memset(&pb, 0, sizeof pb);
@@ -207,7 +213,7 @@ static void conv_q(const char *name, int64_t n, int64_t c, int64_t h, int64_t o,
     bench(name, mk_conv, &pb, 4, a, 3);
 }
 
-/* int8 conv -> s8 with a fused s8 residual add + ReLU */
+/* int8 conv -> s8 with a fused residual add (an s8 skip tensor of the output's shape) + ReLU */
 static void conv_q_res(const char *name, int64_t c, int64_t h, int64_t o, int64_t k) {
     prob pb;
     memset(&pb, 0, sizeof pb);
@@ -306,7 +312,7 @@ static void elementwise_ops(void) {
     pb.alg = aiednn_binary_mul, pb.d = D(4, 1, 64, 56, 56, aiednn_f32);
     bench("binary_mul_s8_f32", mk_bin, &pb, 3, b3, 2);
 
-    /* still on ref: */
+    /* still on ref: -- listed so the scoreboard shows the gaps */
     memset(&pb, 0, sizeof pb);
     pb.alg = aiednn_softmax_accurate, pb.s = D(4, 1, 12, 128, 128, aiednn_f32), pb.d = pb.s;
     bench("softmax_f32_12x128x128", mk_softmax, &pb, 2, f2, 1);

@@ -2,7 +2,12 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Grouped weight-only quantization on the AIE (wq:) against the exact double reference."""
+"""Grouped weight-only quantization on the AIE (impl wq:, the GEMM ELF's WQ mode, aiednn_rt_wq.h): an
+8-bit src times 8- / 4-bit weights with per-group scales and zero points, against the exact double
+reference, through ctypes on the workstation build (the mode's C reference stands in for the array).
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_wq.py
+"""
 from __future__ import annotations
 
 import ctypes as C
@@ -70,7 +75,8 @@ def test_wq_shapes(lib, M, K, N, g):
 @pytest.mark.parametrize("sdt,wdt,zdt,src_zp", [("s8", "s4", "s8", 0), ("u8", "u4", "u4", 113), ("u8", "u8", None, 128),
                                                 ("s8", "u8", "u8", -5), ("u8", "s8", "s32", 0)])
 def test_wq_types_and_zero_points(lib, sdt, wdt, zdt, src_zp):
-    """u8 operands shifted by 128 with zero points corrected per group on the host, exactly."""
+    """u8 operands shifted by 128 and every zero point corrected per group on the host, exactly
+    (the create API takes group scales with [K, N] weights only)"""
     got, want, mag, impl = run(lib, 9, 1024, 40, 128, sdt, wdt, zdt, src_zp)
     assert impl == WQ
     assert np.all(np.abs(got - want) <= 2e-6 * (mag + 1e-30)), np.max(np.abs(got - want) / (mag + 1e-30))
@@ -103,7 +109,8 @@ def test_wq_inner_product(lib):
 
 @pytest.mark.parametrize("dynq", [False, True])
 def test_wq_dynamic_f32_src_opt_in(lib, monkeypatch, dynq):
-    """A floating src takes wq: only with AIEDNN_WQ_DYNQ=1, within int8 activation rounding."""
+    """a floating src stays dequant+ unless AIEDNN_WQ_DYNQ=1: then rows quantize to s8 (scale max|x| / 127)
+    and take wq: -- within the int8 rounding of the activations"""
     if dynq:
         monkeypatch.setenv("AIEDNN_WQ_DYNQ", "1")
     else:

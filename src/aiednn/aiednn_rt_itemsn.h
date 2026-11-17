@@ -4,9 +4,16 @@
  *
  * aiednn_rt_itemsn.h -- many launches' worth of one-item-per-core work in one AIE launch.
  *
- * rt_items_n(): the caller packs item i (pack) and consumes its result (put), double-buffered against
- * the n-tile launch. Returns RT_NOT_TAKEN when there is no n-tile entry, AIEDNN_NO_NTILE /
- * AIEDNN_NO_ITEMSN is set, or the work fits one launch.
+ * The item modes of the GEMM ELF (pool, eltwise, 0xD7 depthwise) take one 4 KB item per core and
+ * return its int32 [1024]: a launch per `cores` items (16 on 4x4), ~0.2 ms of it launch overhead.
+ * With the persistent build's n-tile launch (gemm_uk.cc aiednn_gemm_items_n_start / _finish) one
+ * launch carries up to aiednn_gemm_ntile_max() tiles of `cores` items, all under the same
+ * descriptor (B is re-emitted by the mem tile). Same items, same core code: bit-identical.
+ *
+ * rt_items_n(): the caller packs item i (pack) and consumes its result (put); chunk j+1 is packed
+ * while chunk j runs and chunk j's results are consumed while chunk j+1 runs. Returns RT_NOT_TAKEN
+ * when there is no n-tile entry (x86 without the stand-in, non-persistent builds), AIEDNN_NO_NTILE /
+ * AIEDNN_NO_ITEMSN is set, or the work fits one launch -- the caller's per-launch loop runs.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_gemm.h, aiednn_rt_ntile.h.
  ******************************************************************************/

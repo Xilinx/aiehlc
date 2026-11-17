@@ -6,8 +6,10 @@
  * on mlir-aie's vectorized matmul micro-kernel (mlir-aie/aie_kernels/linalg/mm_aie2.h,
  * matmul_vectorized_4x8x8_i8_i32, a submodule of this repository).
  *
- * Each core produces AIE_MMT_ROWS (128) rows x 32 channels of int8 output for K <= MMT_K = 128
- * (zero-padded; the core build has only the 128 instantiation, K = 64 is x86-reference only):
+ * The plain GEMM tile pads K to 512 and gives each core 32 rows x 32 channels (int32), so a
+ * layer with K <= 128 uses a quarter of every launch or less. MMT gives each core
+ * AIE_MMT_ROWS (128) rows x 32 channels of int8 output for K <= MMT_K = 128 (zero-padded; the core
+ * build has only the 128 instantiation, the K = 64 layout below is kept for the x86 reference):
  *   - the host lays A out pre-tiled: k-round window kr (2 KB) holds rows [kr * mr, +mr) x MMT_K as
  *     [mr/4][MMT_K/8][4][8] (mr = 2048 / MMT_K; K = 64 uses rounds 0..3 only);
  *   - k-round 0's B window carries the core column's B [MMT_K/8][32/8][8][8] (rows 0..63) and the
@@ -165,7 +167,8 @@ static inline void aie_mmt_round_t(const int8_t *a, const int8_t *res, int kr, i
             }
     aie::set_rounding(rnd);
 }
-/* one instantiation (K tile 128): a K-64 copy would cost program memory for nothing */
+/* one instantiation (K tile 128): the micro-kernel is unrolled, and a K-64 copy would cost ~2 KB of
+ * the 16 KB program memory for nothing -- both give 128 rows per core with the same DMA */
 static inline void aie_mmt_round(const int8_t *a, const int8_t *res, int kcode, int kr, int32_t *c32, int8_t *out) {
     (void)kcode;
     aie_mmt_round_t<128>(a, res, kr, c32, out);

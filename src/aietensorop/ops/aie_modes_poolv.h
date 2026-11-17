@@ -11,7 +11,8 @@
  * for a sum. Integer max / sum, so the result is AIE_MODE_POOL's bit for bit; anything else (min, the
  * |x| / x^2 variants, other strides, a row tail shorter than 16) returns 0 or falls back per output.
  *
- * Compiles for the core and the x86 AIE-API emulation. Include after aie_modes_pool.h.
+ * Core build (aie_api) and the x86 AIE-API emulation (src/mlir/runtime/aie_api_x86emu.h) both compile
+ * it: test/poolv_test.cc checks it against AIE_MODE_POOL. Include after aie_modes_pool.h.
  ******************************************************************************/
 #ifndef AIE_MODES_POOLV_H
 #define AIE_MODES_POOLV_H

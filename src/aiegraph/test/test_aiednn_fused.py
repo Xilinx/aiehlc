@@ -2,7 +2,10 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Fused transformer primitives (aiednn_rt_fused.h): gated MLP and RoPE against PyTorch."""
+"""Fused transformer primitives (aiednn_rt_fused.h): gated MLP and RoPE against PyTorch.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_fused.py
+"""
 
 from __future__ import annotations
 
@@ -89,7 +92,8 @@ def _reorder(lib, x, dt_out, scale, zp):
 
 @pytest.mark.parametrize("interleaved", [0, 1], ids=["half_split", "interleaved"])
 def test_rope_quantized_is_the_qdq_chain(lib, interleaved):
-    """aiednn_rope_create_attr with 8-bit operands: byte-identical to the unfused reorder chain."""
+    """aiednn_rope_create_attr with s8 x, u8 cos / sin (read through) and an s8 dst: byte-identical to the
+    dequantizing reorders, the f32 rope and the quantizing reorder (a PT2E graph RoPE as one primitive)"""
     from aiegraph.dnn_ctypes import attr
     shape, cshape = (1, 12, 4, 16), (1, 12, 1, 16)
     x8 = RNG.integers(-128, 128, shape).astype(np.int8)
@@ -124,3 +128,21 @@ def test_rope_attr_refusals(lib):
     _, st = lib.create("aiednn_rope_create_attr", C.byref(md(shape, "f32")), C.byref(md(cshape, "f32")),
                        C.byref(md(cshape, "f32")), C.byref(md(shape, "s8")), C.c_int(0), C.byref(a))
     assert st != 0   # an s8 dst needs dst_scale > 0
+
+def test_rope_f32_src_s8_dst_is_rope_then_quantize(lib):
+    """aiednn_rope_create_attr with f32 x / cos / sin and an s8 dst (attr dst_scale only): byte-identical to the
+    f32 rope followed by the quantizing reorder"""
+    from aiegraph.dnn_ctypes import attr
+    shape, cshape = (1, 16, 4, 64), (1, 16, 1, 64)
+    x = f32(shape)
+    ang = f32(cshape)
+    cos, sin = np.cos(ang).astype(np.float32), np.sin(ang).astype(np.float32)
+    ds, dz = 0.021, 0
+    a, _keep = attr(lib.ALG, dst_scale=ds, dst_zp=dz)
+    m = lambda arr, dt="f32": C.byref(md(arr.shape, dt))
+    got, impl = lib.call("aiednn_rope_create_attr", [m(x), m(cos), m(sin), C.byref(md(shape, "s8")), C.c_int(0), C.byref(a)],
+                         {S: x, COS: cos, SIN: sin, D: np.zeros(shape, np.int8)}, D)
+    assert impl == "ref:rope", impl
+    yf, _ = lib.call("aiednn_rope_create", [m(x), m(cos), m(sin), m(x), C.c_int(0)],
+                     {S: x, COS: cos, SIN: sin, D: np.zeros_like(x)}, D)
+    np.testing.assert_array_equal(got, _reorder(lib, yf, "s8", ds, dz))

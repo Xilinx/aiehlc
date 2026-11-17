@@ -16,8 +16,10 @@
  *     int64 Z[n]                                              (8-byte aligned)
  *     int16 P[n + 1], P[i] = c_lo + sum_{k < i} d_k
  * Codes are int16 so a u8 destination (0..255) fits; the store keeps the low byte.
+ * aie_actq_bytes(n) bytes, 2890 at n = 288.
  *
- * Plain C: the same text is the kernel helper and the x86 reference.
+ * Plain C, no vector API: the same text is the kernel helper (include it between
+ * AIEHLC_KERNEL_PROLOGUE_BEGIN/END) and the x86 reference.
  ******************************************************************************/
 #ifndef AIE_MODES_ACTQ_H
 #define AIE_MODES_ACTQ_H

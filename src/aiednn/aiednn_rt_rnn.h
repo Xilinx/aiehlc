@@ -4,7 +4,8 @@
  *
  * aiednn_rt_rnn.h -- recurrent networks, forward: vanilla RNN, LSTM, GRU, linear-before-reset GRU;
  * multi-layer, left-to-right / right-to-left / bidirectional (concat or sum). ref: only, in double.
- * Weights [L, D, in, G, DHC]; gates LSTM i f c~ o, GRU u r o.
+ * Layouts and gate orders are aiednn.h's (oneDNN's): weights [L, D, in, G, DHC], gates LSTM
+ * i f c~ o, GRU u r o.
  *
  * Needs, from the including TU: aiednn_rt_internal.h and the create helpers of aiednn_rt.cc.
  ******************************************************************************/

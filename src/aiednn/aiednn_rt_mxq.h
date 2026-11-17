@@ -4,9 +4,14 @@
  *
  * aiednn_rt_mxq.h -- block-scale (OCP microscaling, MX) quantize / dequantize along the last axis.
  *
- * Per block: shared exponent s = floor(log2(max |x|)) - emax (8 e4m3, 15 e5m2, 2 e2m1), clamped to
- * [-127, 127]; elements x / 2^s rounded to nearest even, saturated to the largest normal; a zero block
- * takes 2^-127; a NaN makes the scale NaN (0xff).
+ *   quantize   f32 / bf16 / f16 src -> f8_e4m3 / f8_e5m2 / f4_e2m1 elements + one e8m0 scale per block
+ *   dequantize those -> f32 / bf16 / f16
+ *
+ * Per block of `block` elements (32 for MXFP8 / MXFP4): shared exponent s = floor(log2(max |x|)) - emax with
+ * emax = 8 (e4m3), 15 (e5m2), 2 (e2m1), clamped to e8m0's [-127, 127]; elements x / 2^s rounded to nearest even
+ * and saturated to the type's largest normal (448, 57344, 6); a zero block takes 2^-127. A NaN in a block makes
+ * its scale NaN (0xff). Dequantize: element x 2^s (NaN scale -> NaN). Bit-exact against the numpy model in
+ * test_aiednn_mx.py.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_dtypes.h, aiednn_rt.cc's create helpers.
  ******************************************************************************/
@@ -21,7 +26,7 @@ static int mxq_emax(aiednn_data_type_t dt, double *vmax) {
 static int run_ref_blockq(const rt_impl *self, aiednn_primitive *prim, void *const *ptr) {
     (void)self;
     const rt_prob *p = &prim->prob;
-    const int quant = p->flags == 0; /* 0: quantize, 1: dequantize */
+    const int quant = p->flags == 0; /* 0: quantize (SRC -> DST + SCALE), 1: dequantize (SRC + SCALE -> DST) */
     const aiednn_memory_desc_t *s = rt_md(p, AIEDNN_ARG_SRC), *d = rt_md(p, AIEDNN_ARG_DST),
                                *sc = rt_md(p, AIEDNN_ARG_SCALE);
     const void *x = rt_ptr(p, ptr, AIEDNN_ARG_SRC);

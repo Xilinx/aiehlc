@@ -1,4 +1,20 @@
-"""PyTorch fx graph -> aiednn graph API (aiegraph.dnn_graph, include/aiednn_graph.h)."""
+"""PyTorch fx graph -> aiednn graph API (aiegraph.dnn_graph, include/aiednn_graph.h).
+
+One graph op per fx node, named by the node: a module / function / method aiednn has a graph-op kind
+for maps onto it (constants -- weights, biases, BN statistics, python scalars -- become constant
+logical tensors), everything else becomes a ``wildcard`` op so the partitioner sees the whole graph and
+never fuses across it. Nodes whose value is not a tensor (``x.size()``, ``getitem`` of a python tuple)
+stay out of the graph; the tensors they read are marked graph outputs. The library then decides
+support: ``FxGraph.parts`` are the graph API's partitions, a supported one compiles to one aiednn
+primitive.
+
+    fg = FxGraph(lib, gm, example_inputs)      # gm: fx GraphModule (Dynamo's, or symbolic_trace)
+    fg.report()                                # partitions, implementation, unsupported
+    fg.ops                                     # node name -> (kind, inputs, attrs): the mapping itself
+
+Used by ``torch.compile(model, backend="aiednn")`` (aiegraph.dnn_torch_backend); the mapping is the
+fx side of the graph-vs-MLIR fusion check of doc/design/aiednn_framework_api.md section 1.
+"""
 from __future__ import annotations
 
 import math
@@ -18,7 +34,8 @@ _TORCH_DT = {"torch.float32": "f32", "torch.int8": "s8", "torch.uint8": "u8", "t
 
 
 def _name(target) -> str:
-    """the op name of a call target"""
+    """the op name of a call target: torch.relu -> relu, aten.conv2d.default -> conv2d,
+    quantized_decomposed.quantize_per_tensor.default -> quantize_per_tensor"""
     schema = getattr(target, "_schema", None)    # torch._ops.OpOverload: "aten::conv2d"
     if schema is not None:
         return schema.name.split("::")[-1]
@@ -178,7 +195,8 @@ class FxGraph:
         return v
 
     def _getitem(self, node, meta) -> bool:
-        """getitem as the graph's slice (+ a reshape when integer indices drop axes)"""
+        """getitem as the graph's slice (+ a reshape when integer indices drop axes): x[...], or output i
+        of x.split / x.chunk (whose tuple is not a graph tensor). False: not a slice this maps."""
         import torch.fx as fx
         src, idx = node.args
         idx = self._pv(idx)
@@ -243,7 +261,8 @@ class FxGraph:
         return True
 
     def _aten_slice(self, node, meta) -> bool:
-        """aten.slice.Tensor(x, dim, start, end, step=1) / aten.select.int(x, dim, index) as the graph's slice"""
+        """aten.slice.Tensor(x, dim, start, end, step=1) / aten.select.int(x, dim, index) as the graph's slice
+        (+ a reshape dropping the selected axis)"""
         x = node.args[0]
         if not hasattr(x, "name") or x.name not in self.graph.tensors:
             return False
@@ -274,7 +293,8 @@ class FxGraph:
         return True
 
     def _gqa_repeat(self, node):
-        """x.repeat_interleave(r, dim=1) whose every reader is an sdpa's K or V"""
+        """x.repeat_interleave(r, dim=1) whose every reader is an sdpa's K or V: the input's name (the
+        graph's sdpa takes K / V with fewer heads than Q, H % Hk == 0, repeated the same way), else None"""
         import torch.fx as fx
         if node.op != "call_method" and not (node.op == "call_function" and _name(node.target) == "repeat_interleave"):
             return None
@@ -423,7 +443,8 @@ class FxGraph:
             "scale": sc, "zero_point": zp}
 
     def _conv_call(self, node, name, args, kw):
-        """aten.conv2d / convolution as a function"""
+        """aten.conv2d / convolution as a function: (x, w, b, stride, padding, dilation, [transposed,
+        output_padding,] groups) with tensors for w and b (dequantize outputs under PT2E)"""
         from .dnn_ctypes import conv_params
         a = list(args) + [None] * 9
         x, w, b = a[0], a[1], a[2]

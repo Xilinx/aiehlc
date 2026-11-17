@@ -2,7 +2,9 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""The aiednn graph API: partitioning, fusion, int8 dequantize read-through, numbers vs PyTorch."""
+"""The aiednn graph API (include/aiednn_graph.h): partitioning, fusion into one primitive, the int8
+dequantize read-through, unsupported ops left to the framework, and the numbers vs PyTorch.
+Workstation emulation: the GEMM block is its x86 reference, as in test_aiednn_ops.py."""
 
 import numpy as np
 import pytest
@@ -178,7 +180,8 @@ def test_marked_output_is_not_fused(lib):
 
 
 def test_misc_ops(lib):
-    """Pool, softmax, layer norm + quantize, concat, reshape, transpose, sdpa: one partition each."""
+    """pool, softmax, layer norm + quantize, concat, reshape, transpose, sdpa: one partition each
+    (the norm absorbs its quantize), numbers vs PyTorch"""
     rng = np.random.default_rng(5)
     x = rng.standard_normal((1, 4, 8, 8), np.float32)
     g = Graph(lib)
@@ -227,7 +230,8 @@ def test_partition_order_is_executable(lib):
 
 
 def test_find_set_impl_stream_workspace(lib):
-    """find / set_impl and stream execute with a workspace through a compiled partition."""
+    """framework API sections 3 + 4 through a compiled partition: find lists the AIE path and ref:,
+    pinning ref: stays bit-exact, and an execute on a stream with a caller workspace matches"""
     g, feeds, _ = _int8_block(lib)
     g.compile_all()
     out = g.run(dict(feeds))["out"].copy()
@@ -264,7 +268,12 @@ def _qdq_model():
 
 
 def test_onnx_qdq_resnet18_matches_onnxruntime(lib):
-    """onnxruntime-quantized ResNet-18 end to end: all partitions supported, close to the integer run."""
+    """A framework's int8 model end to end: every node of the onnxruntime-quantized ResNet-18 lands in
+    a supported partition and the 20 convs + fc fuse into int8 primitives. Numbers: QDQ int8 has no
+    single exact answer -- onnxruntime's own float (QDQ) and integer (QLinearConv) executions differ
+    by up to two output codes on ~40% of the logits. aiednn must stay as close to the integer run,
+    agree on top-1, and differ no more often than onnxruntime's two modes do from each other.
+    (On the pytorch-hub Samoyed photo it is bit-identical to the integer run.)"""
     pytest.importorskip("onnx")
     ort = pytest.importorskip("onnxruntime")
     path = _qdq_model()
@@ -293,13 +302,15 @@ def test_onnx_qdq_resnet18_matches_onnxruntime(lib):
     yf = ort_run(ort.GraphOptimizationLevel.ORT_DISABLE_ALL)
     y = m.run({"data": x})[m.outputs[0]]
     assert y.argmax() == yi.argmax()
-    # no further from onnxruntime's integer run than its float run is
+    # no further from onnxruntime's integer run than its float run is (2 output codes here), and
+    # differing on no more logits
     assert np.abs(y - yi).max() <= np.abs(yi - yf).max() * 1.001
     assert (np.abs(y - yi) > 1e-6).mean() <= (np.abs(yi - yf) > 1e-6).mean()
 
 
 def test_linear_on_tokens_and_deconv(lib):
-    """nn.Linear on tokens + bias + gelu in one partition; a transposed conv + relu in one partition."""
+    """nn.Linear on [B, N, K] tokens (2-D weights broadcast) + bias + gelu in one partition; a
+    transposed conv + relu in one partition"""
     rng = np.random.default_rng(8)
     x = rng.standard_normal((2, 7, 32), np.float32)
     w = rng.standard_normal((24, 32), np.float32)
@@ -357,7 +368,8 @@ def test_resampling_reduction_group_norm_prelu(lib):
 
 
 def test_identity_reshape_inside_a_chain(lib):
-    """conv -> identity reshape -> residual add: one partition."""
+    """conv -> identity reshape (eval StochasticDepth) -> residual add: one partition, as the MLIR
+    pipeline's canonicalize gives"""
     rng = np.random.default_rng(10)
     x = rng.standard_normal((1, 8, 6, 6), np.float32)
     w = rng.standard_normal((8, 8, 1, 1), np.float32)
@@ -406,7 +418,10 @@ def _residual_graph(lib, fuse):
 
 
 def test_quantized_residual_add_one_partition_bit_exact(lib):
-    """PT2E's residual folds into the conv as a requant_binary post-op at level 1, byte-identical."""
+    """PT2E's residual (conv -> quantize -> dequantize, + dequantize(skip) -> relu -> quantize) at level 1:
+    the add folds into the conv as a requant_binary post-op -- one partition, byte-identical to the conv
+    with its int8 dst followed by the quantized binary (what blocking the fold by marking the int8 tensor
+    an output gives)"""
     g1, feeds = _residual_graph(lib, 1)
     parts = g1.compile_all()
     conv = [p for p in parts if "convolution3" in p.ops][0]
@@ -421,7 +436,8 @@ def test_quantized_residual_add_one_partition_bit_exact(lib):
 
 
 def test_fusion_level2_residual_stays_exact(lib):
-    """A residual add behind a requantized conv: level 2 = level 1, bit for bit."""
+    """a residual add behind a requantized conv is level 1's exact requant_binary post-op; level 2 adds
+    nothing to it (its inexact pair skip only applies before a relu / clamp): level 2 = level 1, bit for bit"""
     g2, feeds = _residual_graph(lib, 2)
     parts = g2.compile_all()
     conv = [p for p in parts if "convolution3" in p.ops][0]
@@ -432,7 +448,8 @@ def test_fusion_level2_residual_stays_exact(lib):
 
 
 def test_relu6_tail_folds_into_conv_exactly(lib):
-    """PT2E's ReLU6 tail folds into the conv at level 1 as a requant_eltwise post-op, byte-identical."""
+    """conv -> quantize -> dequantize -> clamp(0, 6) -> quantize (PT2E's ReLU6 tail) folds into the conv at
+    level 1 as a requant_eltwise post-op, byte-identical to the conv's int8 dst + the quantized eltwise"""
     rng = np.random.default_rng(14)
     C, H = 8, 6
 
@@ -471,7 +488,9 @@ def test_relu6_tail_folds_into_conv_exactly(lib):
 
 
 def test_fusion_level2_shared_requant_stays_exported(lib):
-    """Level 2: a requantized conv output with two consumers is exported, not swallowed."""
+    """level 2: a requantized conv output whose dequantize feeds two ops (the next conv and a residual add,
+    as in every ResNet block) is not swallowed -- the chain undoes the pair, the conv exports its 8-bit
+    tensor, and every partition input is produced by an earlier partition or is a graph input"""
     rng = np.random.default_rng(12)
     C, H, s = 8, 6, 0.05
     g = Graph(lib, fuse=2)
@@ -514,7 +533,9 @@ def test_fusion_level2_shared_requant_stays_exported(lib):
 
 
 def test_quantized_eltwise_tail_one_partition_bit_exact(lib):
-    """dequantize -> eltwise chain -> quantize is one eltwise partition, bit-identical."""
+    """PT2E's conv -> quantize -> dequantize -> relu6 (clamp) -> quantize tail (and a hardswish chain): the
+    dequantize -> eltwise chain -> quantize is one aiednn_eltwise_forward_create_attr partition, bit-identical
+    to the ops on their own"""
     rng = np.random.default_rng(13)
     x = rng.integers(-128, 128, (1, 8, 6, 6), dtype=np.int8)
 
@@ -540,7 +561,8 @@ def test_quantized_eltwise_tail_one_partition_bit_exact(lib):
 
 
 def test_quantized_maxpool_on_codes_bit_exact(lib):
-    """dequantize -> max_pool -> quantize with equal parameters is one 8-bit max_pool partition."""
+    """dequantize -> max_pool -> quantize with the same scale / zero point (ResNet's stem pool in PT2E / ONNX
+    QDQ) is one 8-bit max_pool partition, bit-identical to the three ops"""
     rng = np.random.default_rng(15)
     x = rng.integers(0, 256, (1, 8, 12, 12), dtype=np.uint8)
 
@@ -561,7 +583,8 @@ def test_quantized_maxpool_on_codes_bit_exact(lib):
 
 
 def test_quantized_view_on_codes(lib):
-    """dequantize -> view -> quantize with equal parameters is a view on the codes, elided when possible."""
+    """dequantize -> reshape (flatten) / transpose -> quantize with equal parameters: the view on the codes;
+    a view whose output only feeds library partitions is elided (no copy: the consumer binds its input)"""
     rng = np.random.default_rng(16)
     x = rng.integers(-128, 128, (1, 4, 3, 5), dtype=np.int8)
 
@@ -594,7 +617,8 @@ def test_quantized_view_on_codes(lib):
 
 
 def test_layout_propagation_nhwc_bit_identical(lib):
-    """Two int8 convs: the edge between them is kept nhwc, bit-identical to propagation off."""
+    """two int8 convs back to back: the int8 edge between them is kept nhwc (layout propagation), graph
+    input / output stay dense, and the result equals the same graph with propagation off, bit for bit"""
     rng = np.random.default_rng(17)
     C = C_ = 8
     H = 7
@@ -654,7 +678,9 @@ def test_layout_propagation_nhwc_bit_identical(lib):
 
 @pytest.mark.parametrize("form", ["transpose_div", "wt_mul_mask"])
 def test_decomposed_attention_is_one_sdpa(lib, form):
-    """HF-style attention is one sdpa partition, matching torch."""
+    """HF-style attention -- q @ k^T (a transpose op or the matmul's transposed-weights attr), scaled by
+    a scalar (divide or multiply; its value bound at execute), [+ mask], softmax, @ v -- is one sdpa
+    partition, matching torch"""
     rng = np.random.default_rng(18)
     B, H, Sq, Skv, D = 1, 2, 5, 7, 4
     q, k, v = (rng.standard_normal(s, np.float32) for s in ((B, H, Sq, D), (B, H, Skv, D), (B, H, Skv, D)))
@@ -713,7 +739,9 @@ def test_slice_windows(lib):
 
 
 def test_nongemm_postop_chains_and_levels(lib):
-    """Post-ops on non-GEMM ops fuse at level 1 (exact) or level 2 (gelu), bit-identical when exact."""
+    """post-ops on non-GEMM ops (the library's _create_attr + "+pt"): softmax -> quantize and layer norm ->
+    add(residual) -> relu fuse at level 1, bit-identical to the ops unfused; a gelu after group norm only
+    at level 2"""
     rng = np.random.default_rng(20)
     s = rng.standard_normal((2, 3, 8), np.float32)
     x = rng.standard_normal((2, 6, 8), np.float32)
@@ -749,7 +777,8 @@ def test_nongemm_postop_chains_and_levels(lib):
 
 
 def test_sdpa_head_split_merge_folded(lib):
-    """q / k / v as [B, S, H, D] through transposes around sdpa: one partition, matching torch."""
+    """q / k / v as [B, S, H, D] through transpose(0, 2, 1, 3), a graph sdpa, then the merge transpose back:
+    one partition (AIEDNN_SDPA_QKV_BSHD | _DST_BSHD), matching torch"""
     rng = np.random.default_rng(21)
     B, S, H, D = 1, 6, 2, 4
     qs, ks, vs = (rng.standard_normal((B, S, H, D), np.float32) for _ in range(3))
@@ -771,7 +800,8 @@ def test_sdpa_head_split_merge_folded(lib):
 
 
 def test_rope_one_partition_bit_exact(lib):
-    """HF rotate_half RoPE is one aiednn_rope_create, bit-identical to the unfused ops."""
+    """HF rotate_half RoPE: x * cos + cat(-x[..., h:], x[..., :h]) * sin is one aiednn_rope_create, bit-identical
+    to the unfused ops"""
     rng = np.random.default_rng(22)
     B, H, S, D = 1, 2, 5, 8
     x = rng.standard_normal((B, H, S, D), np.float32)
@@ -824,7 +854,8 @@ def test_int8_concat_one_partition_bit_exact(lib):
 
 
 def test_gated_mlp_level2(lib):
-    """SwiGLU is one aiednn_gated_mlp_create at level 2, within 1e-4 of torch; level 1 leaves it."""
+    """SwiGLU with nn.Linear weights: down(silu(gate(x)) * up(x)) is one aiednn_gated_mlp_create at level 2
+    (its GEMMs are not bit-identical to the unfused chain), within 1e-4 of torch; level 1 leaves it alone"""
     rng = np.random.default_rng(24)
     S, Dm, Ff = 5, 16, 24
     x = rng.standard_normal((1, S, Dm), np.float32)
@@ -879,7 +910,8 @@ def test_reorder_with_postops_bit_exact(lib):
 
 
 def test_dequantize_read_through_layer_norm_and_sdpa(lib):
-    """An 8-bit dequantize folds into layer norm and into sdpa's Q / K / V."""
+    """an 8-bit tensor's dequantize folds into layer norm (with its quantize after: one partition,
+    bit-identical) and into sdpa's Q / K / V through PT2E's view -> transpose head split (one partition)"""
     rng = np.random.default_rng(26)
     B, S, H, D = 1, 6, 2, 4
     xq = rng.integers(-128, 128, (B, S, H * D), dtype=np.int8)
@@ -918,7 +950,10 @@ def test_dequantize_read_through_layer_norm_and_sdpa(lib):
 
 @pytest.mark.parametrize("style,int8", [("gpt2", False), ("gpt2", True), ("vit", False)])
 def test_packed_qkv_views_fold_into_sdpa(lib, style, int8):
-    """Attention from one packed qkv projection through view ops folds into one sdpa."""
+    """attention fed from one packed qkv projection through view ops -- gpt2's split (3 slices -> view ->
+    transpose) or torchvision's in_proj chain (unflatten -> unsqueeze -> permute -> squeeze -> select x3 ->
+    view -> transpose -> view), optionally from an int8 dequantize: the whole chain folds into one sdpa
+    (AIEDNN_SDPA_QKV_PACKED, the codes read with their scale), matching the unfused graph"""
     rng = np.random.default_rng(27)
     S, H, D = 7, 2, 4
     E = H * D
@@ -973,7 +1008,10 @@ def test_packed_qkv_views_fold_into_sdpa(lib, style, int8):
 
 
 def test_seq_first_batch1_permutes_fold(lib):
-    """Seq-first attention at batch 1: the size-1 transpose and head-merge permute fold."""
+    """torchvision's seq-first attention at batch 1: transpose(1, 0) of [1, S, E] only moves a size-1 dim
+    (a view: layer norm writes it and the quantize folds after it), and the head merge permute(2, 0, 1, 3)
+    of [1, H, S, D] moves bytes like (0, 2, 1, 3) (folds into the sdpa as AIEDNN_SDPA_DST_BSHD); both match
+    the unfused graph"""
     rng = np.random.default_rng(31)
     S, H, D = 7, 2, 4
     E = H * D
@@ -1007,7 +1045,9 @@ def test_seq_first_batch1_permutes_fold(lib):
 
 @pytest.mark.parametrize("scale2", [0.05, 0.07])
 def test_same_param_requant_tail_folds(lib, scale2):
-    """quantize -> dequantize -> view -> quantize with equal parameters folds; a real requant stays."""
+    """quantize -> dequantize -> view -> quantize with the same scale / zero point leaves the codes unchanged
+    (PT2E around torchvision's MHA out_proj): the GEMM writes the last quantize's tensor; the sdpa takes its
+    head merge, the merge view and the quantize. A different scale (a real requant) stays its own partition."""
     rng = np.random.default_rng(37)
     S, H, D = 7, 2, 4
     E = H * D
@@ -1048,7 +1088,8 @@ def test_same_param_requant_tail_folds(lib, scale2):
 
 
 def test_dequantize_slice_quantize_is_a_slice_of_the_codes(lib):
-    """dequantize -> slice -> quantize with equal parameters is a slice of the int8 codes."""
+    """yolov8n's C2f split under PT2E: dequantize -> slice -> quantize with the same parameters is the slice of
+    the int8 codes (one partition, bit-identical), not a slice plus a requantize"""
     q = np.random.default_rng(41).integers(-128, 128, (1, 8, 5, 5), dtype=np.int8)
 
     def build(fuse):
@@ -1069,7 +1110,8 @@ def test_dequantize_slice_quantize_is_a_slice_of_the_codes(lib):
 
 @pytest.mark.parametrize("dt", ["s8", "u8"])
 def test_f32_slice_absorbs_its_quantize(lib, dt):
-    """slice -> quantize of an f32 tensor is one aiednn_slice_create_attr partition, bit-identical."""
+    """yolov8n's C2f chunk of an f32 SiLU output: slice -> quantize is one aiednn_slice_create_attr partition
+    (dst quantization only at level 1), bit-identical to the two ops -- incl. ties x / s = k + 1/2, odd zp"""
     s, zp = 0.1, 3 if dt == "s8" else 131
     x = ((np.random.default_rng(43).integers(-60, 60, (1, 8, 5, 5)) + 0.5) * s).astype(np.float32)
 
@@ -1087,7 +1129,9 @@ def test_f32_slice_absorbs_its_quantize(lib, dt):
 
 
 def test_rmsnorm_pattern_folds_at_level_2(lib):
-    """PT2E's hand-written RMSNorm is one rms_norm partition at level 2, within two codes."""
+    """tiny_llama's hand-written RMSNorm under PT2E (x^2 -> mean -> Q/DQ -> + DQ(eps) -> Q/DQ -> rsqrt -> Q/DQ ->
+    * DQ(Q(x)) -> Q/DQ -> * DQ(w) -> Q) is one rms_norm partition at level 2 (eps read at execute, the int8 weight
+    dequantized by the prologue), within two codes of a float RMSNorm; level 1 leaves it alone"""
     rng = np.random.default_rng(47)
     S, D = 7, 32
     x = rng.standard_normal((1, S, D)).astype(np.float32)
@@ -1131,7 +1175,9 @@ def test_rmsnorm_pattern_folds_at_level_2(lib):
 
 
 def test_quantized_rope_folds_at_level_2(lib):
-    """PT2E's RoPE is one aiednn_rope_create_attr partition at level 2, within two codes."""
+    """PT2E's RoPE: x (f32) -> Q/DQ -> * DQ(cos8); slices of x -> neg -> Q/DQ, Q/DQ -> cat -> Q/DQ -> * DQ(sin8);
+    -> Q/DQ -> add -> Q is one aiednn_rope_create_attr partition at level 2, within two codes of the f32 rope
+    quantized once; level 1 leaves it unfused"""
     rng = np.random.default_rng(53)
     S, D = 6, 16
     h = D // 2

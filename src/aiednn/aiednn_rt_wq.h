@@ -7,10 +7,14 @@
  *
  *   y[m][n] = sum_g s_g[n] * sum_{k in g} (a[m][k] - za) * (w[k][n] - zw_g[n])
  *
- * on the GEMM ELF's WQ mode (aie_modes_wq.h, entry wq_blk_s8f32). Operands go in as int8 (u8 shifted by
- * 128); zero points are corrected here per group from row / column sums:
- * (a' - za')(w' - zw') = a'w' - za' w' - zw' a' + za' zw'. Group size: a multiple of 64 up to 64 * 255.
- * A floating src is dequant+'s, unless AIEDNN_WQ_DYNQ=1 (per-row s8 quantization, not exact).
+ * on the GEMM ELF's WQ mode (aie_modes_wq.h, entry wq_blk_s8f32): the core sums each group's int32
+ * products exactly and accumulates s_g x partial in f32. The operands go in as int8 -- u8 shifted by
+ * 128 -- and everything the symmetric core does not see is corrected here, exactly, per group from row /
+ * column sums:  (a' - za')(w' - zw') = a'w' - za' w' - zw' a' + za' zw'  (a' = a - shift, za' = za - shift).
+ * Group size g: a multiple of 64 up to 64 * 255 (the core's k-round). Tolerance: f32 sums of exact
+ * partials, ~1e-6 of sum |s_g partial| (tests). Inner product: the same problem with [OC, IC] weights
+ * (ip_as_matmul). A floating src is dequant+'s, unless AIEDNN_WQ_DYNQ=1: each src row quantized to s8
+ * with its own scale max|x| / 127 (not exact: the int8 rounding of the activations), then this path.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_gemm.h (mm_geometry, scratch).
  ******************************************************************************/

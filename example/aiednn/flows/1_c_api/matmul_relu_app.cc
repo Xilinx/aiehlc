@@ -2,11 +2,18 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Flow 1 -- the C primitive API (include/aiednn.h): an int8 matmul and a relu, checked against ref:.
+ * Flow 1 -- the C primitive API (include/aiednn.h): two primitives, an int8 matmul and a relu.
+ *
+ * The app only describes tensors and asks for primitives. Dispatch picks each implementation from
+ * what the build linked: the AIE GEMM for the 256x256x256 s8 matmul, the AIE table mode (lut:) for
+ * the s8 relu, ref: (the CPU) for anything no AIE kernel accepts. The results are checked against
+ * ref: through the same API.
  *
  *   PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/flows/1_c_api/matmul_relu_app.cc --target x86 --run
  *   PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/flows/1_c_api/matmul_relu_app.cc \
  *       --target vek280 --run --board <host> --vitis-settings <.../Vitis/settings64.sh>
+ *
+ * Prints "PASS: ..." / "FAIL: ...".
  ******************************************************************************/
 #include "aiednn.h"
 
@@ -59,7 +66,7 @@ int main() {
     if (run(g_y, g_z, mm, rl, sizeof mm))
         return 1;
     printf("matmul -> %s\nrelu   -> %s\n", mm, rl);
-    aiednn_set_impl_filter("ref:");
+    aiednn_set_impl_filter("ref:"); /* the same calls on the CPU reference */
     if (run(g_yref, g_zref, mm_ref, rl_ref, sizeof mm_ref))
         return 1;
     aiednn_set_impl_filter(nullptr);

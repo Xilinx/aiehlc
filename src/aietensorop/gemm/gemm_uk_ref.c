@@ -182,7 +182,8 @@ AIEK_REFERENCE(wq_blk_s8f32) {
     return AIEK_OK;
 }
 
-/* fvec_blk_f32_ref -- the FVEC overlay of gemm_uk.cc: aie_modes_fvec.h's plain C reference per item */
+/* fvec_blk_f32_ref -- the FVEC overlay of gemm_uk.cc: aie_modes_fvec.h's plain C reference per item
+ * (libm float math, within the mode's 1e-5 contract of the core's vector code) */
 AIEK_REFERENCE(fvec_blk_f32) {
     if (num_args != 5 || args[0].ndim != 2 || args[0].shape[1] != AIE_FVEC_N || args[1].shape[1] != AIE_FVEC_AUX)
         return AIEK_ERR_ARGS;
@@ -415,8 +416,9 @@ AIEK_REFERENCE(conv_q_s8s8) { /* A, B, qparams, residual, geom, C */
     return gemm_q_s8s8_ref(t, 5);
 }
 
-/* x86 stand-ins for gemm_uk.cc's n-tile launch (aiednn_gemm_ntile_*): the same tiles, K chain and
- * requant as the core, result tiles in the board's layout. */
+/* x86 stand-ins for gemm_uk.cc's n-tile launch (aiednn_gemm_ntile_*, the persistent board build's
+ * many-tiles-per-launch path, aiednn_rt_ntile.h): the same tiles, K chain and requant as the core,
+ * with the result tiles in the board's layout, so x86 runs exercise the runtime's n-tile pipe. */
 static int8_t *g_ntx_a, *g_ntx_c;
 static int64_t g_ntx_a_bytes, g_ntx_c_bytes, g_ntx_bm, g_ntx_bn, g_ntx_nkb;
 static int g_ntx_which;
@@ -538,8 +540,8 @@ int aiednn_gemm_mmt_n_start(const int8_t *a, int n, const int8_t *b, int kcode) 
     return AIEK_OK;
 }
 
-/* x86 stand-in for aiednn_gemm_dwq_n_start / _finish: n tiles of dwq_blk_s8s8 items (3 * cores)
- * through dwq_blk_s8s8_ref, outputs in item order */
+/* x86 stand-in for aiednn_gemm_dwq_n_start / _finish: n tiles of dwq_blk_s8s8 items (3 * cores, 48 on the
+ * 4x4 build) through dwq_blk_s8s8_ref, outputs in item order */
 static int8_t *g_dwnx_out;
 static int64_t g_dwnx_items, g_dwnx_cap;
 

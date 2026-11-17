@@ -4,9 +4,16 @@
  *
  * gemm_conv_app -- aiednn's int32 paths on the board, against ref:.
  *
- * matmul 300x200x700 (blocked:), conv 3x3 (im2col+), conv 1x1 s2; each vs ref:.
+ *   1. matmul s8 x s8 -> s32, 300x200x700: no AIE kernel has that shape, so
+ *      dispatch must pick blocked:aie:gemm_s8s32 (pad M/N, split K, sum int32);
+ *   2. convolution 3x3 s1, [1,64,30,30] -> [1,96,28,28] s32: im2col+ the
+ *      blocked GEMM;
+ *   3. convolution 1x1 s2, [1,64,28,28] -> [1,128,14,14].
+ * Each result is compared with the same primitive forced to ref:.
  *
  *   PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/gemm_conv_app.cc --target x86 --run
+ *
+ * doc/design/aiednn.md.
  ******************************************************************************/
 #include "aiednn.h"
 
@@ -14,7 +21,7 @@
 #include <string.h>
 
 static int8_t g_a[300 * 700], g_b[200 * 700], g_x[64 * 30 * 30], g_w[96 * 64 * 9], g_w1[128 * 64];
-static int32_t g_out[96 * 28 * 28], g_ref[96 * 28 * 28];
+static int32_t g_out[96 * 28 * 28], g_ref[96 * 28 * 28]; // the largest output (75264 >= 60000)
 
 static int run_case(const char *name, int conv, const int64_t *ds, const int64_t *dw, const int64_t *dd, int nd,
                     int stride, const void *src, const void *wei, long nout) {

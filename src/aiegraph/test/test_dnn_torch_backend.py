@@ -238,7 +238,10 @@ def _levels(gm, x, levels):
 @needs_graph
 @pytest.mark.parametrize("net", ["_Net", "zoo_resnet18"])
 def test_graph_pt2e_level1_matches_pt2e(net):
-    """Default fusions (level 1) against PT2E's eager output: top-1 equal."""
+    """the default fusions (level 1, incl. dequantize x2 -> add -> quantize) against PT2E's own eager
+    output: bit-identical on the small net; on resnet18 the stem's near-ties (y/s within 3e-6 of k.5,
+    aiednn.md §26) shift a few codes, top-1 equal. Level 0 is not the reference: unfused, the convs run
+    as f32 (bf16x3) GEMMs on dequantized values and per-channel weight dequantize stays torch."""
     gm, x = _pt2e_net(net)
     r = _levels(gm, x, (0, 1))
     got, want = r[1][0], r[1][2]
@@ -253,7 +256,8 @@ def test_graph_pt2e_level1_matches_pt2e(net):
 @needs_graph
 @pytest.mark.parametrize("net", ["_Net", "zoo_resnet18"])
 def test_graph_pt2e_level2_within_a_code(net):
-    """fuse_residual_requant (level 2): fewer partitions, same top-1, within about one code."""
+    """fuse_residual_requant (level 2) drops the conv output's requant rounding before the residual add:
+    fewer partitions, same top-1, within about one output code of level 1"""
     gm, x = _pt2e_net(net)
     got1, _, f1 = _run(gm, x, graph=True)
     got2, _, f2 = _run(gm, x, graph=True, fuse_residual_requant=True)
@@ -263,7 +267,8 @@ def test_graph_pt2e_level2_within_a_code(net):
 
 
 class _CausalPos(torch.nn.Module):
-    """sdpa with a positional is_causal keeps causal."""
+    """sdpa with is_causal POSITIONAL (aten order q, k, v, attn_mask, dropout_p, is_causal; scale is keyword-only),
+    as PT2E's graphs call it: a mapper reading kwargs only silently dropped causal (gpt2 / tiny_llama)"""
 
     def forward(self, q, k, v):
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, None, 0.0, True, scale=0.2)

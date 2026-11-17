@@ -5,8 +5,11 @@
  * aiednn_rt_nd.h -- 3-D convolution, deconvolution and pooling (ref:), and the N-D create
  * functions (aiednn_*_create_nd).
  *
- * 1-D problems are rewritten as 2-D with H = 1 and reach the 2-D implementations, the AIE ones included.
- * 3-D problems keep their 5-D descriptors (depth in rt_prob.dpth[]) and run on ref: only.
+ * 1-D problems are rewritten as 2-D with H = 1 (same bytes, a leading unit spatial dim in every
+ * descriptor) and go through the 2-D creates, so they reach the same implementations -- the AIE
+ * im2col / col2im / depthwise / pool composites included. 2-D is the 2-D create. 3-D problems keep
+ * their 5-D descriptors; rt_prob carries H / W in conv / pool and depth in dpth[], and only ref:
+ * implementations accept them (dispatch skips the AIE ones, which are 2-D).
  *
  * Needs, from the including TU: aiednn_rt_internal.h and the create helpers of aiednn_rt.cc.
  ******************************************************************************/

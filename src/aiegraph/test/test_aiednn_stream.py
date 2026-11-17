@@ -2,7 +2,14 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""No heap allocation during an execute with a caller workspace (aiednn_rt_stream.h)."""
+"""Caller-owned workspace, streams, find / set_impl (aiednn_rt_stream.h;
+doc/design/aiednn_framework_api.md sections 3, 4): aiednn_stream_test.cc links the ctypes build's
+libaiednn.so and counts heap allocations (interposed malloc / calloc / realloc) during an execute with
+a caller workspace -- none allowed -- for an AIE GEMM, a gemm+ composite, the float GEMM through RNN
+steps, FVEC and a ref:-only op.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_stream.py
+"""
 
 from __future__ import annotations
 

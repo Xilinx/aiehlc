@@ -7,11 +7,13 @@
  * The host's exact epilogue per output (rt_fx_q): q = ((acc * M + B + (r - rzp) * R) >> sh) + zp,
  * clamped to [lo, hi], per channel M / B / sh (/ R with a fused residual r). The GEMMQ row: {zp, lo,
  * hi} int32 at +4, B int64[32] at +16, M int32[32] at +272, sh int8[32] at +400; the residual row:
- * R int64[32] at +0, rzp int32 at +256. An 8x8 mmul result is four 16-lane groups (rows 2h,
+ * R int64[32] at +0, rzp int32 at +256. The scalar loop cost an int64 multiply-add-shift per output
+ * (~200k cycles a launch, most of it). Here an 8x8 mmul result is four 16-lane groups (rows 2h,
  * 2h+1 x channels ct*8 .. +7): the sum in acc64 lanes (B and R*t as hi * 2^31 + lo), one floor shift
  * by S = min sh, then * 2^(D - e) (int16) and a floor shift by D (e = sh - S, D = max e):
- * floor(floor(x / 2^S) / 2^e) = floor(x / 2^sh), as the MMT requant. Do not switch the saturation mode
- * around the block: it zeroed outputs that clamp to hi. No lane overflows: M <
+ * floor(floor(x / 2^S) / 2^e) = floor(x / 2^sh) -- the MMT requant's scheme (aie_modes_mmt.h), on purpose
+ * also in not touching the saturation mode: switching it around the block (to make overflowing lanes
+ * saturate) gave 0 for ~75 % of the outputs that clamp to hi on the board. No lane overflows: M <
  * 2^31 and sh >= 31 (scale < 1) keep acc * M / 2^S inside int32, and the host refuses the integer
  * epilogue for a shift spread above 14 (rt_fx_init), so 2^(D - e) fits int16.
  ******************************************************************************/
@@ -20,10 +22,12 @@
 
 #if defined(__AIENGINE__) && defined(AIEK_MODE_GEMMQ) && AIEK_MODE_GEMMQ
 /* The core's whole int32 tile (rows x 32 channels, row pitch 32 int32 = 128 bytes) -> int8 in place:
- * row r's channels at bytes [r * 128, +32). One pass after the K rounds, one call site (per-block calls
- * inline 16 copies). Channel group ct outer, row pairs inner: group ct's int8 bytes land on int32
- * channels 0..7 of the same rows, which group 0 has already read. rq / rt: the residual row and the
- * core's residual tile (32 x 32 int8), or null. */
+ * row r's channels at bytes [r * 128, +32). One pass after the K rounds, one call site: requantizing
+ * each 8x8 block where the mmul produced it inlined 16 copies (17 KB of program memory). Channel group
+ * ct outer, row pairs inner: group ct's int8 bytes land on int32 channels 0..7 of the same rows, which
+ * group 0 has already read. Per group ~180 bytes of temporaries (the GEMMQ + CONV core runs within
+ * ~2 KB of its 32 KB stack). rq / rt: the residual row and the core's residual tile (32 x 32 int8), or
+ * null. */
 static inline void aie_gq_tile(int32_t *c, int rows, const uint8_t *qrow, const uint8_t *rq, const int8_t *rt) {
     const int32_t *qp = (const int32_t *)(qrow + 4);
     const int64_t *qb = (const int64_t *)(qrow + 16);

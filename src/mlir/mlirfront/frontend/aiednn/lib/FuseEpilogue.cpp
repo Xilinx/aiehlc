@@ -4,11 +4,14 @@
  ******************************************************************************/
 // --aiednn-fuse-epilogue: fold the single-use eltwise / residual-add chain after a
 // GEMM-family op (conv, deconv, matmul, inner_product) into its post_ops, at most
-// 4 (aiednn_attr_t):
+// 4 (aiednn_attr_t). The rules are the ones the Python lowering used
+// (aiegraph.dnn_torch._Lowerer.absorb / post_op_of):
 //   * aiednn.eltwise on the result, same type        -> #aiednn.post_op<"eltwise", alg, a, b>
 //   * aiednn.binary "add" / "mul" of the result and o -> #aiednn.post_op<"binary", alg, 0, 0>
 //     available before the GEMM, broadcastable to the  with o appended to post_srcs
 //     result, result type unchanged                    (a view feeding o is hoisted)
+// so lowering unfused + this pass == lowering fused (test_dnn_mlir.py).
+#include <type_traits>
 #include "AiednnDialect.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -52,8 +55,9 @@ bool availableBefore(Value o, Operation *g) {
 
 FloatAttr f32(MLIRContext *ctx, float v) { return FloatAttr::get(Float32Type::get(ctx), v); }
 
-/* `keep` takes over `gone`: its location becomes the fused location of both, so the plan export
- * lists every source op a primitive computes */
+/* `keep` takes over `gone` (a post-op, a folded quantize, a ReLU): its location becomes the fused
+ * location of both, so the plan export lists every source op a primitive now computes
+ * (ExportPlan "locs"; the model-flow page shows them as the op's fused nodes) */
 void absorb(Operation *keep, Operation *gone) {
     keep->setLoc(FusedLoc::get(keep->getContext(), {keep->getLoc(), gone->getLoc()}));
 }
@@ -117,7 +121,9 @@ struct FuseEpiloguePass : public PassWrapper<FuseEpiloguePass, OperationPass<fun
 /* --aiednn-fold-requant: a GEMM-family op whose f32 result is only quantized
  * (reorder f32 -> s8/u8, no permutation) writes the integer tensor itself:
  * dst_scale / dst_zero_point = the reorder's scale / zero point, result type = the
- * reorder's. Runs after --aiednn-fuse-epilogue (the requant is the last epilogue step). */
+ * reorder's. The f32 intermediate (4 bytes per element, written and read back)
+ * and the CPU reorder disappear, and the next layer's input stays int8. Runs after
+ * --aiednn-fuse-epilogue (the requant is the last epilogue step). */
 template <typename OpT> bool foldRequant(OpT g) {
     Value r = g.getResult();
     if (!r.hasOneUse() || !getElementTypeOrSelf(r.getType()).isF32() || g.getDstScaleAttr())
@@ -159,12 +165,17 @@ struct FoldRequantPass : public PassWrapper<FoldRequantPass, OperationPass<func:
 
 /* --aiednn-fold-norm-quant: an f32 batch_norm / layer_norm whose result is only quantized (reorder f32 ->
  * s8/u8, no permutation) writes the integer tensor itself, as --aiednn-fold-requant does for a
- * GEMM: dst_scale / dst_zero_point = the reorder's, result type = the reorder's. Bit-identical:
- * the runtime rounds the norm to f32, then applies the reorder's arithmetic. */
+ * GEMM: dst_scale / dst_zero_point = the reorder's, result type = the reorder's. The runtime
+ * (aiednn_batch_normalization_forward_inference_create_attr) rounds the batch norm to f32 and
+ * then applies the reorder's arithmetic, so the codes are bit-identical; the f32 tensor (4 bytes
+ * per element, written and read back) and the CPU reorder pass disappear. densenet121: every
+ * dense layer's concat -> batch_norm -> quantize. */
 template <typename NormT> void foldNormQuant(NormT b) {
     Value r = b.getResult();
-    if (!r.hasOneUse() || !getElementTypeOrSelf(r.getType()).isF32() ||
-        !getElementTypeOrSelf(b->getOperand(0).getType()).isF32() || b.getDstScaleAttr())
+    // a norm needs an f32 source; sdpa may read 8-bit q / k / v (int8 attention) and still write an 8-bit dst
+    const bool srcOk =
+        std::is_same_v<NormT, aiednn::SdpaOp> || getElementTypeOrSelf(b->getOperand(0).getType()).isF32();
+    if (!r.hasOneUse() || !getElementTypeOrSelf(r.getType()).isF32() || !srcOk || b.getDstScaleAttr())
         return;
     /* r -> reorder, or r -> view -> reorder (sdpa's [B,S,H,D] result reshaped to [B,S,H*D] first):
      * a view is a pure reshape, so the int8 element type moves through it */
@@ -203,18 +214,22 @@ struct FoldNormQuantPass : public PassWrapper<FoldNormQuantPass, OperationPass<f
     void runOnOperation() override {
         SmallVector<Operation *> ns;
         getOperation().walk([&](Operation *op) {
-            if (llvm::isa<aiednn::BatchNormOp, aiednn::LayerNormOp, aiednn::SdpaOp>(op))
+            if (llvm::isa<aiednn::BatchNormOp, aiednn::LayerNormOp, aiednn::SdpaOp, aiednn::RopeOp>(op))
                 ns.push_back(op);
         });
-        for (Operation *op : ns)
-            llvm::TypeSwitch<Operation *>(op).Case<aiednn::BatchNormOp, aiednn::LayerNormOp, aiednn::SdpaOp>(
-                [](auto n) { foldNormQuant(n); });
+        for (Operation *op : ns) // rope: f32 in, s8 out (int8 attention's q / k after the host rope)
+            llvm::TypeSwitch<Operation *>(op)
+                .Case<aiednn::BatchNormOp, aiednn::LayerNormOp, aiednn::SdpaOp, aiednn::RopeOp>(
+                    [](auto n) { foldNormQuant(n); });
     }
 };
 
-/* --aiednn-fold-head-permute: when q, k, v all come from a [B,S,H,D] -> [B,H,S,D] permute (single use,
- * a pure reorder), sdpa reads [B,S,H,D] directly (layout bit 0); when its result's only user permutes it
- * back, it writes [B,S,H,D] (layout bit 1). Bit-identical. */
+/* --aiednn-fold-head-permute: attention's head split / merge. A transformer reshapes q, k, v to
+ * [B,S,H,D] and permutes them to [B,H,S,D] for sdpa, then permutes the result back: four full
+ * tensor copies per attention block. When all three inputs come from such a permute (single use, a
+ * pure reorder: same element type, scale 1, zero point 0), sdpa reads the [B,S,H,D] tensors
+ * directly (layout bit 0); when its result's only user permutes it back, it writes [B,S,H,D]
+ * (layout bit 1). The runtime only changes its index arithmetic: bit-identical. */
 static bool isHeadPermute(aiednn::ReorderOp r) {
     auto p = r.getPermAttr();
     if (!p)
@@ -268,7 +283,8 @@ struct FoldHeadPermutePass : public PassWrapper<FoldHeadPermutePass, OperationPa
 
 /* --aiednn-quantize-before-maxpool: quantize(maxpool(x)) -> maxpool(quantize(x)) when every
  * user of the f32 max-pool is the same quantizing reorder (no permutation). Exact: rounding
- * and saturation are monotonic non-decreasing, so the max commutes with them. */
+ * and saturation are monotonic non-decreasing, so the max commutes with them. Then the
+ * pooling runs on int8 (the AIE pool mode) and the producer of x can fold the requant. */
 struct QuantBeforeMaxPoolPass : public PassWrapper<QuantBeforeMaxPoolPass, OperationPass<func::FuncOp>> {
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(QuantBeforeMaxPoolPass)
     StringRef getArgument() const final { return "aiednn-quantize-before-maxpool"; }
@@ -314,8 +330,10 @@ struct QuantBeforeMaxPoolPass : public PassWrapper<QuantBeforeMaxPoolPass, Opera
  * also quantized for some other consumer (reorder f32 -> s8/u8, no permutation, same
  * shape) takes that int8 tensor instead: a new reorder with the same scale / zero point is
  * placed right after o's definition (so --cse merges the existing one into it) and the
- * post-op records the operand's scale / zero point as alpha / beta. Not exact: the add sees the
- * skip at the precision the next layer's input already has. */
+ * post-op records the operand's scale / zero point as alpha / beta. The skip stream is then
+ * int8 end to end: o's producer is used only by that reorder and --aiednn-fold-requant
+ * makes it write int8, and the consumer's epilogue stays integer (rt_fx with residual).
+ * The add sees the skip at the precision the next layer's input already has. */
 template <typename OpT> int quantizeResidual(OpT g) {
     auto post = g.getPostOpsAttr();
     if (!post)
@@ -344,8 +362,10 @@ template <typename OpT> int quantizeResidual(OpT g) {
             }
         }
         if (!q && o.hasOneUse()) {
-            /* the skip feeds nothing quantized: quantize it at the scale of the quantizing reorder
-             * on this GEMM's own result (dnn_torch._quantize_residuals mirrors this) */
+            /* the skip feeds nothing quantized (a downsample block: conv2's output only meets the
+             * downsample conv here): quantize it at the scale of the block output -- the quantizing
+             * reorder on this GEMM's own result, which the next layer reads; the result may also
+             * be the next block's f32 skip (dnn_torch._quantize_residuals mirrors this) */
             for (Operation *u : g.getResult().getUsers()) {
                 auto r = llvm::dyn_cast<aiednn::ReorderOp>(u);
                 auto it =
@@ -399,7 +419,9 @@ struct QuantizeResidualPass : public PassWrapper<QuantizeResidualPass, Operation
 /* --aiednn-sink-permute: binary(reorder_perm(x), c) -> reorder_perm(binary(x, view(c))) when the
  * reorder is a pure f32 permutation used only by that binary, and c is a constant broadcast
  * whose non-singleton dims keep their order under the inverse permutation (so the permuted
- * constant is just a view). Exact. --aiednn-fuse-epilogue can then fuse the binary. */
+ * constant is just a view: convnext's layer scale gamma [1,C,1,1] -> [1,1,1,C]). Exact: the
+ * same products in another layout. The binary then sits on x's producer, so
+ * --aiednn-fuse-epilogue can take it into that GEMM's post-ops. */
 struct SinkPermutePass : public PassWrapper<SinkPermutePass, OperationPass<func::FuncOp>> {
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SinkPermutePass)
     StringRef getArgument() const final { return "aiednn-sink-permute"; }
@@ -435,7 +457,8 @@ struct SinkPermutePass : public PassWrapper<SinkPermutePass, OperationPass<func:
             SmallVector<int64_t> cs(n, 1); // c in x's layout: dim perm[i] = c dim i
             for (int64_t i = 0; i < n; i++)
                 cs[perm[i]] = ct.getDimSize(i);
-            // a view iff the non-singleton dims of c keep their ORDER (which dims, not just their sizes)
+            // a view iff the non-singleton dims of c keep their ORDER (which dims, not just their sizes:
+            // tiny_vit's [1,64,64] position embedding under a [0,2,1] transpose is not a view)
             int64_t lastPos = -1;
             bool inOrder = true;
             for (int64_t i = 0; i < n && inOrder; i++)
@@ -465,7 +488,8 @@ struct SinkPermutePass : public PassWrapper<SinkPermutePass, OperationPass<func:
 };
 
 /* --aiednn-fuse-norm-relu: batch_norm whose only user is a ReLU (alpha 0) of the same type takes
- * AIEDNN_FUSE_NORM_RELU (flags | 4) and the ReLU disappears. Exact. */
+ * AIEDNN_FUSE_NORM_RELU (flags | 4) and the ReLU disappears: one pass over the tensor instead of
+ * two (densenet's pre-activation BN -> ReLU, 62 of each). Exact: the same max(v, 0). */
 struct FuseNormReluPass : public PassWrapper<FuseNormReluPass, OperationPass<func::FuncOp>> {
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FuseNormReluPass)
     StringRef getArgument() const final { return "aiednn-fuse-norm-relu"; }
@@ -495,7 +519,8 @@ struct FuseNormReluPass : public PassWrapper<FuseNormReluPass, OperationPass<fun
  *   reorder(slice(x))    -> slice(reorder(x))           (per reorder user of the slice)
  *   g with users = reorders at k scales -> k copies of g, one per scale
  * Each step is exact: quantization is elementwise, a slice / concat only moves elements, and a clone
- * recomputes the same values. */
+ * recomputes the same values. yolov8n's C2f blocks (a conv whose output is split, part of it feeding a
+ * bottleneck and all of it a concat) kept their convs on an f32 host epilogue before this. */
 bool isQuant(aiednn::ReorderOp q) {
     return q && !q.getPerm() && getElementTypeOrSelf(q.getSrc().getType()).isF32() &&
            llvm::isa<IntegerType>(getElementTypeOrSelf(q.getResult().getType()));
@@ -567,6 +592,49 @@ bool pushThroughPick(aiednn::ReorderOp q) {
     return true;
 }
 
+/* reorder(permute(x)) -> permute'(reorder(x)) and reorder(view(x)) -> view'(reorder(x)), for a pure permute (same
+ * type, scale 1, zero point 0) / a view read once: exact (quantization is elementwise). Attention's q / k / v quantizes
+ * (int8 sdpa sources) then reach their GEMMs (--aiednn-fold-requant) and the head permutes stay pure for
+ * --aiednn-fold-head-permute. */
+bool pushThroughPermute(aiednn::ReorderOp q) {
+    // attention inputs only: on sdpa's output side the permute must stay next to sdpa (fold-head-permute folds
+    // sdpa -> permute, then fold-norm-quant the quantize after it)
+    if (q.getResult().use_empty() ||
+        !llvm::all_of(q.getResult().getUsers(), [](Operation *u) { return llvm::isa<aiednn::SdpaOp>(u); }))
+        return false;
+    auto p = q.getSrc().getDefiningOp<aiednn::ReorderOp>();
+    if (!p || !p.getPerm() || !p.getResult().hasOneUse() || p.getScale().convertToFloat() != 1.0f ||
+        p.getZeroPoint() != 0 ||
+        getElementTypeOrSelf(p.getSrc().getType()) != getElementTypeOrSelf(p.getResult().getType()) ||
+        !getElementTypeOrSelf(p.getSrc().getType()).isF32())
+        return false;
+    OpBuilder b(p);
+    Type elt = getElementTypeOrSelf(q.getResult().getType());
+    auto qx = b.create<aiednn::ReorderOp>(q.getLoc(), retyped(p.getSrc().getType(), elt), p.getSrc(), q.getPermAttr(),
+                                          q.getScaleAttr(), q.getZeroPointAttr());
+    auto np = b.create<aiednn::ReorderOp>(p.getLoc(), q.getResult().getType(), qx.getResult(), p.getPermAttr(),
+                                          p.getScaleAttr(), p.getZeroPointAttr());
+    q.getResult().replaceAllUsesWith(np.getResult());
+    q->erase();
+    p->erase();
+    return true;
+}
+
+bool pushThroughView(aiednn::ReorderOp q) {
+    auto v = q.getSrc().getDefiningOp<aiednn::ViewOp>();
+    if (!v || !v.getResult().hasOneUse() || !getElementTypeOrSelf(v.getSrc().getType()).isF32())
+        return false;
+    OpBuilder b(v);
+    Type elt = getElementTypeOrSelf(q.getResult().getType());
+    auto qx = b.create<aiednn::ReorderOp>(q.getLoc(), retyped(v.getSrc().getType(), elt), v.getSrc(), q.getPermAttr(),
+                                          q.getScaleAttr(), q.getZeroPointAttr());
+    auto nv = b.create<aiednn::ViewOp>(v.getLoc(), q.getResult().getType(), qx.getResult());
+    q.getResult().replaceAllUsesWith(nv.getResult());
+    q->erase();
+    v->erase();
+    return true;
+}
+
 /* g's users all quantizing reorders: merge equal ones, then one clone of g per extra quantization */
 void splitPerQuant(Operation *g, bool clone) {
     Value r = g->getResult(0);
@@ -615,7 +683,8 @@ struct QuantizeThroughViewsPass : public PassWrapper<QuantizeThroughViewsPass, O
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(QuantizeThroughViewsPass)
     QuantizeThroughViewsPass() = default;
     QuantizeThroughViewsPass(const QuantizeThroughViewsPass &o) : PassWrapper(o) {}
-    /* opt-in: clones can cost more than the reorders they remove */
+    /* opt-in: on VEK280 yolov8n (8x4) the 8 clone convs cost more than the 26 reorders they remove
+     * (432 vs 344 ms): an s8 epilogue row costs the A72 what an f32 one does */
     Option<bool> clone{*this, "clone", llvm::cl::desc("one GEMM clone per extra quantization"), llvm::cl::init(false)};
     StringRef getArgument() const final { return "aiednn-quantize-through-views"; }
     StringRef getDescription() const final {
@@ -631,7 +700,8 @@ struct QuantizeThroughViewsPass : public PassWrapper<QuantizeThroughViewsPass, O
                     qs.push_back(q);
             });
             for (aiednn::ReorderOp q : qs)
-                changed |= pushThroughConcat(q) || pushThroughSlice(q) || pushThroughPick(q);
+                changed |= pushThroughConcat(q) || pushThroughSlice(q) || pushThroughPick(q) || pushThroughPermute(q) ||
+                           pushThroughView(q);
         }
         SmallVector<Operation *> gemms;
         getOperation().walk([&](Operation *op) {

@@ -17,7 +17,8 @@
 //   }
 //
 // Constants carry an index into an external store (the weights stay out of the
-// IR); the op location names the source node. Execution order is block order.
+// IR); the op location names the source node (fx node name). Execution order is
+// block order. Placement (sub-mesh, memtile/DDR, blocks) is added by later passes.
 #ifndef AIEDNN_OPS
 #define AIEDNN_OPS
 
@@ -119,7 +120,10 @@ def Aiednn_SdpaOp : Aiednn_Op<"sdpa", [Pure]> {
                        // --aiednn-fold-head-permute: bit 0 q/k/v, bit 1 the result are [B,S,H,D] in memory
                        OptionalAttr<I64Attr>:$layout,
                        // --aiednn-fold-norm-quant: the quantizing reorder after it (s8 / u8 result)
-                       OptionalAttr<F32Attr>:$dst_scale, OptionalAttr<I64Attr>:$dst_zero_point);
+                       OptionalAttr<F32Attr>:$dst_scale, OptionalAttr<I64Attr>:$dst_zero_point,
+                       // 8-bit q / k / v: their dequant scales (q, k, v, unused) and the attr flags
+                       // (AIEDNN_ATTR_TOLERANCE_INT8_ATTN: the library's int8 attention may serve it)
+                       OptionalAttr<DenseF32ArrayAttr>:$src_scales, OptionalAttr<I64Attr>:$flags);
   let results = (outs Aiednn_Tensor:$result);
   let assemblyFormat = "$q `,` $k `,` $v (`mask` $mask^)? prop-dict attr-dict `:` functional-type(operands, results)";
 }
@@ -160,7 +164,9 @@ def Aiednn_SliceOp : Aiednn_UnaryOp<"slice", (ins DenseI64ArrayAttr:$offsets, De
 }
 def Aiednn_RopeOp : Aiednn_Op<"rope", [Pure]> {
   let summary = "rotary position embedding: x * cos + rotate(x) * sin, cos / sin broadcast to src (aiednn_rope_create)";
-  let arguments = (ins Aiednn_Tensor:$src, Aiednn_Tensor:$cos, Aiednn_Tensor:$sin, I64Attr:$interleaved);
+  let arguments = (ins Aiednn_Tensor:$src, Aiednn_Tensor:$cos, Aiednn_Tensor:$sin, I64Attr:$interleaved,
+                       // --aiednn-fold-norm-quant: the quantizing reorder after it (f32 in, s8 / u8 out)
+                       OptionalAttr<F32Attr>:$dst_scale, OptionalAttr<I64Attr>:$dst_zero_point);
   let results = (outs Aiednn_Tensor:$result);
   let assemblyFormat = "$src `,` $cos `,` $sin prop-dict attr-dict `:` functional-type(operands, results)";
 }

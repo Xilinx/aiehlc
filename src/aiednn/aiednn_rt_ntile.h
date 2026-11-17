@@ -4,13 +4,22 @@
  *
  * aiednn_rt_ntile.h -- the im2col convolution pipes with many GEMM tiles per AIE launch.
  *
- * One n-tile launch (aiednn_gemm_ntile_*) streams a chunk of m blocks x every k block of one n block:
- * A tiles packed straight into the launch's device buffer (m outer, k inner), K blocks chained on the
- * core, B blocks through the mem tile. Same blocks and arithmetic as the per-block pipes. During chunk
- * j's launch the host packs chunk j+1 and finishes chunk j-1's output.
+ * run_q_pipe / run_i32_pipe launch the GEMM block once per (m, n, k) block: ~0.11-0.13 ms each,
+ * mostly the launch itself (shim BDs, cache syncs, waits). With the persistent build's n-tile
+ * launch (gemm_uk.cc aiednn_gemm_ntile_*, persist_transform host_tile_n_start) one launch streams
+ * a chunk of m blocks x every k block of one n block (<= aiednn_gemm_ntile_max() tiles): A tiles
+ * are packed straight into the launch's device buffer (m outer, k inner), the core chains the K
+ * blocks as before (0xA0 ... last: plain GEMM or the 0xF1 requant), B blocks stream through the
+ * mem tile (one shared block when K fits one block: re-emitted from the mem tile, cached there).
+ * Same blocks, same core arithmetic, so the result is the per-block pipes' bit for bit.
  *
- * Not taken (the caller's per-block pipe runs): no n-tile entry, a fused residual (B cannot be shared
- * by m blocks), more K blocks than tiles per launch.
+ * Host work is overlapped per chunk as the pipes do per block: during chunk j's launch the host
+ * packs chunk j+1's im2col rows and A tiles (first n block) and finishes chunk j-1's output
+ * (last n block: int8 scatter to the channel planes, or the host epilogue).
+ *
+ * Not taken (the caller's per-block pipe runs): no n-tile entry (x86, non-persistent builds), a
+ * fused residual (its tile rides in B's per-launch rows, so B cannot be shared by m blocks), more
+ * K blocks than tiles per launch.
  *
  * Needs, from the including TU: aiednn_rt_internal.h and aiednn_rt_gemm.h (included at its end).
  ******************************************************************************/
@@ -30,7 +39,8 @@ extern "C" const int8_t *aiednn_gemm_ntile_c(int mb) __attribute__((weak));
 extern "C" void aiednn_gemm_ntile_conv(int on) __attribute__((weak));
 
 /* an environment switch is on: set, non-empty and not "0" */
-/* a runtime switch: the environment, or the same name defined at build time (dnn_build AIEDNN_DEFINES) */
+/* a runtime switch: the environment, or (a baremetal app has none) the same name defined at build time
+ * (dnn_build AIEDNN_DEFINES="AIEDNN_NO_TPIPE=1" writes the #define into the entry) */
 static int rt_env_on(const char *name) {
     static const char *const built[] = {
 #if defined(AIEDNN_NO_TPIPE)
@@ -109,8 +119,9 @@ static void ntile_pack_a(const int8_t *A, int64_t m0, int64_t mn, int64_t K, int
     g_phase[RT_PH_APACK] += rt_ticks() - ta0;
 }
 
-/* A-tile producer: m block mb's nkb tiles ([BM][BK] each, kb at kb * BM * BK) into dst; the launch
- * treats them as bytes. */
+/* A-tile producer: m block mb's nkb tiles ([BM][BK] each, kb at kb * BM * BK) into dst. The
+ * im2col one below reads rows the pipe packed into the im2col matrix; another producer may build
+ * its tiles any way (e.g. raw input regions for a direct-conv mode), the launch treats them as bytes. */
 typedef void (*ntile_a_fn)(void *ctx, int64_t mb, int8_t *dst);
 
 typedef struct {
@@ -192,7 +203,8 @@ static void *g_ntq;
 static size_t g_ntq_cap;
 
 /* which 1: int8 out via the core's requant (o8 [M][N], then the dst planes); 0: int32 o32 [M][N] and
- * the host epilogue (E, di0, ch0). creg: direct conv -- the tiles are input regions, no im2col */
+ * the host epilogue (E, di0, ch0). creg: direct conv -- the tiles are input regions (ntile_a_creg; c's
+ * pstride a multiple of 32 for a batch), no im2col */
 static int run_ntile(const rt_impl *self, const rt_epi *E, const conv_geo *c, int mode, const int8_t *img,
                      const int8_t *wv, int64_t ch0, int8_t *col, int which, int8_t *o8, int8_t *dst, int32_t *o32,
                      int64_t di0, int creg) {
@@ -211,7 +223,10 @@ static int run_ntile(const rt_impl *self, const rt_epi *E, const conv_geo *c, in
         return AIEK_ERR_ALLOC;
     if (which)
         ntile_qparams(E, ch0, N, BN, NP, nnb, qps);
-    /* call the block's entry once with no arguments (nothing launched) so the usage run counts this mode */
+    /* the launches go through aiednn_gemm_ntile_start, not the block's entry: call the entry once with no
+     * arguments (AIEK_ERR_ARGS, nothing launched) so dnn_build(modes="auto")'s usage run, and the model
+     * view, count this layer's mode (GEMMQ for which 1) */
+    /* (direct conv: its own entry, so the CONV mode is counted / made resident too) */
     (void)(creg ? (which ? g_cqblk : g_ckcblk) : blk)->entry(nullptr, 0);
     rt_pipe_work w = {c, mode, xsrc, col, 0, 0, o8, dst, 0, 0, which ? nullptr : E, which ? nullptr : o32, di0, ch0, 0};
     ntile_im2col a_im2col = {col, M, K, BM, BK};
@@ -275,8 +290,10 @@ static int run_ntile(const rt_impl *self, const rt_epi *E, const conv_geo *c, in
     return AIEK_OK;
 }
 
-/* Workstation emulation (AIEDNN_NTILE_EMU=1): the n-tile launch's tiles, in order and with the same
- * K-chain flags, through the single-block entries. */
+/* Workstation emulation of the n-tile launch for the paths that use it with int32 C (blocked_gemm_ntile) and
+ * for the bf16 queue (aiednn_rt_bf16.h): AIEDNN_NTILE_EMU=1 runs the same tiles, in the same order and with
+ * the same K-chain flags, through the single-block entries, so the runtime side of those paths -- tile
+ * order, staging, result slots -- is tested without a board (the conv pipes never take it). */
 static int8_t *g_nte_a, *g_nte_c;
 static size_t g_nte_a_cap, g_nte_c_cap;
 static int nte_on(void) { return rt_env_on("AIEDNN_NTILE_EMU"); }
@@ -306,8 +323,9 @@ static int nte_start(const int8_t *a, int nm, int nkb, const int8_t *b, int64_t 
     return AIEK_OK;
 }
 
-/* X = P Q^T as n-tile launches: P [Pr][K] staged as A tiles, Q as nqb x nkb packed [BN][BK] blocks (qb).
- * tr 0: C[p][q] (row stride ldc); tr 1: C[q][p]. */
+/* X = P Q^T as n-tile launches: P [Pr][K] staged as A tiles (m blocks outer, k inner), Q as nqb x nkb packed
+ * [BN][BK] blocks (qb); per Q block, chunks of P blocks x every k block in one launch. tr 0: C[p][q] (C row
+ * stride ldc); tr 1: C[q][p] -- the product computed transposed (C^T = W A^T). */
 static int ntile_mm(const rt_impl *self, const int8_t *P, int64_t Pr, const int8_t *qb, int64_t Qr, int64_t K,
                     int64_t mpc, int emu, const void *bkey, int32_t *C, int64_t ldc, int tr) {
     const aiednn_impl_t *kc = g_kcblk;
@@ -356,9 +374,13 @@ static int ntile_mm(const rt_impl *self, const int8_t *P, int64_t Pr, const int8
 static void *g_ntt_q;
 static size_t g_ntt_q_cap;
 
-/* A matmul's K-chained blocks (blocked_gemm_kc) as n-tile launches, int32 C, host epilogue after. Either
- * C = A W^T (per n block, chunks of m blocks) or, when M is small, C^T = W A^T. Returns 1 when not taken
- * (no n-tile entry, or AIEDNN_NO_NTILE_MM; AIEDNN_NTILE_MM_T=1 allows the transposed form). */
+/* A matmul's K-chained blocks (blocked_gemm_kc) as n-tile launches, int32 C, the host epilogue after -- the same
+ * tiles and core arithmetic as one launch per (m, n, k) block, so the same int32 sums. Two arrangements, the one
+ * with fewer launches: C = A W^T (per n block, chunks of m blocks; bert's 768-wide projections at M = 128: 12 -> 6)
+ * or, when M is small, C^T = W A^T (the weights as A tiles, re-staged per call; the activations one B block
+ * column: 12 -> 1). Returns 1 when not taken (no n-tile entry, or AIEDNN_NO_NTILE_MM; AIEDNN_NTILE_MM_T=1 allows
+ * the transposed form). VEK280, int8 --mlir: bert 1004 -> 962 ms (GEMM launches 1596 -> 73), gpt2 1050 -> 1039.
+ * AIEDNN_NTILE_EMU: the workstation emulation. */
 static int blocked_gemm_ntile(const rt_impl *self, const aiednn_impl_t *blk, int64_t M, int64_t N, int64_t K,
                               const int8_t *A, const int8_t *B, int32_t *C, const void *bkey) {
     const aiednn_impl_t *kc = g_kcblk;
@@ -370,7 +392,9 @@ static int blocked_gemm_ntile(const rt_impl *self, const aiednn_impl_t *blk, int
         return 1;
     const int64_t ln = nnb * ((nmb + mpc - 1) / mpc);                               /* launches, C = A W^T */
     const int64_t lt = ((M + BN - 1) / BN) * (((N + BM - 1) / BM + mpc - 1) / mpc); /* C^T = W A^T */
-    /* the transposed form re-stages the weights every call: opt-in */
+    /* the transposed form re-stages the weights every call (A tiles; ~2 ms per MB on the A72), which costs more
+     * than the launches it saves (~0.14 ms each): vit's GEMMs 451 -> 541 ms with it. Opt-in until the staged
+     * weights can stay in device memory. */
     if (lt < ln && rt_env_on("AIEDNN_NTILE_MM_T")) {
         const int64_t nab = (M + BN - 1) / BN;
         int8_t *qb = (int8_t *)scratch(&g_ntt_q, &g_ntt_q_cap, (size_t)(nab * nkb * BN * BK));

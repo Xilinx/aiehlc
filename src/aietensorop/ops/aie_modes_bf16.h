@@ -12,8 +12,9 @@
  *   B round kr: [ki 4][ni 8][8][4]  = B[kr*32 + ki*8 + k][ni*4 + n]   (B = weights^T: [K][32 channels])
  * The 2 KB lands in the window's first 32 rows of 64 bytes (A: the mesh row's 32 rows, B: the
  * column's 32 real rows). The core runs mmul<4, 8, 4, bfloat16, bfloat16, accfloat> per (mi, ni, ki)
- * into an f32 tile kept across rounds (and launches with the continue flag), and writes C row-major f32
- * on the last round. Within f32 rounding of ref:, not bit-exact.
+ * into an f32 tile kept across rounds (and across launches with the continue flag, as 0xA0 chains
+ * int32), and writes C row-major f32 on the last round. Every bf16 product is exact in f32; the sum
+ * order is the hardware's, so the result is within f32 rounding of ref: (a tolerance, not bit-exact).
  *
  * Descriptor: B row 127 d[0] = 0xBF, d[1] = column, d[2] bit 0 continue (accumulate onto the previous
  * launch's tile), bit 1 more (do not write C: another K block follows).

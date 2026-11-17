@@ -5,13 +5,28 @@
  * aiednn_rt_fvec.h -- fvec: f32 pointwise and row primitives on the FVEC mode of the GEMM ELF
  * (src/aietensorop/ops/aie_modes_fvec.h, opcode 0xF5).
  *
- *   eltwise   vector programs (aie_fvec_prog), any shape flattened into 1024-float items
- *   binary / prelu   src1 materialized per item, or ROWPROG rows when constant over a trailing block
- *   eltwise backward, softmax backward, batch norm training: row passes (ROWSUM, ROWPROG)
- *   batch / layer / RMS norm, softmax, reduction / pooling over rows <= 1024
+ *   eltwise   as vector programs (aie_fvec_prog): relu / leaky / elu / selu / gelu (tanh, erf) /
+ *             logistic / tanh / swish / soft_relu / mish / hardswish / hardsigmoid / clip / linear / abs /
+ *             exp / log / sqrt / square / reciprocal / rsqrt / erf / sign / softsign / log_sigmoid / neg /
+ *             identity, any shape (flattened into 1024-float items)
+ *   binary    add / sub / mul / div / max / min, src1 broadcast to dst: materialized per item, or, when
+ *             src1 is constant over a trailing block of >= 16 elements (per channel, scalar), ROWPROG rows
+ *             of that block with src1's value as the row constant
+ *   prelu     the same two forms, weights as the operand
+ *   eltwise backward   dy f'(x) as programs (aie_fvec_prog_bwd: 24 algorithms; not gelu_erf), dy in AUX
+ *   softmax backward (accurate / log, last axis) and batch norm training forward: row passes (ROWSUM for the
+ *             row statistics, then ROWPROG; AIE_FV_F_ELEM puts the second operand per element in AUX)
+ *   batch_normalization   inference (f32 in / out): per-channel x * c2 + c3 (+ ReLU) as ROWPROG rows,
+ *             c2 = scale / sqrt(var + eps), c3 = shift - mean * c2 (computed here in double)
+ *   softmax   accurate / log over the last axis, rows <= 1024 (padded with -inf to 16)
+ *   layer_normalization   layer / RMS norm over the last dim (a multiple of 16, <= 1024), SCALE / SHIFT
+ *   reduction / pooling   sum / mean / max over trailing axes, global max / avg pooling (rows <= 1024)
  *
- * f32 in and out; |result - ref:| <= 1e-5 + 1e-5 |ref:|. Entry fvec_blk_f32: items f32 [NI,1024], aux f32
- * [NI,1920], geom s32 [NI,4] = {n, rowlen, op | flags << 8, 0}, ab f32 [1,2] = {alpha, beta}, out f32 [NI,1024].
+ * f32 in and out; |result - ref:| <= 1e-5 + 1e-5 |ref:| (the mode's contract, checked by
+ * test/fvec_test.cc on the core code and test_aiednn_fvec.py through this file). One item per core:
+ * an item holds 1024 elements or floor(1024 / L) whole rows; AUX the item's src1 elements or the
+ * norm's gamma / beta. Entry fvec_blk_f32: items f32 [NI,1024], aux f32 [NI,1920], geom s32 [NI,4]
+ * = {n, rowlen, op | flags << 8, 0}, ab f32 [1,2] = {alpha, beta}, out f32 [NI,1024].
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aie_modes_fvec.h (opcodes / limits).
  ******************************************************************************/
@@ -38,8 +53,8 @@ typedef struct {
     int64_t sp;    /* ROWPROG: the elements sharing one constant (a row is L of them, L | sp) */
     int xf;        /* the item copy: 0 x, 1 -x (reduction min), 2 |x| (amax) */
     int64_t inner; /* softmax over a non-last axis: a row's elements lie inner apart (0 / 1: contiguous) */
-    int qb;        /* quantized binary (attr) */
-    int qd;        /* layer / RMS norm with a quantized dst (attr) */
+    int qb;        /* the quantized binary (attr): typed sources in the fill, the quantize in the unpack */
+    int qd;        /* layer / RMS norm with a quantized dst (attr, 1-code tolerance): rows quantized in the unpack */
     int train;     /* row-pass problems (fvec_train_plan): 1 softmax backward, 2 batch / group norm (block statistics),
                     * 3 layer norm training forward, 4 batch / group norm backward, 5 PReLU backward */
     aie_fv_prog_t prog; /* AIE_FV_PROG: the function as a vector program (aie_fvec_prog) */
@@ -173,8 +188,10 @@ static inline void fvec_axis(const aiednn_memory_desc_t *m, int axis, int64_t *L
         *inner *= m->dims[i];
 }
 
-/* quantized binary as one program: exact dequantize (code - zp) * scale for 8-bit codes, the op, relu / clip;
- * the quantize runs in the unpack. add / sub / max / min only (mul is not exact on the AIE). */
+/* the quantized binary (aiednn_binary_create_attr) as one program: the dequantize (code - zp) * scale, which is
+ * exact for |code - zp| <= 255 (8 bits: one bf16 part, so the bf16-split product rounds once, as IEEE f32
+ * does), the op, relu / clip post-ops; the quantize runs in the unpack as the reorder's. add / sub / max / min
+ * (mul's product of two f32 values is not exact on the AIE: ref:). */
 static int fvec_qbinary_plan(const rt_prob *p, fvec_plan *q, char *why, int cap) {
     const aiednn_memory_desc_t *a = &p->md[0], *b = &p->md[1], *d = &p->md[2];
     /* mul only with AIEDNN_ATTR_TOLERANCE_1CODE: the core's f32 product is not ref:'s correctly rounded one */
@@ -355,8 +372,9 @@ static int fvec_plan_make(const rt_prob *p, fvec_plan *q, char *why, int cap) {
         return fvec_qbinary_plan(p, q, why, cap);
     const aiednn_memory_desc_t *s = &p->md[0], *d = rt_md(p, fvec_out_arg(p));
     const int bwd = p->prop == RT_BWD_DATA && p->kind == aiednn_eltwise;
-    /* layer / RMS norm -> s8 / u8: f32 rows on the core, quantized in the unpack; a code may differ by one,
-     * so only with AIEDNN_ATTR_TOLERANCE_1CODE */
+    /* layer / RMS norm -> s8 / u8 (the norm-quant fold): the f32 rows on the core, the quantize reorder's arithmetic
+     * in the unpack. FVEC's rows are within 1e-5 of ref:'s, so a code can differ by one at a rounding boundary: only
+     * when the caller allows it (AIEDNN_ATTR_TOLERANCE_1CODE) */
     q->qd = p->kind == aiednn_layer_normalization && p->prop == RT_FWD_INF && p->has_attr && !p->npo && !p->n_oscales &&
             !p->ndq && d && (d->data_type == aiednn_s8 || d->data_type == aiednn_u8) && s->data_type == aiednn_f32 &&
             (p->attr_flags & AIEDNN_ATTR_TOLERANCE_1CODE);
@@ -545,7 +563,11 @@ static int acc_fvec(const rt_impl *self, const rt_prob *p, rt_bind *bind, char *
     fvec_plan q;
     if (!fvec_plan_make(p, &q, why, cap))
         return 0;
-    /* aiednn_prefer_fastest only: decline where ref: is faster (per-element binary operands, norms) */
+    /* aiednn_prefer_fastest only: where ref: measured faster (muscaria17, fvec_app, 256 K floats): a binary op
+     * with an operand per element (add 6.0 vs 0.35 ms, div 6.4 vs 3.1: the host's loop is memory-bound, the
+     * item gather is not free), layer / RMS norm (1.07 vs 0.97, 1.07 vs 0.80), batch norm (2.90 vs 1.28).
+     * Not eltwise backward: size-dependent (relu's 6.3 vs 7.6 at 256 K, 19.6 vs 15.9 at 3.2 M; gelu_tanh's 8.9 vs 48)
+     */
     if (p->kind == aiednn_binary && q.op == AIE_FV_PROG && !q.qb && rt_env_on("AIEDNN_NO_FVEC_ELEMBIN")) {
         snprintf(why, cap, "AIEDNN_NO_FVEC_ELEMBIN (a per-element second operand)");
         return 0;
@@ -564,7 +586,8 @@ static int acc_fvec(const rt_impl *self, const rt_prob *p, rt_bind *bind, char *
 static void *g_fv_in, *g_fv_aux, *g_fv_out;
 static size_t g_fv_in_cap, g_fv_aux_cap, g_fv_out_cap;
 
-/* n elements of an s8 / u8 / f32 tensor from element e on, as floats: one loop per type */
+/* n elements of an s8 / u8 / f32 tensor from element e on, as floats (exact for the 8-bit codes): one loop per
+ * type, not rt_ld's per-element switch and double conversion (the quantized binary's fill was 2/3 of its time) */
 static inline void fvec_cvt(aiednn_data_type_t dt, const void *src, int64_t e, int64_t n, float *dst) {
     if (dt == aiednn_s8) {
         const int8_t *x = (const int8_t *)src + e;
@@ -636,7 +659,7 @@ static int64_t fvec_fill(const rt_prob *p, const fvec_plan *q, void *const *ptr,
             in[i] = 1.0f; /* defined lanes (sqrt / div of the padding) */
         if (q->s1 >= 0) { /* src1 element for element, broadcast to dst's shape */
             const aiednn_memory_desc_t *m1 = &p->md[q->s1], *d = rt_md(p, fvec_out_arg(p));
-            if (md_same_shape(m1, d)) /* no broadcast: a typed contiguous copy */
+            if (md_same_shape(m1, d)) /* no broadcast (residual adds, backward dy): a typed contiguous copy */
                 fvec_cvt(q->qb ? m1->data_type : aiednn_f32, ptr[q->s1], e, n, aux);
             else
                 for (int64_t i = 0; i < n; i++)
@@ -753,8 +776,10 @@ static int run_fvec_smbwd(const rt_impl *self, const rt_prob *p, void *const *pt
     return rc;
 }
 
-/* batch norm training / group norm forward: block sums, centred squares (ROWSUM), then the per-channel
- * affine (ROWPROG); two-pass statistics in double as ref:. MEAN / VARIANCE written when present. */
+/* batch norm training / group norm forward: block sums (ROWSUM of x), centred squares (ROWSUM of (x - mean)^2,
+ * rows padded with the mean), then the per-channel affine (ROWPROG) -- two-pass statistics as ref:, accumulated
+ * in double. A row is a chunk of one channel's spatial block; its statistics block: the channel (batch norm) or
+ * the image's group (group norm). MEAN / VARIANCE written when the primitive has them (training). */
 static int run_fvec_blocknorm(const rt_impl *self, const rt_prob *p, void *const *ptr, const fvec_plan *q) {
     const aiednn_memory_desc_t *xm = rt_md(p, AIEDNN_ARG_SRC);
     const float *x = (const float *)rt_ptr(p, ptr, AIEDNN_ARG_SRC);
@@ -827,7 +852,8 @@ static void fvec_qstore(const rt_prob *p, void *const *ptr, int64_t e, const flo
         return;
     }
     const double lo = dt == aiednn_s8 ? -128.0 : 0.0, hi = lo + 255.0, ds = p->dst_scale, zp = p->dst_zp;
-    /* round_even(x): (x + 1.5 2^52) - 1.5 2^52, exact for |x| < 2^51 in the default rounding mode */
+    /* round_even(x) without a libm call per element: (x + 1.5 2^52) - 1.5 2^52 is exact for |x| < 2^51 in the
+     * default rounding mode (= nearbyint); anything larger saturates anyway. NaN stays NaN -> 0, as ref:. */
     const auto q = [&](float v) {
         const double x = (double)v / ds;
         double r = x >= 1e15 ? hi : x <= -1e15 ? lo : (x + 6755399441055744.0) - 6755399441055744.0 + zp;
@@ -1230,8 +1256,9 @@ static int run_fvec_lnbwd(const rt_impl *self, const rt_prob *p, void *const *pt
     return rc;
 }
 
-/* layer / RMS norm inference over a last dim wider than one item (or not a multiple of 16): chunks of L | D,
- * ROWSUM statistics summed on the host, then ROWPROG gamma (x - mean) rstd + beta. */
+/* layer / RMS norm inference over a last dim D wider than one item (or not a multiple of 16): chunks of L | D.
+ * ROWSUM x and ROWSUM (x - mean)^2 (chunk sums added per row on the host, in double), then ROWPROG with the
+ * element operand gamma (or 1): gamma (x - mean) rstd (ROW_DXHAT), then + beta (ADD, element operand). */
 static int run_fvec_lnwide(const rt_impl *self, const rt_prob *p, void *const *ptr, const fvec_plan *q) {
     const aiednn_memory_desc_t *xm = &p->md[0];
     const float *x = (const float *)ptr[0];

@@ -11,8 +11,8 @@
  * scores are Q K^T * scale (+ causal: key j visible to query i when j <= i + nk - nq, bottom-right aligned
  * per sequence), softmax in double over the nk valid keys, then P V; query rows >= nq are written 0.
  *
- * ref: runs the two products in double (sdpab_mm_ref); gemm+sdpavar puts them on the AIE GEMM per (b, h)
- * with the sequence's own lengths.
+ * ref: runs the two products in double (sdpab_mm_ref); gemm+sdpavar puts them on the AIE GEMM (f32 as
+ * bf16x3, gx_gemm) per (b, h) with the sequence's own lengths -- no padded keys reach the array.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_gemmx.h, aiednn_rt_sdpa_bwd.h (sdpab_mm_*).
  ******************************************************************************/

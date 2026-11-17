@@ -2,8 +2,14 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * aiednn_ort_map.h -- ONNX node -> aiednn graph op (include/aiednn_graph.h) for the ORT execution provider;
- * unmapped nodes become wildcard ops so the partitioner sees the whole graph.
+ * aiednn_ort_map.h -- ONNX node -> aiednn graph op (include/aiednn_graph.h), for the ONNX Runtime
+ * execution provider (aiednn_ort_ep.cc). The same mapping as aiegraph/dnn_onnx_graph.py: one graph op
+ * per ONNX node, initializers as constant logical tensors, anything without a mapping (or with a
+ * dynamic shape / an unknown element type) as a wildcard op, so the partitioner sees the whole graph
+ * and never fuses across what the framework keeps.
+ *
+ * GraphMap::add_nodes(nodes) builds an aiednn_graph_t; GetCapability and Compile both use it, the first
+ * over the model, the second over one fused node's subgraph.
  ******************************************************************************/
 #ifndef AIEDNN_ORT_MAP_H
 #define AIEDNN_ORT_MAP_H

@@ -11,7 +11,14 @@
     PYTHONPATH=src python3 example/aiednn/models/run_models.py --models mobilenet_v2 --modes int8 --html
     PYTHONPATH=src python3 example/aiednn/models/run_models.py --mlir ...        # through the aiednn MLIR pipeline
     PYTHONPATH=src python3 example/aiednn/models/run_models.py --models mobilenet_v2 --app vek280 \\
-        --board <host> --vitis-settings <.../Vitis/settings64.sh> [--run-only]
+        --board galerina13 --vitis-settings <.../Vitis/settings64.sh> [--run-only]
+
+x86 (default): ``dnn_torch.model_test`` through the ctypes runtime -- f32 vs the float
+model, int8 vs the same model with the same fake quantization, every integer GEMM
+layer recomputed exactly from its own inputs. ``--app``: the generated C app
+(weights INCBIN'd, golden output embedded, every AIE layer re-run on ref: and
+compared on the device) built with ``ag.dnn_build`` and run on x86 or the board.
+Writes worklocal/aiednn/models/report.md. doc/design/aiednn.md section 9.
 """
 
 from __future__ import annotations
@@ -39,7 +46,7 @@ _MODEL_LINE = re.compile(r"MODEL (\S+) mode=(\S+) ops=(\d+) time_ms=(\S+) relerr
 
 
 def _input(name, args):
-    """The model and its input (--batch B stacks flipped / shifted copies)."""
+    """the model and its input; --batch B stacks B images (the real one, flipped / shifted copies)"""
     m, x = zoo.build(name, pretrained=not args.random)
     if args.batch > 1:
         import torch
@@ -50,7 +57,7 @@ def _input(name, args):
 
 
 def _stem(name, mode, args, prof=False) -> str:
-    """Build directory / page name of one (model, mode, options)."""
+    """the build directory / page name of one (model, mode, options): run_app and --html must agree"""
     return (f"{name}_{mode}" + ("_mlir" if args.mlir else "") + (f"_{args.mesh}" if args.mesh else "")
             + ("_prof" if prof else "") + (f"_b{args.batch}" if args.batch > 1 else "")
             + ("_fastest" if getattr(args, "prefer", "aie") == "fastest" else "")
@@ -62,7 +69,8 @@ def run_app(name, mode, target, args) -> dict:
     m, x = _input(name, args)
     d = OUT / _stem(name, mode, args, prof=args.profiling)
     g, ref, yf = dt.references(m, x, mode, name, mlir=args.mlir, keep_ir=d / "ir" if args.mlir else None)
-    # autotune choices are per target: emulation timings say nothing about the board
+    # AIEDNN_TUNE lines from an --autotune run of this build, per target: workstation emulation times the C
+    # references, so its choices say nothing about the board
     table = d / target / "autotune.txt"
     tune = "tune" if args.autotune else table.read_text() if args.autotune_load and table.is_file() else None
     if args.autotune_load and not table.is_file():
@@ -70,7 +78,7 @@ def run_app(name, mode, target, args) -> dict:
     app = dt.emit_app(g, d, ref, dt.TOL[mode], dt._top1(yf, g.top1_range)[0], verify_gemm=not args.no_verify, autotune=tune,
                       prefer=args.prefer)
     elf = d / target / "aout" / "main.elf"
-    if args.run_only and target != "x86" and elf.is_file():
+    if args.run_only and target != "x86" and elf.is_file():      # reuse the built ELF: stage + run only
         from aiegraph.dnn import DnnBuild, run_app as dnn_run
         rep = DnnBuild(app, target, d / target, [], ok=True, elf=elf)
         dnn_run(rep, board=args.board, timeout=args.timeout)
@@ -80,13 +88,13 @@ def run_app(name, mode, target, args) -> dict:
                   aiehlc_args=("--profiling",) if args.profiling else ())
         try:
             rep = ag.dnn_build(app, **kw)
-        except ag.AiegraphError as exc:   # a single-layer kernel ties the GEMM library
+        except ag.AiegraphError as exc:   # a single-layer kernel (VEK385's conv2dstem) ties the GEMM library
             if "serve the app equally" not in str(exc):
                 raise
             lib = ag.kernel_lib(REPO / "src" / "aietensorop")
             rep = ag.dnn_build(app, kernels=[e.name for e in lib if e.contract.source.name == "gemm_uk.cc"], **kw)
     text = rep.run_log.read_text(errors="replace") if rep.run_log and rep.run_log.exists() else ""
-    if args.autotune:
+    if args.autotune:                # keep the board's choices for --autotune-load
         tuned = [ln.strip() for ln in text.replace("\r", "").splitlines() if ln.startswith("AIEDNN_TUNE")]
         if tuned:
             table.parent.mkdir(parents=True, exist_ok=True)
@@ -111,9 +119,10 @@ def run_x86(name, mode, lib, args) -> dict:
     t = time.time()
     r = dt.model_test(m, x, mode, lib, name, mlir=args.mlir)
     ms = 1e3 * (time.time() - t)
-    if args.html:
+    if args.html:                                  # model-flow page (aiegraph.dnn_viz), board log if one exists
         from aiegraph import dnn_viz
         stem = _stem(name, mode, args)
+        # the board build of the same lowering and batch, if any: the newest of the boards' run.logs
         logs = [p for p in (OUT / stem / b / "run.log" for b in ("vek385", "vek280")) if p.is_file()]
         log = max(logs, key=lambda p: p.stat().st_mtime) if logs else None
         page = dnn_viz.write_model_html(r.graph, lib, x.numpy(), OUT / f"{stem}.html", board_log=log)
@@ -136,7 +145,7 @@ def report(rows) -> str:
 
 
 def _time(r) -> str:
-    """Time column: per inference, and per image for a batch."""
+    """time column: per inference, and per image for a batch"""
     t, b = r.get("time_ms", 0), r.get("batch", 1)
     return f"{t:.0f} ms" if b <= 1 else f"{t:.0f} ms / {b} = {t / b:.1f} ms per image"
 
@@ -179,7 +188,7 @@ def main(argv=None) -> int:
                     help="ROWSxCOLS AIE cores for the GEMM ELF: default 8x4, all VEK280 core rows (the fastest "
                          "measured, doc/design/aiednn.md §18); 4x4 / 6x4 also build")
     a = ap.parse_args(argv)
-    if a.mesh == "4x4":  # the library's own block: no override
+    if a.mesh == "4x4":  # the library's own block: no mesh override, no dir suffix
         a.mesh = None
     OUT.mkdir(parents=True, exist_ok=True)
     lib = None if a.app else AiednnLib.build(OUT / ("lib" + (f"_{a.mesh}" if a.mesh else "")), mesh=_mesh(a.mesh))
@@ -188,7 +197,7 @@ def main(argv=None) -> int:
         for mode in a.modes.split(","):
             try:
                 row = run_app(name, mode, a.app, a) if a.app else run_x86(name, mode, lib, a)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 -- one model's failure must not hide the others
                 row = dict(model=name, mode=mode, where=a.app or "workstation emulation", ok=False, note=f"{type(e).__name__}: {e}")
             rows.append(row)
             print(report([row]).splitlines()[-1], flush=True)

@@ -3,12 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * aiednn_rt_fpool.h -- f32 windowed pooling on the AIE (impl "fpool:", the GEMM ELF's FPOOL mode,
- * aie_modes_fpool.h): 2-D and 3-D, max and average. One item per (plane, output depth, band of output
- * rows), padded on the host (-FLT_MAX for max, 0 for a sum); the core takes the window max / f32 sum, the
- * host divides. Max is exact; average within RT_FPOOL_RTOL of ref:.
+ * aie_modes_fpool.h): 2-D [N, C, H, W] and 3-D [N, C, D, H, W], max and average (padding included or
+ * excluded). One item per (plane, output depth, band of output rows): its KD input slices, padded on the
+ * host (-FLT_MAX for max, 0 for a sum); the core takes the window max / f32 sum, the host divides. Max is
+ * exact; an average is within f32 rounding of ref:'s double sum (RT_FPOOL_RTOL, tests).
  *
- * Max pooling backward: the core finds each window's first strict maximum (op ARGMAX); the host routes dy
- * through those taps in ref:'s order, bit-identical to ref:. Average backward stays ref:.
+ * Max pooling backward (impl "fpool:" for RT_BWD_DATA, max only): the core finds every output window's
+ * first strict maximum (op ARGMAX, the same items from SRC); the host routes dy through those taps in
+ * double, in ref:'s order (outputs row-major, then rounded once), so the gradient is bit-identical to
+ * ref:. A tap in the padding (only possible when every valid value is -FLT_MAX / -inf) is redone with
+ * ref:'s rule. Average backward has no search to move: it stays ref:.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_itemsn.h, aie_modes_fpool.h.
  ******************************************************************************/
@@ -119,7 +123,8 @@ static int acc_fpool(const rt_impl *self, const rt_prob *p, rt_bind *bind, char 
         return fpool_plan_bwd(p, &q, why, cap);
     if (!fpool_plan_make(p, &q, why, cap))
         return 0;
-    /* aiednn_prefer_fastest only: a small pooling is cheaper on the host than a launch */
+    /* aiednn_prefer_fastest only: a small pooling is a few us on the host, a launch ~1 ms (resnet18's global
+     * 512x7x7 average: 2.26 ms on fvec: vs ~0.05 on ref:, galerina13) */
     if (rt_cost_refusals() && md_numel(&p->md[0]) < RT_POOL_SMALL) {
         snprintf(why, cap, "ref: measured faster on a small pooling (aiednn_prefer_fastest)");
         return 0;

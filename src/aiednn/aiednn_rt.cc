@@ -3,13 +3,28 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * aiednn runtime: descriptors, validation, dispatch over an implementation
- * list, execute. The list (rt_impls) holds, in order: the generated
- * aiednn_impl_list[] (one aie:<kernel> per AIEK_SPEC, specificity = fixed dims),
- * composites over those kernels (specificity 0), and ref: CPU implementations
- * (specificity -1). The most specific acceptor wins; a tie is aiednn_unimplemented.
+ * list, execute. The implementations live in aiednn_rt_gemm.h (GEMM family +
+ * AIE composites) and aiednn_rt_ops.h (everything else, ref:).
  *
- * Spliced into the aiehlc entry translation unit: never write the aiehlc kernel
- * keyword or the launch chevrons here, even in a comment. Also builds with a plain host g++.
+ * The list (rt_impls) is built once from three sources, in this order:
+ *   1. the generated aiednn_impl_list[] -- one aie:<kernel> per AIEK_SPEC,
+ *      accepting exactly the dims the spec fixes (specificity = fixed dims);
+ *   2. composites over those kernels (specificity 0):
+ *        blocked:<aie gemm>  any s8 x s8 -> s32|s8 matmul (batched, bias,
+ *                            either weight layout) tiled onto an AIE GEMM
+ *                            block, K summed on the host in int32 -- exact;
+ *        im2col+ / col2im+ / ip+  convolution / deconvolution / inner product
+ *                            as GEMMs, accepted only when the matmul dispatch
+ *                            for that GEMM lands on a non-ref implementation;
+ *   3. ref: CPU implementations (specificity -1), so any valid problem runs.
+ * Dispatch asks every implementation of the problem's kind; the most specific
+ * acceptor wins and a tie is aiednn_unimplemented, never first-wins (the
+ * list order does not decide).
+ *
+ * Spliced into the aiehlc entry translation unit by the builder
+ * (aiegraph/dnn.py), with the implementation headers copied next to it: never
+ * write the aiehlc kernel keyword or the launch chevrons here, even in a
+ * comment. Also builds with a plain host g++ (x86 target, ctypes tests).
  ******************************************************************************/
 #include "aiednn_rt_internal.h"
 #include "aiednn_rt_phead.h" /* dequantized sources (attr.src_scales on layer norm / softmax / sdpa) */
@@ -156,6 +171,9 @@ static int run_ref_gen_index(const rt_impl *self, aiednn_primitive *prim, void *
 static int run_ref_linattn(const rt_impl *self, aiednn_primitive *prim, void *const *ptr);   /* aiednn_rt_linattn.h */
 static int acc_gx_linattn(const rt_impl *self, const rt_prob *p, rt_bind *bind, char *why, int cap);
 static int run_gx_linattn(const rt_impl *self, aiednn_primitive *prim, void *const *ptr);
+static int acc_gx_sdpa8(const rt_impl *self, const rt_prob *p, rt_bind *bind, char *why,
+                        int cap); /* aiednn_rt_sdpa8.h */
+static int run_gx_sdpa8(const rt_impl *self, aiednn_primitive *prim, void *const *ptr);
 static int run_ref_dynq(const rt_impl *self, aiednn_primitive *prim, void *const *ptr);
 static int acc_dynq_reorder(const rt_impl *self, const rt_prob *p, rt_bind *bind, char *why, int cap);
 static int run_dynq_reorder(const rt_impl *self, aiednn_primitive *prim, void *const *ptr);
@@ -319,7 +337,9 @@ static void rt_init(void) {
     add_impl("gemm+sdpabwd", aiednn_sdpa, 0, acc_gx_sdpabwd, run_gx_sdpabwd, nullptr); /* attention backward */
     g_impls[g_nimpls - 1].caps = RT_CAP_TRAIN; /* gemm+sdpabwd: this line sets the impl just added */
     add_impl("gemm+linattn", aiednn_linear_attention, 0, acc_gx_linattn, run_gx_linattn,
-             nullptr);                                                                 /* chunked gated delta rule */
+             nullptr);                                                           /* chunked gated delta rule */
+    add_impl("gemm+sdpa8", aiednn_sdpa, 0, acc_gx_sdpa8, run_gx_sdpa8, nullptr); /* int8 attention (opt-in tolerance) */
+    g_impls[g_nimpls - 1].caps = RT_CAP_Q8SRC;                                   /* gemm+sdpa8 */
     add_impl("gemm+sdpavar", aiednn_sdpa, 0, acc_gx_sdpavar, run_gx_sdpavar, nullptr); /* varlen / paged K V */
     add_impl("densify", aiednn_sparse_matmul, 0, acc_sp_densify, run_sp_densify, nullptr); /* CSR -> dense GEMM */
     add_impl("gemm+gmlp", aiednn_gated_mlp, 0, acc_gx_gmlp, run_gx_gmlp, nullptr); /* gated MLP's GEMMs on the AIE */
@@ -376,8 +396,10 @@ static int rt_prob_is_3d_(const rt_prob *p) { /* = rt_prob_is_3d (aiednn_rt_nd.h
            p->md[0].ndims == 5;
 }
 
-/* quiet dispatches repeat for the same problem on every execute: the choice is memoized on the problem's
- * bytes, the impl filter, the preference and the environment switches */
+/* quiet dispatches (composites' inner GEMMs, zp+, im2col's matmul) repeat for the same problem on every
+ * execute; acceptance is a function of the problem's bytes, the impl filter, the preference and a few
+ * environment switches, so the choice is memoized on exactly those (one full dispatch walks every impl's
+ * acceptor: ~20 ms per ResNet-18 inference on the A72 through zp+ alone) */
 #define RT_DCACHE_N 64
 typedef struct {
     rt_prob p;
@@ -465,6 +487,9 @@ static int dispatch_full(const rt_prob *p, const rt_impl **out, rt_bind *bind, i
         } else if (r->specificity >= 0 && p->prop != RT_FWD_INF && !(r->caps & RT_CAP_TRAIN)) { /* inference paths */
             ok = 0;
             snprintf(why, sizeof why, "training: ref: only");
+        } else if (p->ndq && !(r->caps & RT_CAP_Q8SRC)) { /* 8-bit sources: dequantized first (create) */
+            ok = 0;
+            snprintf(why, sizeof why, "8-bit sources with scales: dequantized first");
         } else if (!(r->caps & RT_CAP_NHWC) && rt_prob_has_fmt(p)) { /* create's native pass (aiednn_rt_layout.h) */
             ok = 0;
             snprintf(why, sizeof why, "nhwc operands: no nhwc path");
@@ -709,8 +734,15 @@ static aiednn_status_t create(aiednn_primitive_t *primitive, const rt_prob *p0) 
     rt_prob inner, tail, pin, pep, pdq;
     int qs1 = 0;
     const rt_prob *porig = p0;
-    if (p0->ndq ||
-        p0->dq_packed) { /* 8-bit / packed sources (aiednn_rt_phead.h): dispatch the f32 / unpacked problem */
+    int q8src = 0; /* an impl reads the 8-bit sources itself (RT_CAP_Q8SRC): no dequantized copies */
+    if (p0->ndq && !p0->dq_packed) {
+        const rt_impl *qi = nullptr;
+        rt_bind qb = {nullptr, nullptr};
+        q8src = dispatch_full(p0, &qi, &qb, 1, nullptr) == aiednn_success;
+    }
+    if (!q8src &&
+        (p0->ndq ||
+         p0->dq_packed)) { /* 8-bit / packed sources (aiednn_rt_phead.h): dispatch the f32 / unpacked problem */
         phead_split(p0, &pdq);
         p0 = &pdq;
     }
@@ -727,8 +759,8 @@ static aiednn_status_t create(aiednn_primitive_t *primitive, const rt_prob *p0) 
         free((void *)p0->oscales);
         return aiednn_invalid_arguments;
     }
-    /* the tail: src = the intermediate in dst's format, src1, dst; a src1 in the other format is converted
-     * per execute */
+    /* the tail: src = the intermediate in dst's format, src1, dst. A src1 in the other format (a skip edge the
+     * graph kept dense while dst went nhwc, or the reverse) is converted to dst's per execute */
     int qs1_cvt = 0;
     aiednn_memory_desc_t qs1_md;
     memset(&qs1_md, 0, sizeof qs1_md);
@@ -795,7 +827,7 @@ static aiednn_status_t create(aiednn_primitive_t *primitive, const rt_prob *p0) 
             const size_t l = strlen(prim->info);
             snprintf(prim->info + l, sizeof prim->info - l, "+pt");
         }
-        if (porig->ndq || porig->dq_packed) {
+        if (!q8src && (porig->ndq || porig->dq_packed)) {
             phead_keep(prim, porig);
             const size_t l = strlen(prim->info);
             snprintf(prim->info + l, sizeof prim->info - l, "+dq");
@@ -816,7 +848,8 @@ static aiednn_status_t create(aiednn_primitive_t *primitive, const rt_prob *p0) 
     return aiednn_out_of_memory;
 }
 
-// int8 GEMM-family typing. no attr: s8|u8 x s8 -> s32 (or s8 for matmul), s32 bias; or all f32.
+// int8 GEMM-family typing: s8|u8 x s8 -> s32 (or s8 for matmul), s32 bias; or all f32
+// no attr: s8|u8 x s8 -> s32 (or s8 for matmul), s32 bias; or all f32.
 // with an attr (fused epilogue): s8|u8 x s8 -> s32|s8|u8|f32, bias s32|f32; or all f32.
 // attr == 2 (weight group scales): also s8|u8 x s8|u8|s4|u4 -> floating dst.
 static int gemm_types_ok(const aiednn_memory_desc_t *s, const aiednn_memory_desc_t *w, const aiednn_memory_desc_t *b,
@@ -1003,8 +1036,8 @@ static aiednn_status_t sdpa_create(aiednn_primitive_t *pr, const aiednn_memory_d
     REQUIRE(pr && md_ok(q) && md_ok(kk) && md_ok(v) && md_ok(d) && (!mask || md_ok(mask)), k,
             "null or malformed descriptor");
     REQUIRE(q->ndims == 4 && kk->ndims == 4 && v->ndims == 4 && d->ndims == 4, k, "Q, K, V, dst rank 4 [B,H,S,D]");
-    /* causal bit 0; AIEDNN_SDPA_QKV_BSHD / _DST_BSHD: those tensors are [B,S,H,D]; the checks below see
-     * [B,H,S,D] */
+    /* causal bit 0; AIEDNN_SDPA_QKV_BSHD / _DST_BSHD: those tensors are [B,S,H,D] (the head split /
+     * merge permutes folded in, --aiednn-fold-head-permute); the checks below see [B,H,S,D] */
     aiednn_memory_desc_t qc = *q, kc = *kk, vc = *v, dc = *d;
     const auto swap12 = [](aiednn_memory_desc_t *m) {
         const int64_t t = m->dims[1];
@@ -1069,6 +1102,11 @@ static aiednn_status_t sdpa_create(aiednn_primitive_t *pr, const aiednn_memory_d
     if (attr && !attr_only_src_dq(attr)) { // folded quantizing reorder: only the dst quantization
         const char *err = attach_attr(&p, attr, 1);
         REQUIRE(!err, k, err ? err : "");
+    }
+    if (attr) { /* AIEDNN_ATTR_TOLERANCE_INT8_ATTN: gemm+sdpa8 may serve s8 Q / K / V */
+        REQUIRE(!(attr->flags & ~(AIEDNN_ATTR_TOLERANCE_1CODE | AIEDNN_ATTR_TOLERANCE_INT8_ATTN)), k,
+                "attr flags: AIEDNN_ATTR_TOLERANCE_1CODE / _INT8_ATTN only");
+        p.attr_flags = attr->flags;
     }
     return create(pr, &p);
 }
@@ -1293,6 +1331,7 @@ extern "C" aiednn_status_t aiednn_pooling_forward_create_attr(aiednn_primitive_t
 #include "aiednn_rt_misc.h"       /* dropout, spatial transformer, CTC loss */
 #include "aiednn_rt_gemmx.h"      /* gemm+ composites: operators as GEMMs on the matmul dispatch */
 #include "aiednn_rt_linattn.h"    /* linear attention: Gated DeltaNet / KDA / GLA (ref: + gemm+linattn) */
+#include "aiednn_rt_sdpa8.h"      /* int8 attention: two int8 GEMMs per head (gemm+sdpa8) */
 #include "aiednn_rt_sdpa_bwd.h"   /* sdpa backward: ref: and gemm+sdpabwd */
 #include "aiednn_rt_sdpa_var.h"   /* variable-length / paged-cache sdpa: ref: and gemm+sdpavar */
 #include "aiednn_rt_mxq.h"        /* block-scale (MX) quantize / dequantize */
@@ -1529,8 +1568,8 @@ extern "C" aiednn_status_t aiednn_concat_create(aiednn_primitive_t *pr, int n, c
     return create(pr, &p);
 }
 
-/* int8 concat: 8-bit sources with their own (scale, zero point), an 8-bit dst with its own; a source already
- * in dst's quantization is a plain copy */
+/* int8 concat (oneDNN's int8_concat_fusion: dequantize each source -> concat -> quantize): 8-bit sources with their
+ * own (scale, zero point), an 8-bit dst with its own; a source already in dst's quantization is a plain copy */
 extern "C" aiednn_status_t aiednn_concat_create_q(aiednn_primitive_t *pr, int n, const aiednn_memory_desc_t *srcs,
                                                   const float *scales, const int32_t *zero_points, int axis,
                                                   const aiednn_memory_desc_t *d, float dst_scale,
@@ -1586,8 +1625,8 @@ extern "C" aiednn_status_t aiednn_reorder_create(aiednn_primitive_t *pr, const a
     return reorder_create_(pr, s, d, perm, scale, zero_point, nullptr);
 }
 
-/* reorder + post-ops: the reorder (dequantizing an integer src) into f32, then the attr's post-ops and dst
- * quantization (aiednn_rt_ptail.h) */
+/* reorder + post-ops (oneDNN's reorder + sum / binary, x8 reorder chains): the reorder (dequantizing an integer
+ * src by scale / zero_point) into f32, then the attr's post-ops and dst quantization (aiednn_rt_ptail.h) */
 extern "C" aiednn_status_t aiednn_reorder_create_attr(aiednn_primitive_t *pr, const aiednn_memory_desc_t *s,
                                                       const aiednn_memory_desc_t *d, const int *perm, float scale,
                                                       int32_t zero_point, const aiednn_attr_t *attr) {
@@ -1679,7 +1718,10 @@ extern "C" aiednn_status_t aiednn_memory_desc_init(aiednn_memory_desc_t *md, int
 
 static aiednn_status_t execute_args_body(aiednn_primitive_t primitive, int nargs, const aiednn_exec_arg_t *args);
 
-/* An execute under the "ref:" filter is a check: its time is kept out of aiednn_phase and aiednn_epilogue. */
+/* An execute under the "ref:" filter is a check (an app's VERIFY_GEMM rerun of a layer on the CPU): its
+ * epilogue / packing time is kept out of aiednn_phase, which otherwise reported the checks' ref: epilogues
+ * as the measured run's (yolov8n: "epilogue=222 ms" of which the AIE layers' own was a few ms), nor in
+ * aiednn_epilogue's counts. */
 extern "C" aiednn_status_t aiednn_primitive_execute_args(aiednn_primitive_t primitive, int nargs,
                                                          const aiednn_exec_arg_t *args) {
     const int check = g_filter && strcmp(g_filter, "ref:") == 0;
@@ -1693,8 +1735,13 @@ extern "C" aiednn_status_t aiednn_primitive_execute_args(aiednn_primitive_t prim
     return st;
 }
 
-/* Megakernel switches priced in (aiednn_prefer_fastest): the first execute that reloaded a core ELF also
- * runs the ref: candidate, timed, and keeps ref: when it beats the AIE run plus one switch back. */
+/* Megakernel switches priced in (aiednn_prefer_fastest). A library build keeps its modes in several core ELFs;
+ * an op whose mode is not in the resident one reloads an ELF first (aiednn_megakernel_need), and the next op
+ * needing the old one reloads it back: ~0.6 ms each on AIE-ML (VEK280), 20-27 ms on VEK385 (phase2's graph
+ * runs: tiny_llama's nine lut: calls 206 ms). Dispatch cannot see that -- which ELF is resident depends on
+ * the op before. So the first execute that switched also runs the primitive's ref: candidate, timed, and
+ * keeps ref: when it beats the AIE run (which included the switch in) plus one switch back. Only switching
+ * executes pay the trial; outputs are valid either way (ref: wrote dst last). */
 extern "C" long aiednn_megakernel_switches __attribute__((weak));
 #if defined(AIE_GEN) && AIE_GEN >= 5
 #define RT_MK_SWITCH_MS 25.0
@@ -1704,7 +1751,7 @@ extern "C" long aiednn_megakernel_switches __attribute__((weak));
 static long g_sw_trials, g_sw_to_ref;
 
 static long rt_mk_switches(void) {
-    static long fake; /* tests: AIEDNN_TEST_MK_SWITCH makes every execute look like a switch */
+    static long fake; /* tests: AIEDNN_TEST_MK_SWITCH makes every execute look like a switch (no ELFs off the board) */
     if (rt_env_on("AIEDNN_TEST_MK_SWITCH"))
         return ++fake;
     return &aiednn_megakernel_switches ? aiednn_megakernel_switches : 0;
@@ -1912,8 +1959,10 @@ extern "C" void aiednn_kernel_stats(void) __attribute__((weak)); // a kernel sou
 
 extern "C" void aiednn_kernel_stats_reset(void) __attribute__((weak)); // a kernel source's own counters
 
-/* Op boundaries (the emitted model app calls aiednn_op_begin(i) before op i executes): with several
- * megakernels per model, aiednn_megakernel_select reloads the cores' ELF when a segment starts. */
+/* Op boundaries (the emitted model app calls aiednn_op_begin(i) before op i executes). With several
+ * megakernels per model (dnn_build modes="auto" splitting the ops into segments whose modes fit a
+ * core's program memory), the generated implementation list carries op -> megakernel and the
+ * persistent runtime's aiednn_megakernel_select reloads the cores' ELF when a segment starts. */
 extern "C" int aiednn_cur_op = -1;
 extern "C" const int aiednn_mk_nops __attribute__((weak));
 extern "C" const unsigned char aiednn_mk_of_op[] __attribute__((weak));

@@ -5,8 +5,15 @@
  * aiednn_rt_eltblk.h -- eltblk:<aie eltwise block>: binary on two 8-bit tensors
  * on the GEMM ELF's eltwise mode (aie_modes_pool.h, opcode 0xE1).
  *
- * The core returns the exact int32 a op b for add / sub / mul / max / min, and a - b for the
- * comparisons; the sign of a zero product comes from the packed operands. div / pow stay on ref:.
+ * The core returns the exact int32 a op b for add / sub / mul / max / min, and
+ * a - b for the comparisons (eq .. le: its sign decides). ref:binary computes
+ * the same small integers in double, so storing them through rt_st gives ref's
+ * result bit for bit, for any destination type -- except the sign of a zero
+ * product (0 * -3 is -0.0 in double, visible in an f32 dst), which the finish
+ * takes from the packed operands. div and pow are not exact from
+ * one integer and stay on ref:. Either operand may broadcast; the host packs
+ * the broadcast values per element. A problem lut: takes (one operand
+ * broadcast along at most one axis) is left to it.
  *
  * Kernel block: items s8 [NI][4096] = a at bytes [0, 1024), b at [2048, 3072),
  * geom s32 [3] = {op, signed bits, n}, out s32 [NI][1024].

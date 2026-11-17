@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * aiednn runtime internals, shared by aiednn_rt.cc and the implementation
- * headers it includes. One translation unit: everything here is static.
- * Spliced into the aiehlc entry, so never write the aiehlc kernel keyword or the launch chevrons.
+ * headers it includes (aiednn_rt_gemm.h, aiednn_rt_ops.h). One translation
+ * unit: everything here is static. Spliced into the aiehlc entry by the
+ * builder, so never write the aiehlc kernel keyword or the launch chevrons.
  ******************************************************************************/
 #ifndef AIEDNN_RT_INTERNAL_H
 #define AIEDNN_RT_INTERNAL_H
@@ -35,7 +36,8 @@ typedef struct {
     aiednn_memory_desc_t md[RT_MAX_MD];
     aiednn_conv_params_t conv;
     aiednn_pool_params_t pool;
-    /* 3-D convolution / pooling: the depth dim's {stride, pad_l, pad_r, dilate, kernel}; 0 for 1-D / 2-D */
+    /* 3-D convolution / pooling: the depth dim's {stride, pad_l, pad_r, dilate, kernel}; conv / pool
+     * above carry H and W (aiednn_rt_nd.h). Unused (0) for 1-D / 2-D. */
     int64_t dpth[5];
     /* training (aiednn_rt_bwd.h): RT_FWD_INF / RT_FWD_TRAIN / RT_BWD_DATA / RT_BWD_WEIGHTS / RT_BWD,
      * and the N-D geometry of a training convolution / pooling */
@@ -76,11 +78,12 @@ typedef struct {
 typedef struct {
     const struct rt_impl *inner;  /* composite: the implementation it runs on */
     const aiednn_impl_t *blk;     /* blocked: the AIE GEMM block kernel */
-    const struct rt_impl *inner2; /* a composite over a composite: the inner's inner, for impl_info */
+    const struct rt_impl *inner2; /* a composite over a composite (zp+ over im2col): the inner's inner, for impl_info */
 } rt_bind;
 
 #define RT_TUNE_MAX 8 /* implementations an autotuned primitive times (aiednn_rt_tune.h) */
-/* aiednn_set_preference: 0 = AIE whenever an AIE implementation can compute the problem; 1 = fastest */
+/* aiednn_set_preference: 0 = AIE whenever an AIE implementation can compute the problem; 1 = fastest
+ * (acceptors may decline a shape where ref: was measured faster: rt_cost_refusals) */
 static int g_prefer;
 static inline int rt_cost_refusals(void) { return g_prefer == 1; }
 
@@ -100,7 +103,8 @@ struct aiednn_primitive {
     /* aiednn_primitive_get_workspace_size: measured for ws_impl (a sizing run), valid while it is chosen */
     const struct rt_impl *ws_impl;
     size_t ws_size;
-    /* zp+ (aiednn_rt_gemmx.h): the per-output-channel weight sums of constant weights, cached at wsum_key */
+    /* zp+ (aiednn_rt_gemmx.h): the per-output-channel weight sums of constant weights (const_w), computed
+     * once for the weights at wsum_key -- O x K adds per execute otherwise (resnet18: ~11 M on the A72) */
     int64_t *wsum;
     const void *wsum_key;
     int64_t wsum_n;
@@ -112,7 +116,8 @@ struct aiednn_primitive {
     /* a requant_eltwise tail: its 256-entry table (the eltwise-attr ref on every code), built on first use */
     int qlut_ok;
     float qlut[256];
-    /* a requant_binary tail with 8-bit src1 / dst: dst = qlut2[code][src1 code], 64 KB, built on first use */
+    /* a requant_binary tail with 8-bit src1 / dst: dst = qlut2[code][src1 code], 64 KB, the ref chain on every
+     * pair (built on first use; NULL until then, freed by destroy) */
     uint8_t *qlut2;
     /* memory formats (aiednn_rt_layout.h): slots whose nhwc buffer execute converts around the dense run
      * (wrap), with their scratch; freed by destroy */
@@ -138,8 +143,9 @@ struct aiednn_primitive {
 
 static int g_exec_const_w; /* the executing primitive's WEIGHTS are a model constant */
 
-/* a requant_* post-op tail fused into the GEMM half's own output write; an impl that writes every dst
- * element through pipe_work / dw_put_item sets claim. dst is the int8 intermediate and the final result. */
+/* a requant_* post-op tail fused into the GEMM half's own output write (aiednn_primitive_execute_args sets it up;
+ * an impl that writes EVERY dst element through pipe_work / dw_put_item sets claim, the others leave the tail to
+ * a separate in-place pass). dst is the int8 intermediate and the final 8-bit result at once. */
 typedef struct {
     int on, claim;
     uint8_t *base;       /* dst */
@@ -174,8 +180,9 @@ enum {
     RT_CAP_TRAIN = 2,
     RT_CAP_ZP = 4,
     RT_CAP_WQ = 8 /* weight group scales */,
-    RT_CAP_NHWC = 16 /* reads / writes nhwc operands itself (or converts internally) */
-};                   /* rt_impl.caps: problem classes an impl takes */
+    RT_CAP_NHWC = 16 /* reads / writes nhwc operands itself (or converts internally) */,
+    RT_CAP_Q8SRC = 32 /* reads 8-bit sources with their attr scales (no dequantized copies) */
+};                    /* rt_impl.caps: problem classes an impl takes */
 typedef struct rt_impl {
     char name[64];
     aiednn_primitive_kind_t kind;
@@ -329,7 +336,13 @@ static double rt_ld(aiednn_data_type_t dt, const void *p, int64_t i) {
     }
 }
 
+/* integer destinations: round to nearest even, then saturate */
 /* host-side phase timers of the AIE composites (aiednn_print_stats: aiednn_phase line) */
+/* RT_PH_CUNPACK: an n-tile / MMT / depthwise / items launch's result tiles copied out of the device
+ * buffer into [M][N] / item order (the int8 scatter to channel planes and host epilogues stay RT_PH_EPI) */
+/* RT_PH_FMT: nhwc <-> dense conversions of a wrapped primitive (aiednn_rt_layout.h) */
+/* RT_PH_ZPPAD / ZPWSUM: zp+'s x - shift pre-pad copy and its weight sums; RT_PH_QTAIL: a requant_* post-op's
+ * tail on the int8 tile (aiednn_post_op_requant_binary / _eltwise) */
 enum {
     RT_PH_IM2COL,
     RT_PH_APACK,
@@ -454,10 +467,13 @@ static int64_t bcast_off(const aiednn_memory_desc_t *src, const aiednn_memory_de
     return off;
 }
 
+/* grow-only scratch buffer (process lifetime) */
 /* ── execute-time memory ─────────────────────────────────────────────────────
- * Temporaries come from rt_alloc / rt_calloc / scratch: the heap, or the caller's workspace as a bump
- * arena when g_ws.base is set; with g_ws.sizing the heap serves while g_ws.high records the need.
- * Caches that outlive an execute stay on the heap. */
+ * An execute's temporaries come from rt_alloc / rt_calloc / scratch: the heap normally, the caller's
+ * workspace (aiednn_primitive_execute_async) when g_ws.base is set -- a bump arena, so that execute
+ * makes no heap allocation -- and with g_ws.sizing the heap serves while g_ws.high records what an
+ * arena would have needed (aiednn_primitive_get_workspace_size). Caches that outlive an execute
+ * (packed constant weights, step tables, the tune table) stay on the heap. */
 #define RT_WS_ALIGN 64
 typedef struct {
     char *base;
@@ -559,9 +575,12 @@ static void gemm_prob(rt_prob *g, int64_t M, int64_t N, int64_t K, aiednn_data_t
 }
 
 /* ── the fused epilogue of the GEMM family ───────────────────────────────────
- * Every GEMM-family implementation, AIE and ref: alike, ends in this. acc: the exact accumulator of dst
- * element di, whose output channel is ch. */
-/* a binary post-op operand: an s8 / u8 src1 with alpha > 0 is quantized, real = (code - beta) * alpha */
+ * Every implementation of convolution / deconvolution / matmul / inner product --
+ * AIE composites and ref: alike -- ends in this, so an AIE result and the ref:
+ * result agree bit for bit whenever the accumulators do. acc: the exact
+ * accumulator of dst element di, whose output channel is ch. */
+/* a binary post-op operand: an s8 / u8 src1 with alpha > 0 is quantized, real = (code - beta) * alpha
+ * (aiednn.h aiednn_post_op_t); otherwise the stored value */
 static inline double rt_po_src1(aiednn_data_type_t dt, const void *src, int64_t i, double alpha, double beta) {
     const double v = rt_ld(dt, src, i);
     return (dt == aiednn_s8 || dt == aiednn_u8) && alpha > 0 ? (v - beta) * alpha : v;
@@ -592,7 +611,10 @@ static void rt_epilogue(const rt_prob *p, void *const *ptr, int64_t di, int64_t 
     rt_st(d->data_type, ptr[2], di, v);
 }
 
-/* rt_epilogue with per-call lookups resolved once; same double operations and order, bit for bit. */
+/* rt_epilogue with everything per-call resolved once (composites call it per
+ * output element): bias / post-op source slots found, and a source whose shape is
+ * dst's indexes with di directly instead of a per-dimension div/mod. The double
+ * operations and their order are rt_epilogue's, so the two agree bit for bit. */
 typedef struct {
     const rt_prob *p;
     void *const *ptr;
@@ -639,13 +661,18 @@ static int same_dims(const aiednn_memory_desc_t *a, const aiednn_memory_desc_t *
 }
 
 /* ── fixed-point requantization ────────────────────────────────────────────
- * For an int8 / uint8 destination with output scales, bias none or per channel and at most one ReLU /
- * clip post-op:
+ * For an int8 / uint8 destination with output scales, bias none or per channel and at
+ * most one post-op that is ReLU (alpha 0) or clip, the epilogue is integer:
  *   q = clamp(((int64)acc * M[ch] + B[ch]) >> sh[ch] + zp, lo, hi)
- * with M * 2^-sh = scales[ch] / dst_scale (M in [2^30, 2^31)), B = rint(bias / dst_scale * 2^sh) +
- * 2^(sh-1). This is the definition of the result: ref: and the AIE core both compute it. A fused s8 / u8
- * residual adds (r - beta) * R[ch], R = rint(alpha / dst_scale * 2^sh). Do NOT round the bias to
- * accumulator units: that is off by up to m/2 codes per output. */
+ * with M * 2^-sh = scales[ch] / dst_scale (M in [2^30, 2^31)), B = rint(bias / dst_scale *
+ * 2^sh) + 2^(sh-1) (bias at full precision plus the rounding half) and lo / hi the dst range
+ * intersected with the activation's quantized bounds. It is the DEFINITION of the result for
+ * these primitives -- ref: and the AIE core both compute it, so the on-device AIE-vs-ref check
+ * stays bit-exact. Within one code of the double formula. A fused residual add whose src1 is
+ * s8 / u8 (dst's shape, scale alpha, zero point beta) adds (r - beta) * R[ch] to the sum,
+ * R = rint(alpha / dst_scale * 2^sh); the activation clamp then applies to acc + bias + residual. Do NOT round the bias
+ * to accumulator units (rint(bias / scales)): that is off by up to m/2 codes per output, and the flips compound --
+ * mobilenet_v3_small int8 went from rel 2e-7 to 1.8e-1. */
 static int rt_fx_mult(double m, int32_t *M, int8_t *sh) {
     if (m != m || m < 0)
         return 0;
@@ -658,7 +685,9 @@ static int rt_fx_mult(double m, int32_t *M, int8_t *sh) {
     }
     const int s = 31 - e;
     if (m == 0 || s > 62) {
-        /* a dead channel (zero weight scale) or m < 2^-31: the output is the rounded bias (+ zp), M = 0 */
+        /* a dead channel (zero weight scale) or m < 2^-31: |acc * m| < 1 for every int32 acc, so the
+         * output is the rounded bias (+ zp). M = 0 says that exactly; before, one such channel sent
+         * a whole conv to the host epilogue (resnet18's stem: 802,816 outputs on the A72) */
         *M = 0;
         *sh = 31;
         return 1;
@@ -680,7 +709,9 @@ static inline int rt_fx_cap(double x, double lim) {
     return s > 126 ? 127 : s < -126 ? -127 : (int)s;
 }
 
-/* q = clamp((acc * M + B) >> sh + zp): B carries the bias at full precision and the rounding half */
+/* q = clamp((acc * M + B) >> sh + zp): B carries the bias at full precision and the rounding
+ * half, so the bias is not rounded to accumulator units (that cost +-m/2 codes when the
+ * accumulator step m = osc/dst_scale is coarse). */
 static inline int32_t rt_fx_q(int64_t acc, int64_t B, int32_t M, int8_t sh, int32_t zp, int32_t lo, int32_t hi) {
     int64_t q = ((acc * (int64_t)M + B) >> sh) + zp;
     return (int32_t)(q < lo ? lo : q > hi ? hi : q);
@@ -709,7 +740,9 @@ static void rt_fx_init(rt_epi *e, const rt_prob *p, int64_t C) {
     }
     double plo = -1e300, phi = 1e300; /* activation bounds in the real (pre-requant) domain */
     /* any run of ReLU (alpha 0) / clip is one clamp: clamp(clamp(v, a1, b1), a2, b2) = clamp(v, lo', hi') with
-     * lo' = clamp(a1, a2, b2), hi' = clamp(b1, a2, b2) */
+     * lo' = clamp(a1, a2, b2), hi' = clamp(b1, a2, b2) -- the same function. A fusion that keeps a folded
+     * requantize's saturation as a clip before the activation (graph fusion level 2: clip, clip(0, 6)) used to
+     * send every such conv / depthwise to the double epilogue on the A72 (mobilenet_v2: 318 ms) */
     for (; k < e->npo && e->po[k].kind == aiednn_post_op_eltwise; k++) {
         double a, b;
         if (e->po[k].alg == aiednn_eltwise_relu && e->po[k].a == 0)
@@ -732,8 +765,10 @@ static void rt_fx_init(rt_epi *e, const rt_prob *p, int64_t C) {
     int64_t *B = (int64_t *)buf, *RM = B + C;
     int32_t *M = (int32_t *)(RM + C);
     int8_t *SH = (int8_t *)(M + C);
-    /* shifts: the full-precision one per channel, lowered where the int64 sums would overflow and to within
-     * 14 of the smallest live one (the core's vector requant); at most RT_FX_MAX_DROP. */
+    /* shifts: the full-precision one per channel (rt_fx_mult), then lowered where the int64 sums would overflow
+     * (a bias or residual scale large against a tiny accumulator step: the shift is 40-52 there) and to within
+     * 14 of the smallest live one (the core's vector requant). Lowering a shift by d keeps 31 - d bits of M;
+     * at most RT_FX_MAX_DROP. resnet50: 10 of 53 convs used to fall back to the double epilogue on the host. */
     int8_t shlo = 127;
     for (int64_t ch = 0; ch < C; ch++) {
         if (!rt_fx_mult((double)e->osc[e->nosc == 1 ? 0 : ch] / e->dscale, &M[ch], &SH[ch]))
@@ -913,10 +948,22 @@ static inline void rt_epi_put(const rt_epi *e, int64_t di, int64_t ch, double ac
     rt_st(e->d->data_type, e->dst, di, v);
 }
 
-/* n outputs: dst[di0 + i] from acc[i * acc_stride], channel ch0 (+ i if ch_step). Same double operations
- * as rt_epilogue with lookups hoisted: bit-identical (AIEDNN_EPI_SLOW checks). */
+/* n outputs: dst[di0 + i] from acc[i * acc_stride], channel ch0 (+ i if ch_step).
+ * The fast loop performs rt_epilogue's double operations in the same order (scale,
+ * bias, relu / clip, requant, round-to-nearest-even + saturate), only with the
+ * per-call and per-channel lookups hoisted: bit-identical (AIEDNN_EPI_SLOW checks). */
 static void rt_epi_row(const rt_epi *e, int64_t di0, int64_t ch0, int ch_step, const int32_t *acc, int64_t acc_stride,
                        int64_t n) {
+    if (e->fx && !e->fx_r && ch_step && acc_stride == 1) { /* a matmul row: rt_fx_q per channel, nothing else */
+        const int64_t *B = e->fx_b + ch0;
+        const int32_t *M = e->fx_m + ch0;
+        const int8_t *sh = e->fx_sh + ch0;
+        const int32_t zp = (int32_t)e->dzp, lo = e->fx_lo, hi = e->fx_hi;
+        uint8_t *o = (uint8_t *)e->dst + di0; /* s8 / u8 codes: the same byte */
+        for (int64_t i = 0; i < n; i++)
+            o[i] = (uint8_t)rt_fx_q((int64_t)acc[i], B[i], M[i], sh[i], zp, lo, hi);
+        return;
+    }
     if (e->fx) {
         for (int64_t i = 0; i < n; i++)
             rt_epi_put(e, di0 + i, ch0 + (ch_step ? i : 0), (double)acc[i * acc_stride]);
@@ -935,7 +982,8 @@ static void rt_epi_row(const rt_epi *e, int64_t di0, int64_t ch0, int ch_step, c
         return;
     }
 #if !defined(AIEDNN_EPI_SLOW)
-    /* an int8 linear layer into f32: per-channel scales, an f32 bias or none, no post-ops */
+    /* an int8 linear layer into f32 (every int8 transformer projection): per-channel scales, an f32 bias or
+     * none, no post-ops -- the generic loop's double operations without its per-element dispatch */
     if (e->fast && ch_step && acc_stride == 1 && e->nosc > 1 && e->npo == 0 && !e->requant &&
         e->d->data_type == aiednn_f32 && (!e->bias_mode || (e->bias_mode == 1 && e->bmd->data_type == aiednn_f32))) {
         const float *osc = e->osc + ch0, *bs = e->bias_mode ? (const float *)e->bias + ch0 : nullptr;
@@ -948,7 +996,9 @@ static void rt_epi_row(const rt_epi *e, int64_t di0, int64_t ch0, int ch_step, c
                 o[i] = (float)((double)acc[i] * (double)osc[i]);
         return;
     }
-    /* the same with one residual add of a tensor shaped like dst: f32, or s8 / u8 dequantized (rt_po_src1) */
+    /* the same with one residual add of a tensor shaped like dst (o / down projections + the skip): f32, or
+     * s8 / u8 dequantized by the post-op's scale and zero point (rt_po_src1; the int8 skips of
+     * --aiednn-quantize-residual) */
     if (e->fast && ch_step && acc_stride == 1 && e->nosc > 1 && e->npo == 1 && !e->requant &&
         e->d->data_type == aiednn_f32 && (!e->bias_mode || (e->bias_mode == 1 && e->bmd->data_type == aiednn_f32)) &&
         e->po[0].kind == aiednn_post_op_binary && e->po[0].alg == aiednn_binary_add && e->po[0].same &&
@@ -968,7 +1018,8 @@ static void rt_epi_row(const rt_epi *e, int64_t di0, int64_t ch0, int ch_step, c
         }
         return;
     }
-    /* the two hot row shapes of an MLP, channel per element, per-channel scales and f32 bias */
+    /* the two hot row shapes of a transformer-style MLP (convnext), channel per element, per-channel
+     * scales and f32 bias: the same double operations as below, no per-element dispatch */
     if (e->fast && ch_step && acc_stride == 1 && e->nosc > 1 && e->npo == 1 &&
         (!e->bias_mode || e->bmd->data_type == aiednn_f32)) {
         const float *osc = e->osc + ch0, *bs = e->bias_mode ? (const float *)e->bias + ch0 : nullptr;
@@ -1030,6 +1081,35 @@ static void rt_epi_row(const rt_epi *e, int64_t di0, int64_t ch0, int ch_step, c
                     y *= s1;
                 if (has_b)
                     y += b1;
+                double d = (y - ya) * ih;
+                d = d < -1.0 ? -1.0 : d > ncl ? ncl : d;
+                int q;
+                if (d != d) {
+                    q = rt_actq_direct(g->kind, g->a, y, g->ds, g->zp, g->lo, g->hi);
+                } else {
+                    const rt_actq_cell *c = &cells[1 + (int)d];
+                    q = fabs(y - c->t) <= c->w ? rt_actq_direct(g->kind, g->a, y, g->ds, g->zp, g->lo, g->hi)
+                                               : (y >= c->t ? c->c1 : c->c0);
+                }
+                o[i] = (uint8_t)q;
+            }
+            return;
+        }
+        if (e->actq && ch_step && acc_stride == 1 && (!e->bias_mode || e->bmd->data_type == aiednn_f32)) {
+            /* a matmul row into GELU / swish -> s8 / u8: rt_actq_code inlined, scales and f32 bias by channel */
+            const rt_actq *g = e->actq;
+            const rt_actq_cell *cells = g->cell;
+            const double ya = g->ya, ih = g->inv_h, ncl = (double)g->ncell;
+            const float *osc = e->nosc ? e->osc + (e->nosc == 1 ? 0 : ch0) : nullptr;
+            const int64_t ost = e->nosc > 1 ? 1 : 0;
+            const float *bs = e->bias_mode ? (const float *)e->bias + ch0 : nullptr;
+            uint8_t *o = (uint8_t *)e->dst + di0;
+            for (int64_t i = 0; i < n; i++) {
+                double y = (double)acc[i];
+                if (osc)
+                    y *= (double)osc[i * ost];
+                if (bs)
+                    y += (double)bs[i];
                 double d = (y - ya) * ih;
                 d = d < -1.0 ? -1.0 : d > ncl ? ncl : d;
                 int q;

@@ -1,10 +1,13 @@
 /* aiednn_rt_layout.h -- memory formats (aiednn_format_t).
  *
  * An nhwc descriptor keeps its logical [N, C, H, W] dims; its bytes are those of a dense [N, H, W, C].
- * create() resolves nhwc operands as:
- *   canon  -- axis-order-independent kinds: nhwc descriptors become dense, axis parameters follow.
- *   native -- the implementation reads / writes nhwc itself (RT_CAP_NHWC): prim->prob keeps the formats.
- *   wrap   -- anything else runs on dense copies converted at execute (prim->fmt_mask).
+ * create() resolves a problem with nhwc operands one of three ways:
+ *   canon  -- kinds whose result does not depend on the axis order (eltwise, binary, ...): every nhwc
+ *             descriptor becomes the dense descriptor of its bytes, axis parameters follow; zero cost.
+ *   native -- the chosen implementation reads / writes nhwc itself (rt_impl.caps & RT_CAP_NHWC and its
+ *             acceptor said so for this problem): prim->prob keeps the formats.
+ *   wrap   -- anything else: the implementation runs on dense copies; execute converts the nhwc inputs in
+ *             and the nhwc outputs back (prim->fmt_mask). Correct everywhere, never faster than dense.
  * Included at the end of aiednn_rt.cc (needs rt_tr8x8 from aiednn_rt_gemm.h). */
 
 static const int RT_NHWC_PHYS[4] = {0, 2, 3, 1}; /* physical axis j holds logical axis RT_NHWC_PHYS[j] */
@@ -26,7 +29,8 @@ static void md_to_phys(aiednn_memory_desc_t *m, int force = 0) {
     m->format = aiednn_format_dense;
 }
 
-/* results independent of the axis order once the axis parameter follows (not dropout: element-order mask) */
+/* results independent of the axis order once the axis parameter follows (dropout is not: its mask is drawn
+ * in element order, so it would differ from the dense run) */
 static int rt_fmt_equivariant(aiednn_primitive_kind_t k) {
     return k == aiednn_eltwise || k == aiednn_binary || k == aiednn_prelu || k == aiednn_sum || k == aiednn_concat ||
            k == aiednn_softmax || k == aiednn_shuffle || k == aiednn_reduction || k == aiednn_reorder ||
@@ -187,7 +191,7 @@ static int rt_fmt_rerun_dense(const rt_impl *self, aiednn_primitive *prim, void 
     return rc;
 }
 
-// ── nhwc:pooling -- 2-D pooling on nhwc src / dst ─────────
+// ── nhwc:pooling -- 2-D pooling on nhwc src / dst, every channel of a pixel in one contiguous pass ─────────
 
 static int acc_nhwc_pool(const rt_impl *self, const rt_prob *p, rt_bind *bind, char *why, int cap) {
     (void)self, (void)bind;
@@ -196,7 +200,8 @@ static int acc_nhwc_pool(const rt_impl *self, const rt_prob *p, rt_bind *bind, c
         snprintf(why, cap, "nhwc src and dst, inference, no attr");
         return 0;
     }
-    /* 8-bit sources are exact on every dense path; floats keep the dense AIE path (wrap). */
+    /* 8-bit sources: every dense path (poolblk:, ref:) is exact, so is this. A float window sum differs in the
+     * last ulp between fpool:'s float and ref:'s double: floats keep the dense AIE path (wrap). */
     if (s->data_type != aiednn_s8 && s->data_type != aiednn_u8) {
         snprintf(why, cap, "s8 / u8 source (f32: fpool: through the wrap)");
         return 0;
@@ -204,7 +209,8 @@ static int acc_nhwc_pool(const rt_impl *self, const rt_prob *p, rt_bind *bind, c
     return 1;
 }
 
-/* the window's taps in ref:pooling's order (kh, kw); max of 8-bit codes as integers, else in double as ref: */
+/* the window's taps in ref:pooling's order (kh, kw), each a contiguous run of C values; max of 8-bit codes as
+ * integers, everything else in double as ref: does -- bit-identical to it */
 static int run_nhwc_pool(const rt_impl *self, aiednn_primitive *prim, void *const *ptr) {
     (void)self;
     const rt_prob *p = &prim->prob;

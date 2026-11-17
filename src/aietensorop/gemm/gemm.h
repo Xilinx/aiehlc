@@ -5,9 +5,15 @@
  * gemm -- one block of the aiednn VEK280 int32 GEMM:
  * C[M][N] (int32) = A[M][K] (int8) * B[N][K]^T (int8), exact accumulators.
  *
- * The aiehlc program is all-int8 (one element type per window): its C is
- * 4 * GEMM_N bytes wide -- the bytes of the int32 result -- so B has that many
- * rows, each core column's first quarter real. M/N/K below are what aiehlc sees.
+ * A fixed block: aiednn's blocked matmul and im2col convolution tile any
+ * shape onto it (zero padding, K summed on the host in int32), which is what
+ * lets one aiehlc kernel serve every conv and the fc of ResNet-18.
+ *
+ * The aiehlc program itself is all-int8 (the kernel codegen gives every
+ * window ONE element type, kernelElementType): its C is GEMM_NB = 4 * GEMM_N
+ * bytes wide -- the bytes of the int32 [GEMM_M][GEMM_N] result -- so its B has
+ * GEMM_NB rows, of which each core column's first quarter is real (see
+ * gemm_uk.cc). M/N/K below are what aiehlc sees.
  ******************************************************************************/
 #ifndef AIETENSOROP_GEMM_H
 #define AIETENSOROP_GEMM_H
@@ -34,7 +40,8 @@
 #error                                                                                                                 \
     "gemm_uk: HW_COLS must be 4 -- B rows N = 128 * HW_COLS must equal K = 512 (gemmnonsquareb), and a core row's 32 A rows hold HW_COLS 8-row items"
 #endif
-/* the partition: core rows 3 .. 2 + HW_ROWS (VEK280), enough NoC shims for the output and input streams */
+/* the partition: core rows 3 .. 2 + HW_ROWS (VEK280), and enough NoC shims for HW_ROWS output
+ * channels + the input streams (4x4: cols 2, 3, 6; 6x4: also 7, 14) */
 #if defined(AIE_GEN) && AIE_GEN == 5 /* VEK385 / AIE2PS: a DMA shim in every column, cores from row 3 */
 #if HW_ROWS == 4
 #define GEMM_PARTITION {0, 3, 0, 6}
@@ -45,7 +52,7 @@
 #define GEMM_PARTITION {0, 8, 0, 7}
 #elif HW_ROWS == 6
 #define GEMM_PARTITION {0, 16, 0, 8}
-#elif HW_ROWS == 8 /* all 8 VEK280 core rows */
+#elif HW_ROWS == 8 /* all 8 VEK280 core rows: co-resident mode's two 4x4 stages (doc/design/aiednn.md §18) */
 #define GEMM_PARTITION {0, 16, 0, 10}
 #else
 #error "gemm_uk: add the partition for this mesh (endRow = 2 + HW_ROWS, skill nonsquaremesh)"

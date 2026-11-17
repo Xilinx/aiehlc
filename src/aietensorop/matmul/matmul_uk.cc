@@ -3,10 +3,22 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * matmul_uk -- the VEK280 int8 GEMM as an aiednn kernel (include/aie_user_kernel.h).
- * aie::mmul<8,8,8> core, 64x64 tiles, 4x4 cores, MMIO load/launch.
  *
- * The launch only accepts device.alloc() buffers, so the entry copies the
- * caller's tensors into three process-lifetime device buffers.
+ * The AIE side is vek280_mlir_aie/aiehlc_cmp/simplematmul_vek280.cc's `matmul`
+ * (aie::mmul<8,8,8> core, 64x64 tiles, 4x4 cores, MMIO load/launch -- no
+ * Gen5-only control-plane pragmas), unchanged. This file adds:
+ *
+ *   AIEK_ENTRY(matmul_s8)   three aiek_tensors in -> stage -> launch -> copy out
+ *   AIEK_SPEC(matmul_s8)    what ag.kernel_lib indexes and the aiednn
+ *                           implementation list is generated from
+ *   matmul_uk_ref.c         the x86 / CPU reference, bit-exact by construction
+ *
+ * Staging: the launch only accepts buffers from device.alloc() (registered in
+ * the runtime's alloc map, 64-byte line-rounded, synced for the CPU after the
+ * run -- VEK280 serves stale output lines otherwise), so the entry copies the
+ * caller's tensors into three process-lifetime device buffers. Every launch
+ * queues its arguments for clean+invalidate before any DMA starts, so
+ * rewriting the inputs between calls is safe.
  ******************************************************************************/
 #include "matmul.h"
 
@@ -137,8 +149,10 @@ __global__(matmul_policy) void matmul(aie::port<input_window_int8 *, RowBA> win_
 }
 
 // The mesh must be a function-local VarDecl from device.partition(...) in the
-// same function as the launch (aiehlc recovers it from there); partition init is
-// once per meshId.
+// SAME function as the launch (aiehlc recovers it from that), so it is
+// re-declared per call; partition init is once per meshId, and the buffers are
+// process-lifetime statics. VEK280: cores start at row 3, and only cols 2,3,6,7
+// of 0..7 reach DDR -- the same partition simplematmul_vek280.cc runs on.
 static int8_t *g_mm_a = nullptr, *g_mm_b = nullptr, *g_mm_c = nullptr;
 
 static int matmul_s8_run(const int8_t *a, const int8_t *b, int8_t *c) {

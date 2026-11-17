@@ -2,7 +2,15 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""The narrow floating types (bf16, f16, f8 e5m2 / e4m3) against PyTorch."""
+"""The narrow floating types (bf16, f16, f8 e5m2 / e4m3) against PyTorch.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_dtypes.py
+
+Conversions must match torch's bit for bit (reorder f32 <-> X, every special value); the
+primitives compute in double from the stored values and round once on store, so they are
+compared with torch run in float64 on the same stored inputs, then rounded to the dtype --
+equal up to one unit in the last place (double rounding through f32).
+"""
 
 from __future__ import annotations
 

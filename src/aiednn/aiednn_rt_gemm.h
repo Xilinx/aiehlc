@@ -103,7 +103,8 @@ static void *g_bp, *g_ap, *g_cb;
 static size_t g_bp_cap, g_ap_cap, g_cb_cap;
 
 // C[M][N] = A[M][K] * B[N][K]^T on the block kernel; returns AIEK status.
-/* packed [BN][BK] blocks of constant weights, keyed by B pointer + shape + block */
+/* packed [BN][BK] weight blocks of constant weights (aiednn_primitive_set_constant_weights),
+ * kept for the process: B pointer + shape + block -> blocks; a full table packs per call */
 typedef struct {
     const int8_t *b;
     int64_t n, k, bn, bk;
@@ -132,7 +133,8 @@ static int8_t *rt_bcache_add(const void *key, int64_t N, int64_t K, const aiednn
     return blocks;
 }
 
-/* zero-padded [BN][BK] blocks of B[N][K], block (nb, kb) at (nb * nkb + kb) * BN * BK; cached when *bkey* is set */
+/* every zero-padded [BN][BK] block of B[N][K], block (nb, kb) at (nb * nkb + kb) * BN * BK: from
+ * the constant-weight cache when *bkey* is set (packed on first use), else into scratch */
 static int8_t *b_blocks(const int8_t *B, int64_t N, int64_t K, const aiednn_impl_t *blk, const void *bkey) {
     const int64_t BK = blk->args[0].dims[1], BN = blk->args[1].dims[0];
     const int64_t nkb = (K + BK - 1) / BK, nnb = (N + BN - 1) / BN;
@@ -161,7 +163,9 @@ static int8_t *b_blocks(const int8_t *B, int64_t N, int64_t K, const aiednn_impl
     return bp;
 }
 
-/* chained K block (gemm_kc_s8s32: A, B, flags s32[1], C s32): accumulates on the core across launches */
+/* the chained K block (gemm_uk.cc gemm_kc_s8s32: A, B, flags s32[1], C s32): with it a K-split
+ * GEMM accumulates on the core across launches -- no host int32 sum, and the last block may
+ * requantize there (blocked_gemm_q) */
 static const aiednn_impl_t *g_kcblk;
 
 static int is_gemm_kc_block(const aiednn_impl_t *g) {
@@ -170,7 +174,8 @@ static int is_gemm_kc_block(const aiednn_impl_t *g) {
            g->args[2].dims[0] == 1 && g->args[3].data_type == aiednn_s32 && g->args[3].ndims == 2;
 }
 
-/* direct conv (aie_modes_conv.h): A is a raw input region per mesh row, plus geom int32 [16 * rows] */
+/* direct conv (aie_modes_conv.h): the chained / requantized blocks with A a raw input region per
+ * mesh row and an extra geom int32 [16 * rows] argument */
 static const aiednn_impl_t *g_ckcblk, *g_cqblk;
 static int is_conv_kc_block(const aiednn_impl_t *g) {
     return g->kind == aiednn_matmul && g->nargs == 5 && g->args[0].data_type == aiednn_s8 && g->args[0].ndims == 2 &&
@@ -203,9 +208,12 @@ static int8_t *a_blocks(const int8_t *A, int64_t m0, int64_t mn, int64_t K, int6
     return ap;
 }
 
-/* mem-tile B cache key for the next launch: (weights, n-block, k-block, shape) of a cached constant, else 0 */
+/* the mem tiles' B cache (gemm_uk.cc #pragma memtile_staging(weights)): the B block of the next
+ * launch, named by (weights, n-block, k-block, shape) when the weights are a cached constant, else
+ * 0. Consecutive launches with one key reuse the block on the array (absent on x86: no-op). */
 extern "C" void aiednn_gemm_weights_key(uint64_t key) __attribute__((weak));
-/* gemm_uk.cc's C launch buffer: the final launch of a block leaves C there (flags bit 2) */
+/* gemm_uk.cc's C launch buffer (board builds): the final launch of a block leaves C there
+ * (flags bit 2) and the runtime copies only the rows / columns it keeps */
 extern "C" const int32_t *aiednn_gemm_stage_c(void) __attribute__((weak));
 
 static inline void rt_wkey(const void *bkey, int64_t nb, int64_t kb, int64_t N, int64_t K) {
@@ -246,7 +254,9 @@ static int8_t *a_blocks_all(const int8_t *A, int64_t M, int64_t K, int64_t BM, i
     return ap;
 }
 
-/* GEMM through the chained block: n blocks outer, m blocks inner, K blocks back to back on the core */
+/* GEMM through the chained block: n blocks outer, m blocks inner (consecutive launches share a B
+ * block, which the mem tiles keep), the K blocks of one (m, n) block back to back on the core
+ * (the core keeps the partial sum, the last launch returns the whole-K int32 block) */
 static int blocked_gemm_kc(const rt_impl *self, const aiednn_impl_t *blk, int64_t M, int64_t N, int64_t K,
                            const int8_t *A, const int8_t *B, int32_t *C, const void *bkey) {
     const aiednn_impl_t *kc = g_kcblk;
@@ -293,7 +303,8 @@ static int blocked_gemm_kc(const rt_impl *self, const aiednn_impl_t *blk, int64_
 static int blocked_gemm_ntile(const rt_impl *self, const aiednn_impl_t *blk, int64_t M, int64_t N, int64_t K,
                               const int8_t *A, const int8_t *B, int32_t *C, const void *bkey);
 
-/* C[M][N] = A[M][K] * B[N][K]^T in [BM][BK] x [BN][BK] blocks. *bkey*: B's identity when constant, else NULL */
+/* C[M][N] = A[M][K] * B[N][K]^T in [BM][BK] x [BN][BK] blocks. *bkey*: B's identity when it
+ * is a constant (its packed blocks are cached under it), NULL to pack per call */
 static int blocked_gemm(const rt_impl *self, const aiednn_impl_t *blk, int64_t M, int64_t N, int64_t K, const int8_t *A,
                         const int8_t *B, int32_t *C, const void *bkey) {
     const int64_t BM = blk->args[0].dims[0], BK = blk->args[0].dims[1], BN = blk->args[1].dims[0];
@@ -392,7 +403,8 @@ static void mm_geometry(const rt_prob *p, mm_geo *g) {
     }
 }
 
-/* weights shared by every batch, src / dst not broadcast: the batch is more rows of one GEMM */
+/* weights shared by every batch (an nn.Linear on [B, S, D]) and src / dst not broadcast: the batch is just more
+ * rows of one GEMM ([B * M, K] x [K, N]; src and dst are contiguous), so its blocks fill instead of B small ones */
 static void mm_fold_batch(mm_geo *g) {
     if (g->batch <= 1)
         return;
@@ -409,7 +421,7 @@ static size_t g_bt_cap, g_c32_cap;
 
 // epilogue + store: c32 [M][N] of batch b into dst (channel = last dim)
 static void mm_epilogue(const rt_prob *p, const mm_geo *g, int64_t b, const int32_t *c32, void *const *ptr) {
-    rt_epi E_; // epilogue resolved once per call
+    rt_epi E_; // epilogue resolved once per call (bit-identical to rt_epilogue)
     rt_epi_init(&E_, p, ptr);
     const uint64_t t0 = rt_ticks();
     for (int64_t m = 0; m < g->M; m++) // one row of N channels at a time
@@ -449,7 +461,7 @@ static int run_blocked(const rt_impl *self, aiednn_primitive *prim, void *const 
 static int run_ref_matmul(const rt_impl *self, aiednn_primitive *prim, void *const *ptr) {
     (void)self;
     const rt_prob *p = &prim->prob;
-    rt_epi E_; // epilogue resolved once per call
+    rt_epi E_; // epilogue resolved once per call (bit-identical to rt_epilogue)
     rt_epi_init(&E_, p, ptr);
     mm_geo g;
     mm_geometry(p, &g);
@@ -546,11 +558,15 @@ static int run_ref_ip(const rt_impl *self, aiednn_primitive *prim, void *const *
 
 typedef struct {
     int64_t N, C, H, W, O, KH, KW, Ho, Wo, G, Cg, Og, s[2], pl[2], d[2];
-    /* images stacked along M: row m is pixel m % pstride of image m / pstride */
+    /* images stacked along the GEMM's M (1: one image per pipe call). With nimg > 1 the im2col pipes
+     * see M = nimg * Ho * Wo rows: row m is pixel m % (Ho*Wo) of image m / (Ho*Wo); sources and
+     * destinations step by a whole image (C*H*W in, O*Ho*Wo out) -- a batch fills the M blocks */
     int64_t nimg;
-    /* rows per image in the stacked M: Ho*Wo, or rounded up to 32 for direct conv; the rest is padding */
+    /* rows per image in that stacked M: Ho*Wo, or rounded up to 32 for direct conv (a mesh row's 32
+     * pixels then never straddle two images); rows Ho*Wo .. pstride-1 of an image are padding */
     int64_t pstride;
-    /* nhwc operands (groups == 1): src [n][H][W][C], dst and fused residual [n][Ho*Wo][O] */
+    /* nhwc operands (aiednn_rt_layout.h; im2col's native paths, groups == 1): src read as [n][H][W][C] (no
+     * hwc_transpose), dst and the fused residual written / read as [n][Ho*Wo][O] rows */
     int src_hwc, dst_hwc, res_hwc;
 } conv_geo;
 
@@ -598,11 +614,13 @@ static void conv_ow_range(int64_t off, int64_t s, int64_t W, int64_t Wo, int64_t
         *hi = Wo;
 }
 
-/* Integer convolution (s8/u8 x s8): one int32 accumulator row per output row; bit-identical to the
- * double loop. Serves depthwise and narrow grouped convs. */
+/* Integer convolution (s8/u8 x s8): one int32 accumulator row per output row,
+ * each tap a contiguous multiply-add the compiler vectorizes (NEON on the A72).
+ * The int32 sum is the exact value the double loop below forms, so the result
+ * is bit-identical; this is what serves depthwise and narrow grouped convs. */
 template <typename T>
 static int ref_conv_int(const rt_prob *p, const conv_geo *g, const T *src, const int8_t *wei, void *const *ptr) {
-    rt_epi E_; // epilogue resolved once per call
+    rt_epi E_; // epilogue resolved once per call (bit-identical to rt_epilogue)
     rt_epi_init(&E_, p, ptr);
     int32_t *row = (int32_t *)scratch(&g_crow, &g_crow_cap, (size_t)g->Wo * sizeof(int32_t));
     if (!row)
@@ -653,7 +671,7 @@ static int run_ref_conv(const rt_impl *self, aiednn_primitive *prim, void *const
         return run_bwd(p, ptr); /* training (aiednn_rt_bwd.h) */
     if (p->md[0].ndims == 5)
         return run_ref_conv3d(p, ptr, 0);
-    rt_epi E_; // epilogue resolved once per call
+    rt_epi E_; // epilogue resolved once per call (bit-identical to rt_epilogue)
     rt_epi_init(&E_, p, ptr);
     conv_geo g;
     conv_geometry(p, 0, &g);
@@ -698,7 +716,7 @@ static int run_ref_deconv(const rt_impl *self, aiednn_primitive *prim, void *con
         return run_bwd(p, ptr); /* training (aiednn_rt_bwd.h) */
     if (p->md[0].ndims == 5)
         return run_ref_conv3d(p, ptr, 1);
-    rt_epi E_; // epilogue resolved once per call
+    rt_epi E_; // epilogue resolved once per call (bit-identical to rt_epilogue)
     rt_epi_init(&E_, p, ptr);
     conv_geo g;
     conv_geometry(p, 1, &g);
@@ -739,7 +757,9 @@ static int run_ref_deconv(const rt_impl *self, aiednn_primitive *prim, void *con
 
 // ── im2col+<matmul>: convolution as one GEMM per (image, group) ────────────
 
-/* grouped convs with fewer output channels per group than this go to ref: (one launch per group) */
+/* A grouped conv with fewer output channels per group than this goes to ref:
+ * -- each group is its own GEMM launch with N = channels per group, so a
+ * depthwise conv would launch once per channel on a block that is 1/128 used. */
 #define RT_MIN_GROUP_N 8
 
 static int conv_int8_problem(const rt_prob *p) { return mm_int8_problem(p); }
@@ -757,7 +777,8 @@ static int acc_gemm_composite(const rt_prob *g, rt_bind *bind, char *why, int ca
     return 1;
 }
 
-/* nhwc on im2col's native paths: one group, binary post-op sources laid out like dst */
+/* nhwc on im2col's native paths: one group (a group's channels are not contiguous in a pixel), and binary
+ * post-op sources laid out like dst (the epilogue indexes them with dst's element index) */
 static int conv_fmt_ok(const rt_prob *p, const conv_geo *c, char *why, int cap, int any_groups = 0) {
     const aiednn_memory_desc_t *d = &p->md[2];
     if (c->G != 1 && !any_groups) {
@@ -828,12 +849,15 @@ static int is_gemm_q_block(const aiednn_impl_t *g) {
 static void *g_qa, *g_qb, *g_qc, *g_qp;
 static size_t g_qa_cap, g_qb_cap, g_qc_cap, g_qp_cap;
 
-/* C8[M][N] = requant(A[M][K] * B[N][K]^T) for channels ch0 .. ch0+N of E, requantized on the core
- * (0xF1). K > BK: the K blocks before the last accumulate on the core. *bkey*: B's identity when constant */
+/* C8[M][N] = requant(A[M][K] * B[N][K]^T) for output channels ch0 .. ch0+N of E: the core
+ * requantizes (0xF1). K <= BK: one launch per block; K > BK (with the chained block): the K
+ * blocks before the last accumulate on the core (gemm_kc, flag "more"), the last continues and
+ * requantizes. *bkey*: B's identity when constant (packed blocks cached) */
 static void *g_qr;
 static size_t g_qr_cap;
 
-/* *res*: fused residual (when E->fx_r), element (m, n) at res[n * res_cs + m] */
+/* *res*: the fused residual of this (image, group) when E->fx_r is set, element (m, n) at
+ * res[n * res_cs + m] (a conv's dst layout: channel planes of M pixels) */
 static int blocked_gemm_q(const rt_impl *self, const rt_epi *E, int64_t ch0, int64_t M, int64_t N, int64_t K,
                           const int8_t *A, const int8_t *B, int8_t *C8, const void *bkey, const int8_t *res,
                           int64_t res_cs) {
@@ -917,8 +941,11 @@ static int blocked_gemm_q(const rt_impl *self, const rt_epi *E, int64_t ch0, int
     return AIEK_OK;
 }
 
-/* col [Ho*Wo][K] of one (image, group): row m = (oh, ow), column k = (ci, kh, kw), zero outside the
- * input. A 1x1 unpadded conv is a [C][HW] -> [HW][C] transpose in cache tiles. */
+/* col [Ho*Wo][K] of one (image, group), x = its first input channel plane: row m = (oh, ow),
+ * column k = (ci, kh, kw) (OIHW order), zero outside the input. A 1x1 unpadded conv is a
+ * (sub-sampled) [C][HW] -> [HW][C] transpose, done in cache tiles; otherwise one input row
+ * (ci, ih) is copied into the K-strided rows of an output row oh, with the bounds checks only
+ * on the border columns. (The per-byte, fully checked loop cost resnet18 132 ms on the A72.) */
 static void im2col_pack(const conv_geo *c, const int8_t *x, int8_t *col) {
     const int64_t K = c->Cg * c->KH * c->KW, M = c->Ho * c->Wo, HW = c->H * c->W;
     if (c->KH == 1 && c->KW == 1 && c->pl[0] == 0 && c->pl[1] == 0) {
@@ -969,7 +996,8 @@ static void im2col_pack(const conv_geo *c, const int8_t *x, int8_t *col) {
     }
 }
 
-/* weights w[o][ci][kh][kw] of one group -> wr[o][kh][kw][ci], cached by pointer for constant weights */
+/* K in (kh, kw, ci) order (NHWC-style): weights w[o][ci][kh][kw] of one group -> wr[o][kh][kw][ci],
+ * cached by pointer for constant weights (aiednn_primitive_set_constant_weights) */
 typedef struct {
     const int8_t *w;
     int64_t o, k;
@@ -999,7 +1027,9 @@ static const int8_t *w_hwc(const conv_geo *c, const int8_t *w) {
     return wr;
 }
 
-/* stem direct conv (Cg < 4): weights [O][KH][KW][Cgp], channels Cg..Cgp-1 zero; cached like w_hwc */
+/* the stem's direct conv (Cg < 4, e.g. RGB): weights [O][KH][KW][Cgp] with zero channels Cg..Cgp-1,
+ * so K = (kh, kw, ci) over Cgp channels -- what the region gather needs (Cg % 4 == 0). Cached per
+ * layer like w_hwc, under the padded K. */
 static const int8_t *w_hwc_pad(const conv_geo *c, const int8_t *w, int64_t Cgp) {
     const int64_t O = c->Og, KK = c->KH * c->KW, K = c->Cg * KK, Kp = Cgp * KK;
     for (int i = 0; g_exec_const_w && i < g_whwc_n; i++)
@@ -1041,7 +1071,9 @@ static const int8_t *hwc_pad_transpose(const conv_geo *c, const int8_t *x, int64
     return xt;
 }
 
-/* im2col with K = (kh, kw, ci): image transposed to [H][W][Cg], then each tap is one contiguous Cg-byte copy */
+/* im2col with K = (kh, kw, ci): the image is first transposed to [H][W][Cg] (cache tiles), then
+ * every tap of a row is one contiguous Cg-byte copy -- instead of 3-byte pieces at stride K, which
+ * defeat the A72's write combining (densenet121's im2col ran at ~2 ns per byte) */
 static const int8_t *hwc_transpose_(const conv_geo *c, const int8_t *x0) { /* [Cg][H][W] -> [H][W][Cg] per image */
     const int64_t HW = c->H * c->W, Cg = c->Cg;
     int8_t *xt0 = (int8_t *)scratch(&g_xhwc, &g_xhwc_cap, (size_t)(c->nimg * HW * Cg));
@@ -1105,7 +1137,8 @@ static int im2col_pack_hwc(const conv_geo *c, const int8_t *x, int8_t *col) {
     return AIEK_OK;
 }
 
-/* 8x8 byte transpose (row pitches sp / dp) in three masked swaps on 64-bit words */
+/* 8x8 byte transpose: 8 rows of 8 bytes at src (row pitch sp) -> 8 rows at dst (pitch dp), in three
+ * masked swaps on 64-bit words -- 16 memory ops instead of 64 byte loads / stores */
 static inline void rt_tr8x8(const int8_t *src, int64_t sp, int8_t *dst, int64_t dp) {
     uint64_t r[8];
     for (int i = 0; i < 8; i++)
@@ -1132,7 +1165,8 @@ static void im2col_rows_1x1(const conv_geo *c, const int8_t *x, int8_t *col, int
             for (int64_t m = m0; m < m0 + mn; m++) {
                 const int64_t im = m / c->pstride, mm = m - im * c->pstride, oh = mm / c->Wo, ow = mm - oh * c->Wo;
                 if (c->s[0] == 1 && c->s[1] == 1 && m + 8 <= m0 + mn && mm + 8 <= c->Ho * c->Wo) {
-                    // stride 1: 8 channels x 8 pixels per rt_tr8x8, leftover channels byte by byte
+                    // stride 1: pixel mm is input pixel mm, 8 rows are 8 contiguous bytes of each plane --
+                    // 8 channels x 8 pixels per rt_tr8x8, then the channels left over byte by byte
                     const int8_t *in = x + im * c->C * HW + c0 * HW + mm;
                     int64_t ci = 0;
                     for (; ci + 8 <= cn; ci += 8)
@@ -1155,7 +1189,8 @@ static void im2col_rows_1x1(const conv_geo *c, const int8_t *x, int8_t *col, int
         }
 }
 
-/* the persistent build's split launch (AIEHLC_ASYNC_LAUNCH); synchronous elsewhere */
+/* the persistent build's split launch (gemm_uk.cc, AIEHLC_ASYNC_LAUNCH): absent on x86 and in
+ * non-persistent builds, where the same order runs synchronously */
 extern "C" int aiednn_gemm_async_start(const aiek_tensor *args, int num_args, int which) __attribute__((weak));
 extern "C" int aiednn_gemm_async_finish(void) __attribute__((weak));
 
@@ -1234,7 +1269,8 @@ static size_t g_cgeo_cap;
 static int launch_overlapped(const aiednn_impl_t *g, aiek_tensor *t, int nt, int which, void (*overlap)(void *),
                              void *ctx) {
     if (aiednn_gemm_async_start && aiednn_gemm_async_finish) {
-        /* ping the entry (launches nothing) so a library build loads the megakernel with its modes */
+        /* the async start bypasses the entry: ping it (no arguments: launches nothing) so a library
+         * build loads a megakernel holding the entry's modes first (aiednn_megakernel_need thunk) */
         g->entry(nullptr, 0);
         const int rc = aiednn_gemm_async_start(t, nt, which);
         if (rc != AIEK_OK)
@@ -1249,13 +1285,16 @@ static int launch_overlapped(const aiednn_impl_t *g, aiek_tensor *t, int nt, int
     return rc;
 }
 
-/* rows of a [M][Og] GEMM result per epilogue tile, so the channel-major walk stays within ~16 KB */
+/* rows of a [M][Og] GEMM result per epilogue tile: the channel-major walk (one output plane
+ * at a time, stride Og) then stays inside ~16 KB, instead of touching a new cache line per
+ * element across the whole result (the A72's 32 KB L1 thrashed: resnet18 epilogue 150 ms) */
 static inline int64_t rt_epi_rows_per_tile(int64_t og, int64_t elem_bytes) {
     const int64_t r = 16384 / (og * elem_bytes);
     return r < 16 ? 16 : r;
 }
 
-/* host work during a launch: next M block's im2col rows, previous block's int8 output scatter */
+/* host work done while a launch is in flight: im2col rows for the next M block, the int8 output
+ * of the previous one scattered to the dst channel planes */
 typedef struct {
     const conv_geo *c;
     int mode; /* 1: (kh, kw, ci) im2col from the [H][W][Cg] image, 2: 1x1 transpose */
@@ -1297,11 +1336,11 @@ static void pipe_work(void *v) {
                 continue;
             }
             int64_t mn = hi - m0 < mb ? hi - m0 : mb;
-            if (m0 + mn > iend) // a tile stays within one image
+            if (m0 + mn > iend) // a tile never crosses into the padding / the next image's planes
                 mn = iend - m0;
             if (c->dst_hwc) { // nhwc dst (one group): the [M][Og] rows are dst rows
                 const uint64_t tq = rt_ticks();
-                if (!w->o32 && w->o8 == w->dst) { // written in place (o8_of)
+                if (!w->o32 && w->o8 == w->dst) { // the result was written in place (o8_of): only a fused tail
                     rt_qfuse_run(w->dst + im * c->O * P + p0 * c->O, mn * c->O);
                     g_qfuse.t += rt_ticks() - tq;
                     m0 += mn;
@@ -1329,7 +1368,7 @@ static void pipe_work(void *v) {
                                mn);
                     continue;
                 }
-                if (og + 8 <= Og) { // 8x8 via rt_tr8x8, rest byte by byte
+                if (og + 8 <= Og) { // 8 channels x 8 pixels at a time (rt_tr8x8), the rest byte by byte
                     int64_t m = 0;
                     for (; m + 8 <= mn; m += 8)
                         rt_tr8x8(w->o8 + (m0 + m) * Og + og, Og, w->dst + im * c->O * P + og * P + p0 + m, P);
@@ -1368,8 +1407,10 @@ static inline int64_t pipe_step(int64_t rows, int64_t launches) {
 static void *g_qps;
 static size_t g_qps_cap;
 
-/* conv with the integer epilogue on the core, pipelined over M blocks: while block j runs, the host
- * packs block j+1 and scatters block j-1. Same results as im2col + blocked_gemm_q. */
+/* conv with the integer epilogue on the core, pipelined over M blocks: while the first launch of
+ * block j runs, the host packs block j+1's im2col rows and scatters block j-1's int8 output (the
+ * persistent build's split launch; elsewhere the same order, synchronously). Same launches and
+ * results as im2col + blocked_gemm_q. */
 static int run_ntile(const rt_impl *self, const rt_epi *E, const conv_geo *c, int mode, const int8_t *img,
                      const int8_t *wv, int64_t ch0, int8_t *col, int which, int8_t *o8, int8_t *dst, int32_t *o32,
                      int64_t di0, int creg); /* aiednn_rt_ntile.h */
@@ -1402,7 +1443,8 @@ static int run_q_pipe(const rt_impl *self, const rt_epi *E, const conv_geo *c, i
         const int creg_ = (mode == 1 || mode == 3) && g_cqblk && (nkb_ == 1 || g_ckcblk) &&
                           conv_region_fits(c, q->args[0].dims[0], BK_);
         const int64_t M_ = conv_m(c), N_ = c->Og, K_ = c->Cg * c->KH * c->KW;
-        /* not mode 3: the padded stem uses direct conv's layout */
+        /* MMT is 4x a GEMM / direct-conv tile; not mode 3 (the padded stem: its input is direct conv's
+         * layout, and col is sized for the unpadded K) */
         if ((mode == 1 || mode == 2 || mode == 4) && mmt_usable(K_, res != nullptr)) {
             const int8_t *xs = mode == 1 ? hwc_transpose(c, img) : img;
             if (!xs)
@@ -1491,8 +1533,9 @@ static int run_q_pipe(const rt_impl *self, const rt_epi *E, const conv_geo *c, i
     int8_t *apall = (int8_t *)scratch(&g_apall, &g_apall_cap, (size_t)(nmb * nkb * BM * BK));
     if (!apall)
         return AIEK_ERR_ALLOC;
-    pipe_work(&w); // block 0's rows; later blocks are packed during the previous one
-    // n blocks outer, m blocks inner: consecutive launches share a B block
+    pipe_work(&w); // block 0's rows (step 0: all); every later block is packed during the previous one
+    // n blocks outer, m blocks inner: consecutive launches share a B block (mem tile cache); the
+    // first n pass packs the next block's rows, the last scatters the previous block's output
     for (int64_t nb = 0; nb < nnb; nb++)
         for (int64_t mb = 0; mb < nmb; mb++) {
             const int64_t m0 = mb * BM, mn = M - m0 < BM ? M - m0 : BM;
@@ -1562,7 +1605,9 @@ static int run_q_pipe(const rt_impl *self, const rt_epi *E, const conv_geo *c, i
     return AIEK_OK;
 }
 
-/* conv with the host epilogue, pipelined like run_q_pipe over K-chained int32 launches (needs K > BK) */
+/* conv with the host epilogue (f32 / int32 dst, a u8 residual, ...), pipelined like run_q_pipe:
+ * K-chained int32 launches per M block; while block j's first launch runs, the host packs block
+ * j+1's im2col rows and runs block j-1's epilogue. Needs the chained block (K > BK). */
 static int run_i32_pipe(const rt_impl *self, const rt_epi *E, const conv_geo *c, int mode, const int8_t *img,
                         const int8_t *wv, int8_t *col, int32_t *o32, int64_t di0, int64_t ch0) {
     const aiednn_impl_t *kc = g_kcblk;
@@ -1669,8 +1714,12 @@ static inline int64_t tpipe_launches(int64_t M, int64_t N, int64_t K, const aied
     return transposed ? (N + BM - 1) / BM * ((M + BN - 1) / BN) * nkb : (M + BM - 1) / BM * ((N + BN - 1) / BN) * nkb;
 }
 
-/* small-M convs: operands swapped, C^T [Og][M] = W [Og][K] x col [M][K]^T, so the weights fill BM.
- * K-chained int32 on the core, epilogue on the host (per pixel column). */
+/* small-M convs (resnet18 layer4: 49 pixels x 512 channels): the GEMM with its operands swapped,
+ * C^T [Og][M] = W [Og][K] x col [M][K]^T, so the weights fill BM and the pixels BN -- half the launches (and the
+ * DMA bytes) of the [M][Og] tiling there. K-chained int32 on the core; the GEMMQ requant is per C column, here a
+ * pixel, so the epilogue runs on the host (rt_epi, bit-identical to the core's; ~25 K elements on layer4). A row
+ * of C^T is one channel's pixels: contiguous in an NCHW dst. Weight blocks [BM][BK] come from the constant-weight
+ * cache like B's (keyed by the weights and the block). */
 static int run_t_pipe(const rt_impl *self, const rt_epi *E, const conv_geo *c, int mode, const int8_t *img,
                       const int8_t *wv, int64_t di0, int64_t ch0) {
     const aiednn_impl_t *kc = g_kcblk;
@@ -1747,7 +1796,8 @@ static int run_t_pipe(const rt_impl *self, const rt_epi *E, const conv_geo *c, i
     return AIEK_OK;
 }
 
-/* the q pipes' [M][Og] int8 result: with an nhwc dst it is the dst image itself */
+/* the q pipes' [M][Og] int8 result: with an nhwc dst (one group, one image per call) that IS the dst image --
+ * the launches' result tiles land in place and pipe_work has nothing left to scatter */
 static int8_t *o8_of(const conv_geo *c, int32_t *out, void *dst, int64_t n, int64_t M) {
     return c->dst_hwc && c->G == 1 && c->nimg == 1 ? (int8_t *)dst + n * c->O * M : (int8_t *)out;
 }
@@ -1755,16 +1805,21 @@ static int8_t *o8_of(const conv_geo *c, int32_t *out, void *dst, int64_t n, int6
 static int run_im2col(const rt_impl *self, aiednn_primitive *prim, void *const *ptr) {
     (void)self;
     const rt_prob *p = &prim->prob;
-    rt_epi E_; // epilogue resolved once per call
+    rt_epi E_; // epilogue resolved once per call (bit-identical to rt_epilogue)
     rt_epi_init(&E_, p, ptr);
     conv_geo c;
     conv_geometry(p, 0, &c);
     rt_prob g;
     const int64_t M = c.Ho * c.Wo, K = c.Cg * c.KH * c.KW;
     gemm_prob(&g, M, c.Og, K, aiednn_s8);
-    /* a batch goes through the pipes as one call, images stacked along M (conv_geo.nimg) */
-    /* K = (kh, kw, ci) for KxK over >= 16 channels or an nhwc src; else 1x1 unpadded (mode 2) or plain im2col.
-     * mode 4: 1x1 over nhwc (not mode 1, which would make it direct-conv eligible) */
+    /* a batch goes through the pipes as ONE call with the images stacked along M (conv_geo.nimg): the
+     * small-spatial layers' M blocks fill up and every B block / launch serves the whole batch. Only
+     * when each image would take a pipe anyway (not the RGB stem's direct conv, one group). */
+    /* K = (kh, kw, ci) from an [H][W][Cg] image: KxK taps over >= 16 channels, and any nhwc src (no transpose
+     * to pay); else 1x1 / no padding (mode 2) or the plain im2col */
+    /* mode 4: a 1x1 over an nhwc image -- rows are the image's pixels (im2col_rows_hwc), but NOT mode 1: that would
+     * make a 1x1 eligible for direct conv (CONV mode, another library ELF than the 1x1's GEMMQ / MMT: mobilenet_v2
+     * PT2E's 7x7 expand convs ping-ponged megakernels, +16 ms on the board) */
     const int hwc = (c.KH * c.KW > 1 && c.Cg >= 16) || c.src_hwc;
     const int pipe = !hwc                            ? (c.KH == 1 && c.KW == 1 && c.pl[0] == 0 && c.pl[1] == 0 ? 2 : 0)
                      : c.src_hwc && c.KH * c.KW == 1 ? 4
@@ -1774,7 +1829,9 @@ static int run_im2col(const rt_impl *self, aiednn_primitive *prim, void *const *
                      (K <= g_qblk->args[0].dims[1] || g_kcblk);
     const int i_ok = pipe && g_kcblk && g_kcblk->args[0].dims[0] == prim->bind.blk->args[0].dims[0];
     const int stem = c.Cg < 4 && c.KH * c.KW > 1 && g_ckcblk;
-    /* the transposed tiling where it takes fewer tiles and the plain one would not use n-tile launches */
+    /* the transposed tiling where it takes fewer launches (one image per call: small-M layers are never batched) */
+    /* the transposed tiling where it takes fewer tiles, and the plain one would not batch its tiles into n-tile
+     * launches anyway (a fused residual, or no n-tile entry): swapped, every tile is its own launch */
     const int64_t nkb_kc = g_kcblk ? (K + g_kcblk->args[0].dims[1] - 1) / g_kcblk->args[0].dims[1] : 0;
     const int t_ok = pipe && g_kcblk && c.N == 1 && !rt_env_on("AIEDNN_NO_TPIPE") &&
                      !ntile_mblocks(nkb_kc, E_.fx_r != nullptr) &&
@@ -1925,7 +1982,7 @@ static size_t g_xt_cap, g_wr_cap;
 static int run_col2im(const rt_impl *self, aiednn_primitive *prim, void *const *ptr) {
     (void)self;
     const rt_prob *p = &prim->prob;
-    rt_epi E_; // epilogue resolved once per call
+    rt_epi E_; // epilogue resolved once per call (bit-identical to rt_epilogue)
     rt_epi_init(&E_, p, ptr);
     conv_geo c;
     conv_geometry(p, 1, &c);
@@ -1979,12 +2036,14 @@ static int run_col2im(const rt_impl *self, aiednn_primitive *prim, void *const *
 }
 
 // ── dwblk:<aie dw block>: depthwise convolution, 16 output bands per launch ─
-/* AIE depthwise block (dw_blk_s8s32): int8 items [16][4096] = padded input rows of one output band
- * (pitch Wp) + KHxKW weights in the last 32 bytes, geom int32 {stride, KH, KW, Wp, Rout, Wo, 0, 0}
- * -> int32 [16][1024], exact accumulators. */
-#define RT_DW_MAX_ITEMS 128 /* items per launch: 1 per core, 3 for dwq_blk */
+/* The AIE depthwise block (gemm_uk.cc dw_blk_s8s32: the GEMM ELF in its
+ * depthwise mode): int8 items [16][4096] = zero-padded input rows of one output
+ * band of one channel (pitch Wp) + KHxKW weights in the last 32 bytes,
+ * geom int32 {stride, KH, KW, Wp, Rout, Wo, 0, 0} -> int32 [16][1024]. The
+ * accumulators are exact, so dst = rt_epilogue(acc) equals ref:convolution. */
+#define RT_DW_MAX_ITEMS 128 /* items per launch = the impl's arg 0 rows: 1 per core (16 on 4x4), 3 for dwq_blk */
 #define RT_DW_BYTES 4096
-#define RT_DW_WB 96 /* item tail: weights in the last 64 bytes, fx params in the 32 before */
+#define RT_DW_WB 96 /* item tail: weights in the last 64 bytes (KH*KW <= 49), fixed-point params in the 32 before */
 #define RT_DW_OUT 1024
 
 static int is_dw_block(const aiednn_impl_t *g) {
@@ -2025,7 +2084,8 @@ static int acc_dwblk(const rt_impl *self, const rt_prob *p, rt_bind *bind, char 
         snprintf(why, cap, "not a depthwise KHxKW<=7x7, stride 1|2, undilated conv whose band fits an item");
         return 0;
     }
-    /* nhwc: items gather / scatter one channel's band at stride C */
+    /* nhwc: items gather one channel's band at stride C and scatter it back the same way (dw_item orders
+     * them channel-fastest, so consecutive items share the band's cache lines) */
     return !rt_prob_has_fmt(p) || conv_fmt_ok(p, &c, why, cap, 1);
 }
 
@@ -2040,8 +2100,8 @@ static inline void dw_item(const conv_geo *c, const dw_plan *d, int64_t it, int6
 static void *g_dwi, *g_dwo;
 static size_t g_dwi_cap, g_dwo_cap;
 
-/* depthwise + requant, 3 items per core (dwq_blk_s8s8): items s8 [3*cores][4096], geometry s32 [8],
- * out s8 [3*cores][1024] */
+/* depthwise + requant with 3 items per core (gemm_uk.cc dwq_blk_s8s8): items s8 [3*cores][4096],
+ * geometry s32 [8], out s8 [3*cores][1024] -- three int8 bands per launch for the same bytes */
 static const aiednn_impl_t *g_dwqblk;
 
 static int is_dwq_block(const aiednn_impl_t *g) {
@@ -2051,7 +2111,8 @@ static int is_dwq_block(const aiednn_impl_t *g) {
            g->args[2].data_type == aiednn_s8 && g->args[2].ndims == 2 && g->args[2].dims[1] == RT_DW_OUT;
 }
 
-/* item it = (image, channel, band) into raw (zeroed by the caller): padded input rows, weights, requant params */
+/* item it = (image, channel, band) of a depthwise layer into raw (zeroed by the caller): its padded
+ * input rows, KHxKW weights in the tail, and (dwq) the core's requant params */
 static void dw_pack_item(const conv_geo *c, const dw_plan *d, const rt_epi *E, int dwq, const int8_t *x,
                          const int8_t *w, int64_t it, int8_t *raw) {
     int64_t n, ch, band;
@@ -2110,7 +2171,7 @@ static int run_dwq_n(const rt_impl *self, const rt_epi *E, const conv_geo *c, co
 
 static int run_dwblk(const rt_impl *self, aiednn_primitive *prim, void *const *ptr) {
     const rt_prob *p = &prim->prob;
-    rt_epi E_; // epilogue resolved once per call
+    rt_epi E_; // epilogue resolved once per call (bit-identical to rt_epilogue)
     rt_epi_init(&E_, p, ptr);
     const int dwq = E_.fx && !E_.fx_r; /* requant on the core (0xD8); a fused residual stays on the host */
     const aiednn_impl_t *gi = dwq && g_dwqblk ? g_dwqblk : self->gen; /* 3 int8 bands per core if it can */

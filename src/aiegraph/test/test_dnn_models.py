@@ -2,7 +2,16 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Whole models through aiednn (``aiegraph.dnn_torch``) against PyTorch, on x86."""
+"""Whole models through aiednn (``aiegraph.dnn_torch``) against PyTorch, on x86.
+
+    python3 -m pytest -q src/aiegraph/test/test_dnn_models.py
+
+Random weights / inputs (no download): the custom networks of
+example/aiednn/models/zoo.py and a few torchvision architectures. f32 must match
+the float model; int8 must match the same model with the same fake quantization,
+with every integer GEMM layer recomputed exactly from its own inputs. The
+pretrained / board runs are example/aiednn/models/run_models.py.
+"""
 
 from __future__ import annotations
 
@@ -81,7 +90,8 @@ def test_emitted_app_runs_on_x86(tmp_path):
 
 
 def test_emitted_mlir_app_with_int8_residuals_runs_on_x86(tmp_path):
-    """The MLIR pipeline's int8 skip streams survive the C app."""
+    """the MLIR pipeline's int8 skip streams (--aiednn-quantize-residual) survive the C app:
+    each binary post-op carries its s8 src1's scale / zero point, and the app matches"""
     import aiegraph as ag
     m, x = zoo.build("resnet18", pretrained=False)
     g, ref, yf = dt.references(m, x, "int8", "resnet18", mlir=True)

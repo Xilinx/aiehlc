@@ -4,17 +4,19 @@
  *
  * aiednn_rt_dtypes.h -- the narrow floating-point types: bf16, f16, f8 (e5m2, e4m3 "fn").
  *
- * Bit-level conversions to / from f32, round to nearest even, matching PyTorch's (c10):
+ * Bit-level conversions to / from f32, round to nearest even, matching PyTorch's (c10) so a test
+ * can compare against torch tensors of the same dtype bit for bit:
  *   bf16: the top 16 bits of an f32 (NaN -> 0x7fc0);
  *   f16:  IEEE binary16, overflow -> inf;
  *   f8 e5m2: the top byte of an f16 (overflow -> inf);
  *   f8 e4m3 (fn: no inf, one NaN 0x7f, max 448): overflow -> NaN.
- *   e8m0: a scale 2^(b - 127), b = 0xff NaN; from f32 the nearest power of two (ties to even
- *         exponent), clamped to [2^-127, 2^127]; NaN / inf -> 0xff.
- *   f4 e2m1: 4 bits s.ee.m (0, 0.5, 1, 1.5, 2, 3, 4, 6), round to nearest even, saturate at 6,
- *         NaN -> 0; two per byte like s4 / u4.
- * Reference implementations read through rt_ld and write through rt_st; values are computed in double
- * and rounded once on store (via f32).
+ * The OCP microscaling (MX) pair, which torch of this tree cannot represent (tested against numpy):
+ *   e8m0: a scale 2^(b - 127), b = 0xff NaN; no sign, no zero. From f32: the nearest power of two
+ *         (ties to the even exponent), clamped to [2^-127, 2^127]; NaN / inf -> 0xff.
+ *   f4 e2m1: 4 bits s.ee.m, values 0, 0.5, 1, 1.5, 2, 3, 4, 6 (no inf / NaN); from f32 round to
+ *         nearest even and saturate at 6; NaN -> 0. Two per byte like s4 / u4.
+ * Every reference implementation reads through rt_ld and writes through rt_st, so these types work
+ * wherever f32 does; values are computed in double and rounded once on store (via f32, as torch).
  ******************************************************************************/
 #ifndef AIEDNN_RT_DTYPES_H
 #define AIEDNN_RT_DTYPES_H

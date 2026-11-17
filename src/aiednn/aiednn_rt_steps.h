@@ -5,14 +5,25 @@
  * aiednn_rt_steps.h -- steps:<aie lut block>: f32 / s32 -> s8 / u8 per-element
  * ops on the GEMM ELF's step-table mode (aie_modes_lut.h, opcode 0x75).
  *
- * Accepted (source f32 or s32, destination s8 or u8): quantizing reorders, batch norm, PReLU, binary
- * with a broadcast operand and the arithmetic eltwise algorithms -- per channel monotone on either side of
- * zero, so the 8-bit result is a step function of the source's order-preserving key.
+ * Accepted (full-size source f32 or s32, destination s8 or u8, the operand forms
+ * of lut:): quantizing reorders, batch norm, PReLU, binary with a broadcast
+ * operand (add, sub, mul, div, max, min, the comparisons) and the arithmetic
+ * eltwise algorithms (relu, clip, linear, abs, square, round, floor, ceil, neg,
+ * hardsigmoid). Each of these is, per channel, a monotone function of the source
+ * on either side of zero -- they are built from +, -, *, /, compares, clamps and
+ * nearbyint, every one of them monotone under correct rounding -- so its 8-bit
+ * result is a step function of the source's order-preserving key (the float's
+ * bits with negatives' magnitude bits flipped, or the s32 itself).
  *
- * The tables are ref: itself: the host bisects every step over the key space of each half line (32 rounds),
- * so the AIE's binary search reproduces ref bit for bit, NaN included. Tables are cached per problem +
- * operand contents. Kernel block: the lut: block, geom[3] flags steps / kind / stride; items hold
- * n <= 1024 four-byte values.
+ * The tables are ref: itself: the host bisects every step of the code over the
+ * key space of each half line (32 rounds; each round runs ref on a synthetic
+ * problem holding every open bracket's midpoint of every channel), so the AIE's
+ * binary search reproduces ref bit for bit, NaN included. libm curves (exp, tanh,
+ * GELU, ...) are not accepted: their monotonicity is not guaranteed.
+ *
+ * Tables are built once per distinct problem + operand contents (a small cache).
+ * Kernel block: the lut: block (aiednn_rt_lut.h), geom[3] flags steps / kind /
+ * stride; items hold n <= 1024 four-byte values.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_ops.h,
  * aie_modes_lut.h, aiednn_rt_lut.h.
@@ -85,7 +96,9 @@ static int acc_steps(const rt_impl *self, const rt_prob *p, rt_bind *bind, char 
         snprintf(why, cap, "ref:reorder's contiguous loop is faster");
         return 0;
     }
-    /* f32 batch norm: ref's per-channel loop is faster */
+    /* f32 batch norm (incl. the fused + quantize form): ref's per-channel loop wins on the board --
+     * 1x128x56x56 7.15 (AIE) vs 6.91 ms, 1x256x28x28 3.74 vs 3.42, and the first call builds the
+     * tables (23 / 36 ms). The exactness machinery (steps_plan_make) still covers it. */
     if (rt_cost_refusals() && p->kind == aiednn_batch_normalization && p->md[0].data_type == aiednn_f32) {
         snprintf(why, cap, "ref:batch_normalization's per-channel f32 loop is faster");
         return 0;
@@ -212,7 +225,7 @@ static int st_cmp(const void *x, const void *y) {
 }
 
 /* the cache: tables of the last few problems, keyed by their parameters and operand contents */
-#define RT_ST_CACHE 128 /* cached step tables */
+#define RT_ST_CACHE 128 /* a model's steps: primitives with constant operands each build once */
 typedef struct {
     uint64_t h;
     int64_t C;
@@ -236,7 +249,8 @@ static uint64_t steps_hash(const rt_prob *p, const lut_plan *q, void *const *ptr
     h = st_fnv(h, fp, sizeof fp);
     h = st_fnv(h, &p->zero_point, sizeof p->zero_point);
     h = st_fnv(h, &q->C, sizeof q->C);
-    /* the fused epilogue: layers with equal statistics differ only in their dst scale */
+    /* the fused epilogue (create_attr): two layers with equal statistics -- an untrained model's batch
+     * norms all are mean 0, var 1 -- differ only in their dst scale; without it they shared tables */
     const int attr_i[3] = {p->has_attr, p->dst_zp, p->npo};
     h = st_fnv(h, attr_i, sizeof attr_i);
     h = st_fnv(h, &p->dst_scale, sizeof p->dst_scale);

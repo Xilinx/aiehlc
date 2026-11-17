@@ -4,6 +4,11 @@
 ###############################################################################
 """index.html for the model-flow pages in worklocal/aiednn/models (run_models.py --html).
 
+One table per board: every page's embedded data (aiegraph.dnn_viz) gives the model, its board
+run (MODEL line of the run.log the page was built against) and its megakernel use. A second
+VEK385 table lists the graph-path (torch.compile / PT2E -> partition graph API) board runs
+from worklocal/aiednn/torch_compile_board, which have no per-op page.
+
     python3 example/aiednn/models/viz_index.py          # writes worklocal/aiednn/models/index.html
 """
 
@@ -31,11 +36,11 @@ def _page_data(p: Path) -> dict | None:
 
 
 def _row(p: Path, d: dict) -> tuple:
-    """(board key, sort key, html row) of one model page."""
+    """(board key, sort key, html row) of one model page"""
     S, b = d["summary"], d.get("board") or {}
-    mk = d.get("megakernel") or dict(modes=[], build={})
+    mk = d.get("megakernel") or dict(modes=[], build={})     # pages written before the megakernel view
     tgt = (d.get("target") or {}).get("key") or ("vek385" if "/vek385/" in b.get("path", "") else "vek280")
-    tail = p.stem[len(d["model"]):]            # the options after the model name
+    tail = p.stem[len(d["model"]):]            # the options after the model name (efficientnet_b0 is not batch 0)
     mesh = re.search(r"_(\d+x\d+)", tail)
     batch = re.search(r"_b(\d+)(?:_|$)", tail)
     used = [m["mode"] for m in mk["modes"] if m["ops"]]

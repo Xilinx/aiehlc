@@ -1,6 +1,6 @@
 #!/bin/bash
-# Run the four aiednn entry flows on workstation emulation.
-#   bash example/aiednn/flows/run_all.sh   (PYTHON= picks the interpreter)
+# Run the four aiednn entry flows on workstation emulation; each prints "PASS: flow N ..." (README.md).
+#   bash example/aiednn/flows/run_all.sh            (from the repo root; PYTHON= picks the interpreter)
 set -u
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
 PY=${PYTHON:-python3}

@@ -4,11 +4,18 @@
  *
  * aiednn_rt_dwn.h -- depthwise + requant with many launches' worth of items in one AIE launch.
  *
- * With the persistent build's n-tile launch (aiednn_gemm_dwq_n_start / _finish) one launch carries up to
- * aiednn_gemm_ntile_max() dwq tiles: tile t's A is its first `cores` items, its B block the other
- * 2 * cores and the descriptor. Bit for bit run_dwblk's result. Host packing / copy-out overlap the launch.
+ * run_dwblk's dwq path launches the GEMM ELF in its 0xD8 mode once per 3 * cores items (48 bands on
+ * 4x4): ~0.5 ms a launch, mostly the launch. With the persistent build's n-tile launch (gemm_uk.cc
+ * aiednn_gemm_dwq_n_start / _finish, persist_transform host_tile_n_start) one launch carries up to
+ * aiednn_gemm_ntile_max() such tiles: tile t's A is its first `cores` items, its B block (streamed
+ * through the mem tile) the other 2 * cores and the descriptor. Same items, same core arithmetic,
+ * so the result is run_dwblk's bit for bit.
  *
- * Not taken: no n-tile entry, AIEDNN_NO_NTILE / AIEDNN_NO_DWN set, or a layer that fits one launch.
+ * Host work overlaps the launch: chunk j+1's items are packed while chunk j runs, and chunk j's
+ * bands are copied out while chunk j+1 runs.
+ *
+ * Not taken (run_dwblk's per-launch loop runs): no n-tile entry (x86 without the stand-in,
+ * non-persistent builds), AIEDNN_NO_NTILE / AIEDNN_NO_DWN set, a layer that fits one launch.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_gemm.h and aiednn_rt_ntile.h.
  ******************************************************************************/

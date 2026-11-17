@@ -2,7 +2,11 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""f32 windowed pooling on the AIE (fpool:) against ref:, through ctypes on the workstation build."""
+"""f32 windowed pooling on the AIE (impl fpool:, the GEMM ELF's FPOOL mode, aiednn_rt_fpool.h) against ref:,
+through ctypes on the workstation build (the mode's C reference stands in for the array).
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_fpool.py
+"""
 from __future__ import annotations
 
 import ctypes as C
@@ -94,7 +98,8 @@ def test_fpool_refuses_dilation_and_wide_stride(lib):
                                            ((1, 4, 5, 9, 11), (3, 3, 3), (1, 1, 1), (1, 1, 1))])
 @pytest.mark.parametrize("ties", [False, True])
 def test_fpool_max_backward_bit_identical(lib, shape, k, s, pad, ties):
-    """Max pooling backward on the AIE: bit-identical to ref:, also with ties."""
+    """max pooling backward: the AIE finds each window's first maximum, the host routes dy in double in
+    ref:'s order -- bit-identical to ref:, also with ties (integer-valued src)"""
     nd = len(shape)
     out = tuple((n + 2 * p - kk) // ss + 1 for n, kk, ss, p in zip(shape[2:], k, s, pad))
     yshape = shape[:2] + out

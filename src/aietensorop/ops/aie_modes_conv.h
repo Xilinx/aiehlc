@@ -6,9 +6,11 @@
  * for the launch's K block (input rows ih_lo .. ih_lo + rows - 1, every padded column, Cg channels,
  * zero where the conv pads), and the core gathers the 32 x 512 im2col tile from it. The K order is
  * the host's (kh, kw, ci) im2col order, so B is the same weights block as for an im2col launch.
- * Mesh row r's geometry (16 int32, CONV_GEOM_*) is the last 64 bytes of its own A slice, and word 0
- * of B row CONV_GEOM_ROW0 is CONV_MAGIC for the whole layer, so one B block can serve many tiles.
- * Not a flag in row 127: for 0xF1 its bytes 4.. are the requant zero point. */
+ * Mesh row r's geometry (16 int32, CONV_GEOM_*) is the last 64 bytes of its own A slice (the core
+ * builds its tables after the whole region is in, so arriving last is fine), and word 0 of B row
+ * CONV_GEOM_ROW0 is CONV_MAGIC for the whole layer: B carries nothing per pixel tile, so one B block
+ * can serve many tiles (n-tile launches replay it). Not a flag byte in row 127: for 0xF1 its bytes
+ * 4.. are the requant zero point (a flag there corrupted it). */
 #ifndef AIE_MODES_CONV_H
 #define AIE_MODES_CONV_H
 

@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * aiednn_rt_slice.h -- slice: a strided sub-tensor copy. dst[i0, i1, ...] = src[off0 + i0 * st0, off1 + i1 * st1, ...]
- * (dst dims are the sizes). ref: only; contiguous rows are memcpy'd. A slice never converts types.
+ * (dst dims are the sizes). The framework ops behind it: tensor indexing / narrow / split pieces (GPT-2's fused qkv
+ * split, ViT's class token, RoPE's halves). ref: only -- pure data movement; rows contiguous in both tensors are
+ * memcpy'd. Element types may differ only in nothing: a slice never converts (reorder does that).
  *
  * Needs, from the including TU: aiednn_rt_internal.h and the create helpers of aiednn_rt.cc.
  ******************************************************************************/
@@ -21,7 +23,8 @@ static int run_ref_slice(const rt_impl *self, aiednn_primitive *prim, void *cons
         sstr[i] = st, st *= s->dims[i];
     const int64_t W = d->dims[nd - 1], rows = md_numel(d) / W;
     const int contig = p->slice_step[nd - 1] == 1;
-    /* dst quantization alone: the quantizing reorder's arithmetic, bit-identical to slice + quantize */
+    /* an attr's dst quantization alone (aiednn_slice_create_attr; post-ops take the +pt tail): f32 -> s8 / u8 by
+     * the quantizing reorder's own arithmetic, so slice + quantize is bit-identical to the two primitives */
     const int q = p->has_attr && s->data_type == aiednn_f32 && (d->data_type == aiednn_s8 || d->data_type == aiednn_u8);
     const double qs = p->dst_scale, qinv = 1.0 / qs, qz = p->dst_zp, qlo = d->data_type == aiednn_s8 ? -128.0 : 0.0;
     for (int64_t r = 0; q && r < rows; r++) {

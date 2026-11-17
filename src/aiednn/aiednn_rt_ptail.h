@@ -6,8 +6,10 @@
  * primitives outside the GEMM family: pooling, softmax, layer / group / batch norm, reduction, resampling, LRN,
  * PReLU. The graph fusion patterns "X + post-ops" (pool, softmax, norms, reduction, interpolate) land here.
  *
- * create splits the problem (ptail_split): the inner primitive (the op without its attr, writing f32)
- * dispatches as standalone; execute then runs the chain through rt_epilogue. impl_info ends in "+pt".
+ * create splits the problem (ptail_split): the inner primitive -- the same op without its attr, writing f32 --
+ * dispatches exactly as the standalone primitive (AIE impls included); execute runs it into an f32 tile and then
+ * the chain through rt_epilogue, the GEMM family's own epilogue, so every primitive's post-ops mean the same thing
+ * (computed in double from the f32 value, dst quantized as nearbyint(v / dst_scale) + zp). impl_info ends in "+pt".
  *
  * Needs, from the including TU: aiednn_rt_internal.h and the create helpers of aiednn_rt.cc.
  ******************************************************************************/
@@ -25,8 +27,8 @@ static int ptail_kind(aiednn_primitive_kind_t k) {
 static int ptail_split(const rt_prob *p0, rt_prob *inner, rt_prob *ep) {
     if (!ptail_kind(p0->kind) || !p0->has_attr || p0->prop != RT_FWD_INF)
         return 0;
-    /* every ptail kind applies the attr here, except batch / layer norm's and slice's dst quantization
-     * alone, which their own impls fold */
+    /* an attr is never dropped: every ptail kind applies it here, except batch / layer norm's and slice's dst
+     * quantization alone, which their own impls fold (lut: / steps: / fvec: / ref: read dst_scale / dst_zp) */
     if (!p0->npo && !p0->n_oscales &&
         (p0->kind == aiednn_batch_normalization || p0->kind == aiednn_layer_normalization || p0->kind == aiednn_slice))
         return 0;

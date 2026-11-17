@@ -2,7 +2,18 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""A graph built through aiegraph.dnn_graph -> a C app that runs it through include/aiednn_graph.h"""
+"""A graph built through aiegraph.dnn_graph -> a C app that runs it through include/aiednn_graph.h:
+the app adds the same ops, partitions, compiles every partition and executes them, twice (cold,
+then timed), and checks the output against a golden. Build / run it like any aiednn app
+(``ag.dnn_build(app, target="vek280", run=True, board=...)``) -- the board measurement of the graph
+API path.
+
+    m = OnnxGraph.load(lib, "resnet18-v1-7.int8.qdq.onnx")
+    app = emit_graph_app(m.graph, m.consts, {"data": x}, m.outputs[0], golden, out_dir, "resnet18_qdq")
+
+Only partition-boundary tensors get memory (fused intermediates never exist); constants and inputs
+live in an .incbin blob. Floats are emitted as C hex literals, so attrs are bit-identical.
+"""
 
 from __future__ import annotations
 
@@ -65,7 +76,25 @@ def emit_graph_app(g: Graph, consts: dict, feeds: dict, output, golden: np.ndarr
                    step: float = 0.0, fuse: int = None, layouts: bool = None, top1_range=None,
                    tie_steps: float = 2.0, ref2: np.ndarray = None, ref2_name: str = "ref2",
                    part_ref: dict = None) -> Path:
-    """*g*: a Graph whose compile_all() ran (its partitions say which tensors cross a boundary)"""
+    """*g*: a Graph whose compile_all() ran (its partitions say which tensors cross a boundary);
+    *consts* / *feeds*: name -> array; *output*: the tensor checked against *golden* (f32);
+    *step*: the output's quantization step, for reporting the difference in codes; *fuse*: the
+    fusion level the app partitions with (default: *g*'s, so the board's partitions are the host's);
+    *layouts*: layout propagation on / off (default: *g*'s; a baremetal app cannot read AIEDNN_GRAPH_DENSE);
+    *top1_range*: (lo, hi, group) -- top-1 is (argmax over output[lo:hi] - lo) // group, for both the app and the
+    golden (yolov8n: the class of the strongest detection, not a flat argmax that can land on a box coordinate);
+    *tie_steps*: a different top-1 still PASSes (as a near-tie) when the golden scores the app's pick within
+    tie_steps output steps of its own top-1 -- a fixed tolerance, never the measured difference (the golden is
+    PyTorch eager, not bit-exact to the AIE's float ops; a deep int8 network amplifies their ulps).
+    *step* 0: the tolerance is tie_steps * 1e-3 of the golden's range.
+    The right *golden* for a deep int8 model is the workstation-emulation run of the same graph (same
+    partitions; only the AIE's float ops differ from ref: by ulps), not the framework's eager output, which
+    drifts by tens of output steps through vit's 12 blocks. *ref2* (e.g. PT2E eager, *ref2_name* "pt2e") is
+    then compared and printed (REF2 line) but never decides PASS / FAIL.
+    *part_ref*: tensor name -> the emulation's value (e.g. the whole ``Graph.run`` env). Every partition output
+    found there is embedded; after the timed runs the app runs each partition once more on the emulation's
+    inputs and prints how far its own output lands (PARTCHK lines, the worst first): which partition's AIE vs
+    ref: numerics differ, isolated from the drift it inherits. Reported only."""
     if g.tensors[output][1] != "f32":
         raise ValueError(f"emit_graph_app: the checked output {output!r} must be f32 (is {g.tensors[output][1]})")
     lo, hi, grp = top1_range if top1_range is not None else (0, int(np.prod(golden.shape)), 1)

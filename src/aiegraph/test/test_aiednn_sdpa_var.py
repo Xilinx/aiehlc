@@ -2,7 +2,10 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Variable-length and paged-KV attention (aiednn_sdpa_varlen_create) against a numpy oracle."""
+"""Variable-length and paged-KV attention (aiednn_sdpa_varlen_create) against a numpy oracle per sequence.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_sdpa_var.py
+"""
 
 from __future__ import annotations
 
@@ -133,7 +136,8 @@ def test_fixed_length_sdpa_unchanged(lib):
 
 @pytest.mark.parametrize("path", ["gemm+sdpa", "ref:"])
 def test_scale_bound_at_execute(lib, path):
-    """AIEDNN_ARG_ATTR_SCALE overrides the create-time scale."""
+    """AIEDNN_ARG_ATTR_SCALE (f32 [1]) overrides the create-time scale: a framework graph's scale is a constant
+    tensor whose value the graph does not know when it partitions"""
     rng = np.random.default_rng(8)
     q, k, v = (rng.normal(0, 1, (1, 2, 5, 8)).astype(np.float32) for _ in range(3))
     m = lambda a: C.byref(md(a.shape, "f32"))

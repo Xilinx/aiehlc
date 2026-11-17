@@ -2,7 +2,29 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Model-flow visualization of a lowered aiednn graph: one self-contained HTML file."""
+"""Model-flow visualization of a lowered aiednn graph: one self-contained HTML file.
+
+    from aiegraph import dnn_torch as dt, dnn_viz
+    g = dt.lower(model, x, mode="int8", name="mobilenet_v2")
+    dnn_viz.write_model_html(g, lib, x, "out.html", board_log=".../vek280/run.log")
+    # or, with impls already in hand:
+    dnn_viz.write_html(g, impls, "out.html", op_times_ms=times)
+
+What it shows (doc/design/aiednn.md section 10): every primitive in execution order
+with its tensors as edges, where it executes (AIE composite vs ``ref:`` on the host
+CPU), where each tensor lives (activation arena offset from ``dnn_torch._plan_memory``,
+the constant / input blob in ``emit_app``'s order), the GEMM block launches and the
+DDR <-> AIE bytes each AIE op moves, the physical AIE tiles the GEMM mesh uses
+(parsed from a built app's ``routing.cc`` when one exists), and per-implementation
+time (board ``PROF`` lines, else x86 ctypes measurements).
+
+The launch / byte numbers are derived from the runtime source, not measured:
+``aiednn_rt_gemm.h`` ``blocked_gemm`` launches the block once per
+(M/128, K/512, N/128) tile, ``im2col+`` / ``col2im+`` run one GEMM per (image,
+group), and ``gemm_uk.cc`` stages A [128][512] s8 (64 KB), B [512][512] s8 (256 KB,
+a quarter real) and C [128][128] s32 (64 KB) in DDR per launch. A board log's
+``aiednn_stats`` launch count is shown next to the estimate.
+"""
 
 from __future__ import annotations
 
@@ -99,7 +121,8 @@ def _lifetimes(g) -> dict:
 
 
 def gemm_geometry(g, op, impl: str = ""):
-    """GEMM(s) an integer/float conv / deconv / matmul primitive reduces to, with its AIE launches and staged bytes."""
+    """GEMM(s) an integer/float conv / deconv / matmul primitive reduces to, the AIE block
+    launches when *impl* is an ``aie:`` composite, and the bytes those launches stage."""
     if not op.fn.startswith(_GEMM_FNS):
         return None
     ex = {a: t for a, t in op.exec if not isinstance(a, tuple)}
@@ -181,7 +204,8 @@ def _op_record(g, i, op, impl, loc_of, producer, t_ms, calls=None, opcodes=None)
 
 
 def _op_opcodes(calls: dict, impl: str, opc: dict) -> list:
-    """[{entry, calls, modes, opcodes}] for the megakernel entries one op called (x86 counts)"""
+    """[{entry, calls, modes, opcodes}] for the megakernel entries one op called (x86 counts):
+    the lut entry sends LUT for lut: and STEPS for steps:"""
     out = []
     for e, n in sorted(calls.items(), key=lambda kv: -kv[1]):
         modes = ENTRY_MODES.get(e, ())
@@ -293,7 +317,10 @@ _TILE = r"XAie_TileLoc\((\d+),\s*(\d+)\)"
 
 
 def parse_routing(path, board: str = "vek280") -> dict:
-    """stream paths of an aiehlc ``routing.cc``."""
+    """stream paths of an aiehlc ``routing.cc``. Each ``round`` block is one shim MM2S stream
+    (circuit-switched, broadcast to the core DMAs it reaches); a ``row`` round also carries
+    the packet-switched output merge into a shim S2MM. Columns are partition-relative
+    + ``partition_start_col`` from ``routingresourcemap.json`` when present."""
     p = Path(path)
     text = p.read_text()
     c0 = 0
@@ -377,7 +404,7 @@ BOARDS = {
     "vek280": dict(name="VEK280", host="Arm Cortex-A72", host_short="A72", array="AIE-ML (xcve2802)",
                    gen="XAIE_DEV_GEN_AIEML", aie_gen=2, cols=38, rows=11, mem_rows=[1, 2],
                    core_rows=list(range(3, 11))),
-    # two memtile rows, cores rows 3..6, every column has a DMA shim
+    # doc/design/aiednn.md section 28: two memtile rows, cores rows 3..6 as on VEK280, every column has a DMA shim
     "vek385": dict(name="VEK385", host="Arm Cortex-A78", host_short="A78", array="AIE2PS",
                    gen="XAIE_DEV_GEN_AIE2PS", aie_gen=5, cols=36, rows=7, mem_rows=[1, 2],
                    core_rows=list(range(3, 7))),
@@ -398,7 +425,8 @@ def board_of(board_log=None, board=None) -> str:
 
 
 def device_geometry(board: str = "vek280") -> dict:
-    """the *board*'s AIE array"""
+    """the *board*'s AIE array: columns / rows from include/aie_device_map.h (its AIE_GEN branch), the
+    AIE-ML row split from aie-rt's xaie_lite_hwcfg.h; documented constants when those are absent."""
     b = BOARDS[board]
     d = dict(cols=b["cols"], rows=b["rows"], shim_row=0, mem_rows=list(b["mem_rows"]), core_rows=list(b["core_rows"]),
              source=f"documented constants ({b['name']} / {b['array']})")
@@ -459,7 +487,8 @@ def _mode_table() -> dict:
 
 
 def _build_info(board_log) -> dict:
-    """what the board build next to *board_log* compiled: modes, entry counts, core program size."""
+    """what the board build next to *board_log* compiled: modes (its aie_modes_cfg.h; absent =
+    every mode), the entry counts of its x86 usage run, the core program size (kernel.map)"""
     if not board_log:
         return {}
     d = Path(board_log).parent
@@ -535,7 +564,9 @@ class _TimedLib:
 
 
 def run_timed(g, lib, x=None, calls: bool = False):
-    """``dnn_torch.run_ctypes`` with each primitive's execution timed on x86."""
+    """``dnn_torch.run_ctypes`` with each primitive's execution timed on x86.
+    Returns (output, impls, buffers, per-op ms) and, with *calls*, per-op {megakernel entry: calls}
+    (``AiednnLib`` builds count every entry: which opcodes each op sends)."""
     from .dnn_torch import run_ctypes
     tl = _TimedLib(lib)
     y, impls, bufs = run_ctypes(g, tl, None if x is None else np.asarray(x), keep=True)
@@ -546,7 +577,8 @@ def run_timed(g, lib, x=None, calls: bool = False):
 
 def build_data(g, impls, *, title=None, board_log=None, op_times_ms=None, routing_cc=None, op_calls=None,
                board_name: str = None) -> dict:
-    """everything the page renders, as one JSON-able dict"""
+    """everything the page renders, as one JSON-able dict; *board_name*: vek280 / vek385 (default: from the
+    board log's directory, else vek280)"""
     if len(impls) != len(g.ops):
         raise ValueError(f"{len(impls)} impls for {len(g.ops)} ops")
     aoff, arena = _plan_memory(g)
@@ -634,7 +666,10 @@ def _summary(d) -> dict:
 
 def write_html(g, impls, out_path, *, title=None, board_log=None, op_times_ms=None, routing_cc=None,
                op_calls=None, board_name: str = None) -> Path:
-    """Write the self-contained model-flow page for lowered graph *g* whose ops dispatched to *impls*"""
+    """Write the self-contained model-flow page for lowered graph *g* whose ops dispatched
+    to *impls* (``run_ctypes``). *board_log*: a board ``run.log`` (PROF / aiednn_stats);
+    *op_times_ms*: per-op x86 times (``run_timed``); *routing_cc*: a built app's routing.cc
+    for the tile placement (default: found next to the board log or any built model)."""
     data = build_data(g, impls, title=title, board_log=board_log, op_times_ms=op_times_ms, routing_cc=routing_cc,
                       op_calls=op_calls, board_name=board_name)
     out = Path(out_path)

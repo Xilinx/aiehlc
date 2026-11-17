@@ -9,7 +9,7 @@
  * dw_pack_item). Output: the int8 band [rout][wo]. 32 output columns per step: per tap one 32-lane
  * int8 x int8 MAC into acc32 (stride 2: the even lanes of 64 loaded bytes), then the host's exact
  * requant ((acc * M + B) >> sh) + zp clamped to [lo, hi], in acc64 lanes: acc * M, plus B as
- * Bh 2^31 + Bl, one floor shift by sh. Bit-identical to dwq_blk_s8s8_ref.
+ * Bh 2^31 + Bl, one floor shift by sh. Bit-identical to the scalar loop it replaced (dwq_blk_s8s8_ref).
  *
  * A step writes all 32 lanes, up to 31 bytes past the band: rows go in order, so a row's overhang
  * is rewritten by the next row, and the last row's lands in the unused rest of the 4 KB C tile.

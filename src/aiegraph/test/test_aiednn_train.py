@@ -2,7 +2,10 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Training primitives (backward, normalization training forward) against torch autograd."""
+"""Training primitives (backward passes, normalization training forward) against torch autograd.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_train.py
+"""
 
 from __future__ import annotations
 

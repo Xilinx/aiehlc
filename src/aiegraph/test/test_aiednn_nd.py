@@ -2,7 +2,12 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""1-D and 3-D convolution, deconvolution and pooling (aiednn_*_create_nd) against PyTorch."""
+"""1-D and 3-D convolution, deconvolution and pooling (aiednn_*_create_nd) against PyTorch.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_nd.py
+
+1-D runs as 2-D (H = 1), so an int8 1-D conv takes the AIE im2col composite; 3-D runs on ref:.
+"""
 
 from __future__ import annotations
 

@@ -2,14 +2,17 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * aiednn_rt_deconvbwd.h -- conv+: deconvolution backward as convolutions, deconv+: average pooling
- * backward as a depthwise deconvolution, conv+: nearest resampling backward (integer factors) as a
- * depthwise convolution.
+ * aiednn_rt_deconvbwd.h -- conv+: deconvolution backward as convolutions (on the AIE where they are), and
+ * deconv+: average pooling backward as a depthwise deconvolution; conv+: nearest resampling backward (integer
+ * factors) as a depthwise convolution.
  *
- * With W [O, Cg, k..] and Wc [C, Og, k..], Wc[g Cg + c][oo] = W[g Og + oo][c] per group:
+ * A deconvolution relates its src position a and dst position a * s - pl + k * dil, the convolution's relation
+ * with src and dst exchanged. So, with W [O, Cg, k..] (O the deconvolution's dst channels):
  *   backward data     dx = conv_forward(src = dy, weights Wc, dst = dx)
  *   backward weights  dWc = conv_backward_weights(src = dy, diff_dst = x), dW = the transpose of dWc
- * diff_bias sums dy per channel (host). Floating types only.
+ * with Wc [C, Og, k..], Wc[g Cg + c][oo] = W[g Og + oo][c] per group. diff_bias sums dy per channel (host).
+ * The inner primitives are the public creates, so dispatch puts them where convolutions go (gemm+conv on the
+ * AIE). Floating types only, as the training creates.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, the public creates of aiednn_rt.cc / aiednn_rt_bwd_create.h.
  ******************************************************************************/
@@ -114,8 +117,9 @@ static int run_dcb(const rt_impl *self, aiednn_primitive *prim, void *const *ptr
 }
 
 // ── avg pooling backward as a depthwise deconvolution ────────────────────────
-/* dx = deconv(dy, w = 1 / |window|) per channel; exclude-padding scales dy by each window's in-bounds count
- * first. padding_r is re-derived so the output is exactly dx's size. */
+/* dx = deconv(dy, w = 1 / |window|) per channel (groups = C), the pool's strides / padding / dilation: the
+ * include-padding average; exclude-padding scales dy by each window's in-bounds count first (weights 1). padding_r is
+ * re-derived so the deconvolution's output is exactly dx's size (a pool may drop a partial last window). */
 typedef struct {
     aiednn_memory_desc_t dx, dy, w;
     aiednn_conv_nd_params_t cp;
@@ -225,7 +229,8 @@ static int run_apb(const rt_impl *self, aiednn_primitive *prim, void *const *ptr
 }
 
 // ── nearest resampling backward with integer factors as a depthwise convolution ─────────────────
-/* dx sums dy over f-blocks: a depthwise convolution of dy with ones, kernel = stride = f */
+/* out = f in per axis: output j reads input floor((j + 0.5) / f) = j / f, so dx sums dy over f-blocks: a depthwise
+ * convolution of dy with ones, kernel = stride = f */
 typedef struct {
     aiednn_memory_desc_t dx, dy, w;
     aiednn_conv_nd_params_t cp;
@@ -291,8 +296,9 @@ static int run_rsb(const rt_impl *self, aiednn_primitive *prim, void *const *ptr
 }
 
 // ── linear resampling backward as per-axis GEMMs ────────────────────────────
-/* separable: per axis (moved last) Y [rows][in] = X [rows][out] A [out][in], A the axis' taps as ref:
- * computes them. The GEMMs take the float matmul dispatch. */
+/* the linear map is separable (weights are a product over axes), so its transpose is applied an axis at a time:
+ * with the axis moved last, Y [rows][in] = X [rows][out] A [out][in], A the axis' taps exactly as ref: computes
+ * them (half-pixel centres, clamped at the borders). The GEMMs take the float matmul dispatch (bf16x3 on the AIE). */
 static void rsl_taps(int64_t in, int64_t out, float *A) { /* A [out][in] */
     memset(A, 0, (size_t)(out * in) * sizeof(float));
     for (int64_t o = 0; o < out; o++) {

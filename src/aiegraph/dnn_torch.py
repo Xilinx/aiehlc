@@ -2,11 +2,36 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""PyTorch ``nn.Module`` -> aiednn primitives: lower once, run on x86 or the board."""
+"""PyTorch ``nn.Module`` -> aiednn primitives: lower once, run on x86 or the board.
+
+    from aiegraph import dnn_torch as dt
+    g = dt.lower(model, x, mode="int8")         # AGraph: tensors + aiednn primitive calls
+    y, impls = dt.run_ctypes(g, lib, x)          # x86, through the shared-library runtime
+    dt.emit_app(g, out_dir, name, golden)        # C app + weight blob -> ag.dnn_build(...)
+    rep = dt.model_test(model, x, "int8", ...)   # all of it, against PyTorch
+
+Lowering. ``torch.fx.symbolic_trace`` after Conv+BatchNorm folding
+(``torch.fx.experimental.optimization.fuse``), shapes from ``ShapeProp``; every
+node becomes aiednn primitives (``_lower_*`` below). Views / reshapes / flatten
+/ dropout / identity are aliases of the same buffer (dense row-major makes them
+free); permute / transpose are ``reorder``. Unsupported nodes raise with the
+node name.
+
+Modes.
+* ``f32``: every primitive in float, so all of it runs on ``ref:`` -- the
+  reference against PyTorch is the float model itself.
+* ``int8``: every Conv2d / ConvTranspose2d / Linear becomes quantize (reorder
+  f32 -> s8, per-tensor symmetric scale calibrated on the input) -> s8 x s8 ->
+  s32 GEMM primitive (the AIE composites) -> per-output-channel dequantize
+  (binary mul, s32 x f32) -> bias (binary add). The tight reference is the same
+  model with the same fake quantization in PyTorch (``fake_quant_reference``);
+  the float model gives the accuracy figures.
+"""
 
 from __future__ import annotations
 
 import math
+import os
 import operator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,7 +80,7 @@ class AGraph:
     nodes: dict = field(default_factory=dict)  # fx node name -> tensor id (per-layer debugging)
     plan: dict = None      # tensor id -> arena byte offset (--aiednn-plan-memory; None: _plan_memory)
     arena: int = None      # arena bytes of that plan
-    top1_range: tuple = None   # (lo, hi, group): top-1 = (argmax over [lo, hi) - lo) // group per image
+    top1_range: tuple = None  # (lo, hi, group): top-1 = (argmax over [lo, hi) - lo) // group per image (model.top1_range)
 
     def new(self, shape, dt="f32", kind="act", data=None, base=None) -> int:
         self.tensors.append(Tensor(len(self.tensors), tuple(int(d) for d in shape), dt, kind, data, base))
@@ -302,7 +327,8 @@ class _Lowerer:
         return post
 
     def gemm_like(self, node, fn, x, w, b, cp, chan_axis):
-        """conv / deconv / linear in the graph's mode"""
+        """conv / deconv / linear in the graph's mode, with the following eltwise /
+        residual adds fused into its epilogue; returns the f32 output tensor."""
         shape = self.shape(node)
         r = len(shape)
         bshape = [1] * r
@@ -329,7 +355,8 @@ class _Lowerer:
         return y
 
     def quantize_gemm_inputs(self, node, fn, x, w):
-        """int8 mode: quantize src (per tensor), weights (per output channel)"""
+        """int8 mode: quantize src (per tensor), weights (per output channel); returns
+        (s8 src, s8 weights, per-channel dequant scales)"""
         sx = self.qscale[node.target]
         wflat = w.reshape(w.shape[0], -1) if fn != "aiednn_matmul_forward_create" else w.reshape(-1, w.shape[-1])
         sw = np.abs(wflat).max(axis=1) / 127.0
@@ -561,7 +588,8 @@ def _slice(L: _Lowerer, name, x: int, starts, sizes, steps=None) -> int:
 
 
 def _slice_getitem(L: _Lowerer, node, x: int, idx):
-    """x[idx] with ints / slices / one Ellipsis"""
+    """x[idx] with ints / slices / one Ellipsis: a slice keeping every axis, then an alias dropping the
+    integer-indexed ones"""
     shape = tuple(L.g.tensors[x].shape)
     idx = idx if isinstance(idx, tuple) else (idx,)
     if any(i is None for i in idx) or sum(i is Ellipsis for i in idx) > 1:
@@ -609,7 +637,8 @@ def _split(L: _Lowerer, node, name, x: int, args, kw) -> tuple:
 
 
 def _gqa_kv(node) -> bool:
-    """x.repeat_interleave(r, dim=1) read only as an sdpa's K / V"""
+    """x.repeat_interleave(r, dim=1) read only as an sdpa's K / V: the sdpa takes K / V with fewer
+    heads than Q (H % Hk == 0, each K / V head serving H / Hk query heads, as repeat_interleave lays out)"""
     if not node.users:
         return False
     dim = node.kwargs.get("dim", node.args[2] if len(node.args) > 2 else None)
@@ -706,22 +735,39 @@ def _lower_call_tensor(L: _Lowerer, node, name, args, kw):
         eps = kw.get("eps", args[4] if len(args) > 4 else 1e-5)
         return _Tid(L._norm(node, "aiednn_layer_normalization_forward_inference_create", int(args[0]), eps, w, b))
     if name in ("scaled_dot_product_attention",):
-        q, k, v = (int(t) for t in args[:3])
-        mask = kw.get("attn_mask", args[3] if len(args) > 3 else None)
-        if kw.get("dropout_p", args[4] if len(args) > 4 else 0.0):
-            raise AiegraphError("dnn_torch", f"{node.name}: sdpa with dropout")
-        if mask is not None and getattr(mask, "dtype", None) is not None and str(mask.dtype) == "torch.bool":
-            raise AiegraphError("dnn_torch", f"{node.name}: sdpa with a boolean mask")
-        m = None if mask is None else L.tid(mask, 4)   # additive float mask, broadcast to [B, H, Sq, Skv]
-        D = g.tensors[q].shape[-1]
-        scale = kw.get("scale", args[6] if len(args) > 6 else None) or 1.0 / math.sqrt(D)   # aten order
-        y = g.new(L.shape(node))
-        return _Tid(g.op(node.name, "aiednn_sdpa_forward_create",
-                         [("md", q), ("md", k), ("md", v), ("null",) if m is None else ("md", m), ("md", y),
-                          ("float", scale), ("int", int(bool(kw.get("is_causal", args[5] if len(args) > 5 else False))))],
-                         [("SRC", q), ("SRC_1", k), ("SRC_2", v)] + ([("ATTN_MASK", m)] if m is not None else [])
-                         + [("DST", y)], y))
+        return _Tid(_lower_sdpa(L, node, args, kw))
     raise AiegraphError("dnn_torch", f"{node.name}: {name} is not supported")
+
+
+def _lower_sdpa(L: "_Lowerer", node, args, kw) -> int:
+    """F.scaled_dot_product_attention (aten argument order). int8 mode with calibrated q / k / v scales: the three
+    sources are quantized per tensor and sdpa reads them as int8 (attr src_scales, AIEDNN_ATTR_TOLERANCE_INT8_ATTN:
+    the library's int8 attention, within a few codes); --aiednn-fold-requant then folds the q / k / v quantizes into
+    their GEMMs. AIEDNN_NO_INT8_ATTN=1 keeps f32 sources."""
+    g = L.g
+    q, k, v = (int(t) for t in args[:3])
+    mask = kw.get("attn_mask", args[3] if len(args) > 3 else None)
+    if kw.get("dropout_p", args[4] if len(args) > 4 else 0.0):
+        raise AiegraphError("dnn_torch", f"{node.name}: sdpa with dropout")
+    if mask is not None and getattr(mask, "dtype", None) is not None and str(mask.dtype) == "torch.bool":
+        raise AiegraphError("dnn_torch", f"{node.name}: sdpa with a boolean mask")
+    m = None if mask is None else L.tid(mask, 4)   # additive float mask, broadcast to [B, H, Sq, Skv]
+    D = g.tensors[q].shape[-1]
+    scale = kw.get("scale", args[6] if len(args) > 6 else None) or 1.0 / math.sqrt(D)   # aten order
+    causal = int(bool(kw.get("is_causal", args[5] if len(args) > 5 else False)))
+    qs = L.qscale or {}
+    attr = None
+    if (L.mode == "int8" and all(f"{node.name}.{c}" in qs for c in "qkv")
+            and os.environ.get("AIEDNN_NO_INT8_ATTN") != "1"):
+        sq, sk, sv = (float(qs[f"{node.name}.{c}"]) for c in "qkv")
+        q, k, v = (L.reorder(f"{node.name}_{c}8", t, "s8", scale=s_) for c, t, s_ in (("q", q, sq), ("k", k, sk), ("v", v, sv)))
+        attr = dict(scales=None, post=[], src_scales=[sq, sk], src_scales_23=[sv, 0.0], flags=4)  # INT8_ATTN
+    y = g.new(L.shape(node))
+    create = [("md", q), ("md", k), ("md", v), ("null",) if m is None else ("md", m), ("md", y),
+              ("float", scale), ("int", causal)] + ([("attr", attr)] if attr else [])
+    return g.op(node.name, "aiednn_sdpa_forward_create_attr" if attr else "aiednn_sdpa_forward_create", create,
+                [("SRC", q), ("SRC_1", k), ("SRC_2", v)] + ([("ATTN_MASK", m)] if m is not None else [])
+                + [("DST", y)], y)
 
 
 def calibrate(gm, x) -> dict:
@@ -734,8 +780,22 @@ def calibrate(gm, x) -> dict:
                 a = float(inp[0].detach().abs().max())
                 scales[name] = max(scales.get(name, 0.0), a / 127.0 if a > 0 else 1.0)
             hooks.append(m.register_forward_pre_hook(hook))
+    sdpa = {torch.nn.functional.scaled_dot_product_attention, torch.ops.aten.scaled_dot_product_attention.default}
+
+    class _Rec(torch.fx.Interpreter):   # sdpa is a function, not a module: record its q / k / v here
+        def call_function(self, target, args_, kwargs):
+            if target in sdpa:
+                for c, t in zip("qkv", args_[:3]):
+                    a = float(t.detach().abs().max())
+                    key = f"{self._node}.{c}"
+                    scales[key] = max(scales.get(key, 0.0), a / 127.0 if a > 0 else 1.0)
+            return super().call_function(target, args_, kwargs)
+
+        def run_node(self, n):
+            self._node = n.name
+            return super().run_node(n)
     with torch.no_grad():
-        gm(x)
+        _Rec(gm).run(x)
     for h in hooks:
         h.remove()
     return scales
@@ -760,7 +820,8 @@ def prepare(model, x):
 
 
 def mha_module(m):
-    """nn.MultiheadAttention *m* (batch-first self-attention, packed in_proj) as modules the lowerings know"""
+    """nn.MultiheadAttention *m* (batch-first self-attention, packed in_proj) as modules the lowerings know:
+    one Linear for Q / K / V, a head split, sdpa, the out Linear (same math; returns (out, None))"""
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
@@ -792,7 +853,9 @@ def mha_module(m):
 
 
 def _decompose_mha(model):
-    """Swap nn.MultiheadAttention for the equivalent modules the lowering knows."""
+    """nn.MultiheadAttention (batch-first self-attention, packed in_proj, no masks at the call: vit) ->
+    the same math as modules the lowering knows: one Linear for Q / K / V, a head split, sdpa, the out
+    Linear. Returns *model* itself when it has none; else a copy with them swapped."""
     import copy
 
     import torch
@@ -812,7 +875,9 @@ def _decompose_mha(model):
 
 
 def _dynamo_trace(model, x):
-    """torch._dynamo.export as the tracer of last resort, Conv+BN folded after it."""
+    """torch._dynamo.export as the tracer of last resort, Conv+BN folded after it. One eval run first: a
+    model that caches shape-derived attributes on its first call (ultralytics' Detect anchors) would
+    otherwise mutate them during export, which export refuses."""
     import torch
     from torch.fx.experimental.optimization import fuse
     with torch.no_grad():
@@ -825,7 +890,9 @@ def _dynamo_trace(model, x):
 
 
 def lower(model, x, mode: str = "f32", name: str = "model", gm=None, qscale=None, fuse: bool = True) -> AGraph:
-    """Lower *model* (traced on example input *x*, shape [1,...]) to aiednn primitives."""
+    """Lower *model* (traced on example input *x*, shape [1,...]) to aiednn primitives.
+    *fuse*=False leaves eltwise / residual adds as their own primitives (the MLIR
+    pass --aiednn-fuse-epilogue folds them; aiegraph.dnn_mlir)."""
     if mode not in ("f32", "int8"):
         raise AiegraphError("dnn_torch", f"mode={mode!r}", hint="'f32' or 'int8'")
     gm = gm if gm is not None else prepare(model, x)
@@ -840,7 +907,10 @@ def lower(model, x, mode: str = "f32", name: str = "model", gm=None, qscale=None
 
 
 def _quantize_residuals(gm, qscale: dict):
-    """the int8 skip streams of --aiednn-quantize-residual, in the fx graph"""
+    """the int8 skip streams of --aiednn-quantize-residual, in the fx graph: an add whose
+    other operand is a conv / linear output (the add that fuses into that GEMM's epilogue)
+    sees a skip operand that also feeds a quantized conv / linear at that layer's input
+    scale -- the int8 copy the graph already makes for it"""
     import operator
 
     import torch
@@ -863,7 +933,9 @@ def _quantize_residuals(gm, qscale: dict):
         for skip, other in ((a[0], a[1]), (a[1], a[0])):
             q = next((u for u in skip.users if is_gemm(u) and u.target in qscale), None)
             if q is None and len(skip.users) == 1:
-                # the skip feeds nothing quantized: use the block output's scale
+                # the skip feeds nothing quantized (downsample blocks): the block output's scale -- the
+                # GEMM reading relu(add) -- as --aiednn-quantize-residual borrows the reorder on the
+                # fused GEMM's result
                 out = n
                 if len(out.users) == 1:
                     u = next(iter(out.users))
@@ -886,14 +958,35 @@ def _fake_q8(t, s: float):
     return torch.clamp(torch.round(t / s), -128, 127) * s
 
 
+def _quantize_sdpa_inputs(gm, qscale: dict) -> None:
+    """int8 attention (_lower_sdpa): q / k / v are quantized per tensor before sdpa; simulate it in *gm*"""
+    import torch
+    if os.environ.get("AIEDNN_NO_INT8_ATTN") == "1":
+        return
+    sdpa = {torch.nn.functional.scaled_dot_product_attention, torch.ops.aten.scaled_dot_product_attention.default}
+    for n in list(gm.graph.nodes):
+        if n.op != "call_function" or n.target not in sdpa or not all(f"{n.name}.{c}" in qscale for c in "qkv"):
+            continue
+        args = list(n.args)
+        with gm.graph.inserting_before(n):
+            for i, c in enumerate("qkv"):
+                args[i] = gm.graph.call_function(_fake_q8, (args[i], float(qscale[f"{n.name}.{c}"])))
+        n.args = tuple(args)
+    gm.recompile()
+
+
 def fake_quant_reference(gm, x, qscale: dict, in_place: bool = False, quant_residual: bool = False):
-    """PyTorch with the int8 mode's quantization simulated"""
+    """PyTorch with the int8 mode's quantization simulated (input per-tensor, weights
+    per output channel, both symmetric) -- what the int8 aiednn graph must match.
+    *in_place*: quantize *gm* itself and leave the hooks on (layer_diff). *quant_residual*:
+    the residual adds' skip operands too, as --aiednn-quantize-residual does."""
     import copy
 
     import torch
     ref = gm if in_place else copy.deepcopy(gm)
     if quant_residual:
         _quantize_residuals(ref, qscale)
+    _quantize_sdpa_inputs(ref, qscale)
     hooks = []
     for name, m in ref.named_modules():
         if not isinstance(m, (torch.nn.Conv2d, torch.nn.ConvTranspose2d, torch.nn.Linear)):
@@ -942,7 +1035,8 @@ def _bufs(g: AGraph) -> dict:
 
 
 def run_ctypes(g: AGraph, lib, x=None, keep: bool = False):
-    """Execute *g* on x86 (``dnn_ctypes.AiednnLib``)."""
+    """Execute *g* on x86 (``dnn_ctypes.AiednnLib``). Returns (output, [impl per op])
+    and, with *keep*, every tensor buffer too."""
     import ctypes as C
 
     from .dnn_ctypes import ARG, MULTIPLE_SRC, ConvParams, PoolParams, md
@@ -1001,6 +1095,9 @@ def run_ctypes(g: AGraph, lib, x=None, keep: bool = False):
                 a, held = mk_attr(lib.ALG, scales=item[1]["scales"], post_ops=post,
                                   dst_scale=item[1].get("dst_scale", 0.0), dst_zp=item[1].get("dst_zp", 0),
                                   flags=item[1].get("flags", 0))
+                for fld in ("src_scales", "src_scales_23"):     # per-source dequant scales (8-bit sdpa sources)
+                    for k_, v_ in enumerate(item[1].get(fld) or []):
+                        getattr(a, fld)[k_] = float(v_)
                 keepalive += [a, held]
                 cargs.append(C.byref(a))
             else:
@@ -1063,7 +1160,10 @@ def _int_gemm(g: AGraph, op: Op) -> bool:
 
 def emit_app(g: AGraph, out: Path, golden: np.ndarray, tol: float, float_top1: int = -1,
              verify_gemm: bool = True, autotune=None, prefer: str = "aie") -> Path:
-    """C app running *g* through aiednn on the x86 / board build, checking the output against *golden*"""
+    """C app running *g* through aiednn on the x86 / board build, checking the output
+    against *golden* (rel L2 < *tol* and the same top-1). *verify_gemm*: re-run every
+    integer conv / deconv / matmul on ref: with the same inputs and compare bit for bit
+    (on the device, so every AIE layer is checked where it ran)."""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     blob, coff = bytearray(), {}
@@ -1109,6 +1209,18 @@ def _app_head(g, out, arena, gold_off, ngold, tol, float_top1) -> list:
         f"#define GOLD_OFF {gold_off}", f"#define NGOLD {ngold}", f"#define TOL {tol!r}",
         f"#define FLOAT_TOP1 {float_top1}", f'#define MODEL_NAME "{g.name}"', f'#define MODE "{g.mode}"',
         f"#define NOPS {len(g.ops)}", "",
+        "/* dnn_build's AIEDNN_FORCE_REF_OPS: ops created on ref: because their AIE mode would cost a megakernel",
+        "   switch worth more than the op (a board with slow ELF loads); none elsewhere */",
+        "#ifdef AIEDNN_FORCE_REF_OPS",
+        "static const int g_force_ref[] = AIEDNN_FORCE_REF_OPS;",
+        "static int force_ref(int i) {",
+        "    for (unsigned k = 0; k < sizeof g_force_ref / sizeof g_force_ref[0]; k++)",
+        "        if (g_force_ref[k] == i) return 1;",
+        "    return 0;",
+        "}",
+        "#else",
+        "static int force_ref(int) { return 0; }",
+        "#endif", "",
         "#if defined(__aarch64__)",
         "static uint64_t now_ticks(void) { uint64_t v; __asm__ volatile(\"isb; mrs %0, cntvct_el0\" : \"=r\"(v)); return v; }",
         "static double ticks_ms(uint64_t t) { uint64_t f; __asm__ volatile(\"mrs %0, cntfrq_el0\" : \"=r\"(f)); return 1e3 * (double)t / (double)f; }",
@@ -1172,12 +1284,16 @@ def _c_op(g: AGraph, i: int, op: Op, int_gemm: bool = False) -> list:
                     rs, rz = (float(po[3]), float(po[4])) if len(po) > 3 else (0.0, 0.0)  # s8 src1 scale / zp
                     pos.append(f"{{aiednn_post_op_binary, aiednn_binary_{po[1]}, {rs!r}f, {rz!r}f, "
                                f"{_c_md(g.tensors[po[2]])}}}")
-            pre.append(f"        static {'' if d.get('flags') else 'const '}aiednn_attr_t c{j} = "
+            mut = d.get("flags") or d.get("src_scales") or d.get("src_scales_23")
+            pre.append(f"        static {'' if mut else 'const '}aiednn_attr_t c{j} = "
                        f"{{{len(sc) if sc is not None else 0}, "
                        f"{f's{j}' if sc is not None else 'nullptr'}, {float(d.get('dst_scale', 0.0))!r}f, "
                        f"{int(d.get('dst_zp', 0))}, {len(pos)}, {{{', '.join(pos)}}}}};")
             if d.get("flags"):     # AIEDNN_ATTR_* opt-ins: the last field, past the positional initializer
                 pre.append(f"        c{j}.flags = {int(d['flags'])}u;")
+            for fld in ("src_scales", "src_scales_23"):   # per-source dequant scales, also past the initializer
+                for k_, v_ in enumerate(d.get(fld) or []):
+                    pre.append(f"        c{j}.{fld}[{k_}] = {float(v_)!r}f;")
             cargs.append(f"&c{j}")
         elif k == "floats":
             pre.append(f"        static const float c{j}[] = {{{', '.join(f'{v!r}f' for v in item[1])}}};")
@@ -1186,7 +1302,9 @@ def _c_op(g: AGraph, i: int, op: Op, int_gemm: bool = False) -> list:
                     f"{{AIEDNN_ARG_MULTIPLE_SRC + {a[1]}, P{t}}}") if isinstance(a, tuple) else f"{{AIEDNN_ARG_{a}, P{t}}}"
                    for a, t in op.exec)
     return (["    {", f'        g_op_name[{i}] = "{op.name}";'] + pre +
-            [f"        st = {op.fn}(&p, {', '.join(cargs)});",
+            [f"        if (force_ref({i})) aiednn_set_impl_filter(\"ref:\"); // dnn_build: not worth a switch",
+             f"        st = {op.fn}(&p, {', '.join(cargs)});",
+             f"        if (force_ref({i})) aiednn_set_impl_filter(nullptr);",
              f'        if (st != aiednn_success) return fail({i}, "create", st);']
             + (["        aiednn_primitive_set_constant_weights(p, 1); // model weights: packed blocks cached"]
                if _const_weights(g, op) else []) +
@@ -1238,7 +1356,8 @@ def _c_verify(g: AGraph, i: int, op: Op, cargs: list, ex: str) -> list:
 
 
 def _autotune_lines(autotune) -> list:
-    """AIEDNN_TUNE setup lines for *autotune*: None, "tune" or a saved table's text."""
+    """*autotune*: None (dispatch decides), "tune" (time every accepting implementation on the warm-up
+    run, AIEDNN_TUNE lines after the timed run), or a saved table's text (preloaded: no tuning cost)"""
     if not autotune:
         return []
     if autotune == "tune":
@@ -1305,7 +1424,9 @@ def _app_main(g: AGraph, autotune=None, prefer: str = "aie") -> list:
 # ── per-layer comparison ──────────────────────────────────────────────────
 
 def layer_diff(model, x, mode: str, lib, top: int = 10) -> list:
-    """[(node, rel error, shape)] of the graph vs the fake-quant PyTorch model, in graph order."""
+    """Run the graph and the (fake-quant) PyTorch model side by side and return
+    [(node, rel error, shape)] in graph order -- the first large one is the
+    layer to look at."""
     import torch
     from torch.fx import Interpreter
     gm = prepare(model, x)
@@ -1363,7 +1484,10 @@ def _post_eltwise(alg, v, a, b):
 
 
 def gemm_exact_check(g: AGraph, bufs: dict) -> tuple:
-    """Recompute every integer GEMM-like primitive in PyTorch from its own inputs; (checked, [(op, mismatches)])."""
+    """Recompute every integer conv / deconv / matmul primitive in PyTorch from the
+    graph's OWN input buffers and compare exactly (float64 holds these sums
+    exactly). Independent of quantization drift: each AIE layer is checked on what
+    it actually received. Returns (primitives checked, [(op, mismatches)])."""
     import torch
     import torch.nn.functional as F
     checked, bad = 0, []
@@ -1436,8 +1560,11 @@ def gemm_exact_check(g: AGraph, bufs: dict) -> tuple:
 
 # ── one call: lower, run, compare ─────────────────────────────────────────
 
-#: pass thresholds (relative L2 vs the mode's reference, plus the same top-1); int8 allows
-#: quantization-tie flips, a lowering bug is O(1).
+#: pass thresholds (relative L2 vs the mode's reference, plus the same top-1).
+#: int8: aiednn's f32 activations and PyTorch's differ in the last ulp, so an
+#: activation sitting on a quantization tie can round to the other code (measured
+#: on mobilenet_v2: 1 of 401,408 codes at the first divergence, 3.8e-6 from the
+#: tie); deep nets accumulate those flips to a few 1e-2. A lowering bug is O(1).
 TOL = {"f32": 1e-4, "int8": 0.15}
 
 @dataclass
@@ -1470,7 +1597,9 @@ class ModelReport:
 
 
 def references(model, x, mode, name="model", mlir: bool = False, keep_ir=None):
-    """(graph, reference output for the mode, float model output)."""
+    """(graph, reference output for the mode, float model output). *mlir*: lower
+    unfused and run the aiednn MLIR pipeline (aiegraph.dnn_mlir.optimize) instead
+    of the Python epilogue fusion."""
     import torch
     gm = prepare(model, x)
     with torch.no_grad():
@@ -1491,12 +1620,14 @@ def references(model, x, mode, name="model", mlir: bool = False, keep_ir=None):
 
 
 def model_test(model, x, mode: str, lib, name: str = "model", mlir: bool = False) -> ModelReport:
-    """lower *model*, run it through aiednn on x86 (ctypes), compare with PyTorch."""
+    """lower *model*, run it through aiednn on x86 (ctypes), compare with PyTorch
+    (*mlir*: through the aiednn MLIR pipeline)"""
     g, ref, yf = references(model, x, mode, name, mlir=mlir)
     y, impls, bufs = run_ctypes(g, lib, x.numpy(), keep=True)
     if g.plan is not None:
-        # the MLIR memory plan overwrote earlier inputs: re-run on private buffers for the
-        # per-layer GEMM check and require bit-identical outputs
+        # that run used the MLIR memory plan (shared arena, in-place ops), so earlier
+        # layers' inputs are overwritten: re-run on private buffers for the per-layer
+        # GEMM check, and require the two outputs to be bit-identical (plan check)
         plan, g.plan = g.plan, None
         y2, _, bufs = run_ctypes(g, lib, x.numpy(), keep=True)
         g.plan = plan
@@ -1515,7 +1646,9 @@ def model_test(model, x, mode: str, lib, name: str = "model", mlir: bool = False
 
 
 def _top1(y, rng=None) -> list:
-    """top-1 class per image: one per row of a [batch, classes] output, else over the whole output"""
+    """top-1 class per image: one per row of a [batch, classes] output, else over the whole output;
+    *rng* (lo, hi, group): only flat indices [lo, hi) of each image count, reported as (index - lo) // group
+    (a detector's [classes, anchors] score rows: the class of its strongest detection)"""
     y = np.asarray(y)
     rows = y.reshape(y.shape[0], -1) if y.ndim >= 2 and y.shape[0] > 1 else y.reshape(1, -1)
     lo, hi, grp = rng or (0, rows.shape[1], 1)

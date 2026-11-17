@@ -4,10 +4,20 @@
  *
  * aiednn_rt_tune.h -- measured implementation choice (autotuning).
  *
- * With aiednn_set_autotune(1), the first execute of a problem signature runs every accepting
- * implementation (up to RT_TUNE_MAX), times each on its second run, keeps the fastest and records the
- * choice per signature for later creates. aiednn_autotune_dump() prints the table, aiednn_autotune_load(text)
- * preloads one. Not tuned: in-place primitives and single acceptors.
+ * Dispatch ranks the implementations that accept a problem by specificity (exact-shape kernel >
+ * composite > ref:). That says what *fits*, not what is *fastest*: a composite and ref: can both
+ * accept, and which one wins depends on the shape (a global pool loses on the AIE, a 3x3 conv wins
+ * 25x). With aiednn_set_autotune(1), the first execute of a problem signature runs every accepting
+ * implementation (create records them, up to RT_TUNE_MAX), times each on its second run, keeps the
+ * fastest for the primitive and records the choice per signature; later primitives with the same
+ * signature take it at create, without timing. Every implementation is bit-exact against ref: (or
+ * within its declared tolerance), so whichever ran last left a valid dst.
+ *
+ * aiednn_autotune_dump() prints the table ("AIEDNN_TUNE <sig> <kind> <impl> <us> | <impl> <us> ..."),
+ * aiednn_autotune_load(text) preloads one (a board run's dump), so an app ships tuned choices.
+ *
+ * Not tuned (the dispatch choice runs): a dst that overlaps an input (an in-place primitive --
+ * running it twice would read its own output), or a single acceptor.
  ******************************************************************************/
 #ifndef AIEDNN_RT_TUNE_H
 #define AIEDNN_RT_TUNE_H
@@ -23,7 +33,8 @@ typedef struct {
 static rt_tune_entry g_tune_tab[RT_TUNE_SLOTS];
 static int g_tune_n, g_tune;
 
-/* problem signature: kind, algorithm, descriptor types and dims, conv / pool geometry, epilogue shape */
+/* problem signature: kind, algorithm, every memory descriptor's type and dims, conv / pool
+ * geometry, the epilogue's shape -- what decides which implementation is fastest, no pointers */
 static uint64_t rt_tune_sig(const rt_prob *p) {
     uint64_t h = 1469598103934665603ULL;
     auto mix = [&](int64_t v) {

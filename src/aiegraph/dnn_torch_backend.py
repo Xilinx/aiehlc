@@ -1,4 +1,21 @@
-"""``torch.compile(model, backend="aiednn")``: run PyTorch graphs through aiednn."""
+"""``torch.compile(model, backend="aiednn")``: run PyTorch graphs through aiednn.
+
+Dynamo hands the backend an fx graph. The backend splits it into regions aiednn can run and regions it
+cannot (``CapabilityBasedPartitioner``), compiles each supported region to aiednn primitives and calls
+them from the generated module; everything else stays torch code. Support is the lowering's own
+verdict -- a region whose lowering fails hands the failing node back to torch and the graph is
+re-partitioned -- the rule of the graph API ("create failing means unsupported",
+doc/design/aiednn_framework_api.md section 2).
+
+Interim inner part: a region is lowered with ``dnn_torch.lower`` (fx -> aiednn primitives; the MLIR
+pipeline with ``mlir``) and run with ``run_ctypes`` on the workstation build of the library
+(``libaiednn.so``: the AIE kernels' C references stand in for the array -- workstation emulation).
+A region takes one tensor input (dnn_torch's graphs have one); other regions stay torch code. When the
+partition graph API (aiednn_graph.h) lands, ``_compile_region`` switches to graph_add_op /
+get_partitions / partition_compile behind the same interface.
+
+Flags: ``aiegraph.backends.aiednn`` (benchmark, mode, mlir, allow_ref).
+"""
 from __future__ import annotations
 
 import copy
@@ -28,7 +45,10 @@ def _flags():
 
 
 class _Region:
-    """one supported region, lowered once."""
+    """one supported region, lowered once. Called with the fused_* call's arguments: *act* is the
+    position of its one activation, the others are constants (get_attr in the caller) bound into the
+    lowering. Returns what the submodule returns: one tensor, or a tuple when Dynamo keeps an
+    intermediate alive (served from the kept buffers by node name)."""
 
     def __init__(self, sub, args, act):
         from torch.fx.experimental.optimization import fuse
@@ -143,7 +163,8 @@ def _graph_lib():
 
 
 class _PartModule(torch.nn.Module):
-    """one supported graph-API partition in place of its fx nodes"""
+    """one supported graph-API partition in place of its fx nodes: torch tensors in, the compiled
+    partition executed on their buffers, torch tensors out (the submodule's output structure)"""
 
     def __init__(self, fg, part, cp, args, outs):
         super().__init__()
@@ -171,7 +192,9 @@ class _PartModule(torch.nn.Module):
 
 
 def _boundary(nodes) -> tuple:
-    """(input names, output names) of a node group"""
+    """(input names, output names) of a node group, in the order fuse_as_graphmodule gives its
+    submodule's placeholders and outputs: inputs by first use over the topologically sorted nodes
+    (args, then kwargs), outputs = nodes with a user outside the group"""
     import torch.fx as fx
     from torch.fx.passes.utils.fuser_utils import topo_sort
     nodes = topo_sort(nodes)
@@ -198,7 +221,9 @@ def _perm_of(node):
 
 
 def _sink_permute(gm) -> int:
-    """mul / add of a permute's result by a constant -> the op above the permute, the constant permuted back"""
+    """mul / add of a permute's result by a constant -> the op above the permute, the constant permuted
+    back (--aiednn-sink-permute on the fx side): convnext's layer scale then sits right after its GEMM,
+    where the graph API fuses it as a post-op. Returns how many ops moved."""
     from .dnn_torch_graph import _name
     moved = 0
     for node in list(gm.graph.nodes):
@@ -240,7 +265,9 @@ def _sink_permute(gm) -> int:
 
 
 def _inline_mha(gm, example_inputs) -> int:
-    """Inline the decomposition of nn.MultiheadAttention submodules; returns calls moved."""
+    """nn.MultiheadAttention submodules (Dynamo keeps them as one call_module: vit) -> their decomposition
+    (dnn_torch.mha_module: Linear, split, sdpa, Linear) traced and inlined in place, so the graph API sees
+    the GEMMs and the attention. Self-attention only (q, k, v the same node), no masks; returns calls moved."""
     import operator
 
     import torch
@@ -293,7 +320,9 @@ def _inline_mha(gm, example_inputs) -> int:
 
 
 def _split_to_narrow(gm) -> int:
-    """x.split / x.chunk whose pieces are only picked by integer getitem -> one torch.narrow per piece."""
+    """x.split / x.chunk whose pieces are only picked by integer getitem -> one torch.narrow per piece.
+    The split's tuple is no tensor, so a partition reading a piece would have the tuple, not x, at its
+    boundary; narrow reads x itself. Sizes from Dynamo's example values (node.meta); returns pieces moved."""
     import operator
 
     import torch
@@ -328,7 +357,9 @@ def _split_to_narrow(gm) -> int:
 
 
 def _select_to_narrow(gm) -> int:
-    """x.select(dim, i) (aten.select.int: PT2E graphs) -> narrow(x, dim, i, 1) + squeeze(dim), two real fx nodes."""
+    """x.select(dim, i) (aten.select.int: PT2E graphs) -> narrow(x, dim, i, 1) + squeeze(dim), two real fx nodes.
+    FxGraph would otherwise add a helper slice op plus a reshape for the one node, and when the two land in
+    different partitions both would claim that node. Returns nodes rewritten."""
     import torch
     n_done = 0
     for node in list(gm.graph.nodes):
@@ -349,7 +380,9 @@ def _select_to_narrow(gm) -> int:
 
 
 def _group_nodes(fg, part, by_name) -> list:
-    """the fx nodes a partition replaces"""
+    """the fx nodes a partition replaces: its ops' nodes (a helper op such as 'x.slice' belongs to node
+    x), plus the nodes FxGraph folded into it -- a GQA repeat_interleave read only inside, a split whose
+    every piece is -- so the fused submodule's inputs are the tensors the partition reads"""
     names = list(dict.fromkeys(o if o in by_name else o.rsplit(".", 1)[0] for o in part.ops))
     nodes = [by_name[n] for n in names if n in by_name]
     inside = set(nodes)
@@ -366,8 +399,9 @@ def _group_nodes(fg, part, by_name) -> list:
     return nodes
 
 
-def _graph_backend(gm, example_inputs):
-    """Partition the fx graph through the graph API and compile each supported partition."""
+def _graph_backend(gm, example_inputs, tr=None):
+    """partitioning by the library: every fx node becomes a graph op (dnn_torch_graph), the graph API
+    returns partitions, each supported one replaces its nodes with one compiled aiednn primitive"""
     from torch.fx.passes.utils.fuser_utils import fuse_by_partitions
 
     from .dnn_torch_graph import FxGraph
@@ -375,11 +409,14 @@ def _graph_backend(gm, example_inputs):
     # Conv+BN folded on the fx side as dnn_torch.prepare does (the graph API does not fold BN into a
     # conv), without a re-trace so the call signature stays Dynamo's
     gm = fuse(gm, no_trace=True)
-    _sink_permute(gm)
-    _inline_mha(gm, example_inputs)
-    _split_to_narrow(gm)
-    _select_to_narrow(gm)
+    if tr:
+        tr.fx("conv+bn", gm, "BN folded into its conv (torch.fx.experimental.optimization.fuse)")
+    moved = (_sink_permute(gm), _inline_mha(gm, example_inputs), _split_to_narrow(gm), _select_to_narrow(gm))
     fg = FxGraph(_graph_lib(), gm, example_inputs, fuse=2 if _flags().fuse_residual_requant else 1)
+    if tr:
+        tr.fx("rewrites", gm, "sink_permute {}, inline_mha {}, split_to_narrow {}, "
+                              "select_to_narrow {} (ours, on the fx graph)".format(*moved))
+        tr.ops("graph ops", fg, "one graph-API op per fx node; a wildcard is never fused into a partition")
     by_name = {n.name: n for n in gm.graph.nodes}
     sup, cps = [], []
     for p in fg.parts:             # compile first: a partition that fails to compile stays torch code
@@ -392,6 +429,8 @@ def _graph_backend(gm, example_inputs):
             sup.append(p)
         except RuntimeError as exc:
             fg.compile_failed[p.info] = str(exc)
+    if tr:
+        tr.parts("partitions", fg, sup, cps, "the library's partitions: supported = the fused primitive created")
     groups = [_group_nodes(fg, p, by_name) for p in sup]
     bounds = [_boundary(nodes) for nodes in groups]   # before fusing renames the inputs
     fused = fuse_by_partitions(gm, groups)
@@ -402,13 +441,18 @@ def _graph_backend(gm, example_inputs):
         setattr(fused, name, mods[name])
     fused.recompile()
     fused.aiednn_graph, fused.aiednn_parts = fg, mods
+    if tr:
+        tr.fused("executed", fused, mods, "what torch runs: a node per compiled partition, the rest torch")
+        print(f"[aiednn] stage graphs: {tr.write(_flags().dump)}")
     aiednn_backend.last = fused
     aiednn_backend.history.append(fused)    # every graph Dynamo compiled (graph breaks give several)
     return fused.forward
 
 
 def aiednn_backend(gm, example_inputs):
-    """the Dynamo backend: partition, compile the supported regions, return the stitched forward."""
+    """the Dynamo backend: partition, compile the supported regions, return the stitched forward.
+    The graph API decides the partitions when it is in the tree and ``graph`` is not False (f32
+    graphs); otherwise the interim dnn_torch.lower regions."""
     import torch
     _freeze_params(gm, example_inputs)
     fl = _flags()

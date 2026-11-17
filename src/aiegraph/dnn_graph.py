@@ -2,7 +2,18 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""ctypes binding of include/aiednn_graph.h (the partition graph API)."""
+"""ctypes binding of include/aiednn_graph.h (the partition graph API).
+
+    lib = build_graph_lib(out_dir)            # libaiednn.so with the graph API
+    g = Graph(lib)
+    g.add("convolution", ["x", "w", "b"], "y", conv=conv_params((1, 1), (1, 1), (1, 1)))
+    g.add("relu", ["y"], "z")
+    g.tensor("x", (1, 8, 16, 16), "f32"); ...   # every tensor's shape / type (constants: const=True)
+    for p in g.finalize():
+        if p.supported: p.compile().execute({"x": x, "w": w, "b": b}, {"z": z})
+
+Tensor names are any hashables; ids are assigned in first-use order.
+"""
 
 from __future__ import annotations
 
@@ -54,7 +65,8 @@ FIND_HEURISTIC, FIND_MEASURE = 0, 1
 
 
 def build_graph_lib(out: Path, mesh=None) -> AiednnLib:
-    """AiednnLib.build plus the graph API"""
+    """AiednnLib.build plus the graph API: a wrapper TU so this works whether or not aiednn_rt.cc
+    already includes aiednn_rt_graph.h (the include guard makes the second inclusion empty)."""
     from .dnn import impl_list_source
     from .kernel_lib import kernel_lib
     out.mkdir(parents=True, exist_ok=True)
@@ -106,7 +118,8 @@ class Stream:
 
 
 def attr(lib: AiednnLib, **kw) -> GAttr:
-    """GAttr from keywords: alg"""
+    """GAttr from keywords: alg (name or int), alpha, beta, conv, pool, weights_transposed, axis, perm,
+    eps, flags, scale, zero_point, scales (per channel, with axis), zero_points, sdpa_scale, causal"""
     a = GAttr()
     lib.so.aiednn_graph_op_attr_init(C.byref(a))
     keep = []
@@ -268,7 +281,8 @@ class Graph:
         return [Partition(self, C.c_void_p(arr[i])) for i in range(n)]
 
     def run(self, feeds: dict, fallback=None) -> dict:
-        """Every partition in order on numpy buffers."""
+        """Every partition in order on numpy buffers. Unsupported partitions call
+        fallback(partition, env) which must fill the partition's output in env, else raise."""
         env = dict(feeds)
         for p in self.parts:
             for o in p.outputs:

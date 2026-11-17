@@ -2,7 +2,9 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * fpool_app -- f32 pooling on the AIE (fpool:) vs ref:: max exact, average to 1e-6.
+ * fpool_app -- f32 windowed pooling on the AIE (impl fpool:, aiednn_rt_fpool.h, the GEMM ELF's FPOOL mode):
+ * each case runs with the default dispatch and with the ref: filter; max must match ref: exactly, an
+ * average to 1e-6 ("FPCHK"); times per call in "OPTIME". Deterministic inputs.
  *
  *   PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/fpool_app.cc --target x86 --run
  *   ... --target vek280 --run --board <host> --vitis-settings <.../settings64.sh>
@@ -90,7 +92,7 @@ static void run_case(const char *name, int nd, const int64_t *dims, const int64_
     g_fail |= !ok;
 }
 
-/* max pooling backward: dx bit-exact vs ref: */
+/* max pooling backward: the AIE finds each window's first maximum; dx must equal ref: bit for bit */
 static void run_bwd(const char *name, int nd, const int64_t *dims, const int64_t *k, const int64_t *s,
                     const int64_t *p) {
     int64_t od[5] = {dims[0], dims[1], 0, 0, 0}, nin = 1, nout = 1;

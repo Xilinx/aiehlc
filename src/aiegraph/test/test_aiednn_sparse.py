@@ -2,7 +2,10 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""CSR sparse-src matmul (aiednn_sparse_matmul_create) against the dense product."""
+"""CSR sparse-src matmul (aiednn_sparse_matmul_create) against the dense product.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_sparse.py
+"""
 
 from __future__ import annotations
 

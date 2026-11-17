@@ -2,13 +2,19 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * aiednn_rt_bf16.h -- float matmul on the GEMM ELF's bf16 mode (aie_modes_bf16.h, opcode 0xBF):
+ * aiednn_rt_bf16.h -- float matmul on the GEMM ELF's bf16 mode (aie_modes_bf16.h, opcode 0xBF; AIE-ML
+ * native bf16 mmul, f32 accumulation):
  *   bf16blk:<blk>  bf16 x bf16 matmul;
- *   bf16x3:<blk>   f32 x f32 matmul as a bf16x3 split x = hi + mid + lo; the six significant products
- *                  run as ONE bf16 GEMM of depth 6K: A' = [Ah Ah Am Ah Al Am], W' = [Wh Wm Wh Wl Wh Wm].
- * Kernel block: A bf16 [BM][256], B^T bf16 [128][256], flags {bit 0 continue, bit 1 more K follows},
- * returns C f32 [BM][128]. Every element goes through rt_epi_put. Tolerance RT_BF16_RTOL * sqrt(K)
- * relative to sum |a b|, not bit-exact.
+ *   bf16x3:<blk>   f32 x f32 matmul as a bf16x3 split: x = hi + mid + lo (each bf16, round to nearest
+ *                  even of the remainder), and the six products that matter (hh, hm, mh, hl, lh, mm)
+ *                  run as ONE bf16 GEMM of depth 6K -- A' = [Ah Ah Am Ah Al Am], W' = [Wh Wm Wh Wl Wh Wm]
+ *                  -- accumulated in f32 on the core: close to an f32 GEMM.
+ * The kernel block takes A bf16 [BM][256], B^T bf16 [128][256] (channels x K, as bytes [.][512]),
+ * flags {bit 0 continue, bit 1 more K follows} and returns C f32 [BM][128]: a K-chained tile per core.
+ * The runtime blocks the problem (M by BM, N by 128, K by 256), transposes [K][N] weights once, and
+ * stores every element through rt_epi_put -- the epilogue ref:matmul uses (bias, post-ops, dst type).
+ * bf16 products are exact in f32; the f32 sum's order is the hardware's: within RT_BF16_RTOL * sqrt(K)
+ * of ref:matmul's double sum relative to sum |a b| -- a tolerance, not bit-exact.
  *
  * Accepted: matmul, bf16 x bf16 (bf16blk:) or f32 x f32 (bf16x3:), no zero points, any dst.
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_gemm.h (mm_geometry).
@@ -77,7 +83,7 @@ static void bf16x3_rows(const float *src, int64_t R, int64_t K, int wt, uint16_t
     static const int ai[6] = {0, 0, 1, 0, 2, 1}, wi[6] = {0, 1, 0, 2, 0, 1};
     const int *sel = wt ? wi : ai;
     enum { CH = 256 };
-    uint16_t pl[3][CH]; /* the hi / mid / lo planes of a chunk of one row */
+    uint16_t pl[3][CH]; /* the hi / mid / lo planes of a chunk of one row: straight-line, branch-free loops */
     for (int64_t r = 0; r < R; r++)
         for (int64_t k0 = 0; k0 < K; k0 += CH) {
             const int64_t n = K - k0 < CH ? K - k0 : CH;
@@ -104,7 +110,9 @@ static void bf16x3_rows(const float *src, int64_t R, int64_t K, int wt, uint16_t
 static void *g_b3a, *g_b3w;
 static size_t g_b3a_cap, g_b3w_cap;
 
-/* constant weights: the final [N][KK] bf16 operand kept per (pointer, shape), so a repeated call packs only A */
+/* constant weights (g_exec_const_w: set_constant_weights, the graph API, a composite's model weights):
+ * the final [N][KK] bf16 operand -- transposed and, for bf16x3, split -- kept per (pointer, shape), so
+ * a repeated call (a recurrent step, every inference) packs only A */
 #define RT_B16_WCACHE 64
 typedef struct {
     const void *key;
@@ -136,9 +144,14 @@ static const uint16_t *b16_wcache_put(const void *key, int64_t n, int64_t k, int
 }
 
 /* ── several bf16 GEMMs per launch ─────────────────────────────────────────────
- * Between b16q_defer(1) / b16q_defer(0), a GEMM with a plain f32 dst queues its tiles; outputs are written
- * when the queue flushes. The persistent build runs a flush as one launch (aiednn_gemm_bf16_n_start), else
- * tile by tile. K chains may straddle a flush. The n-tile launch is opt-in (AIEDNN_B16N=1). */
+ * A caller with many small independent GEMMs (attention: two per head) brackets them with b16q_defer(1) /
+ * b16q_defer(0): inside, a GEMM whose result needs no epilogue (plain f32 dst) queues its tiles -- the same
+ * A / W blocks and K-chain flags it would launch one by one -- and its outputs are written when the queue
+ * flushes (full, or at b16q_defer(0)). The persistent build runs a flush as one launch
+ * (gemm_uk.cc aiednn_gemm_bf16_n_start: every tile its own B block); elsewhere the tiles go through the
+ * single-tile entry in order, which is exactly the undeferred sequence. K chains may straddle a flush: the
+ * core keeps the accumulators between launches as it does between single-tile launches. The n-tile launch
+ * is opt-in (AIEDNN_B16N=1, environment or dnn_build AIEDNN_DEFINES) until a board run has validated it. */
 extern "C" int aiednn_gemm_bf16_n_start(const uint16_t *a, int n, const uint16_t *w, const uint8_t *flags)
     __attribute__((weak));
 extern "C" int aiednn_gemm_bf16_n_finish(void) __attribute__((weak));
@@ -194,7 +207,7 @@ static int b16q_flush(void) {
     const int emu = rt_env_on("AIEDNN_NTILE_EMU"); /* aiednn_rt_ntile.h: tests, no board */
     if (((aiednn_gemm_bf16_n_start && aiednn_gemm_bf16_n_finish && aiednn_gemm_bf16_n_c) || emu) && n > 1 &&
         rt_env_on("AIEDNN_B16N")) { /* opt-in until a board run validates it */
-        gen->entry(nullptr, 0);     /* the megakernel thunk: the ELF with the bf16 mode */
+        gen->entry(nullptr, 0);     /* the megakernel thunk: the ELF with the bf16 mode (the call itself declines) */
         self->launches++;
         const uint64_t te = rt_ticks();
         rc = emu ? b16q_emu_start(gen, n, BM, BN) : aiednn_gemm_bf16_n_start(g_b16q.a, n, g_b16q.w, g_b16q.flags);
@@ -265,7 +278,8 @@ static int run_bf16_common(const rt_impl *self, aiednn_primitive *prim, void *co
     mm_geometry(p, &g);
     const int plain =
         !E_.fx && !E_.acc_add && !E_.nosc && !E_.bias_mode && !E_.npo && !E_.requant && E_.d->data_type == aiednn_f32;
-    /* queue only for the n-tile launch */
+    /* queue only for the n-tile launch: queued tiles through the single-tile entry were slower on the board than
+     * the scratch-reusing loop (bert sdpa 504 -> 549 ms: 6 MB of cold queue vs one hot tile) */
     const int defer = g_b16q.defer > 0 && plain && rt_env_on("AIEDNN_B16N");
     if (!defer && g_b16q.n) { /* this GEMM runs now: what is queued first, in order */
         const int rq = b16q_flush();

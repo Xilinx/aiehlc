@@ -3,11 +3,16 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Board numbers for the torch.compile path: the backend's graph emitted as a graph-API board app.
+"""Board numbers for the torch.compile path: the graph `torch.compile(model, backend="aiednn")` hands the
+library (dnn_torch_backend: Conv+BN fold, sink-permute, FxGraph -> the partition graph API), emitted as a
+graph-API board app (aiegraph.dnn_graph_app) and run on the board.
 
     PYTHONPATH=src python3 example/aiednn/models/torch_compile_board.py --models resnet18,mobilenet_v2 \\
-        --mode pt2e --board <host> --vitis-settings <.../settings64.sh>
+        --mode pt2e --board galerina13 --vitis-settings <.../settings64.sh>
     ... --mode f32 --models tiny_vit ... ; --target x86 runs the same app in workstation emulation
+
+pt2e: XNNPACK quantizer (per-channel symmetric weights, affine int8 activations) -> convert_pt2e, the int8
+graph a framework hands over. The app checks its output against the eager (PT2E) model.
 """
 from __future__ import annotations
 
@@ -46,7 +51,8 @@ def pt2e(m, x):
 
 
 def graph_of(name: str, mode: str):
-    """(fx GraphModule, input, eager output, float top-1, top-1 window or None)."""
+    """(fx GraphModule as the backend partitions it, example input, eager output, float top-1, top-1 window:
+    zoo's model.top1_range, a detector's class rows; None = the whole output)"""
     from torch.fx.experimental.optimization import fuse
     m, x = zoo.build(name)
     with torch.no_grad():
@@ -61,7 +67,8 @@ def graph_of(name: str, mode: str):
 
 
 def _output_step(gm) -> float:
-    """Scale of the dequantize producing the graph output; 0 for f32 graphs."""
+    """the quantization step of the graph's output: the scale of the dequantize that produces it (PT2E),
+    walking back through single-input ops; 0 when there is none (f32 graphs), which the app reports as raw"""
     out = next(n for n in gm.graph.nodes if n.op == "output").args[0]
     n = out[0] if isinstance(out, (tuple, list)) else out
     for _ in range(8):
@@ -76,7 +83,8 @@ def _output_step(gm) -> float:
 
 def run_one(name, mode, args, lib):
     gm, x, golden, float_top1, rng = graph_of(name, mode)
-    # the emulation golden must dispatch with the board app's preference
+    # the emulation golden must dispatch as the board app does (it calls aiednn_set_preference too): prefer fastest
+    # puts other implementations under some partitions, and vit amplifies their f32 differences block by block
     lib.so.aiednn_set_preference(1 if args.prefer == "fastest" else 0)
     try:
         return _run_one(name, mode, args, lib, gm, x, golden, float_top1, rng)
@@ -92,15 +100,18 @@ def _run_one(name, mode, args, lib, gm, x, golden, float_top1, rng):
     feeds = {[n.name for n in gm.graph.nodes if n.op == "placeholder"][0]: x.numpy()}
     d = OUT / (f"{name}_{mode}" + (f"_fuse{args.fuse}" if args.fuse != 1 else "") +
                ("_fastest" if args.prefer == "fastest" else "") + ("_dense" if args.dense else ""))
-    # golden: the same partitions run by aiednn on the workstation; PT2E eager is reported as REF2
+    # the app partitions on the board itself, at the Graph's fusion level (emit_graph_app emits it)
+    # golden: the same partitions run by aiednn on the workstation (the board differs from it only by the AIE's
+    # bf16x3 / fvec ulps); PT2E eager is reported beside it (REF2), since level 1 matches aiednn, not torch
     env = fx.graph.run({**fx.consts, **feeds})
     emu = env[fx.alias.get(out, out)].astype(np.float32).reshape(golden.shape)
-    # part_ref: per-partition emulation outputs (PARTCHK lines on the board)
+    # part_ref: every partition's emulation output; the app re-runs each partition on the emulation's inputs and
+    # reports the worst (PARTCHK lines), so a board difference is pinned to partitions instead of inferred
     app = emit_graph_app(fx.graph, fx.consts, feeds, out, emu, d, f"{name}_{mode}",
                          layouts=False if args.dense else None, top1_range=rng, step=_output_step(gm),
                          ref2=golden, ref2_name="pt2e", part_ref=env)
     hooks = ["aiednn_set_preference(aiednn_prefer_fastest);"] if args.prefer == "fastest" else []
-    if hooks:
+    if hooks:   # prefer fastest: cost refusals (tiny ops may take ref:)
         src = app.read_text()
         key = "CK(aiednn_graph_create(&g));"
         assert key in src, "emit_graph_app changed: no graph_create line to hook"
@@ -108,7 +119,7 @@ def _run_one(name, mode, args, lib, gm, x, golden, float_top1, rng):
     mesh = tuple(int(v) for v in args.mesh.split("x"))
     t = time.time()
     elf = d / args.target / "aout" / "main.elf"
-    if args.run_only and args.target != "x86" and elf.is_file():
+    if args.run_only and args.target != "x86" and elf.is_file():   # reuse the built ELF: run only
         from aiegraph.dnn import DnnBuild, run_app
         rep = DnnBuild(app, args.target, d / args.target, [], ok=True, elf=elf)
         run_app(rep, board=args.board, timeout=args.timeout)

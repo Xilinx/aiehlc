@@ -2,9 +2,17 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * aiednn_ort_ep.cc -- aiednn as an ONNX Runtime plugin execution provider: GetCapability = graph API
- * partitions, Compile = aiednn_partition_compile, Compute = aiednn_compiled_partition_execute.
- * Session option "ep.aiednn.benchmark" = "1" pins the fastest implementation per partition.
+ * aiednn_ort_ep.cc -- aiednn as an ONNX Runtime execution provider (plugin EP library, ORT >= 1.23).
+ *
+ *   GetCapability = the graph API's partitions: every ONNX node becomes a graph op (aiednn_ort_map.h),
+ *                   aiednn_graph_get_partitions decides, each supported partition is one fused node;
+ *   Compile       = aiednn_partition_compile of that fused node's subgraph (one primitive, dispatch
+ *                   picks AIE or ref: as for any primitive);
+ *   Compute       = aiednn_compiled_partition_execute on ORT's CPU buffers.
+ *
+ * Constant initializers are copied at Compile (drop_constant_initializers), so ORT feeds only the
+ * activations. Session option "ep.aiednn.benchmark" = "1": aiednn_compiled_partition_find(MEASURE)
+ * once per partition at Compile and pin the fastest. Python: aiegraph.dnn_ort_ep.
  ******************************************************************************/
 #include <cstdio>
 #include <cstdlib>

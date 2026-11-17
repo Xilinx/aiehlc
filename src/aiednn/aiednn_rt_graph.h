@@ -6,15 +6,19 @@
  *
  * Partitioning, in topological order:
  *   - an anchor (convolution, matmul, inner product) absorbs the single-consumer chain after it:
- *     bias_add, up to AIEDNN_MAX_POST_OPS eltwise / binary ops, then a per-tensor quantize. With
- *     src and weights from dequantize ops of 8-bit tensors, the anchor reads the 8-bit tensors directly.
- *   - layer / batch norm absorb a following per-tensor quantize.
+ *     bias_add, then up to AIEDNN_MAX_POST_OPS eltwise / binary ops (a residual add is a binary
+ *     post-op), then a per-tensor quantize -> one primitive with an aiednn_attr_t epilogue. With
+ *     src and weights both coming out of dequantize ops of 8-bit tensors, the anchor reads the
+ *     8-bit tensors directly (scales = s_src * s_wei[c], zero points into the attr): the int8 GEMM
+ *     every quantized model runs. A residual from a per-tensor dequantize is read as 8-bit too.
+ *   - layer / batch norm absorb a following per-tensor quantize (the _attr creates).
  *   - every other supported op is a partition of its own; a dequantize whose consumers all read
  *     through it joins the first of their partitions, otherwise it is a reorder of its own.
- * Support is never guessed: each candidate is created through aiednn.h and destroyed; on failure the
- * chain is shortened, then the 8-bit read-through dropped, then the op is unsupported.
+ * Support is never guessed: each candidate is created through aiednn.h (dispatch) and destroyed;
+ * when that fails the chain is shortened, then the 8-bit read-through dropped, then the op is
+ * unsupported. So a partition is supported exactly when the library can run it.
  *
- * Uses only aiednn.h.
+ * Uses only aiednn.h (doc/design/aiednn_framework_api.md, layering).
  ******************************************************************************/
 #ifndef AIEDNN_RT_GRAPH_H
 #define AIEDNN_RT_GRAPH_H
@@ -442,7 +446,8 @@ static void gr_add_dq(gr_plan *p, int op) {
 }
 
 /* append an eltwise post-op; a relu (alpha 0) or clip right after another one merges into a single clip
- * when the ranges overlap */
+ * (clip(clip(v, l1, h1), l2, h2) = clip(v, max(l1, l2), min(h1, h2)) when the ranges overlap): the
+ * library's on-core integer requant takes one relu | clip after an optional residual add */
 static int gr_push_eltwise(gr_plan *p, aiednn_alg_kind_t alg, float a, float b) {
     const int bounded = (alg == aiednn_eltwise_relu && a == 0.f) || alg == aiednn_eltwise_clip;
     const float lo = alg == aiednn_eltwise_clip ? a : 0.f, hi = alg == aiednn_eltwise_clip ? b : 3.0e38f;
@@ -782,9 +787,10 @@ static int gr_is_view(const struct aiednn_graph *g, const gr_op *o) {
            y->format == aiednn_format_dense;
 }
 
-/* past a per-tensor quantize's output `cur`: dequantize -> dense views -> quantize with the same parameters,
- * any number of times; the codes are unchanged, so the partition writes the last quantize's tensor instead
- * (exact). Appends the ops to ops[]; returns the new tensor. */
+/* past a per-tensor quantize's output `cur`: dequantize -> dense views -> quantize, both with the same
+ * scale / zero point / type, any number of times (PT2E's DQ -> view -> Q around torchvision's MHA): the codes
+ * come out unchanged, so the partition writing `cur` writes the last quantize's tensor instead (exact).
+ * Appends the ops to ops[]; returns the new tensor. */
 static int gr_qcopy_tail(const struct aiednn_graph *g, int cur, int *ops, int *n, int cap) {
     for (;;) {
         const int q0 = g->t[cur].producer;
@@ -812,7 +818,8 @@ static int gr_qcopy_tail(const struct aiednn_graph *g, int cur, int *ops, int *n
 }
 
 /* fusion level 2 only: a per-tensor quantize whose only consumer is a dequantize with the same scale /
- * zero point -- skipping both drops that rounding (not exact). Returns the dequantize, or -1. */
+ * zero point -- skipping both drops that rounding (not exact; the MLIR pipeline's
+ * --aiednn-quantize-residual makes the same trade). Returns the dequantize, or -1. */
 static int gr_qdq_pair(const struct aiednn_graph *g, int u) {
     const gr_op *q = &g->ops[u];
     if (g->fuse < 2 || q->kind != aiednn_gop_quantize || q->nin != 1 || q->attr.n_scales)
@@ -828,8 +835,9 @@ static int gr_qdq_pair(const struct aiednn_graph *g, int u) {
 }
 
 /* level 1 (exact): the anchor's value -> quantize -> dequantize (same parameters) -> add | sub | mul | max |
- * min with another tensor = one requant_binary post-op. Returns the binary op (and the dequantize in *dq),
- * -1 if the pattern is not there. */
+ * min with another tensor = one requant_binary post-op (the library defines it as the GEMM with that 8-bit
+ * dst followed by aiednn_binary_create_attr, byte for byte): PT2E's residual. Returns the binary op (and
+ * the dequantize in *dq), -1 if the pattern is not there. */
 static int gr_requant_binary(const struct aiednn_graph *g, int cur, int u, gr_plan *p, int *dq, int *skip, int *ns,
                              int cap) {
     const gr_op *q = &g->ops[u];
@@ -839,7 +847,8 @@ static int gr_requant_binary(const struct aiednn_graph *g, int cur, int u, gr_pl
     for (int k = 0; k < p->attr.n_post_ops; k++)
         if (p->attr.post_ops[k].kind != aiednn_post_op_eltwise)
             return -1; /* one per primitive; earlier binary post-ops would reorder with it */
-    /* the add may sit behind any number of same-parameter quantize -> dequantize pairs (in the views' dims) */
+    /* PT2E brackets views with same-parameter quantize -> dequantize pairs: the codes reach the residual
+     * unchanged (gr_qcopy_tail), so the add may sit behind any number of them -- in the views' dims */
     *ns = 0;
     const int qt = gr_qcopy_tail(g, q->out, skip, ns, cap);
     const int d = gr_sole_user(g, qt);
@@ -890,7 +899,10 @@ static int gr_requant_binary(const struct aiednn_graph *g, int cur, int u, gr_pl
 }
 
 /* level 1 (exact): the anchor's value -> quantize -> dequantize (same parameters) -> a unary eltwise =
- * one requant_eltwise post-op. Returns the eltwise op (the dequantize in *dq), or -1. */
+ * one requant_eltwise post-op (the library: the GEMM with that 8-bit dst, then
+ * aiednn_eltwise_forward_create_attr, byte for byte -- a 256-entry table on the int8 tile): PT2E's
+ * conv -> Q -> DQ -> relu6 / hardswish / sigmoid tails. Later eltwise ops and the final quantize follow as
+ * the usual chain. Returns the eltwise op (the dequantize in *dq), or -1. */
 static int gr_requant_eltwise(const struct aiednn_graph *g, int u, gr_plan *p, int *dq) {
     const gr_op *q = &g->ops[u];
     if (!g->fuse || q->kind != aiednn_gop_quantize || q->nin != 1 || q->attr.n_scales ||
@@ -1098,7 +1110,7 @@ static aiednn_pool_nd_params_t gr_pool_nd(const aiednn_pool_params_t *c) {
     return n;
 }
 
-/* the newer forward kinds (type_cast .. rms_norm) and the norms' training forward (3 outputs);
+/* the 2026-11-14 forward kinds (type_cast .. rms_norm) and the norms' training forward (3 outputs);
  * -1: not one of them */
 static int gr_build_ext(const struct aiednn_graph *g, int oi, gr_plan *p) {
     const gr_op *o = &g->ops[oi];
@@ -1518,9 +1530,11 @@ static int gr_build_single(const struct aiednn_graph *g, int oi, gr_plan *p, con
     return 1;
 }
 
-/* the post-op chain after a non-GEMM op: the op computes into f32, then the GEMM epilogue in double.
- * Level 1 keeps what is exact against the unfused ops (relu / clip / max / min, one add / sub / mul with
- * no quantize after it, a final per-tensor quantize); level 2 takes any eltwise / binary. Returns the
+/* the post-op chain after a non-GEMM op (pool, softmax, reduction, resampling, group / batch / layer norm):
+ * the library computes the op alone into f32 (byte-identical to the standalone op), then the GEMM epilogue
+ * in double. Level 1 keeps what is exact against the unfused f32 ops: relu / clip / max / min, one add /
+ * sub / mul when no quantize follows it (one correctly rounded op), and a final per-tensor quantize;
+ * level 2 takes any eltwise / binary. Each step is kept only if the _attr create accepts it. Returns the
  * number of ops absorbed (ops[1..]). */
 static int gr_test(const gr_plan *p, char *impl, int cap);
 static int gr_src_dq(const struct aiednn_graph *g, gr_plan *p, int arg, aiednn_memory_desc_t *md, int slot, int *ops,
@@ -1551,7 +1565,8 @@ static int gr_pt_chain(const struct aiednn_graph *g, int cur, gr_plan *p, int *o
             const int exact = (alg == aiednn_eltwise_relu && a == 0.f) || alg == aiednn_eltwise_clip;
             step = (exact || g->fuse >= 2) && gr_push_eltwise(&q, alg, a, b);
         } else if (!viewed && gr_is_view(g, o)) {
-            step = viewed = 1; /* a dense view: the op writes it in its own dims; only eltwise / quantize after it */
+            step = viewed = 1; /* a dense view (torchvision's seq-first transpose at batch 1, sdpa's head merge
+                                * view): the op writes it in its own dims; only eltwise / quantize after it */
         } else if (o->nin == 2 && !viewed && gr_binary_of(o, &alg) && q.attr.n_post_ops < AIEDNN_MAX_POST_OPS) {
             const int mm = alg == aiednn_binary_max || alg == aiednn_binary_min;
             const int ar = alg == aiednn_binary_add || alg == aiednn_binary_sub || alg == aiednn_binary_mul;
@@ -1767,7 +1782,8 @@ static int gr_try_qbin(struct aiednn_graph *g, int oi, gr_plan *p, int *ops, int
 }
 
 /* dequantize -> unary eltwise [-> up to AIEDNN_MAX_POST_OPS more] [-> quantize]: one
- * aiednn_eltwise_forward_create_attr (bit-identical to the ops) */
+ * aiednn_eltwise_forward_create_attr (bit-identical to the ops; an 8-bit source runs as one table) --
+ * PT2E's conv -> quantize -> dequantize -> relu6 -> quantize tails */
 static int gr_try_qelt(struct aiednn_graph *g, int oi, gr_plan *p, int *ops, int *n, char *impl, int cap) {
     const gr_op *o = &g->ops[oi];
     aiednn_alg_kind_t alg;
@@ -1801,7 +1817,8 @@ static int gr_try_qelt(struct aiednn_graph *g, int oi, gr_plan *p, int *ops, int
 }
 
 /* dequantize -> max_pool -> quantize with the same per-tensor scale / zero point / type: max_pool on the
- * 8-bit codes, exactly */
+ * 8-bit codes, exactly (q(dq(x)) = x for equal parameters, and max commutes with the monotone dq) --
+ * PT2E / ONNX QDQ run ResNet's stem pool between such a pair */
 static int gr_try_qpool(struct aiednn_graph *g, int oi, gr_plan *p, int *ops, int *n, char *impl, int cap) {
     const gr_op *o = &g->ops[oi];
     gr_q q;
@@ -1820,8 +1837,9 @@ static int gr_try_qpool(struct aiednn_graph *g, int oi, gr_plan *p, int *ops, in
     return gr_test(p, impl, cap);
 }
 
-/* dequantize -> reshape | transpose | slice -> quantize with the same per-tensor parameters: the view /
- * slice on the 8-bit codes */
+/* dequantize -> reshape | transpose | slice -> quantize with the same per-tensor scale / zero point / type:
+ * the view / slice on the 8-bit codes (q(dq(x)) = x for equal parameters) -- PT2E / ONNX QDQ around a
+ * flatten, a split */
 static int gr_try_qview(struct aiednn_graph *g, int oi, gr_plan *p, int *ops, int *n, char *impl, int cap) {
     const gr_op *o = &g->ops[oi];
     gr_q q;
@@ -1837,7 +1855,7 @@ static int gr_try_qview(struct aiednn_graph *g, int oi, gr_plan *p, int *ops, in
     p->md[0] = g->t[q.qt].lt.md, p->md[3] = g->t[g->ops[u].out].lt.md, p->dst_id = g->t[g->ops[u].out].lt.id;
     if (o->kind == aiednn_gop_reshape) {
         p->kind = GP_COPY;
-    } else if (o->kind == aiednn_gop_slice) { /* the slice of the codes */
+    } else if (o->kind == aiednn_gop_slice) { /* the slice of the codes (yolov8n's C2f split, RoPE halves) */
         p->kind = GP_SLICE;
         memcpy(p->starts, o->attr.starts, sizeof p->starts);
     } else { /* a same-type reorder: a pure permute of the codes */
@@ -2006,8 +2024,9 @@ static int gr_part_dequant(struct aiednn_graph *g, int di) {
 
 /* ── layout propagation (doc/design/aiednn_framework_api.md section 5) ─── */
 
-/* partitions whose primitive takes nhwc natively or for free; a reshape / transpose / GEMM reading a 4-D
- * tensor depends on its memory order */
+/* partitions whose primitive takes nhwc natively or for free (elementwise in memory order); everything
+ * else would convert inside the primitive (the library's "+fmtwrap"), and a reshape / transpose / GEMM
+ * reading a 4-D tensor depends on its memory order */
 static int gr_nhwc_kind(int kind) {
     return kind == GP_CONV || kind == GP_DECONV || kind == GP_ELT || kind == GP_BIN || kind == GP_QBIN ||
            kind == GP_QELT || kind == GP_CONCAT || kind == GP_POOL || kind == GP_PRELU;
@@ -2056,9 +2075,11 @@ static int gr_set_fmt(struct aiednn_graph *g, uint64_t id, aiednn_format_t f) {
     return 1;
 }
 
-/* nhwc on every 4-D activation edge between nhwc-friendly partitions, proposed all at once; then, until
- * nothing changes, a partition that no longer creates (or only via "fmtwrap") sends its edges back to
- * dense. The set only shrinks, so this ends. */
+/* nhwc on every 4-D activation edge between supported nhwc-friendly partitions: the producer's dst and
+ * every consumer's input. All eligible edges are proposed at once (a residual conv binds src, dst and
+ * the residual: flipping one of them alone gives mixed formats); then, until nothing changes, every
+ * partition that no longer creates -- or only creates by converting formats inside ("fmtwrap") -- sends
+ * its edges back to dense. The set only shrinks, so this ends. Outputs are bit-identical either way. */
 static void gr_propagate_layouts(struct aiednn_graph *g) {
     char impl[160];
     const char *dbg_e = getenv("AIEDNN_GRAPH_LAYOUT_DEBUG");
@@ -2128,9 +2149,11 @@ static int gr_is_scalar_f32(const struct aiednn_graph *g, int t) {
     return gr_numel(&g->t[t].lt.md) == 1 && g->t[t].lt.md.data_type == aiednn_f32;
 }
 
-/* matmul(Q, K^T) -> multiply | divide by a scalar -> [add mask] -> softmax(last axis) -> matmul(., V): one
+/* matmul(Q, K^T) [K^T: the matmul's transposed-weights attr, or a transpose of K's last two dims] ->
+ * multiply | divide by a scalar -> [add mask] -> softmax(last axis) -> matmul(., V): one
  * aiednn_sdpa_forward_create. The scalar is bound at execute (AIEDNN_ARG_ATTR_SCALE; a divide binds its
- * reciprocal). f32, 4-D [B, H, S, D]. Returns 1 with the partition made, 0 otherwise. */
+ * reciprocal), so its value need not be known here. f32, 4-D [B, H, S, D] (Hk != H for GQA as the
+ * library accepts). Returns 1 with the partition made, 0 if the pattern is not there or does not create. */
 static void gr_sdpa_bshd(const struct aiednn_graph *g, gr_plan *p, int *ops, int *n);
 
 /* after the sdpa (and its folded head merge): a view and a per-tensor quantize as for a norm (gr_pt_chain),
@@ -2250,7 +2273,8 @@ static int gr_is_unit_perm(const struct aiednn_graph *g, const gr_op *o) {
     return n >= 0 && n == gr_perm_nonunit(g, o, NULL, b) && !memcmp(a, b, (size_t)n * sizeof(int));
 }
 
-/* the head split / merge around attention: a transpose that moves the bytes like (0, 2, 1, 3) of a 4-D tensor */
+/* the head split / merge around attention: a transpose that moves the bytes like (0, 2, 1, 3) of a 4-D
+ * tensor -- that permute itself, or e.g. torchvision's permute(2, 0, 1, 3) at batch 1 */
 static int gr_is_headperm(const struct aiednn_graph *g, const gr_op *o) {
     static const int hp[4] = {0, 2, 1, 3};
     int a[AIEDNN_MAX_NDIMS], b[AIEDNN_MAX_NDIMS];
@@ -2275,8 +2299,10 @@ static int gr_in_ops(const int *ops, int n, int op) {
     return 0;
 }
 
-/* fold the head split (Q, K, V through transpose(0, 2, 1, 3)) and the head merge into the sdpa plan:
- * AIEDNN_SDPA_QKV_BSHD / _DST_BSHD. Only when every one of Q, K, V has it; undone if the create refuses. */
+/* fold the head split (Q, K, V each a [B, S, H, D] tensor through transpose(0, 2, 1, 3)) and the head merge
+ * (dst through the same transpose) into the sdpa plan: AIEDNN_SDPA_QKV_BSHD / _DST_BSHD with the
+ * [B, S, H, D] descriptors. Only when every one of Q, K, V has it (the flag is joint); undone if the
+ * create refuses. */
 static void gr_sdpa_bshd(const struct aiednn_graph *g, gr_plan *p, int *ops, int *n) {
     char impl[160];
     gr_plan q;
@@ -2321,8 +2347,9 @@ static void gr_sdpa_bshd(const struct aiednn_graph *g, gr_plan *p, int *ops, int
 }
 
 /* read the plan's source `arg` (descriptor *md, slot `slot` of src_scales / src_scales_23) through the
- * per-tensor dequantize of an 8-bit tensor feeding it, directly or through one single-use reshape.
- * Adds the consumed ops to ops[]; 1 if read through. */
+ * per-tensor dequantize of an 8-bit tensor feeding it -- directly, or through one single-use reshape in
+ * between (PT2E's linear -> Q -> DQ -> view -> ...): the library dequantizes as it reads, byte-identical to
+ * the DQ (layer norm / softmax / sdpa _create_attr). Adds the consumed ops to ops[]; 1 if read through. */
 static int gr_src_dq(const struct aiednn_graph *g, gr_plan *p, int arg, aiednn_memory_desc_t *md, int slot, int *ops,
                      int *n) {
     int b = 0;
@@ -2463,9 +2490,11 @@ static int gr_view_is(const gr_view *v, const int64_t *want, int64_t off) {
     return 1;
 }
 
-/* fold the view chains in front of an sdpa plan's Q / K / V: one packed [B, S, 3, H, D] base
- * (AIEDNN_SDPA_QKV_PACKED), or each its own [B, S, H, D] (AIEDNN_SDPA_QKV_BSHD) or dense base; an 8-bit
- * dequantized base is read as codes. 1 if anything folded (kept only if the create accepts it). */
+/* fold the view chains in front of an sdpa plan's Q / K / V: one packed [B, S, 3, H, D] base for all three
+ * (AIEDNN_SDPA_QKV_PACKED -- gpt2's split, torchvision's in_proj unflatten / permute / select), or each its
+ * own [B, S, H, D] base (AIEDNN_SDPA_QKV_BSHD) or dense base (a plain reshape chain); a base produced by a
+ * per-tensor dequantize of an 8-bit tensor is read as codes. Every folded op must feed only folded ops or
+ * the plan's own ops. 1 if anything folded (kept only if the create accepts it). */
 static int gr_sdpa_views(const struct aiednn_graph *g, gr_plan *p, int *ops, int *n) {
     if (!g->fuse)
         return 0;
@@ -2628,8 +2657,10 @@ static int gr_const_operand(const struct aiednn_graph *g, int t, int *k, int *dq
     return 1;
 }
 
-/* level 2: x^2 -> mean(last dim) -> + eps -> rsqrt -> * x -> * weight [-> quantize] as one rms_norm.
- * eps is read at execute (GR_ARG_EPS). Anchored at the mean. */
+/* level 2: a hand-written RMSNorm -- x^2 -> mean(last dim) -> + eps -> rsqrt -> * x -> * weight [-> quantize],
+ * PT2E's quantize -> dequantize pairs between the steps skipped -- as one rms_norm (aiednn_layer_normalization
+ * with AIEDNN_RMS_NORM | USE_SCALE, dst quantized). eps is a graph constant: the compiled partition reads it
+ * at execute (GR_ARG_EPS); an integer weight is dequantized by the prologue. Anchored at the mean. */
 static int gr_part_rmsnorm(struct aiednn_graph *g, int ri) {
     const gr_op *R = &g->ops[ri];
     if (g->fuse < 2 || R->part >= 0 || R->kind != aiednn_gop_reduction || R->attr.alg != aiednn_reduction_mean ||
@@ -2839,8 +2870,9 @@ static int gr_same_source(const struct aiednn_graph *g, int x, int y) {
            g->ops[a].attr.scale == g->ops[b].attr.scale && g->ops[a].attr.zero_point == g->ops[b].attr.zero_point;
 }
 
-/* level 2: quantized RoPE (every step through quantize -> dequantize, 8-bit x / cos / sin) as one
- * aiednn_rope_create_attr. Anchored at the add. */
+/* level 2: PT2E's quantized RoPE -- every step of x * cos + cat(-x[..., h:], x[..., :h]) * sin ends in a
+ * quantize -> dequantize, and x / cos / sin are 8-bit behind dequantizes -- as one aiednn_rope_create_attr
+ * (codes read with their scales, dst quantized; the intermediate roundings dropped). Anchored at the add. */
 static int gr_part_qrope(struct aiednn_graph *g, int ai) {
     const gr_op *A = &g->ops[ai];
     aiednn_alg_kind_t alg;
@@ -2933,8 +2965,10 @@ static int gr_part_qrope(struct aiednn_graph *g, int ai) {
     return 0;
 }
 
-/* gated MLP: matmul(mul(act(matmul(x, Wg)), matmul(x, Wu)), Wd) as one aiednn_gated_mlp_create (level 2:
- * not bit-identical). All three matmuls bias-free with the same weight layout. Anchored at the down projection. */
+/* gated MLP (SwiGLU / GeGLU): matmul(mul(act(matmul(x, Wg)), matmul(x, Wu)), Wd) as one
+ * aiednn_gated_mlp_create. Level 2: the fused GEMMs are not bit-identical to the unfused chain. All three
+ * matmuls bias-free with the same weight layout (nn.Linear's transposed [F, D] / [D, F]: the flag).
+ * Anchored at the down projection. */
 static int gr_part_gmlp(struct aiednn_graph *g, int md) {
     const gr_op *D = &g->ops[md];
     if (g->fuse < 2 || D->kind != aiednn_gop_matmul || D->nin != 2 || D->part >= 0)
@@ -2978,8 +3012,9 @@ static int gr_part_gmlp(struct aiednn_graph *g, int md) {
     return 0;
 }
 
-/* reshape elision: a dense reshape partition whose output feeds exactly one supported partition joins it;
- * the consumer binds the reshape's input buffer. */
+/* reshape elision: a dense reshape partition (plain, or the dequantize -> reshape -> quantize view on codes)
+ * whose output feeds exactly one supported partition is not a copy at all -- that consumer binds its input
+ * buffer (the same bytes in the same order), and the reshape op joins it. */
 static void gr_elide_reshapes(struct aiednn_graph *g) {
     for (int i = 0; i < g->nparts; i++) {
         struct aiednn_partition *P = &g->parts[i];
@@ -3009,7 +3044,8 @@ static void gr_elide_reshapes(struct aiednn_graph *g) {
             if (binds && (first < 0 || g->parts[j].key < g->parts[first].key))
                 first = j;
         }
-        /* one consuming partition only: no other partition names a tensor without a producer */
+        /* one consuming partition only: the reshape joins it, so no other partition names a tensor that
+         * no longer has a producer (a framework mapping boundaries back to its own nodes relies on that) */
         if (!ok || first < 0 || nc != 1)
             continue;
         for (int j = 0; j < g->nparts; j++) { /* rebind: the consumers read the reshape's input */

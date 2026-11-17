@@ -2,7 +2,12 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Typed f32 avg-pool / layer / RMS-norm backward paths are byte-identical to the generic loops."""
+"""The typed f32 host paths of average-pooling backward and layer / RMS-norm backward (aiednn_rt_bwd.h)
+are byte-identical to the generic loops they bypass (AIEDNN_BWD_GENERIC=1 forces those), on ref:.
+test_aiednn_train.py checks both against PyTorch.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_bwd_fast.py
+"""
 from __future__ import annotations
 
 import ctypes as C

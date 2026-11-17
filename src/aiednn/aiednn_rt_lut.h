@@ -10,8 +10,10 @@
  * full-size operand is s8 / u8; any destination type. The other operands
  * (weights, mean / variance, the broadcast side) may be any type.
  *
- * Exact by construction: the tables are ref: run on a synthetic problem whose full operand holds all 256
- * byte values of every channel.
+ * Exact by construction: the tables are the ref: implementation itself, run on
+ * a synthetic problem of the same kind whose full operand holds all 256 byte
+ * values of every channel (dims 1 except the channel axis and one axis of 256).
+ * The AIE then only indexes them, so the result is ref's bit for bit.
  *
  * Kernel block: items s8 [NI][4096], tables s8 [NI][7680], geom s32 [NI][4] =
  * {n, run0, inner, nt | es << 8}, out s8 [NI][4096] (es = 4: n <= 1024 words).
@@ -61,9 +63,11 @@ static int lut_plan_shape(const rt_prob *p, lut_plan *q, char *why, int cap) {
     q->axis = -1;
     q->main_slot = rt_slot(p, AIEDNN_ARG_SRC);
     q->dst_slot = rt_slot(p, AIEDNN_ARG_DST);
-    /* batch norm with a dst quantization: still per-channel, copied into the synthetic ref run */
+    /* batch norm may carry a dst quantization (dst_scale / dst_zp only, --aiednn-fold-norm-quant):
+     * still per-channel and monotone, and the synthetic ref run copies it with the prob */
     const int bn_dstq = p->kind == aiednn_batch_normalization && !p->npo && !p->n_oscales;
-    /* quantized eltwise: the table run on all 256 codes covers the whole chain */
+    /* the quantized eltwise (create_attr): its ref is the whole dequantize -> eltwise -> post-ops -> quantize
+     * chain, so the table run on all 256 codes is exact for it too */
     const int elt_q = p->kind == aiednn_eltwise && p->has_attr && !p->n_oscales;
     if (!d || (p->has_attr && !bn_dstq && !elt_q) || (p->npo && !elt_q)) {
         snprintf(why, cap, "no attr / post-ops (batch norm: dst quantization only; eltwise: create_attr)");
@@ -151,7 +155,8 @@ static int lut_plan_make(const rt_prob *p, lut_plan *q, char *why, int cap) {
     return 1;
 }
 
-/* identity reorders: ref:'s contiguous loop beats a 64 KB AIE launch */
+/* identity reorders ref: runs as a tight contiguous loop (reorder_contig: dequantize to f32, same
+ * type): one AIE launch per 64 KB loses to them (board: s8 -> f32 2.97 vs 0.69 ms) */
 static int reorder_ref_is_fast(const rt_prob *p) {
     const aiednn_data_type_t s = p->md[0].data_type, d = p->md[1].data_type;
     return p->kind == aiednn_reorder && (s == d || (s == aiednn_f32) != (d == aiednn_f32));
@@ -314,7 +319,8 @@ static int run_lut(const rt_impl *self, aiednn_primitive *prim, void *const *ptr
     return AIEK_OK;
 }
 
-/* x86 stand-in for the AIE lut / steps block: items, tables, geom, out as above */
+/* x86 stand-in for the AIE lut / steps block (the functions the core runs): items, tables, geom, out
+ * as above. For workstation runs of lut: without a board. */
 static int rt_lut_block_x86(const aiek_tensor *t, int n) {
     if (n != 4)
         return AIEK_ERR_ARGS;

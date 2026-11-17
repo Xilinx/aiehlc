@@ -5,10 +5,18 @@
  * aiednn_rt_red.h -- redblk:<aie pool block>: reduction of an 8-bit tensor over
  * its trailing axes on the GEMM ELF's pool mode (aie_modes_pool.h, 0xB0).
  *
- * src viewed as [outer][R]; each segment of R is laid out as a KH x KW window, Wo windows
- * per item; a segment longer than one item is cut into 4 KB chunks combined on the host.
- * The core returns exact int32 max / min / sum / sum|x| / sum x*x / max|x|; the host finishes
- * (mean, eps, p-th root) as ref: does. Accepted: sum, mean, max, min, amax, lp norms p = 1, 2.
+ * src viewed as [outer][R], R = the reduced trailing extent (dims of size 1 may
+ * sit anywhere). Each segment of R is laid out as a KH x KW window, Wo windows
+ * side by side per item (pitch Wo*KW, stride KW, one output row), so one launch
+ * reduces many short segments; a segment longer than one item is cut into 4 KB
+ * chunks whose partials the host combines.
+ *
+ * The core returns exact int32 max / min / sum / sum|x| / sum x*x / max|x|
+ * (padding is neutral: type min / max or 0). ref:reduction accumulates the same
+ * integers in double -- exact -- and then divides (mean), adds eps or takes the
+ * p-th root (lp norms); the host does exactly that, so the result is ref's bit
+ * for bit. Accepted: sum, mean, max, min, amax, and the lp norms for p = 1, 2
+ * (pow(|x|, p) of a small integer is exact). mul and other p stay on ref:.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aie_modes_pool.h,
  * aiednn_rt_pool.h (the block: is_pool_block).

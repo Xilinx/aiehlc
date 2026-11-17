@@ -6,7 +6,8 @@
  *
  * Any elementwise function of one 8-bit value, per channel: out = T[ch][byte(in)].
  * The host builds T by running the reference on all 256 inputs of every channel,
- * so the core reproduces the reference bit for bit.
+ * so the core reproduces the reference bit for bit whatever the function (eltwise,
+ * PReLU, batch norm, x op per-channel-constant, requantize / dequantize reorders).
  *
  * One item per core, as the depthwise / pool modes: IN is the core's 4 KB item
  * gathered from its A rows, OUT its 4 KB C tile. Element size ES of the result:

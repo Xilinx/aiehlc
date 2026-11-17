@@ -14,6 +14,7 @@
 // Result: `aiednn.offset` (byte offset of the result's buffer) on every op that
 // defines an activation buffer, `aiednn.arena_bytes` on the func, and
 // `aiednn.naive_bytes` (sum of all buffers, no reuse) for comparison.
+// aiegraph.dnn_mlir reads these back and the C app uses them for its arena.
 #include "AiednnDialect.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"

@@ -1,4 +1,19 @@
-"""aiednn as an ONNX Runtime execution provider (plugin EP library, onnxruntime >= 1.23)."""
+"""aiednn as an ONNX Runtime execution provider (plugin EP library, onnxruntime >= 1.23).
+
+    from aiegraph import dnn_ort_ep
+    sess = dnn_ort_ep.session("model.onnx")            # builds + registers libaiednn_ort_ep.so once
+    y = sess.run(None, {"input": x})
+    dnn_ort_ep.assigned(sess)                          # how many nodes run on aiednn (profiling-free check)
+
+GetCapability is the graph API's partitioning (aiednn_graph.h), Compile is partition_compile, Compute is
+compiled_partition_execute (aiednn_ort_ep.cc). Everything aiednn does not claim runs on ORT's CPU EP.
+``benchmark=True`` sets the session option ``ep.aiednn.benchmark`` = 1: find(MEASURE) per partition at
+Compile, the fastest implementation pinned. Runs in workstation emulation (the AIE kernels' C references
+stand in for the array); the board path stays dnn_build apps.
+
+Build needs ORT's C headers, which the wheel does not ship: $AIEDNN_ORT_INCLUDE, else the release
+tarball of the installed version is fetched once into worklocal/aiednn/ort_headers/<version>/.
+"""
 from __future__ import annotations
 
 import os
@@ -40,7 +55,8 @@ def ort_include() -> Path:
 
 
 def build_ep(out=None, mesh=None) -> Path:
-    """libaiednn_ort_ep.so: the EP + the aiednn runtime with the graph API"""
+    """libaiednn_ort_ep.so: the EP + the aiednn runtime with the graph API (workstation build of the
+    GEMM megakernel's entries, as dnn_graph.build_graph_lib)"""
     from ..dnn import impl_list_source
     from ..kernel_lib import kernel_lib
     repo = _env.repo_root()
@@ -82,7 +98,8 @@ def register(so=None, name: str = "aiednn") -> str:
 
 
 def _pin_batch(model, batch: int):
-    """the model with every dynamic leading input dim fixed to *batch*"""
+    """the model with every dynamic leading input dim fixed to *batch*: aiednn takes static shapes only
+    (a symbolic N leaves every node a wildcard). Returns a path or serialized bytes."""
     import onnx
     m = onnx.load(str(model)) if not isinstance(model, onnx.ModelProto) else model
     changed = False
@@ -97,7 +114,8 @@ def _pin_batch(model, batch: int):
 
 def session(model, benchmark: bool = False, options=None, cpu_fallback: bool = True, batch: int = 1,
             name: str = "aiednn"):
-    """an InferenceSession with aiednn first and ORT's CPU EP for what aiednn does not claim"""
+    """an InferenceSession with aiednn first and ORT's CPU EP for what aiednn does not claim; dynamic
+    batch dims are pinned to *batch*"""
     import onnxruntime as ort
     register(name=name)
     model = _pin_batch(model, batch)
@@ -114,7 +132,8 @@ def session(model, benchmark: bool = False, options=None, cpu_fallback: bool = T
 
 
 def assigned(sess) -> dict:
-    """{"aiednn": n, "CPUExecutionProvider": m}"""
+    """{"aiednn": n, "CPUExecutionProvider": m}: nodes per EP, from the session's profile-free node
+    assignment (needs session option session.record_ep_graph_assignment_info = 1 when available)"""
     getter = getattr(sess, "get_provider_graph_assignment_info", None)
     if getter is None:
         return {}

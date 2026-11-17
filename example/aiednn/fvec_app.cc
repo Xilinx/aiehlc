@@ -2,7 +2,9 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * fvec_app -- FVEC mode (aie_modes_fvec.h) f32 ops vs ref: under |aie - ref| <= 1e-5 + 1e-5 |ref|:
+ * fvec_app -- the FVEC mode (aie_modes_fvec.h) on the board: f32 eltwise programs, binary ops, softmax
+ * layer / RMS norm, batch norm, PReLU and per-channel binary (ROWPROG), eltwise backward through dispatch, each against
+ *ref: on the same input under the mode's contract |aie - ref| <= 1e-5 + 1e-5 |ref|, with both timings:
  *
  *   FVCHK <name> impl=<impl> aie_ms=<steady> ref_ms=<steady> contract=<worst ratio> ok=<0|1>
  *
@@ -190,7 +192,8 @@ int main() {
             1, n);
     /* training rows (ROWSUM + ROWPROG with a per-element operand) */
     aiednn_memory_desc_t sm2 = D(2, 256, 1000);
-    float *ys = (float *)malloc(256 * 1000 * 4); /* a real softmax output (rows sum to 1) */
+    float *ys = (float *)malloc(256 * 1000 * 4); /* a real softmax output (rows sum to 1): s = sum y dy is a convex
+                                                  * combination of dy, the case backward sees in training */
     for (int r = 0; r < 256; r++) {
         double t = 0;
         for (int i = 0; i < 1000; i++)
@@ -234,7 +237,7 @@ int main() {
         },
         6, bt, 1, 197L * 384);
     free(mv), free(vv);
-    { /* quantized binary over every (code, code) pair: byte-identical to ref: */
+    { /* the quantized binary over every (code, code) pair: byte-identical to ref: (the unfused chain) */
         aiednn_memory_desc_t q8;
         const int64_t dq[1] = {65536};
         aiednn_memory_desc_init(&q8, 1, dq, aiednn_s8);

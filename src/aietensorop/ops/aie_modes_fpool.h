@@ -12,14 +12,15 @@
  * a sum is the f32 sum in tap order (the host divides for an average).
  *
  * Op 2, ARGMAX (max pooling backward): out[o] = the int32 tap index t = (q * KH + y) * KW + x of the
- * window's FIRST strict maximum in (q, y, x) order (ref:'s rule), written as int32 bits.
+ * window's FIRST strict maximum in (q, y, x) order -- ref:'s rule -- written as int32 bits; the host routes
+ * dy through it (aiednn_rt_fpool.h), in double as ref: does, so the gradient stays bit-identical.
  *
  * Descriptor (D = the bytes after opcode and column): D[0] op 0 max / 1 sum / 2 argmax, D[1] KD, D[2] KH, D[3] KW,
  * D[4] SH, D[5] SW (1 or 2), D[6..7] WP, D[8..9] ROUT, D[10..11] WO (LE16).
  * Needs KD * RIN * WP <= 1024 and ROUT * WO <= 1024.
  *
- * The core path is aie_api vector code only (no scalar FPU: a scalar float op pulls in softfloat);
- * aie_fpool_item_ref is the plain C reference.
+ * The core path is aie_api vector code only (AIE-ML has no scalar FPU: a scalar float op pulls softfloat
+ * into program memory); aie_fpool_item_ref is the plain C reference (x86 stand-in, gemm_uk_ref.c).
  ******************************************************************************/
 #ifndef AIE_MODES_FPOOL_H
 #define AIE_MODES_FPOOL_H

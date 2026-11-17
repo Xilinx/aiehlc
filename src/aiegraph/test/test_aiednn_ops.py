@@ -2,7 +2,16 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Every aiednn primitive against an independent oracle (PyTorch, else numpy)."""
+"""Every aiednn primitive against an independent oracle (PyTorch, else numpy).
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_ops.py
+
+The runtime is built as a shared library whose AIE implementation list holds
+the gemm_s8s32 block kernel with its x86 reference as the entry, so the int8
+GEMM family runs through the same blocked / im2col / col2im / ip composites as
+on the board; the test also checks which implementation dispatch picked.
+Needs g++ and torch; no Vitis, no board.
+"""
 
 from __future__ import annotations
 
@@ -213,7 +222,10 @@ def test_sdpa(lib, mask, causal, sq, skv):
 @pytest.mark.parametrize("causal,sq,skv,layout", [(False, 64, 64, 0), (True, 64, 64, 0), (False, 37, 50, 0),
                                                    (False, 64, 64, 2 | 4), (True, 200, 120, 0)])
 def test_sdpa_on_aie_block(lib, causal, sq, skv, layout):
-    """sdpablk: into a quantized s8 destination, within RT_SDPA_TOL codes of ref:sdpa."""
+    """sdpablk: (the GEMM ELF's SDPA mode, aie_modes_sdpa.h) for an sdpa into a quantized s8 destination:
+    Q / K / V quantized per tensor, integer scores, table softmax -- within RT_SDPA_TOL (4) codes of
+    ref:sdpa; the f32-destination sdpa above stays on ref:. Query blocks (sq 200), a short last block (37)
+    and the folded head-permute layouts (AIEDNN_SDPA_QKV_BSHD | DST_BSHD) included."""
     B, H, D, Dv = 2, 4, 16, 16
     bshd = layout & 2
     shp = (lambda s, d: (B, s, H, d)) if bshd else (lambda s, d: (B, H, s, d))
@@ -658,7 +670,9 @@ def test_conv_fused_epilogue(lib, dst_dt, groups):
 
 @pytest.mark.parametrize("dst_dt", ["s8", "u8"])
 def test_conv_int8_residual_fixed_point(lib, dst_dt):
-    """A fused residual add with an s8 src1: AIE == ref: bit for bit."""
+    """a fused residual add whose src1 is s8 (scale / zero point in the post-op's alpha / beta):
+    the fixed-point epilogue carries it as (r - zr) * R; AIE == ref: bit for bit, within one
+    code of the double formula with the dequantized residual"""
     N, Cc, O = 1, 16, 32
     x, w = i8((N, Cc, 9, 9)), i8((O, Cc, 3, 3))
     sc, b = f32((O,), 1e-4, 1e-3), f32((O,), -1, 1)
@@ -688,7 +702,9 @@ def test_conv_int8_residual_fixed_point(lib, dst_dt):
 
 @pytest.mark.parametrize("k", [1, 3])
 def test_conv_batch_in_m_residual(lib, k):
-    """A batch through the im2col pipes is one call with images stacked along M: AIE == ref:."""
+    """a batch through the im2col pipes is ONE call with the images stacked along the GEMM's M
+    (conv_geo.nimg): rows of several images share M blocks, and the int8 output and the s8 residual
+    are mapped back per image -- AIE == ref: bit for bit"""
     N, Cc, O, H = 3, 16, 32, 7       # 3 * 49 rows: images share the first M block
     x, w = i8((N, Cc, H, H)), i8((O, Cc, k, k))
     sc, b = f32((O,), 1e-4, 1e-3), f32((O,), -1, 1)
@@ -742,7 +758,8 @@ def test_attr_validation(lib):
 
 @pytest.mark.parametrize("k,s,hw", [(3, 1, 13), (3, 2, 14), (5, 1, 11), (5, 2, 17), (3, 1, 112), (7, 1, 56), (7, 2, 15)])
 def test_depthwise_on_aie_block(lib, k, s, hw):
-    """The depthwise overlay of the GEMM ELF: bit-identical to ref:convolution."""
+    """the depthwise overlay of the GEMM ELF: banded items, exact int32 accumulators,
+    the shared epilogue (scales, bias, ReLU6) -> bit-identical to ref:convolution"""
     N, Cc, p = 2, 24, k // 2
     Ho = (hw + 2 * p - k) // s + 1
     x, w = i8((N, Cc, hw, hw)), i8((Cc, 1, k, k))
@@ -772,7 +789,8 @@ def test_depthwise_on_aie_block(lib, k, s, hw):
                                           ("pooling_avg_include_padding", 3, 1, 1, 13),
                                           ("pooling_avg_exclude_padding", 3, 2, 1, 63)])
 def test_pooling_on_aie_block(lib, alg, k, s, p, hw):
-    """The pool overlay of the GEMM ELF == ref:pooling bit for bit."""
+    """the pool overlay of the GEMM ELF (poolblk:aie:pool_s8s32) == ref:pooling bit for bit (problems with
+    enough window work per item: RT_PL_MIN_WORK leaves tiny ones on ref:)"""
     N, Cc = 2, 8
     x = i8((N, Cc, hw, hw))
     Ho = (hw + 2 * p - k) // s + 1
@@ -795,7 +813,9 @@ def test_pooling_on_aie_block(lib, alg, k, s, p, hw):
 
 
 def test_global_pool_placement_follows_the_preference(lib):
-    """A global 7x7 pool stays on the AIE by default; aiednn_prefer_fastest lets it go to ref:."""
+    """a global 7x7 pool has ~49 window ops per item: the AIE launches lose to ref: (board: 5.1 vs
+    0.23 ms on 512 channels). The default preference still puts it on the AIE; aiednn_prefer_fastest
+    lets the pool block refuse it (RT_PL_MIN_WORK)"""
     x = i8((1, 64, 7, 7))
     from aiegraph.dnn_ctypes import PoolParams
     pp = PoolParams()
@@ -818,7 +838,8 @@ def test_global_pool_placement_follows_the_preference(lib):
 
 @pytest.mark.parametrize("k,s,hw", [(3, 1, 14), (3, 2, 15), (5, 1, 9), (7, 1, 28)])
 def test_depthwise_int8_requant_on_core(lib, k, s, hw):
-    """Depthwise s8 dst + ReLU6 requantized on the core: bit-identical to ref:."""
+    """s8 dst + ReLU6: the depthwise mode requantizes on the core (0xD8, fixed point); ref:
+    computes the same integer epilogue -> bit-identical, within one code of the double formula"""
     N, Cc, p = 1, 16, k // 2
     Ho = (hw + 2 * p - k) // s + 1
     x, w = i8((N, Cc, hw, hw)), i8((Cc, 1, k, k))
@@ -845,7 +866,9 @@ def test_depthwise_int8_requant_on_core(lib, k, s, hw):
 
 @pytest.mark.parametrize("cin,dst_dt", [(96, "f32"), (96, "s8"), (64 * 25 // 25 * 25, "s8")])
 def test_k_split_conv_chains_on_the_core(lib, cin, dst_dt):
-    """K > 512: K blocks chain on the core, with on-core requant; AIE == ref:."""
+    """K = cin*9 > 512: the K blocks chain on the core (gemm_kc: the core keeps the partial sum);
+    an s8 dst with an integer epilogue also requantizes there (0xF1 continuing the chain).
+    AIE == ref: bit for bit"""
     N, H, O = 1, 10, 40
     x, w = i8((N, cin, H, H)), i8((O, cin, 3, 3))
     sc, b = f32((O,), 1e-4, 1e-3), f32((O,), -1, 1)
@@ -870,7 +893,10 @@ def test_k_split_conv_chains_on_the_core(lib, cin, dst_dt):
 
 @pytest.mark.parametrize("dt,zp,relu", [("s8", 0, 0), ("s8", 3, 0), ("u8", 113, 1), ("s8", -5, 1)])
 def test_batch_norm_create_attr_equals_batch_norm_then_quantize(lib, dt, zp, relu):
-    """Batch norm f32 -> s8 / u8 is bit-identical to batch norm + quantizing reorder, ties included."""
+    """--aiednn-fold-norm-quant's runtime half: batch norm f32 -> s8 / u8 with dst_scale / zp is
+    bit-identical to the f32 batch norm followed by the quantizing reorder -- including ties
+    (identity BN, inputs on a 0.25 grid, dst_scale 0.5) and odd zero points, where
+    round(x) + zp and round(x + zp) differ"""
     rng = np.random.default_rng(7)
     x = (rng.integers(-300, 300, size=(2, 4, 3, 5)) * 0.25).astype(np.float32)
     mean, var = np.zeros(4, np.float32), np.ones(4, np.float32)
@@ -890,7 +916,9 @@ def test_batch_norm_create_attr_equals_batch_norm_then_quantize(lib, dt, zp, rel
 
 
 def test_dead_channel_keeps_the_integer_epilogue(lib):
-    """An all-zero-weight channel (multiplier 0) keeps the fixed-point epilogue."""
+    """a conv output channel whose weights are all zero (output scale 0) has multiplier 0: the
+    fixed-point epilogue says that exactly (M = 0) instead of falling back to the host double path
+    for the whole layer (resnet18's stem: 802,816 outputs). Checked against the double epilogue"""
     rng = np.random.default_rng(3)
     x = rng.integers(-60, 60, size=(1, 8, 6, 6)).astype(np.int8)
     w = rng.integers(-60, 60, size=(4, 8, 3, 3)).astype(np.int8)
@@ -915,7 +943,9 @@ def test_dead_channel_keeps_the_integer_epilogue(lib):
 
 
 def test_autotune_times_every_acceptor_and_keeps_one(lib, capfd):
-    """aiednn_set_autotune(1): picks one impl per signature, result unchanged, dump / load round-trip."""
+    """aiednn_set_autotune(1): the first execute of a signature runs every accepting implementation
+    (here the AIE im2col composite and ref:), keeps one, and the result is unchanged; a second
+    primitive with the same signature takes the recorded choice; dump / load round-trip it"""
     x, w = i8((1, 8, 12, 12)), i8((16, 8, 3, 3))
     b = RNG.integers(-1000, 1000, 16).astype(np.int32)
     oshape = (1, 16, 10, 10)
@@ -944,7 +974,9 @@ def test_autotune_times_every_acceptor_and_keeps_one(lib, capfd):
 
 @pytest.mark.parametrize("groups", [1, 16])   # im2col GEMM (0xF1) and depthwise (0xD8)
 def test_clamp_chain_stays_on_the_core_requant(lib, groups):
-    """A run of clamps is one clamp, so the integer epilogue takes it; AIE == ref:."""
+    """graph fusion level 2 keeps a folded requantize's saturation as a clip before the activation
+    (clip(sat), clip(0, 6)); a run of clamps is one clamp, so the integer / on-core epilogue still takes
+    it: the chain equals the single clip(0, 5.9) byte for byte, and the AIE equals ref:"""
     Cc = 16
     x, w = i8((1, Cc, 12, 12)), i8((Cc, Cc // groups, 3, 3))
     sc, b = f32((Cc,), 1e-3, 1e-2), f32((Cc,), -1, 1)
@@ -973,7 +1005,9 @@ def test_clamp_chain_stays_on_the_core_requant(lib, groups):
 @pytest.mark.parametrize("filt", [None, "ref:"])
 @pytest.mark.parametrize("ddt,post", [("s8", ()), ("u8", ("relu",)), ("s8", ("clip",)), ("f32", ("relu",))])
 def test_requant_binary_post_op_equals_the_unfused_chain(lib, kind, filt, ddt, post):
-    """aiednn_post_op_requant_binary: byte-identical to the unfused GEMM + quantized binary."""
+    """aiednn_post_op_requant_binary (PT2E's conv -> quantize -> dequantize -> add -> [relu] -> quantize as one
+    primitive): byte-identical to the GEMM with its int8 intermediate as dst followed by
+    aiednn_binary_create_attr -- on the AIE path and on ref:"""
     from aiegraph.dnn_ctypes import Attr
     q_sc, q_zp, r_sc, r_zp, d_sc, d_zp = 0.047, -3, 0.031, 4, 0.052, (2 if ddt == "s8" else 120 if ddt == "u8" else 0)
     if kind == "conv":
@@ -1019,7 +1053,8 @@ def test_requant_binary_post_op_equals_the_unfused_chain(lib, kind, filt, ddt, p
 @pytest.mark.parametrize("alg,a,b,ddt,qdt", [("clip", 0.0, 6.0, "s8", "s8"), ("hardswish", 1 / 6, 0.5, "u8", "u8"),
                                               ("logistic", 0, 0, "s8", "s8"), ("gelu_erf", 0, 0, "f32", "s8")])
 def test_requant_eltwise_post_op_equals_the_unfused_chain(lib, groups, filt, alg, a, b, ddt, qdt):
-    """aiednn_post_op_requant_eltwise: byte-identical to the unfused conv + quantized eltwise."""
+    """aiednn_post_op_requant_eltwise (conv -> Q -> DQ -> hardtanh / hardswish / sigmoid -> Q as one primitive):
+    byte-identical to the conv with its int8 intermediate as dst followed by aiednn_eltwise_forward_create_attr"""
     Cc, H = 16, 10
     x, w = i8((1, Cc, H, H)), i8((Cc, Cc // groups, 3, 3))
     sc, bias = f32((Cc,), 1e-3, 1e-2), f32((Cc,), -1, 1)
@@ -1053,7 +1088,8 @@ def test_requant_eltwise_post_op_equals_the_unfused_chain(lib, groups, filt, alg
 @pytest.mark.parametrize("bshd", [0, 2 | 4])
 @pytest.mark.parametrize("filt", [None, "ref:"])
 def test_sdpa_gqa(lib, hk, bshd, filt):
-    """Grouped-query / multi-query attention matches PyTorch's enable_gqa."""
+    """grouped-query / multi-query attention: K, V with Hk heads, query head h reads head h // (H // Hk) --
+    PyTorch's enable_gqa (= K, V repeat_interleave'd over the head axis)"""
     B, H, Sq, Skv, D, Dv = 2, 4, 9, 13, 8, 6
     q, k, v = f32((B, H, Sq, D)), f32((B, hk, Skv, D)), f32((B, hk, Skv, Dv))
     scale = 1.0 / math.sqrt(D)
@@ -1076,7 +1112,8 @@ def test_sdpa_gqa(lib, hk, bshd, filt):
 
 
 def test_sdpa_heads_queued_across_launch_boundaries(lib):
-    """gemm+sdpa deferred GEMM passes over all heads match PyTorch."""
+    """gemm+sdpa defers each GEMM pass over all heads (b16q_defer): 36 score tiles and 48 P V tiles cross
+    the 32-tile queue mid K chain, GQA, several N blocks -- the same result as PyTorch (bf16x3 tolerance)"""
     B, H, hk, Sq, Skv, D, Dv = 1, 6, 3, 40, 300, 64, 24
     q, k, v = f32((B, H, Sq, D)), f32((B, hk, Skv, D)), f32((B, hk, Skv, Dv))
     scale = 1.0 / math.sqrt(D)
@@ -1114,7 +1151,8 @@ def test_sdpa_gqa_on_aie_block(lib):
                                                   (2, False, True, 2)])
 @pytest.mark.parametrize("filt", [None, "ref:"])
 def test_sdpa_backward_vs_autograd(lib, hk, mask, causal, bshd, filt):
-    """sdpa backward (dQ, dK, dV) against torch autograd."""
+    """sdpa backward (dQ, dK, dV) against torch autograd: MHA / GQA / MQA, mask, causal (Sq = Skv), [B,S,H,D];
+    gemm+sdpabwd puts its GEMMs on the AIE float GEMM"""
     B, H, S, D, Dv = 2, 4, 12, 8, 6
     q, k, v = f32((B, H, S, D)), f32((B, hk, S, D)), f32((B, hk, S, Dv))
     m = f32((1, H, S, S)) if mask else None
@@ -1148,7 +1186,8 @@ def test_sdpa_backward_vs_autograd(lib, hk, mask, causal, bshd, filt):
 
 @pytest.mark.parametrize("name", ["sin", "cos", "tan"])
 def test_eltwise_sin_cos_wide_range_on_fvec(lib, name):
-    """FVEC sin / cos within 2e-6 over [-200, 200]."""
+    """FVEC sin / cos: Cody-Waite reduction by 2 pi, a fold into [-pi/2, pi/2] and the odd polynomial: |error|
+    within 2e-6 over [-200, 200] (incl. the fold boundaries)"""
     x = f32((4, 1000), -200.0, 200.0)
     x[0, :8] = [np.pi / 2, -np.pi / 2, np.pi, -np.pi, 3 * np.pi / 2, 0.0, 1e-7, -1e-7]
     got, impl = lib.call("aiednn_eltwise_forward_create",
@@ -1165,7 +1204,8 @@ def test_eltwise_sin_cos_wide_range_on_fvec(lib, name):
 
 @pytest.mark.parametrize("cdt", ["s8", "u8", "f32"])
 def test_binary_select_on_fvec(lib, cdt):
-    """select via FVEC element passes: each output exactly a or b."""
+    """select: three FVEC element passes ([c] a, [!c] b, add) -- each output exactly a or b (a -0.0 may come back as
+    +0.0); broadcast operands are expanded on the host first (test_binary covers that)"""
     s = (2, 3, 4, 50)
     a, b = f32(s, -2, 2), f32(s, -2, 2)
     c = RNG.integers(0, 2, s).astype({"s8": np.int8, "u8": np.uint8, "f32": np.float32}[cdt])

@@ -2,7 +2,15 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""ctypes binding of include/aiednn.h"""
+"""ctypes binding of include/aiednn.h: build the runtime as a shared
+library (with the x86 reference of a GEMM block kernel as its "AIE" entry, so
+the blocked / im2col / col2im / ip composites run), then call primitives on
+numpy arrays.
+
+    lib = AiednnLib.build(tmp_dir)
+    out, impl = lib.run("eltwise", ins={"src": x}, out_shape=x.shape, out_dt="f32",
+                        alg=lib.ALG["eltwise_relu"], alpha=0.0, beta=0.0)
+"""
 
 from __future__ import annotations
 
@@ -56,7 +64,10 @@ ARG_WEI_SCALES, ARG_WEI_ZPS = 136, 137
 
 def attr(lib_alg: dict, scales=None, dst_scale=0.0, dst_zp=0, post_ops=(), src_zp=0, wei_zp=0,
          wei_scales=None, wei_zps=None, flags=0):
-    """post_ops: ("eltwise", alg, alpha, beta) | ("binary", alg, shape, dt[, scale, zp]) |"""
+    """post_ops: ("eltwise", alg, alpha, beta) | ("binary", alg, shape, dt[, scale, zp]) |
+    ("requant_binary", alg, shape, dt, scale, zp, q_scale, q_zp, q_dt) (scale / zp of
+    an s8 / u8 src1); wei_scales / wei_zps: (shape, dt) of the grouped weight scales / zero points
+    (their buffers go to execute as ARG_WEI_SCALES / ARG_WEI_ZPS); returns (Attr, keepalive)"""
     a = Attr()
     a.src_zero_point, a.wei_zero_point, a.flags = src_zp, wei_zp, flags   # flags: AIEDNN_ATTR_* opt-ins
     if wei_scales is not None:
@@ -174,7 +185,8 @@ class AiednnLib:
 
     @classmethod
     def build(cls, out: Path, with_gemm: bool = True, defines=(), mesh=None) -> "AiednnLib":
-        """*mesh*: (rows, cols) whose block shapes the impl list carries"""
+        """*mesh*: (rows, cols) whose block shapes the impl list carries (the x86 references take
+        their shapes from the arguments, so this checks the runtime at a larger mesh's blocks)"""
         from .dnn import impl_list_source
         from .kernel_lib import kernel_lib
         out.mkdir(parents=True, exist_ok=True)

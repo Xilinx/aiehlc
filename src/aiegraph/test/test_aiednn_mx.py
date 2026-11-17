@@ -2,7 +2,14 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Weight-only quantization (group scales / zero points) and MX types e8m0 / f4_e2m1 against numpy."""
+"""Weight-only quantization: grouped weight scales / zero points (attr.wei_scales / wei_zero_points)
+and the OCP microscaling types e8m0 / f4_e2m1 (MXFP4 / MXFP8 matmul), against numpy.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_mx.py
+
+torch of this tree has no e8m0 / fp4 dtype, so the conversions are checked against a numpy model of
+the OCP MX spec (nearest, ties to the even code; f4 saturates at 6, e8m0 clamps to [2^-127, 2^127]).
+"""
 
 from __future__ import annotations
 
@@ -173,7 +180,8 @@ def test_grouped_inner_product(lib):
 
 
 def test_grouped_int8_src(lib):
-    """s8 src x s4 weights with group scales and zero points -> f32: the exact reference."""
+    """s8 src x s4 weights with group scales and zero points -> f32: the exact reference an AIE int8
+    GEMM with per-group partial sums is checked against"""
     M, K, N, g = 4, 128, 6, 64
     x = RNG.integers(-128, 128, (M, K))
     wv = RNG.integers(-8, 8, (K, N))
@@ -216,7 +224,8 @@ def test_grouped_refusals(lib, case, capfd):
 
 @pytest.mark.parametrize("et,emax,vmax", [("f8_e4m3", 8, 448.0), ("f8_e5m2", 15, 57344.0), ("f4_e2m1", 2, 6.0)])
 def test_block_quantize_and_dequantize(lib, et, emax, vmax):
-    """MX quantize / dequantize per block of 32 against the numpy model."""
+    """MX quantize: per block of 32, s = floor(log2 max|x|) - emax (zero block: -127), elements x / 2^s saturated
+    and encoded as reorder does (its conversions are checked above); dequantize = element 2^s"""
     rng = np.random.default_rng(5)
     R, K, blk = 3, 128, 32
     x = (rng.standard_normal((R, K)) * rng.choice([1e-3, 1.0, 50.0, 3e4], (R, K))).astype(np.float32)

@@ -5,7 +5,7 @@
  * aiednn graph API: hand over a whole graph of framework-level ops, get back
  * partitions -- each either supported (fused into one aiednn primitive) or not
  * (the framework runs those ops itself) -- then compile and execute the
- * supported ones.
+ * supported ones. doc/design/aiednn_framework_api.md section 1.
  *
  *   aiednn_graph_create(&g);
  *   aiednn_graph_add_op(g, id, aiednn_gop_convolution, &attr, 2, in, 1, out);   // every op
@@ -14,7 +14,9 @@
  *   for each part: if (aiednn_partition_is_supported(part))
  *       aiednn_partition_compile(part, &cp), aiednn_compiled_partition_execute(cp, ...);
  *
- * A partition compiles to one aiednn primitive.
+ * Built only on aiednn.h: a partition compiles to one primitive and executes
+ * through aiednn_primitive_execute_args, so dispatch decides AIE vs ref: as for
+ * any primitive.
  ******************************************************************************/
 #ifndef AIEDNN_GRAPH_H
 #define AIEDNN_GRAPH_H
@@ -68,7 +70,8 @@ typedef struct {
  *   group_norm         x [, scale [, shift]] [N,C,...], attr.groups (= C: instance norm), attr.eps
  *   prelu              x, slope (broadcastable to x after leading 1s)
  *   slice              x -> the sub-tensor starting at attr.starts[axis], of the output md's dims (step 1):
- *                      Dense only.
+ *                      split / chunk outputs, x[:, 0], RoPE's halves. Dense only; a strided copy.
+ * Appended 2026-11-14 (every oneDNN graph op has a counterpart; doc/design/aiednn_framework_api.md §7):
  *   type_cast          x -> y of another data type, same dims (round to nearest even, saturating)
  *   reorder            x -> y, same dims; data type and / or memory format may differ
  *   select             cond, then, else -> y = cond ? then : else (numpy broadcasting, cond nonzero = true)
@@ -76,9 +79,10 @@ typedef struct {
  *   dropout            x -> y [, mask u8]: attr.alpha = drop probability, attr.seed; probability 0: identity
  *   rms_norm           x [, gamma] -> y over the last dim, attr.eps (= layer_norm with AIEDNN_RMS_NORM)
  *   layer_norm / group_norm with 3 outputs: the training forward -- y, mean, variance (biased)
- *   softmax            attr.alg aiednn_softmax_log: log-softmax
+ *   softmax            attr.alg aiednn_softmax_log: log-softmax (oneDNN LogSoftmax)
  * Training (backward) ops -- gradients in the order listed, inputs in the order listed:
  *   eltwise_backward          src, diff_dst -> diff_src; attr.alg / alpha / beta as the forward eltwise
+ *                             (oneDNN ReLUBackward, GELUBackward, ... are this op with their alg)
  *   softmax_backward          dst, diff_dst -> diff_src; attr.axis, attr.alg (accurate / log)
  *   pool_backward             diff_dst, src -> diff_src; attr.alg aiednn_pooling_max / avg_*, attr.pool;
  *                             avg: src may be omitted (diff_src's md gives the shape)
@@ -97,7 +101,7 @@ typedef struct {
  *   dynamic_dequantize        x s8 / u8 / s32, scales [, zero_points] -> y f32   at execute; [1] per tensor, or
  *                             [dims[attr.axis]] per channel (attr.axis -1: per tensor)
  *   linear_attention          q, k, v, gate [, beta] [, state_in] -> dst [, state_out]: the gated delta rule
- *                             (aiednn_linear_attention_create). attr.flags
+ *                             (Gated DeltaNet, KDA, GLA / RetNet; aiednn_linear_attention_create). attr.flags
  *                             AIEDNN_LA_* (NO_DELTA: no beta input), attr.sdpa_scale (0: 1 / sqrt(Dk)) */
 typedef enum {
     aiednn_gop_convolution = 1,
@@ -131,8 +135,8 @@ typedef enum {
     aiednn_gop_reduction,
     aiednn_gop_group_norm,
     aiednn_gop_prelu,
-    aiednn_gop_slice, /* appended */
-    aiednn_gop_type_cast,
+    aiednn_gop_slice,     /* appended */
+    aiednn_gop_type_cast, /* appended 2026-11-14 */
     aiednn_gop_reorder,
     aiednn_gop_select,
     aiednn_gop_squared_difference,
@@ -228,28 +232,47 @@ typedef struct {
     void *data;
 } aiednn_tensor_t;
 
-/* aiednn_primitive_find / _set_impl on the partition's primitive. */
+/* aiednn_primitive_find / _set_impl on the partition's primitive: which implementations accept the
+ * fused problem and how fast (AIEDNN_FIND_HEURISTIC / _MEASURE), then pin one. A framework's
+ * benchmark mode calls find(MEASURE) once per compiled partition. */
 int aiednn_compiled_partition_find(aiednn_compiled_partition_t compiled, int mode, aiednn_impl_perf_t *out, int cap);
 aiednn_status_t aiednn_compiled_partition_set_impl(aiednn_compiled_partition_t compiled, const char *impl);
 
 /* inputs / outputs by logical tensor id (any order; extra entries ignored); forwards to
  * aiednn_primitive_execute_async. stream NULL: synchronous. workspace: NULL = the library allocates,
  * else >= get_workspace_size bytes of 64-byte aligned host memory, untouched until the stream is
- * waited. */
+ * waited -- then the execute allocates nothing, except caches (packed constant weights) the first
+ * execute fills: run one warm-up execute if the first call must be allocation-free too. */
 aiednn_status_t aiednn_compiled_partition_execute(aiednn_compiled_partition_t compiled, aiednn_stream_t stream,
                                                   int n_in, const aiednn_tensor_t *in, int n_out,
                                                   const aiednn_tensor_t *out, void *workspace, size_t workspace_size);
 void aiednn_compiled_partition_destroy(aiednn_compiled_partition_t compiled);
 
 /* Fusion level (AIEDNN_GRAPH_NO_FUSE=1 sets 0): 0 = every op its own partition; 1 (default) = exact
- * fusions only (anchor epilogues, dequantize read-through, norm + quantize, quantized binary / eltwise /
- * max_pool / views, requant post-ops), each bit-identical to the int8 ops it replaces; 2 = also drops a
- * quantize -> dequantize pair with equal per-tensor parameters before a relu / clamp in an anchor's chain. */
+ * fusions only -- anchor epilogues, the 8-bit dequantize read-through, norm + quantize, and
+ * dequantize x2 -> add | sub | mul | max | min [-> relu | clamp] -> quantize as one quantized binary
+ * (aiednn_binary_create_attr), and dequantize -> unary eltwise chain -> quantize as one quantized eltwise
+ * (aiednn_eltwise_forward_create_attr; one 256-entry table for an 8-bit source), and dequantize -> max_pool
+ * -> quantize with equal parameters as an 8-bit max_pool on the codes, dequantize -> reshape | transpose ->
+ * quantize as the view on the codes, and an anchor -> quantize -> dequantize -> add | sub | mul | max | min
+ * (requant_binary post-op) or -> unary eltwise (requant_eltwise post-op) folded into the anchor -- each
+ * bit-identical to
+ * the int8 ops it replaces. Level 1 is not bit-identical to
+ * level 0 as a whole: unfused, a conv between dequantizes runs in f32, a different computation from the int8
+ * GEMM the read-through gives. 2 = also an inexact one: an anchor's chain passes a quantize -> dequantize
+ * pair with the same per-tensor parameters when a relu / clamp follows it (PT2E's conv -> Q -> DQ -> relu6
+ * -> Q tail), dropping that rounding; the pair's saturation and the clamp merge into one clip post-op, so
+ * the anchor keeps the on-core integer requant. Residual adds stay level 1's quantized binary (a clip
+ * before the add would push the anchor onto the host f32 epilogue, ~3x slower on the board). Adjacent
+ * relu / clip post-ops always merge into one clip. */
 void aiednn_graph_set_fusion(aiednn_graph_t graph, int level);
 
-/* Layout propagation (default on; AIEDNN_GRAPH_DENSE=1 turns it off): a 4-D activation that only connects
- * supported partitions taking nhwc natively is kept aiednn_format_nhwc. Graph inputs / outputs stay dense.
- * Partition inputs / outputs report the chosen md: allocate aiednn_memory_desc_get_size(&lt.md) bytes. */
+/* Layout propagation (default on, with fusion; AIEDNN_GRAPH_DENSE=1 turns it off): a 4-D activation that
+ * only connects supported partitions whose primitives take nhwc natively (conv, elementwise, binary,
+ * concat, pool) is kept channels-last (aiednn_format_nhwc) between them -- no NCHW <-> HWC repacking
+ * around each conv. Graph inputs / outputs and anything an unsupported partition touches stay dense.
+ * Partition inputs / outputs report the chosen md: allocate aiednn_memory_desc_get_size(&lt.md) bytes
+ * and pass such a buffer only between partitions. Outputs are bit-identical with it on or off. */
 void aiednn_graph_set_layout_propagation(aiednn_graph_t graph, int on);
 
 void aiednn_graph_destroy(aiednn_graph_t graph); /* and its partitions; compiled partitions stay valid */

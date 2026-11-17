@@ -10,11 +10,15 @@
  * OUT is its int32 C tile (AIE_MODE_OUT entries). D points at the descriptor
  * byte after the opcode and column bytes.
  *
- * The core computes only exact integers and zeroes the unused outputs; every
- * divide, rounding, saturation and requantization is the host's.
+ * The core computes only exact integers -- a window's max or sum, a op b in
+ * int32 -- and zeroes the unused outputs; every divide, rounding, saturation
+ * and requantization is the host's, so the host matches its reference bit
+ * for bit whatever the rounding rule.
  *
- * Statement macros, not functions: aiehlc does not carry outside helpers into the
- * kernel. Plain C, so the same text is the x86 reference. Include between
+ * Statement macros, not functions: helpers outside the kernel body are not
+ * carried into the kernel by aiehlc. Plain C, so the same text is the x86
+ * reference (aiednn_rt_pool.h). aiehlc does not carry .h includes into the
+ * kernel either, so the kernel source must include this header between
  * "// AIEHLC_KERNEL_PROLOGUE_BEGIN" and "// AIEHLC_KERNEL_PROLOGUE_END".
  *
  * Pool descriptor (LE16 = little-endian 16-bit):

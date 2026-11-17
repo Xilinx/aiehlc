@@ -4,11 +4,17 @@
  *
  * aiednn_rt_rnn_bwd.h -- RNN backward (back-propagation through time), ref:, in double.
  *
- * The forward is recomputed keeping every step's state, then each (layer, direction) is walked against
- * its processing order, accumulating dW / dU / db and propagating to dx and the previous state.
+ * The forward is recomputed layer by layer keeping every step's state (h, c, gate activations), then
+ * each (layer, direction) is walked against its processing order: the step's dh (from the layer
+ * above, or diff_dst_layer for the top) plus the recurrent dh / dc give the gate pre-activation
+ * gradients, which accumulate into dW / dU / db and propagate to the step's input (dx, summed over
+ * directions for the layer below) and to the previous state. Cells and layouts as the forward
+ * (aiednn_rt_rnn.h).
  *
- * With rnnb_ctx.mm set (gemm+rnnbwd, aiednn_rt_gemmx.h) the non-recurrent products (W x, dW, dx, dU) run
- * as GEMMs over all T x N steps; the loops keep the gates, dB and the recurrence nh = U dA.
+ * With rnnb_ctx.mm set (the gemm+rnnbwd composite, aiednn_rt_gemmx.h) the products that are not a
+ * recurrence leave the step loops and run as GEMMs over all T x N steps through dispatch: the forward's
+ * W x, then dW = X^T dA, dx = dA W^T and dU = Hp^T dA (GRU: without the candidate gate's columns, which
+ * stay in the loop as ref: does them). The loops keep the gates, dB and the recurrence nh = U dA.
  ******************************************************************************/
 #ifndef AIEDNN_RT_RNN_BWD_H
 #define AIEDNN_RT_RNN_BWD_H

@@ -2,14 +2,17 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * parity_bench -- times the parity primitives at network sizes with the dispatched implementation:
+ * parity_bench -- times the primitives added for parity (doc/design/aiednn.md §24) at the sizes
+ * networks use, with the implementation dispatch picks: which of them are slow enough on the host
+ * to deserve an AIE implementation. One line per problem:
  *
  *   PBENCH <name> impl=<impl> t_ms=<mean of REPS after the first> t_first_ms=<first> ref_ms=<ref: steady,
  *          when dispatch picked another implementation> speedup=<ref / t> mflop=<n>
  *
- * A failing case prints PBENCH_FAIL (not "FAIL:", which ends a board run).
+ * A case that cannot create / execute prints PBENCH_FAIL (not "FAIL:", which ends a board run).
  *   PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/parity_bench.cc --target x86 --run
  *   ... --target vek280 --run --board <host> --vitis-settings <.../settings64.sh>
+ * Data is random but untouched by checks (correctness is test_aiednn_*.py's job).
  ******************************************************************************/
 #include "aiednn.h"
 
@@ -23,7 +26,7 @@
 
 #define REPS 3
 #define NSLOT 10
-#define SLOT_BYTES (4L << 20) /* 10 slots + a copy: 44 MB of the 128 MB heap */
+#define SLOT_BYTES (4L << 20) /* 10 slots + a copy: 44 MB of the board's 128 MB default heap */
 static unsigned char *g_pool, *g_save;
 static int g_fail;
 
@@ -48,7 +51,8 @@ static aiednn_memory_desc_t D(aiednn_data_type_t dt, int nd, int64_t a, int64_t 
     return m;
 }
 
-/* random slot contents: f32 in [-1, 1), else small bytes (0x3c.. is moderate in every float type) */
+/* random contents for every slot: f32 in [-1, 1) where a slot is read as f32, small bytes otherwise
+ * (a byte pattern of 0x3c.. is a moderate float, bf16, f16 and e8m0 scale alike) */
 static void fill_pool(void) {
     uint32_t s = 4242u;
     float *f = (float *)g_pool;
@@ -64,7 +68,7 @@ static int time_one(Mk mk, int nargs, const int *tags, int constw, double *first
     aiednn_primitive_t p;
     if (mk(&p) != aiednn_success)
         return 0;
-    if (constw) /* constant weights: packed once */
+    if (constw) /* the weights a model holds constant: packed once, like an app */
         aiednn_primitive_set_constant_weights(p, 1);
     snprintf(impl, 160, "%s", aiednn_primitive_impl_info(p));
     aiednn_exec_arg_t a[NSLOT];
@@ -87,11 +91,12 @@ static int time_one(Mk mk, int nargs, const int *tags, int constw, double *first
     return 1;
 }
 
-/* the dispatched implementation, and ref: when dispatch picked something else */
+/* the dispatched implementation, and ref: on the same problem when dispatch picked something else */
 template <typename Mk>
 static void run(const char *name, double mflop, int nargs, const int *tags, Mk mk, int constw = 0) {
     char impl[160], rimpl[160];
-    fill_pool(); /* fresh inputs, no inf / NaN from an earlier case */
+    fill_pool(); /* fresh inputs: an earlier case's output (inf / NaN from random bf16 / e8m0 bytes) is not this one's
+                    input */
     double first, steady, rfirst = 0, rsteady = 0;
     if (!time_one(mk, nargs, tags, constw, &first, &steady, impl)) {
         printf("PBENCH_FAIL %s (create or execute failed)\n", name);
@@ -100,7 +105,7 @@ static void run(const char *name, double mflop, int nargs, const int *tags, Mk m
     }
     char acc[64] = "-";
     if (strncmp(impl, "ref:", 4) != 0) {
-        /* the output slot after the AIE run, then ref:'s */
+        /* the output slot (dst, or the gradient a backward pass writes) after the AIE run, then ref:'s */
         int os = 0;
         for (int i = 0; i < nargs; i++)
             if (tags[i] == AIEDNN_ARG_DST || tags[i] == AIEDNN_ARG_DIFF_SRC || tags[i] == AIEDNN_ARG_DIFF_WEIGHTS) {
@@ -113,10 +118,10 @@ static void run(const char *name, double mflop, int nargs, const int *tags, Mk m
         aiednn_set_impl_filter(nullptr);
         if (!memcmp(g_save, g_pool + os * SLOT_BYTES, SLOT_BYTES))
             snprintf(acc, sizeof acc, "exact");
-        else { /* f32 outputs: ||aie - ref|| / ||ref|| */
+        else { /* f32 outputs: ||aie - ref|| / ||ref|| over the slot (the untouched tail is equal) */
             const float *a = (const float *)g_save, *r = (const float *)(g_pool + os * SLOT_BYTES);
             double dd = 0, rr = 0;
-            long nf = 0; /* finite on one side only */
+            long nf = 0; /* finite on one side only: a real difference (random bf16 / e8m0 bytes give inf on both) */
             for (long i = 0; i < SLOT_BYTES / 4; i++)
                 if (isfinite(a[i]) && isfinite(r[i]))
                     dd += ((double)a[i] - r[i]) * ((double)a[i] - r[i]), rr += (double)r[i] * r[i];
@@ -134,7 +139,7 @@ static void run(const char *name, double mflop, int nargs, const int *tags, Mk m
 enum { S_ = AIEDNN_ARG_SRC, W_ = AIEDNN_ARG_WEIGHTS, B_ = AIEDNN_ARG_BIAS, D_ = AIEDNN_ARG_DST };
 
 static void spatial(void) {
-    { /* 1-D conv, int8 (runs as 2-D) */
+    { /* 1-D conv (audio / sequence models), int8: rewritten as 2-D, so it can reach the AIE */
         aiednn_memory_desc_t s = D(aiednn_s8, 3, 1, 64, 2048), w = D(aiednn_s8, 3, 64, 64, 3),
                              d = D(aiednn_s32, 3, 1, 64, 2048);
         aiednn_conv_nd_params_t cp = {};
@@ -145,7 +150,7 @@ static void spatial(void) {
             return aiednn_convolution_forward_create_nd(p, &s, &w, nullptr, &d, &cp, nullptr);
         });
     }
-    for (int q = 0; q < 2; q++) { /* 3-D conv: ref: */
+    for (int q = 0; q < 2; q++) { /* 3-D conv (video / medical): ref: */
         const aiednn_data_type_t dt = q ? aiednn_s8 : aiednn_f32;
         aiednn_memory_desc_t s = D(dt, 5, 1, 16, 8, 28, 28), w = D(dt, 5, 32, 16, 3, 3, 3),
                              d = D(q ? aiednn_s32 : aiednn_f32, 5, 1, 32, 8, 28, 28);
@@ -205,9 +210,9 @@ static void recurrent(void) {
     }
 }
 
-/* LLM decode GEMM: M = 1 or 16 against a narrow / grouped K x N weight */
+/* the LLM decode GEMM: M = 1 or 16 tokens against a K x N weight in a narrow / grouped format */
 static void weight_formats(void) {
-    const int64_t K = 1024, N = 1024, g = 128;
+    const int64_t K = 1024, N = 1024, g = 128; /* 2048 x 2048 takes 5-9 s per ref: call on the A72 */
     struct {
         const char *name;
         int64_t M;
@@ -394,7 +399,7 @@ int main() {
     composites();
     pointwise();
     misc();
-    /* only the last line may carry "PASS:" / "FAIL:" */
+    /* the board runner stops at the first "PASS:" / "FAIL:": only the last line may carry one */
     printf("PBENCH done fail=%d\n%s: parity bench\n", g_fail, g_fail ? "FAIL" : "PASS");
     free(g_pool), free(g_save);
     return g_fail;

@@ -1,4 +1,7 @@
-"""Every graph op kind of include/aiednn_graph.h against PyTorch (forward values, autograd gradients)."""
+"""Every oneDNN graph op has an aiednn graph counterpart (include/aiednn_graph.h): the 2026-11-14 kinds --
+type_cast, reorder, select, squared_difference, dropout, rms_norm, log-softmax, the norms' training forward
+and the training (backward) ops -- against PyTorch (forward values, autograd gradients).
+Workstation emulation."""
 
 import os
 
@@ -11,7 +14,7 @@ from aiegraph.dnn_ctypes import conv_params, pool_params
 from aiegraph.dnn_graph import GOP, Graph, build_graph_lib
 
 # oneDNN graph op (dnnl_graph_types.h) -> the aiednn graph kind that serves it. Ops served by a generic kind
-# carry the attribute that selects them. PENDING: no library primitive yet.
+# carry the attribute that selects them. PENDING: no library primitive yet (none today).
 ONEDNN = {
     "Abs": "eltwise", "AbsBackward": "eltwise_backward", "Add": "add", "AvgPool": "avg_pool",
     "AvgPoolBackward": "pool_backward", "BatchNormForwardTraining": "batch_norm_training",
@@ -390,7 +393,8 @@ def test_onnx_dequantize_with_runtime_scale(lib):
 
 @pytest.mark.parametrize("fuse", [1, 2])
 def test_quantized_mul_tolerance_only_at_level_2(lib, fuse):
-    """Quantized mul: level 1 keeps the exact table, level 2 the AIE mul within one code."""
+    """dequantize x2 -> mul -> quantize: level 1 keeps the exact table (ref:), level 2 opts into the AIE mul
+    (AIEDNN_ATTR_TOLERANCE_1CODE), within one code of level 1"""
     rng = np.random.default_rng(15)
     a, b = rng.integers(-128, 128, (4, 64), dtype=np.int8), rng.integers(-128, 128, (4, 64), dtype=np.int8)
 

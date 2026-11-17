@@ -4,13 +4,24 @@
  *
  * resnet18_app -- int8 ResNet-18, float image -> logits, through aiednn.
  *
- * Convs and fc are aiednn primitives; the integer epilogues follow gen_engine.py's numpy model.
- * Checks every layer's uint8 output (r18_gold.bin) and the logits bit-for-bit vs TVM (r18_logits.bin).
+ * Every convolution (stem 7x7, 16 3x3, 3 fused 1x1 downsamples) and the fc are
+ * aiednn primitives: the app describes the tensors and aiednn's dispatch picks
+ * an implementation per layer from what the builder linked in (on VEK280: the
+ * AIE int8 GEMM block behind im2col / blocked matmul; ref: otherwise). The
+ * integer epilogues between them -- input quantize, requantize, residual
+ * combine, maxpool, avgpool -- are the app's, written exactly as
+ * resnetengine/gen_engine.py's numpy model, which is checked against TVM's
+ * own dump of every layer when the data is generated.
+ *
+ * Self-checks: every layer's uint8 output against that model (r18_gold.bin),
+ * and the 1000 float logits bit-for-bit against TVM's (r18_logits.bin).
  *
  *   python3 example/aiednn/resnet18/gen_resnet18.py      # -> worklocal/aiednn/resnet18_data
  *   PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/resnet18/resnet18_app.cc \
  *       --headers worklocal/aiednn/resnet18_data --target x86 --run
- *   ... --target vek280 --run --board <host> --vitis-settings <.../settings64.sh>
+ *   ... --target vek280 --run --board galerina13 --vitis-settings <.../settings64.sh>
+ *
+ * doc/design/aiednn.md.
  ******************************************************************************/
 #include "aiednn.h"
 #include "resnet18_net.h"

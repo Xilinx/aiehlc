@@ -1,5 +1,7 @@
-// x86 check of aie_modes_wq.h through the AIE-API emulation: the core's round structure for group
-// sizes 64 .. 1024 and K spanning several launches, against aie_wq_ref_tile.
+// x86 check of aie_modes_wq.h (the grouped weight-only quant mode) through the AIE-API emulation: run
+// the core's round structure -- int32 8x8-tiled partial sums per 64-K round, aie_wq_flush at each group's
+// last round, the int32 partial and the f32 tile carried across launches -- for group sizes 64 .. 1024
+// and K spanning several launches, and compare with aie_wq_ref_tile.
 #include "aie_api_x86emu.h"
 #include <cmath>
 #include <cstdio>

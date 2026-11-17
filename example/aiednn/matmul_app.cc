@@ -3,11 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * matmul_app -- the smallest aiednn application: one int8 matmul.
- * Dispatch picks the implementation; the result is checked against ref:.
+ *
+ * Nothing here names a kernel, a mesh or a DMA. The app describes the tensors,
+ * asks aiednn for a matmul primitive, and aiednn's dispatch picks an
+ * implementation from the ones the builder linked in (the AIE kernel whose
+ * AIEK_SPEC accepts 256x256x256 s8, else the CPU ref:). It then checks the
+ * result against the ref: implementation through the same API.
  *
  *   PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/matmul_app.cc \
- *       --target vek280 --run --board <host> --vitis-settings <.../Vitis/settings64.sh>
+ *       --target vek280 --run --board galerina13 --vitis-settings <.../Vitis/settings64.sh>
  *   PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/matmul_app.cc --target x86 --run
+ *
+ * doc/design/aiednn.md.
+ *
+ * Prints "PASS: ..." / "FAIL: ..." (what run_vek280.py waits for).
  ******************************************************************************/
 #include "aiednn.h"
 

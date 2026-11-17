@@ -2,14 +2,22 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * aiednn_rt_stream.h -- streams, caller-owned workspace, async execute, find / set_impl.
+ * aiednn_rt_stream.h -- streams, caller-owned workspace, async execute, find / set_impl
+ * (doc/design/aiednn_framework_api.md sections 3 and 4).
  *
- *   workspace   an execute's temporaries come from the caller's workspace through the rt_alloc arena
- *               (any 64-byte aligned host memory; the AIE never reads it). Its size is the arena's
- *               high-water mark of one sizing run, cached per implementation.
- *   streams     in order; each execute runs at enqueue, wait returns the first error.
- *   find        every acceptor, by dispatch rank (HEURISTIC) or timed on library-owned buffers
- *               (MEASURE); the fastest allowed one goes into the autotune table.
+ *   workspace   an execute's temporaries (packed blocks, im2col columns, staging, the composites'
+ *               buffers) come from the caller's workspace through the rt_alloc arena
+ *               (aiednn_rt_internal.h): no heap allocation in such an execute. Any 64-byte aligned
+ *               host memory: the AIE never reads it -- every entry stages into the runtime's own
+ *               device buffers. The size is measured: one sizing run of the chosen implementation on
+ *               library-owned buffers records the arena's high-water mark (cached per implementation).
+ *               Caches that outlive an execute (packed constant weights, step tables) are filled on
+ *               the heap by the first execute that needs them.
+ *   streams     in order; this implementation runs each execute at enqueue (conformant: wait returns
+ *               the first error of the queued executes).
+ *   find        every acceptor, dispatch rank (HEURISTIC) or timed on library-owned buffers (MEASURE:
+ *               two runs each, the second timed, its sizing recorded); the fastest one the preference
+ *               allows goes into the autotune table. Never touches the caller's buffers.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_tune.h.
  ******************************************************************************/

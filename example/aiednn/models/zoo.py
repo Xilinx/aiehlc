@@ -2,7 +2,9 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Models the aiednn model tests run: torchvision classifiers and small custom networks.
+"""Models the aiednn model tests run: torchvision classifiers (pretrained, on a
+real ImageNet image) and small custom networks for the operators the
+classifiers do not use (attention, transposed convolution, resampling, ...).
 
     zoo.build("mobilenet_v2", pretrained=True) -> (model, input)
 """
@@ -25,7 +27,8 @@ TORCHVISION = ["resnet18", "mobilenet_v2", "mobilenet_v3_small", "squeezenet1_1"
 
 
 class TinyViT(nn.Module):
-    """Tiny ViT: patch embedding, [CLS] token, pre-norm transformer blocks, head."""
+    """patch embedding conv, [CLS] token, pre-norm transformer blocks (LayerNorm, q/k/v
+    Linear, SDPA, GELU MLP, residuals), head."""
 
     def __init__(self, img=32, patch=4, dim=64, heads=4, depth=2, classes=10):
         super().__init__()
@@ -56,7 +59,8 @@ class TinyViT(nn.Module):
 
 
 class TinyUNet(nn.Module):
-    """Tiny U-Net: conv/maxpool encoder, transposed-conv / bilinear decoder with skips, sigmoid head."""
+    """encoder (conv, maxpool), bottleneck, decoder (ConvTranspose2d + concat skip,
+    bilinear upsample + concat), per-pixel sigmoid head."""
 
     def __init__(self, c=16):
         super().__init__()
@@ -100,7 +104,9 @@ CUSTOM = {"tiny_vit": (TinyViT, (1, 3, 32, 32)), "tiny_unet": (TinyUNet, (1, 3, 
           "mixer_head": (MixerHead, (1, 3, 32, 32))}
 
 
-# ── benchmark models: not in the default run_models list; transformers take embeddings, not token ids ──
+# ── benchmark models (doc/design/aiednn.md section 34): the common cases the library's optimized
+#    implementations and graph fusions are chosen for. Not in the default run_models list (they are big);
+#    run them by name. Transformers take embeddings, not token ids (no gather in front of the network). ──
 
 class BertLayer(nn.Module):
     """post-norm encoder layer: fused-QKV-free self attention with an additive mask, GELU (erf) MLP"""
@@ -241,8 +247,10 @@ YOLOV8N_URL = "https://github.com/ultralytics/assets/releases/download/v8.3.0/yo
 
 
 def _yolov8n():
-    """yolov8n with the released COCO weights (random weights give a degenerate model)."""
-    import ultralytics.nn.tasks  # noqa: F401 -- unpickles the model
+    """The released COCO weights. DetectionModel("yolov8n.yaml") alone has random weights whose
+    activations shrink layer by layer (int8 scales down to 3e-12): every output saturates, so
+    PyTorch, ref: and the AIE agree on a degenerate model and its timings mean nothing."""
+    import ultralytics.nn.tasks  # noqa: F401 -- ultralytics (no-deps install + opencv-python-headless): unpickles the model
     if not YOLOV8N_PT.is_file():
         import urllib.request
         YOLOV8N_PT.parent.mkdir(parents=True, exist_ok=True)
@@ -260,7 +268,10 @@ def _yolov8n():
 
 
 def _c2f_forward(self, x):
-    """C2f.forward as a plain loop: Dynamo mis-traces upstream's y.extend(generator) for n >= 2."""
+    """C2f.forward as a plain loop. Upstream's y.extend(m(y[-1]) for m in self.m) feeds each
+    bottleneck the previous one's output; torch 2.4's Dynamo evaluates that generator against the
+    list as it was, so a traced C2f with n >= 2 (yolov8n layers 4 and 6) computes something else
+    (bus score 0.72 vs 0.92 eager) -- and both the direct path's fallback tracer and torch.compile use Dynamo."""
     y = list(self.cv1(x).chunk(2, 1))
     for m in self.m:
         y.append(m(y[-1]))
@@ -288,9 +299,10 @@ def image_input() -> torch.Tensor:
 
 
 def build(name: str, pretrained: bool = True, seed: int = 0):
-    """(eval model, example input); pretrained weights and the real image when *pretrained*."""
+    """(eval model, example input). torchvision models: ImageNet weights and the real
+    image when *pretrained*, else random weights and a random input."""
     torch.manual_seed(seed)
-    if BENCH.get(name):                                 # transformers: random weights
+    if BENCH.get(name):                                 # bert / gpt2 / tiny_llama: random weights (norms keep them sane)
         ctor, shape = BENCH[name]
         m = ctor().eval()
         if name != "yolov8n":
@@ -298,7 +310,7 @@ def build(name: str, pretrained: bool = True, seed: int = 0):
         x = _yolo_image(shape)
         with torch.no_grad():
             n = m(x).shape[-1]                         # [1, 4 + 80, anchors]: box rows first
-        m.top1_range = (4 * n, 84 * n, n)              # top-1 = class of the strongest detection
+        m.top1_range = (4 * n, 84 * n, n)              # top-1 = the class of the strongest detection, not a box
         return m, x
     if name in CUSTOM:
         cls, shape = CUSTOM[name]

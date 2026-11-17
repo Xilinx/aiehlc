@@ -5,8 +5,10 @@
  * aiednn_rt_bwd.h -- training: backward passes, and the training forward of the normalizations.
  *
  * A training primitive has its forward's kind and rt_prob.prop != RT_FWD_INF; dispatch gives it to
- * ref: only. Gradients accumulate in double, rounded once on store. Max pooling routes to the window's
- * first maximum; norms use the biased variance; RMS norm drops the mean terms.
+ * ref: only (the AIE paths are inference), and the ref: run functions hand it to run_bwd. Every
+ * gradient accumulates in double and is rounded once on store. Formulas are the textbook ones
+ * (PyTorch autograd is the test oracle): max pooling routes to the window's first maximum; batch /
+ * layer / group norm use the biased variance; RMS norm drops the mean terms.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aiednn_rt_ops.h and the create helpers of
  * aiednn_rt.cc.
@@ -272,7 +274,8 @@ static int bwd_generic_only(void) {
     return (e && e[0] == '1') || rt_ref_generic();
 }
 
-/* average pooling backward, all f32: run_bwd_pool's arithmetic without the per-element type dispatch */
+/* average pooling backward, every tensor f32: run_bwd_pool's arithmetic (double accumulators, the same
+ * tap order and divisor, one rounding at the store) without the per-element type dispatch */
 static int bwd_pool_avg_f32(const rt_prob *p, void *const *ptr, const int64_t *xs, const int64_t *ys, const int64_t *k,
                             const int64_t *s, const int64_t *pl, const int64_t *dl, int64_t NC) {
     const float *dy = (const float *)rt_ptr(p, ptr, AIEDNN_ARG_DIFF_DST);
@@ -445,7 +448,8 @@ static int run_norm_training(const rt_prob *p, void *const *ptr) {
     return AIEK_OK;
 }
 
-/* layer / RMS norm backward over the last dim, all f32: run_norm_bwd's arithmetic on contiguous rows */
+/* layer / RMS norm backward over the last dim, every tensor f32: run_norm_bwd's arithmetic (the same double
+ * expressions in the same order) on contiguous rows, gamma hoisted out of the element loop */
 static int norm_bwd_ln_f32(const rt_prob *p, void *const *ptr, const norm_geo *g, int rms) {
     const float *x = (const float *)rt_ptr(p, ptr, AIEDNN_ARG_SRC),
                 *dy = (const float *)rt_ptr(p, ptr, AIEDNN_ARG_DIFF_DST);

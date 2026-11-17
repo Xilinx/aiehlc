@@ -2,7 +2,10 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""The pointwise / binary / reduction / softmax algorithms added for parity, against PyTorch."""
+"""The pointwise / binary / reduction / softmax algorithms added for parity, against PyTorch.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_algs.py
+"""
 
 from __future__ import annotations
 

@@ -12,6 +12,9 @@
 #define AIEDNN_RT_OPS_H
 
 #include "aiednn_rt_internal.h"
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 // ── eltwise ────────────────────────────────────────────────────────────────
 
@@ -36,7 +39,7 @@ static double eltwise_f(int alg, double x, double a, double b) {
     case aiednn_eltwise_tanh:
         return tanh(x);
     case aiednn_eltwise_swish:
-        return rt_swish(x, a); /* aiednn_rt_geluq.h */
+        return rt_swish(x, a); /* aiednn_rt_geluq.h: the expression its step table bisects */
     case aiednn_eltwise_soft_relu:
         return softplus_d(a * x) / a;
     case aiednn_eltwise_mish:
@@ -103,7 +106,8 @@ static double eltwise_f(int alg, double x, double a, double b) {
 
 static inline double binq_src(const rt_prob *p, int s, const void *ptr, int64_t off);
 
-/* quantized eltwise: dequantize -> eltwise -> post-ops -> quantize, step for step in its precisions */
+/* the quantized eltwise (aiednn_eltwise_forward_create_attr): the unfused chain dequantize -> eltwise ->
+ * post-ops -> quantize, step for step in its precisions (lut: tables are this, on all 256 codes) */
 static int run_ref_eltwise_q(const rt_prob *p, void *const *ptr) {
     const aiednn_memory_desc_t *d = &p->md[1];
     const int64_t n = md_numel(d);
@@ -121,7 +125,8 @@ static int run_ref_eltwise_q(const rt_prob *p, void *const *ptr) {
     return AIEK_OK;
 }
 
-/* 8-bit source: the element function evaluated once on all 256 codes, then looked up (exact) */
+/* an 8-bit source: the element function of its 256 codes, evaluated once and looked up (exact: the same
+ * evaluation, on every code) -- a dequantize -> SiLU -> quantize tail is a byte table on the A72 */
 static int eltwise_ref_8bit_ok(const rt_prob *p) {
     const aiednn_data_type_t s = p->md[0].data_type, d = p->md[1].data_type;
     return p->kind == aiednn_eltwise && p->prop == RT_FWD_INF && (s == aiednn_s8 || s == aiednn_u8) &&
@@ -243,11 +248,13 @@ static inline double binq_eval(const rt_prob *p, double x, double y) {
     return r;
 }
 
-/* 8-bit a, b and dst: a 64 KB table of binq_eval over every code pair is the op exactly; tables are
- * cached by the quantization parameters across primitives */
+/* 8-bit a, b and dst: dst is a function of the two codes, so a 64 KB table of binq_eval over every pair is the
+ * op exactly (tiny_llama's SwiGLU gate * up and RMSNorm weight multiplies: 34 per token, per-element double
+ * arithmetic on the A72 before). Tables are cached by the quantization parameters across primitives -- an app
+ * creates a primitive per execute -- so a repeated inference builds none. */
 #define RT_BINQ_LUTS 64
 typedef struct {
-    rt_prob key; /* the problem with shapes cleared */
+    rt_prob key; /* alg, types, scales / zero points, dst quantization, post-ops (shapes cleared) */
     uint8_t *lut;
 } rt_binq_lut;
 static rt_binq_lut g_binq_lut[RT_BINQ_LUTS];
@@ -322,7 +329,8 @@ static int run_ref_binary_q(const rt_prob *p, void *const *ptr) {
 static void *g_qres_buf;
 static size_t g_qres_cap;
 
-/* a requant_binary primitive's tail: run_ref_binary_q's arithmetic, typed for the common case, else that */
+/* a requant_binary primitive's tail (the quantized binary on the GEMM's int8 intermediate): run_ref_binary_q's
+ * arithmetic, typed for the common case (8-bit tensors, src1 shaped as dst, relu / clip after), else that */
 static int qres_tail(const rt_prob *t, void *const *ptr) {
     const aiednn_memory_desc_t *a = &t->md[0], *b = &t->md[1], *d = &t->md[2];
     int typed = same_dims(b, d) && b->data_type != aiednn_f32 && d->data_type != aiednn_f32 &&
@@ -368,8 +376,10 @@ static int qres_tail(const rt_prob *t, void *const *ptr) {
     return AIEK_OK;
 }
 
-/* requant_binary tail with 8-bit src1 and dst: a 64 KB table of qres_tail on every code pair, built once
- * per primitive. Applies when src1 is a full tensor like dst. */
+/* a requant_binary tail on the primitive: with 8-bit src1 and dst (every element shaped as dst, or broadcast)
+ * the result is a function of the code pair, so a 64 KB table of qres_tail itself on all 65,536 pairs (built
+ * once per primitive) replaces the per-element dequantize / op / divide (~16 ns per element on the A72) */
+/* the binary tail's 64 KB pair table applies: 8-bit src1 and dst, src1 a full tensor like dst */
 static int qres_lut2_ok(const aiednn_primitive *prim) {
     const rt_prob *t = &prim->qtail;
     const aiednn_memory_desc_t *b = &t->md[1], *d = &t->md[2];
@@ -418,7 +428,8 @@ static int qres_tail2(aiednn_primitive *prim, void *const *ptr) {
     return AIEK_OK;
 }
 
-/* requant_eltwise tail: dst[i] = T[code[i]], T = run_ref_eltwise_q on all 256 codes, built once per primitive */
+/* a requant_eltwise primitive's tail: dst[i] = T[code[i]], T = run_ref_eltwise_q on all 256 codes (exact by
+ * construction: the table is the ref chain itself), built once per primitive */
 static void qelt_lut(aiednn_primitive *prim) {
     const rt_prob *t = &prim->qtail;
     if (!prim->qlut_ok) {
@@ -518,7 +529,8 @@ static int run_ref_binary(const rt_impl *self, aiednn_primitive *prim, void *con
     int64_t adv, amd, bdv, bmd;
     if (p->alg != aiednn_binary_select && a->data_type == aiednn_f32 && b->data_type == aiednn_f32 &&
         d->data_type == aiednn_f32 && bin_bcast_simple(a, d, &adv, &amd) && bin_bcast_simple(b, d, &bdv, &bmd)) {
-        /* common broadcasts: the operand element is (i / dv) % m, walked with counters */
+        /* the common broadcasts (RMSNorm's weight [D] / per-row scale [.., 1], RoPE's [1, S, D] over heads): the
+         * operand element is (i / dv) % m, walked with counters -- no per-element bcast_off */
         const float *x = (const float *)ptr[0], *y = (const float *)ptr[1];
         float *o = (float *)ptr[2];
         int64_t ia = 0, ca = 0, ib = 0, cb = 0;
@@ -672,8 +684,8 @@ static int rt_ref_generic(void) {
     return e && e[0] == '1';
 }
 
-/* resampling taps of every output position: up to 2^sp (offset, weight) pairs in run_ref_resampling's
- * corner order, zero weights dropped. cnt[o] taps at tap[o * 8]. */
+/* the resampling taps of every output position, once for all planes: up to 2^sp (offset, weight) pairs in
+ * run_ref_resampling's corner order, zero weights dropped as it drops them. cnt[o] taps at tap[o * 8]. */
 typedef struct {
     int64_t off;
     double w;
@@ -747,8 +759,9 @@ static int resampling_f32(const rt_prob *p, void *const *ptr) {
     return AIEK_OK;
 }
 
-/* nearest resampling, src and dst of one type: a byte copy through per-axis index maps; a repeated
- * output row is a memcpy */
+/* nearest resampling, src and dst of one type: every output element is a source element (weight 1), so a byte
+ * copy through per-axis index maps; an output row equal to the previous one (the same source row) is a memcpy.
+ * (yolov8n's int8 FPN up-samples: 31 ms on the A72 through the per-element loop) */
 static int resampling_nearest_copy(const rt_prob *p, void *const *ptr) {
     const aiednn_memory_desc_t *s = &p->md[0], *d = &p->md[1];
     const int sp = s->ndims - 2;
@@ -846,7 +859,8 @@ static int run_ref_resampling(const rt_impl *self, aiednn_primitive *prim, void 
 static void *g_lrn_sq;
 static size_t g_lrn_sq_cap;
 
-/* LRN forward, f32: run_ref_lrn's window sums in its order; squares from an exact table */
+/* LRN forward, src and dst f32: run_ref_lrn's window sums in its order; the squares come from a table
+ * ((double)x)^2, exact for an f32 x, so every partial sum is the reference's */
 static int lrn_f32(const rt_prob *p, void *const *ptr) {
     const aiednn_memory_desc_t *s = &p->md[0];
     const int64_t N = s->dims[0], C = s->dims[1], H = s->ndims > 2 ? s->dims[2] : 1, W = s->ndims > 3 ? s->dims[3] : 1;
@@ -964,12 +978,45 @@ static double ld_opt(const rt_prob *p, void *const *ptr, int arg, int64_t i, dou
     return md ? rt_ld(md->data_type, rt_ptr(p, ptr, arg), i) : dflt;
 }
 
-/* ref:'s f32 -> s8 / u8 quantize, sat(nearbyint((double)f / scale) + zp), via f * (1 / scale) unless g lies
- * within 1e-5 of a rounding tie; ties, huge values, inf and NaN take the divide. Exact for every float. */
+/* ref:'s f32 -> s8 / u8 quantize, sat(nearbyint((double)f / scale) + zp), without the divide in the common case:
+ * f * (1 / scale) is within a few ulps of f / scale (|g| < 2^24: under 1e-8 absolute), so unless g lies within
+ * 1e-5 of a rounding tie both round to the same integer; ties, huge values, inf and NaN take the divide. The
+ * A72 does not pipeline a double divide. Exact for every float
+ * (test_dnn.py: test_quantize_without_divide_matches_the_divide). */
 static inline double rt_quant8(float f, double scale, double inv, double zp, double lo) {
     const double g = (double)f * inv, c = nearbyint(g);
     double r = fabs(g - c) < 0.49999 && fabs(g) < 16777216.0 ? c + zp : nearbyint((double)f / scale) + zp;
     return r != r ? 0.0 : r < lo ? lo : r > lo + 255.0 ? lo + 255.0 : r;
+}
+
+/* rt_quant8 over a contiguous row into 8-bit codes; on the A72 four lanes at a time, any group with a lane
+ * near a tie, huge, inf or NaN taking the scalar rule */
+static void rt_quant8_row(const float *x, int64_t n, double scale, double zp, double lo, uint8_t *d) {
+    const double inv = 1.0 / scale;
+    int64_t i = 0;
+#if defined(__aarch64__)
+    const float64x2_t vi = vdupq_n_f64(inv), vz = vdupq_n_f64(zp), vlo = vdupq_n_f64(lo);
+    const float64x2_t vhi = vdupq_n_f64(lo + 255.0), half = vdupq_n_f64(0.49999), big = vdupq_n_f64(16777216.0);
+    for (; i + 4 <= n; i += 4) {
+        const float32x4_t f = vld1q_f32(x + i);
+        const float64x2_t g0 = vmulq_f64(vcvt_f64_f32(vget_low_f32(f)), vi), g1 = vmulq_f64(vcvt_high_f64_f32(f), vi);
+        const float64x2_t c0 = vrndnq_f64(g0), c1 = vrndnq_f64(g1);
+        const uint64x2_t ok = vandq_u64(vandq_u64(vcltq_f64(vabdq_f64(g0, c0), half), vcaltq_f64(g0, big)),
+                                        vandq_u64(vcltq_f64(vabdq_f64(g1, c1), half), vcaltq_f64(g1, big)));
+        if (!(vgetq_lane_u64(ok, 0) & vgetq_lane_u64(ok, 1))) {
+            for (int k = 0; k < 4; k++)
+                d[i + k] = (uint8_t)(int)rt_quant8(x[i + k], scale, inv, zp, lo);
+            continue;
+        }
+        const float64x2_t r0 = vminq_f64(vmaxq_f64(vaddq_f64(c0, vz), vlo), vhi);
+        const float64x2_t r1 = vminq_f64(vmaxq_f64(vaddq_f64(c1, vz), vlo), vhi);
+        const int32x4_t w = vcombine_s32(vmovn_s64(vcvtq_s64_f64(r0)), vmovn_s64(vcvtq_s64_f64(r1)));
+        const int16x4_t h = vmovn_s32(w);
+        vst1_lane_u32((uint32_t *)(void *)(d + i), vreinterpret_u32_s8(vmovn_s16(vcombine_s16(h, h))), 0);
+    }
+#endif
+    for (; i < n; i++)
+        d[i] = (uint8_t)(int)rt_quant8(x[i], scale, inv, zp, lo);
 }
 
 static double norm_out(const rt_prob *p, double v) { return (p->flags & AIEDNN_FUSE_NORM_RELU) && v < 0 ? 0 : v; }
@@ -1037,7 +1084,8 @@ static void norm_groups(const rt_prob *p, void *const *ptr, int64_t ngroups, int
     const int q = p->has_attr && s->data_type == aiednn_f32 && dt_is_int(p->md[1].data_type);
     if (s->data_type == aiednn_f32 && (p->md[1].data_type == aiednn_f32 || q) && per_ch == 1 && nch == len &&
         (!gmd || gmd->data_type == aiednn_f32) && (!bmd || bmd->data_type == aiednn_f32)) {
-        /* f32 in / out, one scale / shift per element of the group: same double ops, lookups hoisted */
+        /* f32 in / out, one scale / shift per element of the group (LayerNorm): the same double
+         * operations in the same order, with the per-element lookups hoisted */
         const double ds = p->dst_scale, zp = p->dst_zp, lo = p->md[1].data_type == aiednn_s8 ? -128.0 : 0.0;
         const double dinv = 1.0 / ds;
         const float *gs = gmd ? (const float *)rt_ptr(p, ptr, AIEDNN_ARG_SCALE) : nullptr;
@@ -1135,7 +1183,8 @@ static int run_ref_concat(const rt_impl *self, aiednn_primitive *prim, void *con
         const int64_t schunk = p->md[k].dims[p->axis] * inner * esz;
         if (p->has_attr &&
             !(p->md[k].data_type == d->data_type && p->scales[k] == p->dst_scale && p->zps[k] == p->dst_zp)) {
-            /* quantized concat: source k's codes requantized to dst's by a 256-entry table (exact) */
+            /* quantized concat: source k's codes requantized to dst's (scale, zero point) by a 256-entry table --
+             * the dequantize -> concat -> quantize chain on every code, exact by construction */
             uint8_t lut[256];
             const int sk = p->md[k].data_type == aiednn_s8;
             const double lo = d->data_type == aiednn_s8 ? -128.0 : 0.0, hi = lo + 255.0;
@@ -1176,8 +1225,10 @@ static int run_ref_sum(const rt_impl *self, aiednn_primitive *prim, void *const 
     return AIEK_OK;
 }
 
-/* Identity-permutation reorders as contiguous loops (memcpy, quantize, dequantize), bit-identical to
- * the general loop below. 0 = not handled. */
+/* Identity-permutation reorders as contiguous loops: same type -> memcpy,
+ * f32 -> s8/u8 quantize and s8/u8 -> f32 dequantize with exactly the
+ * arithmetic of the general loop below (double, nearbyint, rt_st's NaN and
+ * saturation rules), so the result is bit-identical. 0 = not handled. */
 static int reorder_contig(const rt_prob *p, const aiednn_memory_desc_t *s, const aiednn_memory_desc_t *d,
                           void *const *ptr, int64_t n) {
     for (int k = 0; k < d->ndims; k++)
@@ -1190,16 +1241,7 @@ static int reorder_contig(const rt_prob *p, const aiednn_memory_desc_t *s, const
     }
     const double scale = p->scale, zp = p->zero_point;
     if (sdt == aiednn_f32 && (ddt == aiednn_s8 || ddt == aiednn_u8)) {
-        const float *x = (const float *)ptr[0];
-        const double lo = ddt == aiednn_s8 ? -128.0 : 0.0;
-        const double inv = 1.0 / scale;
-        for (int64_t i = 0; i < n; i++) {
-            const double v = rt_quant8(x[i], scale, inv, zp, lo);
-            if (ddt == aiednn_s8)
-                ((int8_t *)ptr[1])[i] = (int8_t)v;
-            else
-                ((uint8_t *)ptr[1])[i] = (uint8_t)v;
-        }
+        rt_quant8_row((const float *)ptr[0], n, scale, zp, ddt == aiednn_s8 ? -128.0 : 0.0, (uint8_t *)ptr[1]);
         return 1;
     }
     if ((sdt == aiednn_s8 || sdt == aiednn_u8) && ddt == aiednn_f32) {
@@ -1213,8 +1255,9 @@ static int reorder_contig(const rt_prob *p, const aiednn_memory_desc_t *s, const
     return 0;
 }
 
-/* same-type permutation that merges to [B][R][C] -> [B][C][R] (NHWC <-> NCHW): a batched transpose in
- * 32x32 tiles. Returns 0 if not of that form. */
+/* A same-type permutation that merges to [B][R][C] -> [B][C][R] (NHWC <-> NCHW: dst dims are src
+ * (0, 3, 1, 2) or (0, 2, 3, 1)): a batched transpose in 32x32 tiles instead of the per-element
+ * index arithmetic below (convnext's permutes: 210 ms of CPU). Returns 0 if not of that form. */
 static int reorder_transpose(const rt_prob *p, const aiednn_memory_desc_t *s, const aiednn_memory_desc_t *d,
                              void *const *ptr) {
     const int n = s->ndims;
@@ -1267,7 +1310,8 @@ static int reorder_transpose(const rt_prob *p, const aiednn_memory_desc_t *s, co
     return 1;
 }
 
-/* same-type permute keeping the last axis (e.g. (0, 2, 1, 3)): one memcpy per dst row */
+/* a same-type permute that keeps the last axis (attention's head split / merge, (0, 2, 1, 3)): one memcpy per
+ * dst row of the last dim -- the general loop decodes every element's offset */
 static int reorder_rows(const rt_prob *p, const aiednn_memory_desc_t *s, const aiednn_memory_desc_t *d,
                         void *const *ptr) {
     const int n = d->ndims;
@@ -1359,7 +1403,9 @@ static int run_ref_sdpa(const rt_impl *self, aiednn_primitive *prim, void *const
     const aiednn_memory_desc_t *mk = rt_md(p, AIEDNN_ARG_ATTN_MASK);
     const void *mp = rt_ptr(p, ptr, AIEDNN_ARG_ATTN_MASK);
     const int64_t B = d->dims[0], H = d->dims[1], Sq = q->dims[2], Skv = k->dims[2], D = q->dims[3], Dv = v->dims[3];
-    /* scores, then one head's K [Skv][D] and V [Skv][Dv] and a Q row, each loaded once; same order */
+    /* scores, then one head's K [Skv][D] and V [Skv][Dv] and a Q row, each loaded once (rt_ld per
+     * multiply-add made this ~10x slower than its arithmetic: tiny_vit's two sdpa took 8.2 of 16 ms on the A72);
+     * the same values in the same order, so the result is unchanged */
     double *s = (double *)scratch(&g_sdpa, &g_sdpa_cap, (size_t)(Skv + Skv * D + Skv * Dv + D) * sizeof(double));
     if (!s)
         return AIEK_ERR_ALLOC;

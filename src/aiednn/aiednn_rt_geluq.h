@@ -4,12 +4,19 @@
  * Activation -> int8 by table (GELU, swish). The epilogue of a GEMM with one fused activation
  * and an s8 / u8 dst computes, per output element,
  *   q(y) = sat(nearbyint(f(y) / ds + zp)),   y = acc * oscale[c] + bias[c]
- * with f = y * Phi(y) (gelu_erf), its tanh form (gelu_tanh) or y * sigmoid(a * y) (swish). q is a step
- * function of y with at most 256 steps, so one table per (f, a, ds, zp, dst type) replaces it: a grid over y
- * whose cells each hold the code before and after their one change point t (found by bisection on
- * rt_actq_direct). y within `band` of t, cells holding the minimum xm, and cells with two steps take the
- * formula, so the table returns exactly what the formula returns (rt_actq_check). Left of ya q = sat(zp);
- * from yb on q is the dst maximum -- both verified when the table is built. */
+ * with f = y * Phi(y) (gelu_erf), its tanh form (gelu_tanh: GPT-2) or y * sigmoid(a * y) (swish): a
+ * polynomial, a tanh or an exp, a double
+ * divide and a rounding -- half of convnext's and efficientnet's host time on the A72. q is a step
+ * function of y with at most 256 steps, the same for every channel, so one table per
+ * (f, a, ds, zp, dst type) replaces it: a grid over y whose cells are narrower than the distance
+ * between two steps, each holding the code before and after its one change point t. The change
+ * point is found by bisection on rt_actq_direct itself. That formula is not monotone in double
+ * arithmetic right at a step (1 - p loses bits for negative y, so a few doubles past t flip back),
+ * so y within `band` (1e-12 relative) of t also takes the formula: the table returns exactly what
+ * the formula returns (rt_actq_check verifies it; test_dnn.py runs the check).
+ * All three activations dip to one minimum (xm) and are monotone on either side; a cell holding xm is
+ * constant or slow (rt_actq_fill_cell), and cells with two steps are slow: those keep the formula. Left of ya |f(y)| /
+ * ds < 1/4, so q = sat(zp); from yb on q is the dst maximum -- both verified when the table is built, never assumed. */
 #ifndef AIEDNN_RT_GELUQ_H
 #define AIEDNN_RT_GELUQ_H
 
@@ -89,7 +96,9 @@ static void rt_actq_fill_cell(const rt_actq *g, rt_actq_cell *c, double lo, doub
     c->w = g->band;
     int slow = 0;
     if (lo - win <= g->xm && g->xm <= hi + win) {
-        /* contains the minimum: constant iff both ends and the minimum agree, clear of a rounding boundary */
+        /* contains the minimum (xm known to ~1e-7, win covers that): q falls to q(xm), then rises, so
+         * the cell is constant iff both ends and the minimum agree -- and f(xm) / ds + zp is clear of
+         * a rounding boundary, where the formula's jitter would flip codes on the flat bottom */
         const int cm = rt_actq_direct(g->kind, g->a, g->xm, g->ds, g->zp, g->lo, g->hi);
         const double vm = rt_actq_f(g->kind, g->a, g->xm) / g->ds + g->zp;
         slow = !(c0 == c1 && c0 == cm && fabs(vm - floor(vm) - 0.5) > 1e-6);
@@ -184,8 +193,10 @@ static const rt_actq *rt_actq_get(int kind, double a, double ds, double zp, doub
     return g;
 }
 
-/* one conversion, one clamp, one guard compare: ends are sentinel cells reached by clamping the index,
- * a slow cell has w = +inf. Clamps are compares, not fmin / fmax. */
+/* one conversion, one clamp, one guard compare: the ends are sentinel cells reached by clamping the
+ * (floating) index, a slow cell has w = +inf. y in (ya - h, ya) indexes the first real cell, whose
+ * code there is lo_code too (q is constant left of ya, verified). Clamps are compares, not fmin /
+ * fmax (libm calls on x86 without -ffast-math). */
 static inline int rt_actq_code(const rt_actq *g, double y) {
     double d = (y - g->ya) * g->inv_h;
     d = d < -1.0 ? -1.0 : d > (double)g->ncell ? (double)g->ncell : d;

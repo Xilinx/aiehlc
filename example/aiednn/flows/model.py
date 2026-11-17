@@ -2,7 +2,11 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""The models flows 2-4 run: "tiny" (defined here) or any example/aiednn/models/zoo.py name."""
+"""The models flows 2-4 run. Default "tiny": a small net defined here (conv-bn-relu -> conv -> residual add ->
+relu -> global pool -> fc; random weights and input) so the flows finish in seconds. Any other name comes from
+example/aiednn/models/zoo.py: torchvision models with their ImageNet weights on a real photo (resnet18,
+mobilenet_v2, resnet50, vit_b_16, ...), and the benchmark transformers (bert_base, gpt2_small, tiny_llama)
+and yolov8n."""
 import sys
 from pathlib import Path
 

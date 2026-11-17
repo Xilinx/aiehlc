@@ -2,7 +2,13 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Post-ops on the non-GEMM primitives (aiednn_rt_ptail.h) and slice: fused == unfused chain."""
+"""Post-ops on the non-GEMM primitives (aiednn_rt_ptail.h) -- the "X + post-ops" fusion patterns -- and slice.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_postops.py
+
+Each fused primitive equals its unfused chain: the op alone (f32), then the post-ops in double, then the dst
+quantization -- the GEMM family's epilogue semantics.
+"""
 
 from __future__ import annotations
 
@@ -187,7 +193,8 @@ def test_slice_nhwc_channels(lib):
 
 @pytest.mark.parametrize("ddt,zp", [("s8", 0), ("s8", -3), ("u8", 113), ("u8", 0)])
 def test_slice_quantize_is_slice_then_quantize(lib, ddt, zp):
-    """aiednn_slice_create_attr with dst quantization: bit-identical to slice + quantizing reorder."""
+    """aiednn_slice_create_attr with dst quantization alone (yolov8n's C2f chunk -> quantize): bit-identical to the
+    slice, then the quantizing reorder -- exact ties x / scale = k + 1/2 included, with an odd zero point"""
     sc = 0.25
     x = f32((1, 32, 6, 5))
     x.reshape(-1)[:64] = (np.arange(64) - 32 + 0.5) * sc   # exact ties
@@ -247,7 +254,8 @@ def test_slice_out_of_range_refused(lib):
 
 @pytest.mark.parametrize("kind", ["pool", "softmax", "reduction"])
 def test_dst_quantization_alone_is_applied(lib, kind):
-    """An attr with only dst_scale / dst_zero_point must quantize."""
+    """an attr with only dst_scale / dst_zero_point (no post-ops) must quantize -- global avg pool -> u8 was the
+    ONNX resnet18 head; every create_attr that accepts an attr applies it (impl_info "+pt")"""
     x = f32((1, 16, 7, 7))
     a, keep = attr(lib.ALG, dst_scale=0.01, dst_zp=7)
     if kind == "pool":
@@ -322,7 +330,8 @@ def test_reorder_permute_keeping_last_axis(lib, perm):
                                       (False, "u8")],
                          ids=["plain", "bias", "residual", "bias_residual", "bias_s8_skip", "u8_skip"])
 def test_int8_linear_f32_epilogue_matches_ref(lib, bias, res):
-    """The int8 linear-layer epilogue fast paths are bit-identical to ref:matmul's generic epilogue."""
+    """the int8 linear-layer epilogue fast paths (per-channel scales [+ bias] [+ residual add of an f32 or a
+    quantized s8 / u8 skip] -> f32) are bit-identical to ref:matmul's generic epilogue"""
     M, K, N = 33, 96, 200
     x = RNG.integers(-128, 128, (M, K)).astype(np.int8)
     w = RNG.integers(-128, 128, (K, N)).astype(np.int8)
@@ -355,7 +364,8 @@ def test_int8_linear_f32_epilogue_matches_ref(lib, bias, res):
 @pytest.mark.parametrize("k", [1, 3])
 @pytest.mark.parametrize("ddt", ["s8", "u8"])
 def test_conv_u8_residual_requantized_on_the_core(lib, k, ddt):
-    """A fused residual with a u8 src1 takes the on-core requant, bit-identical to ref:."""
+    """a fused residual whose src1 is u8 (a skip after ReLU, resnet50's bottlenecks) takes the on-core requant
+    (shifted to s8 exactly: r - 128, zr - 128) -- bit-identical to ref:, and it is the q pipe (gemm_q entry)"""
     N, Cc, O, H = 1, 32, 64, 9
     x = RNG.integers(-128, 128, (N, Cc, H, H)).astype(np.int8)
     w = RNG.integers(-128, 128, (O, Cc, k, k)).astype(np.int8)
@@ -385,7 +395,8 @@ def test_conv_u8_residual_requantized_on_the_core(lib, k, ddt):
 @pytest.mark.parametrize("alg", ["gelu_tanh", "gelu_erf"])
 @pytest.mark.parametrize("ddt", ["s8", "u8"])
 def test_int8_linear_gelu_to_int8_matches_the_formula(lib, alg, ddt):
-    """GELU int8 epilogue step table returns the double-precision codes."""
+    """an MLP up projection (GPT-2's gelu_tanh, BERT's gelu_erf) into int8: the epilogue's step table
+    (aiednn_rt_geluq.h) returns the codes of sat(rint(gelu(acc * s + b) / ds + zp)) evaluated in double"""
     import math
     M, K, N = 40, 128, 96
     x = RNG.integers(-128, 128, (M, K)).astype(np.int8)
@@ -421,7 +432,8 @@ def ntile_emu(monkeypatch):
 @pytest.mark.parametrize("M,N,K", [(128, 768, 768), (300, 300, 1100), (3000, 130, 1100), (100, 3000, 700)],
                          ids=["bert_proj", "multi_block", "chunked", "transposed_chunked"])
 def test_int8_matmul_ntile_matches_per_block_launches(lib, ntile_emu, monkeypatch, M, N, K, tr):
-    """The int8 matmul's K-chained blocks as n-tile launches give the per-block result bit for bit."""
+    """the int8 matmul's K-chained blocks as n-tile launches (on by default; AIEDNN_NO_NTILE_MM=1 off) (chunks of m blocks x every k block per n block)
+    give the per-block result bit for bit, in fewer launches; small M takes the transposed form (C^T = W A^T)"""
     monkeypatch.setenv("AIEDNN_NTILE_MM_T", tr)
     x = RNG.integers(-128, 128, (M, K)).astype(np.int8)
     w = RNG.integers(-128, 128, (K, N)).astype(np.int8)
@@ -464,7 +476,8 @@ def _dq(x, sc, zp):
 @pytest.mark.parametrize("sdt,zp", [("s8", -3), ("u8", 120)])
 @pytest.mark.parametrize("op", ["layer_norm", "layer_norm_q", "softmax", "softmax_q"])
 def test_dequantized_source_equals_dequantize_then_op(lib, sdt, zp, op):
-    """attr.src_scales on layer norm / softmax: byte-identical to a dequantize reorder in front."""
+    """attr.src_scales on layer norm / softmax: the 8-bit source is read through its scale -- byte-identical to
+    a dequantize reorder in front of the f32 op (with or without the op's own dst quantization)"""
     shape, sc = (3, 7, 40), 0.037
     x = (RNG.integers(0, 256, shape).astype(np.uint8) if sdt == "u8" else RNG.integers(-128, 128, shape).astype(np.int8))
     q = op.endswith("_q")
@@ -498,7 +511,8 @@ def test_dequantized_source_equals_dequantize_then_op(lib, sdt, zp, op):
 
 
 def test_dequantized_qkv_sdpa_equals_dequantize_then_sdpa(lib):
-    """sdpa with 8-bit Q / K / V read through src scales: byte-identical to the f32 sdpa."""
+    """sdpa with s8 Q / K and u8 V read through attr src_scales[0..1] / src_scales_23[0]: the f32 sdpa on the
+    dequantized tensors, byte for byte"""
     B, H, Sq, Skv, Dh = 1, 2, 9, 11, 16
     q = RNG.integers(-128, 128, (B, H, Sq, Dh)).astype(np.int8)
     k = RNG.integers(-128, 128, (B, H, Skv, Dh)).astype(np.int8)
@@ -524,7 +538,8 @@ def test_dequantized_qkv_sdpa_equals_dequantize_then_sdpa(lib):
 @pytest.mark.parametrize("dt", ["f32", "s8"])
 @pytest.mark.parametrize("dst_bshd", [0, 4])
 def test_sdpa_reads_a_packed_qkv(lib, dt, dst_bshd):
-    """AIEDNN_SDPA_QKV_PACKED: byte-identical to the same sdpa on split, permuted tensors."""
+    """AIEDNN_SDPA_QKV_PACKED: Q, K, V as the slices of one [B, S, 3, H, D] projection output (dequantized as read
+    for s8) -- byte-identical to the same sdpa on the three tensors split out and permuted to [B, H, S, D]"""
     B, S_, H, Dh = 2, 13, 3, 16
     qkv = (RNG.integers(-128, 128, (B, S_, 3, H, Dh)).astype(np.int8) if dt == "s8"
            else f32((B, S_, 3, H, Dh), -1, 1))
@@ -551,7 +566,10 @@ def test_sdpa_reads_a_packed_qkv(lib, dt, dst_bshd):
 
 @pytest.mark.parametrize("case", ["tiny_step_big_bias", "shift_spread", "tiny_step_residual"])
 def test_requant_with_extreme_scales_stays_on_the_core(lib, case):
-    """A tiny accumulator step lowers the shift and stays on the core's requant, bit-identical to ref:."""
+    """a tiny accumulator step (osc / dst_scale ~ 2^-45: resnet50's late layers) puts the full-precision shift at
+    40-52, where bias * 2^shift or the residual scale overflowed int64 and per-channel shifts spread past 14:
+    those convs fell back to the double epilogue on the host. The shift is now lowered by a few bits of M there:
+    still the core's requant, bit-identical to ref:, within one code of the double formula"""
     N, Cc, O, H = 1, 32, 64, 9
     x = RNG.integers(-128, 128, (N, Cc, H, H)).astype(np.int8)
     w = RNG.integers(-128, 128, (O, Cc, 1, 1)).astype(np.int8)
@@ -595,7 +613,8 @@ def test_requant_with_extreme_scales_stays_on_the_core(lib, case):
                                      ((1, 8, 128, 64), (1, 1, 128, 64)), ((2, 3, 5), (2, 1, 1)), ((2, 3, 5), (1, 3, 1))])
 @pytest.mark.parametrize("alg", ["binary_mul", "binary_add", "binary_sub", "binary_max"])
 def test_f32_binary_common_broadcasts(lib, ash, bsh, alg):
-    """The f32 binary's broadcast fast path equals the per-element loop."""
+    """the f32 binary's broadcast fast path (a trailing block or a leading row repeated) equals the per-element
+    bcast_off loop's double arithmetic; the (2, 3, 5) x (1, 3, 1) case stays on the general path"""
     x, y = f32(ash), f32(bsh)
     lib.set_filter("ref:")
     try:
@@ -623,7 +642,8 @@ def test_gen_index(lib):
 @pytest.mark.parametrize("axis", [-1, 1])
 @pytest.mark.parametrize("qdt", ["s8", "u8"])
 def test_dynamic_quantize(lib, direction, axis, qdt):
-    """Dynamic quantize / dequantize with execute-time scales equal the static reorder."""
+    """dynamic quantize / dequantize: scales and zero points as execute-time tensors -- per tensor equal to the
+    static reorder created with those values (dynq+ runs that reorder), per channel the same arithmetic"""
     shape = (2, 6, 7)
     nc = 1 if axis < 0 else shape[axis]
     sc = RNG.uniform(0.01, 0.05, nc).astype(np.float32)
@@ -653,7 +673,8 @@ def test_dynamic_quantize(lib, direction, axis, qdt):
 
 @pytest.mark.parametrize("tol", [0, 1])
 def test_quantized_mul_on_the_aie_only_with_the_tolerance_flag(lib, tol):
-    """Quantized binary mul: exact table by default, FVEC within one code with the tolerance flag."""
+    """the quantized binary mul: ref:'s exact code-pair table by default; with AIEDNN_ATTR_TOLERANCE_1CODE the
+    FVEC mode (the core's f32 product, not correctly rounded) -- within one code"""
     shp = (1, 8, 2048)
     x, y = RNG.integers(-128, 128, shp).astype(np.int8), RNG.integers(-128, 128, shp).astype(np.int8)
     def run(flags, filt=None):
@@ -696,7 +717,8 @@ def test_nearest_resampling_copy_equals_the_generic_loop(lib, monkeypatch, dt, i
 
 @pytest.mark.parametrize("alg", ["swish", "gelu_tanh"])
 def test_conv_activation_to_int8_plane_rows_match_the_formula(lib, alg):
-    """An NCHW conv with swish / gelu_tanh -> s8: the plane-row epilogue returns the double codes."""
+    """an NCHW conv with swish / gelu_tanh -> s8 (yolov8n's layers): the plane-row epilogue (one channel per row,
+    the step table inlined) returns the codes of sat(rint(f(acc * s + b) / ds)) in double"""
     N, Cc, O, H = 1, 16, 24, 20
     x = RNG.integers(-128, 128, (N, Cc, H, H)).astype(np.int8)
     w = RNG.integers(-128, 128, (O, Cc, 3, 3)).astype(np.int8)

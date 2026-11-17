@@ -2,7 +2,13 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""aiednn_rnn_forward_create (RNN / LSTM / GRU) against PyTorch and a numpy GRU recurrence."""
+"""aiednn_rnn_forward_create (RNN / LSTM / GRU) against PyTorch's nn.RNN / nn.LSTM / nn.GRU.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_rnn.py
+
+PyTorch's GRU is linear-before-reset (aiednn_rnn_lbr_gru); the oneDNN-style GRU (reset applied
+before U_o) is checked against a numpy recurrence.
+"""
 
 from __future__ import annotations
 

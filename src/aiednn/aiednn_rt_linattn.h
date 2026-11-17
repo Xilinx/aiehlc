@@ -7,14 +7,16 @@
  * state h [Dk][Dv] (state_in or 0) and a_t = exp(gate_t) (1 without a gate):
  *   h <- Diag(a_t) h;  u_t = beta_t (v_t - h^T k_t)  (no delta: u_t = v_t);  h <- h + k_t u_t^T;
  *   o_t = scale h^T q_t
+ * the recurrence of the linear-attention layers in hybrid LLMs (Qwen3-Next's Gated DeltaNet, Kimi's KDA).
  *
  * ref: runs it token by token in double. gemm+linattn runs the chunked form: with G_i the cumulative log gate
  * inside a chunk of n tokens and h0 the state at its start,
  *   (I + A) U = R,  A_ij = beta_i (k_i . k_j)_{G_i - G_j} (j < i),  R_i = beta_i (v_i - (k_i)_{G_i}^T h0)
  *   O = scale ((Q)_G h0 + (Q K^T)_{G_i - G_j, j <= i} U),   h1 = Diag(e^{G_n}) h0 + ((K)_{G_n - G_j})^T U
- * where (x)_D weights channel d by e^D: four stacked f32 GEMMs per chunk on the matmul dispatch, (I + A)^-1
- * and the gate factors on the host. Per-channel gates split around the chunk's middle (16-token chunks);
- * chunks whose gates exceed float range take host steps.
+ * where (x)_D weights channel d by e^D: four stacked f32 GEMMs per chunk on the matmul dispatch (bf16x3 on the AIE),
+ *the unit lower triangular (I + A)^-1 and the gate factors on the host. A per-channel gate is split around the chunk's
+ *middle (k_i e^{G_i - c} . k_j e^{c - G_j}), so chunks are 16 tokens; a chunk whose gates span more than float can
+ *carry takes host steps. Within the f32 contract of ref: like the other bf16x3 composites.
  ******************************************************************************/
 #ifndef AIEDNN_RT_LINATTN_H
 #define AIEDNN_RT_LINATTN_H
@@ -132,7 +134,8 @@ static int acc_gx_linattn(const rt_impl *self, const rt_prob *p, rt_bind *bind, 
            gx_inner_ok(&g_la_t, C + L.Dk, L.Dv, C, &b4, why, cap);
 }
 
-/* per-chunk buffers; GEMM operand pairs stacked so one GEMM serves both */
+/* per-chunk buffers; pairs of GEMM operands sit stacked so one GEMM serves both (3 GEMMs per chunk, 4 with the
+ * delta rule's (I + A)^-1 R, instead of 7: the launches are most of the composite's time) */
 typedef struct {
     float *A1; /* [2n][Dk]: K e^{G} over Q e^{G} (against h0) */
     float *A2; /* [2n][Dk]: Kd over Qd (against Kn^T) */

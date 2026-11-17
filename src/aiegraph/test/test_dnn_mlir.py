@@ -2,7 +2,14 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""The aiednn MLIR dialect as the model IR (``aiegraph.dnn_mlir``): bit-identical round trip."""
+"""The aiednn MLIR dialect as the model IR (``aiegraph.dnn_mlir``).
+
+    python3 -m pytest -q src/aiegraph/test/test_dnn_mlir.py
+
+AGraph -> aiednn MLIR -> aiednn-opt (parse + verify + --aiednn-export-plan) ->
+AGraph must run bit-identically and keep every op's name, function and order.
+Needs a built aiednn-opt ($AIEDNN_OPT or build/aiednn/aiednn-opt).
+"""
 
 from __future__ import annotations
 
@@ -102,7 +109,9 @@ def test_fuse_epilogue_pass_matches_python_fusion(lib, name):
 
 @pytest.mark.parametrize("name", ["mobilenet_v3_small", "tiny_unet", "tiny_vit"])
 def test_pipeline_int8(lib, name):
-    """The default pipeline: fewer primitives, exact integer GEMMs, a smaller bit-identical arena."""
+    """the default pipeline: fewer primitives and reorders, int8 GEMM outputs, every
+    integer GEMM exact, and the memory plan's arena run bit-identical to private
+    buffers (model_test raises otherwise) with a smaller arena than no reuse"""
     m, x = zoo.build(name, pretrained=False)
     rp = dt.model_test(m, x, "int8", lib, name)
     r = dt.model_test(m, x, "int8", lib, name, mlir=True)
@@ -140,7 +149,8 @@ module {
 
 
 def test_quantize_before_maxpool_puts_pooling_on_the_aie(lib):
-    """--aiednn-quantize-before-maxpool puts squeezenet's max-pools on the int8 pool mode."""
+    """--aiednn-quantize-before-maxpool: squeezenet's max-pools take int8 (exact: quantize is
+    monotonic), so they dispatch to the GEMM ELF's pool mode and the model stays within tolerance"""
     m, x = zoo.build("squeezenet1_1", pretrained=False)
     r = dt.model_test(m, x, "int8", lib, "squeezenet1_1", mlir=True)
     assert r.ok and not r.gemm_bad, r
@@ -148,7 +158,11 @@ def test_quantize_before_maxpool_puts_pooling_on_the_aie(lib):
 
 
 def test_quantize_residual_makes_skip_streams_int8(lib):
-    """--aiednn-quantize-residual makes resnet18's skips s8; matches the quantized-skip reference."""
+    """--aiednn-quantize-residual: resnet18's identity skips (also quantized for the next
+    block's conv) become s8 with their scale on the post-op, and so do the downsample blocks'
+    (conv2's output, used by the add only: quantized at the block output's scale, so conv2 writes
+    int8 and both epilogues run on the core); the model matches the reference that quantizes the
+    same skips"""
     m, x = zoo.build("resnet18", pretrained=False)
     r = dt.model_test(m, x, "int8", lib, "resnet18", mlir=True)
     assert r.ok and not r.gemm_bad, r
@@ -159,7 +173,9 @@ def test_quantize_residual_makes_skip_streams_int8(lib):
 
 
 def test_sink_permute_fuses_convnext_layer_scale(lib):
-    """--aiednn-sink-permute + --aiednn-fuse-epilogue fold convnext's layer scale into the matmul."""
+    """--aiednn-sink-permute moves convnext's layer-scale mul (gamma [1,C,1,1], after the
+    NHWC->NCHW permute) onto the projection matmul as a [1,1,1,C] view; --aiednn-fuse-epilogue
+    then takes it as a binary-mul post-op: one primitive less per block, same result"""
     m, x = zoo.build("convnext_tiny", pretrained=False)
     r = dt.model_test(m, x, "int8", lib, "convnext_tiny", mlir=True)
     assert r.ok and not r.gemm_bad, r
@@ -169,7 +185,8 @@ def test_sink_permute_fuses_convnext_layer_scale(lib):
 
 
 def test_sink_permute_moves_a_channel_constant_but_not_a_transposed_matrix():
-    """A [1,C,1,1] constant above a permute is a view; a [1,4,4] above a transpose is not."""
+    """a [1,C,1,1] constant above a [0,3,1,2] permute is a view ([1,1,1,C]); a [1,4,4] constant
+    above a [0,2,1] transpose is NOT, although the sizes match (tiny_vit's position embedding)"""
     moved = dm.opt("""
 module {
   func.func @m(%x: tensor<1x2x3x4xf32>) -> tensor<1x4x2x3xf32> {
@@ -195,7 +212,8 @@ module {
 
 
 def test_fuse_norm_relu_folds_the_relu_into_batch_norm(lib):
-    """--aiednn-fuse-norm-relu: BN -> ReLU is one batch_norm, same result."""
+    """--aiednn-fuse-norm-relu: densenet's pre-activation BN -> ReLU is one batch_norm with flags | 4,
+    62 eltwise primitives less, and the same result"""
     m, x = zoo.build("densenet121", pretrained=False)
     r = dt.model_test(m, x, "int8", lib, "densenet121", mlir=True)
     assert r.ok and not r.gemm_bad, r
@@ -205,7 +223,8 @@ def test_fuse_norm_relu_folds_the_relu_into_batch_norm(lib):
 
 
 def test_fold_norm_quant_drops_the_reorders_bit_exactly(lib):
-    """--aiednn-fold-norm-quant: batch_norm -> quantize pairs fold, logits bit-identical."""
+    """--aiednn-fold-norm-quant: densenet's batch_norm -> quantize pairs become batch_norms with an
+    int8 dst (create_attr); the logits are bit-identical to the pipeline without the pass"""
     m, x = zoo.build("densenet121", pretrained=False)
     out = {}
     for tag, pipe in (("on", dm.PIPELINE), ("off", tuple(p for p in dm.PIPELINE if p != "--aiednn-fold-norm-quant"))):
@@ -220,12 +239,15 @@ def test_fold_norm_quant_drops_the_reorders_bit_exactly(lib):
 
 
 def test_transformer_folds_are_bit_exact(lib):
-    """tiny_vit: head-permute and norm-quant folds give fewer primitives, bit-identical logits."""
+    """tiny_vit: --aiednn-fold-head-permute (sdpa reads / writes [B,S,H,D]: the 8 head split / merge
+    permutes go) and --aiednn-fold-norm-quant on layer norm and sdpa (they write int8 directly):
+    fewer primitives, logits bit-identical to the pipeline without the two passes"""
     import os
     m, x = zoo.build("tiny_vit", pretrained=False)
     out = {}
     drop = ("--aiednn-fold-head-permute", "--aiednn-fold-norm-quant")
-    # compared on ref:sdpa: the folded sdpa would take sdpablk:, which is not bit-exact
+    # the folded sdpa (int8 dst) would take the AIE sdpablk:, within a tolerance rather than bit-exact:
+    # the folds are compared on ref:sdpa (test_sdpa_on_aie_block / the model tests cover sdpablk:)
     os.environ["AIEDNN_NO_SDPABLK"] = "1"
     try:
         for tag, pipe in (("on", dm.PIPELINE), ("off", tuple(p for p in dm.PIPELINE if p not in drop))):
@@ -243,32 +265,36 @@ def test_transformer_folds_are_bit_exact(lib):
 
 
 def test_llm_rewrites_fold_rope_rmsnorm_and_qkv_split(lib):
-    """tiny_llama RoPE / RMSNorm rewrites and gpt2's c_attn split are bit-identical."""
+    """tiny_llama: the RoPE chain becomes aiednn_rope_create in front of the head permute (which then folds into
+    sdpa) and the unfused RMSNorm a layer norm -- bit-identical to the pipeline without the rope rewrite, every
+    slice / concat / permute gone; gpt2: the c_attn GEMM splits per q / k / v slice, bit-identical"""
     m, x = zoo.build("tiny_llama", pretrained=False)
     qs = dt.calibrate(dt.prepare(m, x), x)
     out = {}
     for tag, rw in (("on", dm.REWRITES), ("off", ("fuse_rmsnorm",))):
         g = dm.optimize(dt.lower(m, x, "int8", "tiny_llama", fuse=False, qscale=qs), rewrites=rw)
-        out[tag] = (np.asarray(dt.run_ctypes(g, lib, x.numpy())[0]).copy(), [o.fn for o in g.ops])
-    (y1, f1), (y0, f0) = out["on"], out["off"]
+        out[tag] = (np.asarray(dt.run_ctypes(g, lib, x.numpy())[0]).copy(), [o.fn for o in g.ops], g)
+    (y1, f1, g1), (y0, f0, _) = out["on"], out["off"]
     assert np.array_equal(y1.view(np.uint8), y0.view(np.uint8))
-    assert f1.count("aiednn_rope_create") == 8
+    assert sum(fn.startswith("aiednn_rope_create") for fn in f1) == 8    # _attr: int8 q / k for int8 attention
     assert not {"aiednn_slice_create", "aiednn_concat_create"} & set(f1)
-    assert not any(fn == "aiednn_reorder_create" for fn in f1)          # quantizes folded, permutes into sdpa
+    # every head permute folded into sdpa, every q / k quantize into its rope (aiednn_rope_create_attr)
+    assert not any(o.fn == "aiednn_reorder_create" for o in g1.ops)
     assert f1.count("aiednn_reduction_create") == 0 and f0.count("aiednn_reduction_create") == 0   # rmsnorm in both
     m, x = zoo.build("gpt2_small", pretrained=False)
     qs = dt.calibrate(dt.prepare(m, x), x)
     out = {}
     for tag, rw in (("on", ("split_gemm_slices",)), ("off", ())):
         g = dm.optimize(dt.lower(m, x, "int8", "gpt2_small", fuse=False, qscale=qs), rewrites=rw)
-        out[tag] = (np.asarray(dt.run_ctypes(g, lib, x.numpy())[0]).copy(), [o.fn for o in g.ops])
-    (y1, f1), (y0, f0) = out["on"], out["off"]
+        out[tag] = (np.asarray(dt.run_ctypes(g, lib, x.numpy())[0]).copy(), [o.fn for o in g.ops], g)
+    (y1, f1, _), (y0, f0, _) = out["on"], out["off"]
     assert np.array_equal(y1.view(np.uint8), y0.view(np.uint8))
     assert f1.count("aiednn_slice_create") == 0 and f0.count("aiednn_slice_create") == 36
 
 
 def test_direct_conv_runs_resnet_convs_exactly(lib):
-    """Direct conv (aie_modes_conv.h) takes eligible 3x3 convs; every GEMM layer matches ref:."""
+    """direct conv (aie_modes_conv.h): the 3x3 convs whose input regions fit a mesh row's A slice go
+    through conv_kc / conv_q (the core gathers the im2col tile); every GEMM layer still matches ref:"""
     from aiegraph import dnn_viz
     m, x = zoo.build("resnet18", pretrained=False)
     r = dt.model_test(m, x, "int8", lib, "resnet18", mlir=True)

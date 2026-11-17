@@ -2,8 +2,14 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * lut_app -- 8-bit per-element primitives on the AIE (lut:, eltblk:, redblk:, steps:),
- * each compared byte for byte with ref:.
+ * lut_app -- the 8-bit per-element primitives on the AIE: the table mode (lut:,
+ * aiednn_rt_lut.h) for eltwise, batch norm, PReLU, binary with a per-channel
+ * operand, dequantize / requantize reorders, and the eltwise mode (eltblk:,
+ * aiednn_rt_eltblk.h) for binary of two 8-bit tensors, and the pool mode
+ * (redblk:, aiednn_rt_red.h) for reductions; f32 -> 8-bit ops on the step-table
+ * mode (steps:, aiednn_rt_steps.h). Each runs with the default dispatch,
+ * then with the ref: filter, and the two outputs are compared byte for byte
+ * ("OPCHK <name> impl=<impl> mismatches=0 of N"). Deterministic inputs.
  *
  *   PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/lut_app.cc --target x86 --run
  *   ... --target vek280 --run --board <host> --vitis-settings <.../settings64.sh>
@@ -74,7 +80,7 @@ static void check(const char *name, mk_fn mk, const void *ctx, int nargs, aiednn
             snprintf(impl, sizeof impl, "%s", aiednn_primitive_impl_info(p));
         memset(g_out[pass], pass ? 0xa5 : 0x5a, (size_t)nbytes(dmd));
         args[ndst].data = g_out[pass];
-        for (int rep = 0; rep < 2; rep++) { /* second call: steady state */
+        for (int rep = 0; rep < 2; rep++) { /* the second call is steady state (tables cached) */
             const double t0 = now_ms();
             if (aiednn_primitive_execute_args(p, nargs, args) != aiednn_success) {
                 printf("FAIL: %s execute\n", name);
@@ -244,11 +250,12 @@ int main() {
     aiednn_exec_arg_t bf[6] = {{AIEDNN_ARG_SRC, g_f},      {AIEDNN_ARG_DST, nullptr}, {AIEDNN_ARG_MEAN, mean},
                                {AIEDNN_ARG_VARIANCE, var}, {AIEDNN_ARG_SCALE, scale}, {AIEDNN_ARG_SHIFT, shift}};
     check("bnorm_relu_f32_s8_aie", mk_bn, &o, 6, bf, 1, &o.d); /* default preference: on the AIE */
-    /* f32 batch norm: steps: declines under prefer_fastest */
+    /* f32 batch norm: ref's loop beats steps: (aiednn_rt_steps.h acc_steps), which declines it when
+     * asked for the fastest implementation */
     aiednn_set_preference(aiednn_prefer_fastest);
     g_expect_ref = 1;
     check("bnorm_relu_f32_s8", mk_bn, &o, 6, bf, 1, &o.d);
-    /* batch norm + ReLU + quantize, two block sizes (C <= 256: the stats arrays) */
+    /* densenet's batch norm + ReLU + quantize, two block sizes (C <= 256: the stats arrays) */
     o = {aiednn_eltwise_relu,
          0.031f,
          0,

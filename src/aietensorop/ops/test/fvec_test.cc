@@ -1,6 +1,7 @@
 // x86 check of aie_modes_fvec.h (the FVEC mode) against double precision, through the AIE-API
 // emulation: g++ -std=c++20 -DAIE_FVEC_EMU -I src/mlir/runtime -I src/aietensorop/ops fvec_test.cc
-// Prints each program's worst |got - want| / (1e-5 + 1e-5 |want|) (contract: <= 1).
+// Every function aie_fvec_prog builds runs as a program through the core code; one line each with its
+// worst |got - want| / (1e-5 + 1e-5 |want|) (the contract: <= 1); "0 mismatching" when all are within.
 #include "aie_api_x86emu.h"
 using int32 = int32_t;
 #include <cmath>
@@ -490,7 +491,7 @@ int main() {
             std::printf("bwd f %2d (%2d ins) contract %.3f%s\n", u.f, p.nins, worst, worst <= 1.0 ? "" : "  MISMATCH");
         }
     }
-    /* an unused item of a partial launch: every op with n = rowlen = 0 must return */
+    /* an unused item of a partial launch: every op with n = rowlen = 0 must return (it hung row ops on the board) */
     for (int op : {(int)AIE_FV_PROG, (int)AIE_FV_SOFTMAX, (int)AIE_FV_LOGSOFTMAX, (int)AIE_FV_LNORM,
                    (int)AIE_FV_RMSNORM, (int)AIE_FV_RMAX, (int)AIE_FV_RSUM, (int)AIE_FV_ROWPROG, (int)AIE_FV_ROWSUM})
         run(op, 3, 0, 0, 1e-5f, 0.f, in, aux, out);

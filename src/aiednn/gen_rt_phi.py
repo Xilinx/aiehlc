@@ -3,7 +3,13 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Writes aiednn_rt_phi.h: Phi(x) on [0, 9) as 18 degree-9 polynomials (usage: python3 src/aiednn/gen_rt_phi.py)."""
+"""Writes aiednn_rt_phi.h: the standard normal CDF Phi(x) = (1 + erf(x / sqrt 2)) / 2 on [0, 9)
+as 18 degree-9 polynomials in (x - interval centre), fitted at Chebyshev nodes against
+math.erf / erfc. Max abs error 4.5e-14 (printed). GELU = x * Phi(x) evaluates without libm
+erf / exp: newlib's erf cost ~140 ns per element on the A72 (convnext_tiny's epilogue 1.5 s).
+
+    python3 src/aiednn/gen_rt_phi.py      # rewrites src/aiednn/aiednn_rt_phi.h
+"""
 import math
 from pathlib import Path
 

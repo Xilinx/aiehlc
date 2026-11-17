@@ -5,11 +5,18 @@
  * aiednn_rt_pool.h -- poolblk:<aie pool block>: pooling on the GEMM ELF's pool
  * mode (aie_modes_pool.h, opcode 0xB0), 16 output bands per launch.
  *
- * Item = (image*channel plane, band of output rows): input rows at pitch Wp = (Wo-1)*s + KW, padded
- * with the type minimum (max) or 0 (avg). Kernel block:
+ * Same item scheme as dwblk:. Item = (image*channel plane, band of output
+ * rows): the band's input rows at pitch Wp = (Wo-1)*s + KW, padded with the
+ * type minimum (max) or 0 (avg). The kernel block takes
  *   items s8 [16][4096], geom s32 [8] = {op, signed, s, KH, KW, Wp, Rout, Wo},
  *   out s32 [16][1024] = per output the window's exact max or sum.
- * The host finishes as ref:pooling does. Windows with no valid element are not accepted.
+ * The host then does exactly what ref:pooling does with that number --
+ * (double)sum / (KH*KW or valid count), rt_st -- so the result is
+ * bit-identical to ref:pooling for s8/u8 sources and any destination type.
+ *
+ * Max over min-padding equals ref's max over valid elements, except where a
+ * window holds no valid element at all (ref: -inf). Such problems are not
+ * accepted.
  *
  * Needs, from the including TU: aiednn_rt_internal.h, aie_modes_pool.h.
  ******************************************************************************/
@@ -34,7 +41,8 @@ typedef struct {
 } pool_plan;
 
 /* a window of output position o covers [o*s - pad, o*s - pad + k); valid if it
- * meets [0, n). Checking the first and last windows covers all of them. */
+ * meets [0, n). Pads sit only at the ends, so checking the first and last
+ * windows covers all of them. */
 static int pool_dim_ok(int64_t n, int64_t no, int64_t k, int64_t s, int64_t pad) {
     const int64_t first = -pad, last = (no - 1) * s - pad;
     return first + k > 0 && last < n;
@@ -81,7 +89,9 @@ static int acc_poolblk(const rt_impl *self, const rt_prob *p, rt_bind *bind, cha
     pool_plan q;
     if (!pool_plan_make(p, &q, why, cap))
         return 0;
-    /* one item per (plane, band): little window work per item makes launches cost more than ref: */
+    /* one item per (plane, band): with little window work per item the launches cost more than ref:'s
+     * loop (board, muscaria18: global 7x7 avg pool of 512 channels 5.1 ms vs ref: 0.23 ms; 3x3 s2 max
+     * pool of 64 x 112 x 112, ~9k window ops an item, 12.5 ms vs 26.4 ms) */
     if (rt_cost_refusals() && q.rout * q.Wo * q.KH * q.KW < RT_PL_MIN_WORK) { /* aiednn_prefer_fastest only */
         snprintf(why, cap, "%lld window ops per item (< %d): ref: is faster", (long long)(q.rout * q.Wo * q.KH * q.KW),
                  RT_PL_MIN_WORK);
@@ -116,7 +126,8 @@ static void pool_finish_item(const rt_prob *p, const pool_plan *q, int64_t nc, i
     const aiednn_data_type_t dt = p->md[1].data_type;
     const int64_t oh0 = band * q->rout, rows = q->Ho - oh0 < q->rout ? q->Ho - oh0 : q->rout;
     if (p->alg == aiednn_pooling_max && (dt == aiednn_s8 || dt == aiednn_u8)) {
-        /* the window maximum of 8-bit codes is the output code itself: a typed row copy */
+        /* the window maximum of 8-bit codes is the output code itself: a typed row copy, not rt_st's per-element
+         * switch and double (resnet18's stem pool: ~4 ms of host time around one launch) */
         for (int64_t r = 0; r < rows; r++) {
             const int32_t *vr = v + r * q->Wo;
             const int64_t o = (nc * q->Ho + oh0 + r) * q->Wo;
@@ -213,7 +224,8 @@ static int run_poolblk(const rt_impl *self, aiednn_primitive *prim, void *const 
     return AIEK_OK;
 }
 
-/* x86 stand-in for the AIE pool block (same macro the core runs): items, geom, out as above. */
+/* x86 stand-in for the AIE pool block (same macro the core runs): items,
+ * geom, out as above. For workstation runs of poolblk: without a board. */
 static int rt_pool_block_x86(const aiek_tensor *t, int n) {
     if (n != 3)
         return AIEK_ERR_ARGS;

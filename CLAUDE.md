@@ -830,7 +830,7 @@ skill **aiednnapp**.
 **aiednn MLIR dialect** (`src/mlir/mlirfront/frontend/aiednn/`, `aiednn-opt`): the whole model as
 aiednn primitives -- one op per primitive (all `Pure`), SSA tensors in a `func.func`, constants as
 `aiednn.const {index}` into an external store, fused epilogues as `#aiednn.post_op` attributes.
-`aiegraph.dnn_mlir` converts `AGraph` <-> MLIR bit-exactly (all 11 models). **AGraph rewrites first** (`dnn_mlir.REWRITES`, they need constant values the MLIR only references): `split_gemm_slices` (a GEMM read only by slices along N becomes one GEMM per slice: gpt2 / vit q,k,v), `fuse_rmsnorm` (pow / mean / add eps / rsqrt / mul / mul -> layer_norm RMS), `fuse_rope` (rotate-half chain -> `aiednn_rope_create`, bit-identical, moved in front of the head permute so fold-head-permute folds it into sdpa; follow views to the root when matching); tiny_llama 162 -> 49 primitives, gpt2 121 -> 109. **Pipeline**
+`aiegraph.dnn_mlir` converts `AGraph` <-> MLIR bit-exactly (all 11 models). **AGraph rewrites first** (`dnn_mlir.REWRITES`, they need constant values the MLIR only references): `split_gemm_slices` (a GEMM read only by slices along N becomes one GEMM per slice: gpt2 / vit q,k,v), `fuse_rmsnorm` (pow / mean / add eps / rsqrt / mul / mul -> layer_norm RMS), `fuse_rope` (rotate-half chain -> `aiednn_rope_create`, bit-identical, moved in front of the head permute so fold-head-permute folds it into sdpa; follow views to the root when matching); tiny_llama 162 -> 49 primitives, gpt2 121 -> 109. **int8 attention**: calibrated q / k / v scales, sdpa `create_attr` with `src_scales` + `AIEDNN_ATTR_TOLERANCE_INT8_ATTN` (library `gemm+sdpa8`), quantizes pushed through views / input head permutes and folded into the q / k / v GEMMs; `AIEDNN_NO_INT8_ATTN=1` off. **Switch-aware segments**: `dnn.SWITCH_MS` per board; on VEK385 light-only ops that would need their own megakernel go to ref: (`AIEDNN_FORCE_REF_OPS`). **Pipeline**
 (`dnn_mlir.PIPELINE`, `references(mlir=True)`, `run_models.py --mlir`): canonicalize (view /
 identity-reorder / quant round-trip folds) -> cse (duplicate quantizations) ->
 `--aiednn-sink-permute` (a constant mul/add above a pure permute, towards its GEMM) ->
@@ -926,6 +926,14 @@ ONNX opset onto them; table + tests `test_aiednn_graph_parity.py`.
 nhwc dst), everything else through a conversion (`+fmtwrap`). The graph API proposes nhwc on internal activation
 edges and keeps it where no partition wraps -- the ~22 ms of `hwc_transpose` / `c_unpack` / scatter per ResNet-18
 image is what it removes.
+
+**`torch.export` -> a board program** (`src/aiegraph/dnn_export.py`, flow 2 `--export`): `to_fx(ep)` turns the
+ExportedProgram's ATen graph back into the torch-level graph flow 4 lowers (parameter ops -> rebuilt
+`nn.Conv2d` / `nn.Linear` / norm modules, the rest torch functions, input-independent nodes folded, `view ->
+Linear -> view` and GQA `unsqueeze -> expand -> view` folded back), `compile_exported(ep, x, target=, board=)`
+is flow 4 from there (calibrate, MLIR, `emit_app`, `dnn_build`). Arguments are normalized against the op
+schema: `torch.export.load` spells some as keywords. `prepare_for_export` swaps `nn.MultiheadAttention` for
+fusable modules. All 8 benchmark models compile to the direct path's primitives; skill **aiednnexport**.
 
 **Framework hooks** (`doc/design/aiednn.md` §26): `torch.compile(model, backend="aiednn")`
 (`src/aiegraph/dnn_torch_backend.py` + `dnn_torch_graph.FxGraph`, flags in `aiegraph.backends.aiednn`) and an
@@ -1317,6 +1325,7 @@ Other tools: `browser_type`, `browser_wait_for_element`, `browser_execute_script
 | `torch.compile(model, backend="aiednn")` or the aiednn ONNX Runtime EP (`dnn_ort_ep`): `Invalid backend`, nothing offloaded, every node a wildcard (`dims -1`), partition `KeyError`, EP build needs ORT headers, IR version 14 | aiednnframeworkhooks |
 | A traced model (Dynamo export, PT2E, torch.compile) disagrees with eager, or a model PASSes while its int8 scales decay geometrically / every output saturates (random weights); a detector's top-1 flips between equally correct runs (yolov8n: C2f generator mistraced by torch 2.4 Dynamo, `top1_range`) | dynamotracedmodel |
 | Transformer models still run slices / concats / permutes / unfused RMSNorm on the host in the direct path; an AGraph rewrite in `dnn_mlir.REWRITES` (`split_gemm_slices`, `fuse_rmsnorm`, `fuse_rope`) matches nothing (views, own-dst uses, shifting indices) | aiednnllmrewrites |
+| `torch.export` program through the model compiler (`dnn_export.to_fx` / `compile_exported`, flow 2 `--export`): `has no torch-level counterpart`, the translated graph differs from eager only after `torch.export.load`, more primitives than `run_models --mlir` (views around Linears, MultiheadAttention) | aiednnexport |
 | aiednn MLIR pass changes a model's numbers (rel err jumps, every GEMM still exact): `--aiednn-sink-permute` taking a transposed constant for a view; bisecting the pipeline (`optimize.__defaults__`) | aiednnsinkpermute |
 | aiednn model slow on VEK280 while AIE launches are a small part: `aiednn_phase` im2col_pack / epilogue dominate, host.cc at -Os, a CPU pool/reorder between int8 layers | aiednnhostperf |
 | aiednn op still on ref: although an AIE path exists, a gemm+ composite declines ("its GEMM ... would run on ref:"), a 3-D / training problem never reaches the AIE, placement changed after the AIE-first preference default, a model's accuracy collapses only under prefer_aie (a table cache keyed on part of the problem) | aiednngemmx |

@@ -2,7 +2,11 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""The transposed conv tiling (run_t_pipe): same bytes as the plain tiling, fewer launches."""
+"""The transposed conv tiling (run_t_pipe): few pixels x many channels run as C^T = W x col^T, so the weights fill
+the block's M. Same bytes as the plain tiling (AIEDNN_NO_TPIPE=1), fewer launches, at the 8x4 mesh's blocks.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_tpipe.py
+"""
 
 from __future__ import annotations
 

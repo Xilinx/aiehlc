@@ -2,7 +2,10 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Dropout, the spatial transformer (affine grid, grid sample) and CTC loss against PyTorch."""
+"""Dropout, the spatial transformer (affine grid, grid sample) and CTC loss against PyTorch.
+
+    python3 -m pytest -q src/aiegraph/test/test_aiednn_misc.py
+"""
 
 from __future__ import annotations
 

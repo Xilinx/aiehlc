@@ -1,5 +1,6 @@
-/* An app on the prebuilt aiednn library (plain g++ + <dist>/link.mk, no aiehlc); results checked
- * against plain loops. */
+/* An ordinary app on the PREBUILT aiednn library: plain C++ against aiednn.h, compiled and linked with
+ * aarch64-none-elf-g++ (Makefile + <dist>/link.mk) -- no aiehlc, no kernel source. Creating a primitive
+ * is the query: dispatch picks the implementation (printed); each result is checked against plain loops. */
 #include "aiednn.h"
 #include <math.h>
 #include <stdio.h>
@@ -12,7 +13,9 @@ static int rnd(int lo, int hi) {
     return lo + (int)((s_rng >> 8) % (unsigned)(hi - lo + 1));
 }
 
-/* per case "ok" / "bad:"; only the final verdict is PASS: / FAIL: (the runner stops at the first FAIL:) */
+/* per case "ok" / "bad:" -- only the final verdict is PASS: / FAIL: (the board runner stops at the
+ * first FAIL: anywhere on the console). The candidate list is the query: every implementation that
+ * accepted the problem, in dispatch rank. */
 static int check(const char *what, int ok, aiednn_primitive_t p) {
     char cands[512] = "";
     if (p)

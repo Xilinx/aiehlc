@@ -2,8 +2,11 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * convprof_app -- per-shape time breakdown of an int8 conv (requant + ReLU) on the board.
- * AIEDNN_KCYC=1 adds core (0, 0)'s cycles per GEMMQ launch.
+ * convprof_app -- where an int8 conv's time goes on the board, per ResNet-18 layer shape: the s8 conv
+ * with per-channel requant + ReLU (the quantized model layer), timed steady-state, then the library's
+ * stats for that shape alone (implementation, AIE launches, host phases, kernel copy / launch split).
+ * Built with AIEDNN_DEFINES="AIEDNN_KCYC=1" the kernel also reports core (0, 0)'s cycles per GEMMQ
+ * launch and how many of them it waited for its A / B / C windows.
  *
  *   AIEDNN_DEFINES="AIEDNN_KCYC=1" PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/convprof_app.cc \
  *       --target vek280 --mesh 8x4 --run --board <host> --vitis-settings <.../settings64.sh>
@@ -55,7 +58,7 @@ static int conv(const char *name, int64_t c, int64_t h, int64_t o, int64_t k, in
     at.n_scales = o, at.scales = g_scales, at.dst_scale = 0.05f;
     at.n_post_ops = 1, at.post_ops[0].kind = aiednn_post_op_eltwise, at.post_ops[0].alg = aiednn_eltwise_relu;
     const long nout = (long)o * ho * ho;
-    { /* ref: for the byte check */
+    { /* ref: on the same problem, for the byte check below */
         aiednn_set_impl_filter("ref:");
         aiednn_primitive_t r;
         aiednn_exec_arg_t ra[4] = {
@@ -79,7 +82,7 @@ static int conv(const char *name, int64_t c, int64_t h, int64_t o, int64_t k, in
     double first = 0, steady = 0;
     for (int rep = 0; rep <= REPS; rep++) {
         if (rep == 1)
-            aiednn_stats_reset(); /* stats: steady executes only */
+            aiednn_stats_reset(); /* the stats below: the REPS steady executes only */
         const double t0 = now_ms();
         if (aiednn_primitive_execute_args(p, 4, a) != aiednn_success) {
             printf("FAIL: %s execute\n", name);
@@ -112,7 +115,7 @@ int main() {
     for (int i = 0; i < 512; i++)
         g_bias[i] = (i % 17) * 100 - 800, g_scales[i] = 0.001f + 0.0001f * (float)(i % 7);
     int rc = 0;
-    rc |= conv("stem_7x7_s2", 4, 224, 64, 7, 2); /* C 3 padded to 4 */
+    rc |= conv("stem_7x7_s2", 4, 224, 64, 7, 2); /* C 3 padded to 4, as PT2E's stem reaches the library */
     rc |= conv("l1_3x3_64", 64, 56, 64, 3, 1);
     rc |= conv("l2_3x3_s2", 64, 56, 128, 3, 2);
     rc |= conv("l2_3x3_128", 128, 28, 128, 3, 1);

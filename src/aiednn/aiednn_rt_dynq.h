@@ -5,8 +5,9 @@
  * aiednn_rt_dynq.h -- gen_index and dynamic quantize / dequantize (scales / zero points as run-time tensors).
  *
  * gen_index writes the s32 position along one axis. dynamic quantize is the reorder's arithmetic with the
- * scale / zero point read at execute: ref: per element; dynq+ (per tensor) creates the static reorder per value
- * pair (memoized) and runs whatever implements it.
+ * scale / zero point read at execute: ref: per element (per tensor or per channel along axis); dynq+ (per
+ * tensor, impl "dynq") creates -- once per value pair, through the quiet dispatch memo -- the static reorder with those
+ * values and runs whatever implements it, so the AIE's steps: / lut: modes serve it where they serve a reorder.
  *
  * Needs, from the including TU: aiednn_rt_internal.h and the create helpers of aiednn_rt.cc.
  ******************************************************************************/

@@ -1,5 +1,6 @@
-// x86 check of aie_modes_bf16.h (layouts + core round) through the AIE-API emulation against the f32
-// reference.
+// x86 check of aie_modes_bf16.h (the bf16 GEMM mode's layouts + core round) through the AIE-API emulation:
+// pack A / B as the host does, slice each round's windows as the DMA delivers them, run the core rounds,
+// compare C with the f32 reference.
 #include "aie_api_x86emu.h"
 using aie::accfloat;
 using aie::bfloat16;

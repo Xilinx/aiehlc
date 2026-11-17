@@ -8,8 +8,9 @@
  *   u = 0.5 * y          this file
  *   z = relu(u)          library
  *
- * dnn_build scans this file for create calls, so the partition's matmul is
- * named here: aiednn_matmul_forward_create(
+ * The host fills x, walks the partitions, and reads z. Weights stay put.
+ * dnn_build picks kernels by scanning this file for create calls, so the
+ * matmul the partition compiles to is named here: aiednn_matmul_forward_create(
  *
  *   PYTHONPATH=src python -m aiegraph dnn-build example/aiednn/hostflow/host_app.cc --target x86 --run
  *   ... --target vek280 --run --board <host> --vitis-settings <.../settings64.sh>

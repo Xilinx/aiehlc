@@ -2,7 +2,15 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""ONNX model -> aiednn graph API (aiegraph.dnn_graph)"""
+"""ONNX model -> aiednn graph API (aiegraph.dnn_graph): one graph op per ONNX node, initializers as
+constant tensors, anything without a mapping as a wildcard op. What an ONNX Runtime execution
+provider's GetCapability / Compile do, without onnxruntime: unsupported partitions run through
+onnx's ReferenceEvaluator.
+
+    m = OnnxGraph.load(lib, "resnet18-v1-7.int8.qdq.onnx", batch=1)
+    m.report()                          # partitions: fused, int8, implementation, unsupported
+    y = m.run({"data": x})[m.outputs[0]]
+"""
 
 from __future__ import annotations
 

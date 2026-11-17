@@ -5,7 +5,23 @@
 ###############################################################################
 """int8 ResNet-18 (TVM's deployed graph) -> the data the aiednn ResNet-18 app runs.
 
+The extraction is resnetengine's (``src/aietensorop/resnetengine/gen_engine.py``,
+imported, not copied): every conv's OIHW weights and epilogue constants are
+parsed from TVM's graph/params/generated C, and its numpy model of the fused
+network (stem + maxpool, 16 conv layers with fused downsample / on-core
+residual, every inter-layer tensor 8-bit) is checked against TVM's own dump of
+every call first. This script adds the input quantize check and writes:
+
+  resnet18_net.h     layer table + per-channel constants (C), INCBIN paths
+  r18_weights.bin    stem + every layer's (and downsample's) OIHW int8 weights
+  r18_dense.bin      fc weights [1000][512] int8 ([N][K], aiednn's matmul layout)
+  r18_image.bin      the float [3][224][224] image TVM's dumps were made from
+  r18_logits.bin     TVM's float logits for it (the app's bit-exact target)
+  r18_gold.bin       the model's uint8 output of the stem and every layer
+
     python3 example/aiednn/resnet18/gen_resnet18.py [--deploy DIR] [--out DIR]
+
+Default --out is worklocal/aiednn/resnet18_data/. doc/design/aiednn.md.
 """
 import argparse
 import sys
@@ -19,7 +35,9 @@ import gen_engine as ge  # noqa: E402
 
 
 def quantize(image, scale: str, zp: str, pad: int) -> np.ndarray:
-    """TVM call 00 + zero-point pad: roundf(x * s) + zp, clamp [0, 255], - 128, into [3][230][230] bordered by *pad*."""
+    """TVM call 00 + the stem's zero-point pad, as the app computes it:
+    float32 roundf(x * s) + zp (round half away from zero), clamp [0, 255],
+    - 128, into a [3][230][230] int8 tensor bordered by *pad*."""
     x = image.reshape(3, 224, 224).astype(np.float32) * np.float32(float(scale.rstrip("f")))
     r = (np.sign(x) * np.floor(np.abs(x) + np.float32(0.5))).astype(np.float32)
     v = np.clip(r + np.float32(float(zp.rstrip("f"))), 0, 255).astype(np.int32) - 128
