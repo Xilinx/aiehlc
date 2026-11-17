@@ -8,7 +8,7 @@
     python3 tutorial/aieprogram/sync_code.py           # rewrite the listings
     python3 tutorial/aieprogram/sync_code.py --check   # exit 1 if one is stale
 
-A listing is everything between
+The root README.md is synced too. A listing is everything between
     <!-- code: example/tileprogram/ccode/<file>.cc -->
 and
     <!-- /code -->
@@ -37,11 +37,11 @@ def main():
     ap.add_argument("--check", action="store_true", help="only report stale listings")
     args = ap.parse_args()
     stale = []
-    for md in sorted(HERE.rglob("*.md")):
+    for md in sorted(HERE.rglob("*.md")) + [REPO / "README.md"]:  # the root README has one listing too
         old = md.read_text()
         new = render(old)
         if new != old:
-            stale.append(str(md.relative_to(HERE)))
+            stale.append(str(md.relative_to(REPO)))
             if not args.check:
                 md.write_text(new)
     if args.check:

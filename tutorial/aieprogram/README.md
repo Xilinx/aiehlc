@@ -75,7 +75,8 @@ mostly configuration; chapters 6.1 and 6.2 measure what each change buys.
 ## Maintenance
 
 - Each chapter opens with its example's full source, generated from
-  `example/tileprogram/ccode/`. After editing an example:
+  `example/tileprogram/ccode/` (so is the conv2d example in the root `README.md`).
+  After editing an example:
   `python3 tutorial/aieprogram/sync_code.py` (`--check` exits 1 if stale).
 - Figures in `img/` come from `img/make_figures.py` (stdlib Python):
   `python3 tutorial/aieprogram/img/make_figures.py`.
