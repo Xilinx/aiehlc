@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
 # Routing IR re-entry round trip (doc/design/routing_ir_reentry.md).
 #
-#   script/test/routing_ir_roundtrip.sh <src.cc> [aiehlc.sh args...]
+#   script/test/routing_ir_roundtrip.sh [--stage routing|dmaphop] <src.cc> [aiehlc.sh args...]
 #
 # 1. builds <src.cc> normally (baseline),
-# 2. builds it again with AIEHLC_ROUTING_IR_IN = the baseline's
-#    ir/dfschedule/0_initial.mlir (the routing IR fed back unchanged),
+# 2. builds it again feeding the baseline's IR of that stage back unchanged:
+#    routing (default): AIEHLC_ROUTING_IR_IN = ir/dfschedule/0_initial.mlir
+#    dmaphop:           AIEHLC_DMAPHOP_IR_IN = ir/dfschedule/3_DmapToDmaphopPass.mlir
 # 3. requires every generated file and every dumped IR stage to be byte-identical.
-# Exit 0 = the routing IR carries the whole tiling decision for this source.
+# Exit 0 = that IR carries everything the rest of the pipeline needs for this source.
 # Default aiehlc.sh args: --aie-version 5. Work dirs under ${TMPDIR:-/tmp}.
 set -uo pipefail
-SRC="$(realpath "${1:?usage: $0 <src.cc> [aiehlc.sh args...]}")"
+STAGE=routing
+if [ "${1:-}" = "--stage" ]; then
+    STAGE="${2:?--stage routing|dmaphop}"
+    shift 2
+fi
+case "$STAGE" in
+routing) ENV=AIEHLC_ROUTING_IR_IN IRFILE=0_initial.mlir ;;
+dmaphop) ENV=AIEHLC_DMAPHOP_IR_IN IRFILE=3_DmapToDmaphopPass.mlir ;;
+*) echo "unknown --stage $STAGE (routing|dmaphop)"; exit 2 ;;
+esac
+SRC="$(realpath "${1:?usage: $0 [--stage routing|dmaphop] <src.cc> [aiehlc.sh args...]}")"
 shift
 ARGS=("$@")
 [ ${#ARGS[@]} -eq 0 ] && ARGS=(--aie-version 5)
@@ -20,14 +31,15 @@ build_in() {
     mkdir -p "$1"
     (cd "$1" && bash -c "source '$REPO/script/aiehlc.sh' ${ARGS[*]} --runtime-source-file '$SRC'" > build.log 2>&1)
 }
-echo "[roundtrip] $SRC (work dir $WORK)"
+echo "[roundtrip] $SRC, $STAGE IR (work dir $WORK)"
 build_in "$WORK/base" || { echo "[roundtrip] FAIL: baseline build failed ($WORK/base/build.log)"; exit 1; }
-IR="$WORK/base/ir/dfschedule/0_initial.mlir"
+IR="$WORK/base/ir/dfschedule/$IRFILE"
 [ -f "$IR" ] || { echo "[roundtrip] FAIL: no $IR"; exit 1; }
-cp "$IR" "$WORK/routing_in.mlir"
-AIEHLC_ROUTING_IR_IN="$WORK/routing_in.mlir" build_in "$WORK/reentry" ||
-    { echo "[roundtrip] FAIL: re-entry build failed ($WORK/reentry/build.log)"; exit 1; }
-grep -h "AIEHLC_ROUTING_IR_IN" "$WORK/reentry/build.log" | head -3
+cp "$IR" "$WORK/ir_in.mlir"
+export "$ENV=$WORK/ir_in.mlir"
+build_in "$WORK/reentry" || { echo "[roundtrip] FAIL: re-entry build failed ($WORK/reentry/build.log)"; exit 1; }
+unset "$ENV"
+grep -h "$ENV" "$WORK/reentry/build.log" | head -3
 grep -q "identical to the generated IR" "$WORK/reentry/build.log" ||
     { echo "[roundtrip] FAIL: the IR read back differs from the generated IR"; exit 1; }
 fail=0

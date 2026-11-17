@@ -22,6 +22,7 @@
 //   aie::set_rounding / set_saturation (the SRS modes of to_vector)
 //   f32: sub, mul (-> accfloat), inv, invsqrt, to_fixed / to_float, vector_cast, up/downshift,
 //   reduce_add / reduce_max, shuffle_down_rotate, mask / gt / lt / select (aie_modes_fvec.h)
+//   bfloat16 (global scalar type: fp32 upper half, round-to-nearest-even from float)
 // Anything else is a compile error in the harness -- extend this file.
 //
 // Alignment: load_v / store_v need the pointer aligned to the vector size
@@ -53,6 +54,29 @@
 // Accumulator tags are global in the AIE API (acc32, not aie::acc32).
 struct acc32 {};
 struct acc64 {};
+
+// bfloat16 (global, as chess's native type): the upper 16 bits of an IEEE fp32;
+// float -> bfloat16 rounds to nearest even (NaN stays NaN), bfloat16 -> float
+// is exact. Arithmetic goes through float, as a scalar bf16 expression does.
+struct bfloat16 {
+    uint16_t bits = 0;
+    bfloat16() = default;
+    bfloat16(float f) {
+        uint32_t u;
+        std::memcpy(&u, &f, 4);
+        if ((u & 0x7f800000u) == 0x7f800000u && (u & 0x7fffffu))
+            bits = (uint16_t)((u >> 16) | 0x40); // quiet NaN
+        else
+            bits = (uint16_t)((u + 0x7fffu + ((u >> 16) & 1u)) >> 16);
+    }
+    operator float() const {
+        const uint32_t u = (uint32_t)bits << 16;
+        float f;
+        std::memcpy(&f, &u, 4);
+        return f;
+    }
+};
+static_assert(sizeof(bfloat16) == 2, "bfloat16 is a 16-bit type");
 
 namespace aie {
 
@@ -128,25 +152,7 @@ inline void set_rounding(rounding_mode m) { emu::rnd() = m; }
 inline saturation_mode get_saturation() { return emu::sat(); }
 inline rounding_mode get_rounding() { return emu::rnd(); }
 
-// bfloat16: the upper 16 bits of an IEEE float; float -> bfloat16 rounds to nearest even.
-struct bfloat16 {
-    uint16_t bits = 0;
-    bfloat16() = default;
-    bfloat16(float f) {
-        uint32_t u;
-        std::memcpy(&u, &f, 4);
-        if ((u & 0x7fffffffu) > 0x7f800000u)
-            bits = (uint16_t)((u >> 16) | 0x40); // NaN stays NaN
-        else
-            bits = (uint16_t)((u + 0x7fffu + ((u >> 16) & 1u)) >> 16);
-    }
-    operator float() const {
-        const uint32_t u = (uint32_t)bits << 16;
-        float f;
-        std::memcpy(&f, &u, 4);
-        return f;
-    }
-};
+using ::bfloat16; // one type: the global chess-native bfloat16 above (aie::bfloat16 names it too)
 struct accfloat {};
 
 template <class T, unsigned N> struct vector {

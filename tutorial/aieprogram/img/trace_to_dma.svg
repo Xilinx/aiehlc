@@ -1,0 +1,68 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1060' height='430' viewBox='0 0 1060 430'>
+<defs><marker id='arr' markerUnits='userSpaceOnUse' markerWidth='12' markerHeight='10' refX='11' refY='5' orient='auto'><path d='M0,0 L12,5 L0,10 z' fill='#444'/></marker></defs>
+<rect width='100%' height='100%' fill='white'/>
+<text x='530.0' y='24.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='15' text-anchor='middle' fill='#222' font-weight='bold'>Step 1: from load_buffer calls to a DMA pattern (matrix A of the GEMM)</text>
+<rect x='20.0' y='44.0' width='320.0' height='330.0' rx='8' fill='#fafafa' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='180.0' y='66.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>1. run the kernel on x86 for every core</text>
+<text x='180.0' y='82.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>(trace)</text>
+<rect x='370.0' y='44.0' width='320.0' height='330.0' rx='8' fill='#fafafa' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='530.0' y='66.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>2. fit each port's blocks to one formula</text>
+<text x='530.0' y='82.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>(affine fit)</text>
+<rect x='720.0' y='44.0' width='320.0' height='330.0' rx='8' fill='#fafafa' fill-opacity='1.0' stroke='#555555' stroke-width='1'/>
+<text x='880.0' y='66.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>3. that formula IS a DMA buffer descriptor</text>
+<text x='880.0' y='82.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>(DMA pattern)</text>
+<line x1='346.0' y1='210.0' x2='364.0' y2='210.0' stroke='#555555' stroke-width='2' marker-end='url(#arr)'/>
+<line x1='696.0' y1='210.0' x2='714.0' y2='210.0' stroke='#555555' stroke-width='2' marker-end='url(#arr)'/>
+<text x='34.0' y='108.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='bold'>core (pm=1, pn=2) records:</text>
+<text x='42.0' y='128.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#a0522d' font-weight='normal'>load a  offset (16,  0)  shape (16,64)</text>
+<text x='42.0' y='145.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#a0522d' font-weight='normal'>load a  offset (16, 64)  shape (16,64)</text>
+<text x='42.0' y='162.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#a0522d' font-weight='normal'>load a  offset (16,128)  shape (16,64)</text>
+<text x='42.0' y='179.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#a0522d' font-weight='normal'>load a  offset (16,192)  shape (16,64)</text>
+<text x='34.0' y='210.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='bold'>core (pm=2, pn=0) records:</text>
+<text x='42.0' y='230.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#a0522d' font-weight='normal'>load a  offset (32,  0)  shape (16,64)</text>
+<text x='42.0' y='247.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#a0522d' font-weight='normal'>load a  offset (32, 64)  shape (16,64)</text>
+<text x='42.0' y='264.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#a0522d' font-weight='normal'>load a  offset (32,128)  shape (16,64)</text>
+<text x='42.0' y='281.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#a0522d' font-weight='normal'>load a  offset (32,192)  shape (16,64)</text>
+<text x='34.0' y='316.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#666' font-weight='normal'>... 16 cores x 4 rounds, plus every</text>
+<text x='34.0' y='330.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#666' font-weight='normal'>store, release and commit</text>
+<text x='34.0' y='352.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#666' font-weight='normal'>stubs: aie::load_buffer records,</text>
+<text x='34.0' y='366.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#666' font-weight='normal'>ASan checks every byte the kernel reads</text>
+<text x='384.0' y='112.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='bold'>offset = base_p0 * pm + base_p1 * pn</text>
+<text x='384.0' y='128.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='bold'>       + step_i * i + step_j * j</text>
+<text x='390.0' y='156.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='bold'>block</text>
+<text x='460.0' y='156.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>(16, 64)</text>
+<text x='390.0' y='174.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='bold'>base_p0</text>
+<text x='460.0' y='174.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>(16, 0)    moves with pm</text>
+<text x='390.0' y='192.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='bold'>base_p1</text>
+<text x='460.0' y='192.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>(0, 0)     same for all pn</text>
+<text x='390.0' y='210.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='bold'>rounds</text>
+<text x='460.0' y='210.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>1 x 4</text>
+<text x='390.0' y='228.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='bold'>step_j</text>
+<text x='460.0' y='228.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>(0, 64)    the K loop</text>
+<text x='384.0' y='262.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='bold'>=&gt; A depends on pm only:</text>
+<text x='384.0' y='278.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='bold'>   ROW BROADCAST</text>
+<text x='384.0' y='300.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#1f4e79' font-weight='normal'>B: base_p1 = (16, 0) -&gt; COLUMN broadcast</text>
+<text x='384.0' y='316.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#38761d' font-weight='normal'>C: moves with pm and pn -&gt; GATHER</text>
+<text x='384.0' y='344.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#990000' font-weight='normal'>not affine / not one shape -&gt; build error</text>
+<text x='384.0' y='358.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#990000' font-weight='normal'>(the DMA could not stream it)</text>
+<text x='734.0' y='112.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='bold'>shim MM2S descriptor, mesh row pm:</text>
+<text x='740.0' y='136.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='bold'>start</text>
+<text x='794.0' y='136.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>A + 4096 * pm   (16 rows x 256 B)</text>
+<text x='740.0' y='154.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='bold'>d0</text>
+<text x='794.0' y='154.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>16 words  = 64 B of one row</text>
+<text x='740.0' y='172.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='bold'>d1</text>
+<text x='794.0' y='172.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>16 rows, pitch 256 B</text>
+<text x='740.0' y='190.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='bold'>d2</text>
+<text x='794.0' y='190.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>4 chunks, step 64 B   (j)</text>
+<text x='740.0' y='208.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#a0522d' font-weight='bold'>length</text>
+<text x='794.0' y='208.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='normal'>1024 B per round, 4 rounds</text>
+<text x='734.0' y='240.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#222' font-weight='bold'>routed to all 4 cores of mesh row pm</text>
+<text x='734.0' y='258.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#222' font-weight='normal'>core side: 1 KB ping + 1 KB pong window,</text>
+<text x='734.0' y='272.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#222' font-weight='normal'>a lock pair; load_buffer = acquire,</text>
+<text x='734.0' y='286.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#222' font-weight='normal'>release = give the buffer back</text>
+<text x='734.0' y='316.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#666' font-weight='normal'>written to aout/newfile.cpp as</text>
+<text x='734.0' y='330.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#666' font-weight='normal'>constexpr aie::GemmSpace __aie_gemm_IFM</text>
+<text x='734.0' y='344.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#666' font-weight='normal'>  .d1 = {64, tile_round 4, tile 16, stride 16}</text>
+<text x='734.0' y='358.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#666' font-weight='normal'>  .d2 = {256, tile_round 4, tile 64, stride 64}</text>
+<text x='530.0' y='405.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#333' font-weight='normal'>Nothing here knows it is a GEMM: the same three steps route the conv2d of tutorial 2.</text>
+</svg>

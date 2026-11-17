@@ -215,7 +215,7 @@ bool isFullConnectAuto(ModuleOp moduleOp);
 // (passblueprinttoschedulekernel) lowerings, from the attribute alone, so the
 // two always make the same decision.
 //   check:  a GEMM-schedule (fullconnect_auto = 1, no halo) port of a
-//           kernel-only kernel: its final core window and round count must be
+//           kernel-only kernel, or a {.resident} input on any path: its final core window and round count must be
 //           the kernel's block and block count, else the build fails (the core
 //           and shim DMA would otherwise disagree -- a silent wait_io hang).
 //   follow: an INPUT among those whose blocks are row-contiguous (cover every

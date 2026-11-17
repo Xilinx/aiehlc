@@ -163,7 +163,12 @@ LogicalResult emitCoreTileParams(FlowLoweringCtx &c, CoreTileCtx &t, const CoreT
             int64_t tileRows = d.passState->tileRows;
             if (tileM > 0 && tileM < tileRows) {
                 int64_t mRounds = tileRows / tileM;
-                t.perCorePerKRound = t.perCorePerKRound / mRounds;
+                // Only the M-side input (A, view [tileRows, K]) holds mRounds tile_m strips;
+                // B's view (tile_cols x K) is sent whole in every m-round (same rule as
+                // passblueprinttoschedulekernel.cpp, P4bk).
+                const int64_t effK = d.passState->effectiveK;
+                if (effK <= 0 || t.perCorePerKRound == tileRows * effK)
+                    t.perCorePerKRound = t.perCorePerKRound / mRounds;
             }
         }
     } else {

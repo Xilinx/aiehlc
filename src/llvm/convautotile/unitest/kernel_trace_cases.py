@@ -9,7 +9,9 @@ CASES use the kernel-only port form (simpleconv2dkernel_port.cc), TENSOR_CASES
 the tensor form (simpleconv2dkernel.cc: aie::in / aie::out, .pad, .reuse,
 block views, aie::autotune), DATAFLOW_CASES the {.depth / .resident / .tile}
 options (simplegemm_dataflow.cc), SPACE_CASES hand-written GemmSpaces + block
-loads (simpleconv2dkernel_space.cc: a GemmSpace and the kernel's blocks must agree).
+loads (simpleconv2dkernel_space.cc: a GemmSpace and the kernel's blocks must agree),
+TEMPLATE_CASES a `template <...> __global__` kernel (example/aiednn/gemm_kacc_bf16.cc:
+instantiated at its launch by kernel_template.cpp before the analysis).
 
     python3 src/llvm/convautotile/unitest/kernel_trace_cases.py [build/aiehlc-convtile]
 """
@@ -28,7 +30,8 @@ SPACE_BASE = CCODE / "simpleconv2dkernel_space.cc"
 LOAD_T = "aie::load_buffer(x_t, {oh0 * S - P, ow0 * S - P, 0}, {IH_T, IW_T, C}"
 LOAD_X = "const int8_t *x = aie::load_buffer(win_a, {oh0 * S, ow0 * S, 0}, {ih_t, iw_t, C});"
 
-# (name, [(old, new), ...], expected substring in the output; None = must pass)
+# (name, [(old, new), ...], expected substring in the output; None = must pass,
+#  "PASS:text" = must pass and print text)
 CASES = [
     ("baseline", [], None),
     # A slab one row taller than the conv footprint is still an affine block
@@ -156,6 +159,10 @@ GEMM_CASES = [
     ("gemm: role tags omitted (aie::port<T, aie::shape<...>>)",
      [("aie::IFM, ", ""), ("aie::WEIGHTS, ", ""), ("aie::OFM, ", "")],
      None),
+    ("gemm: .tile on a K-chunk block (not whole rows: the DMA would ignore it)",
+     [("const int8_t *x = aie::load_buffer(a, {pm * 16, j * 64}, {16, 64});",
+       "const int8_t *x = aie::load_buffer(a, {pm * 16, j * 64}, {16, 64}, {.tile = {8, 8}});")],
+     "need blocks that are whole rows of the tensor"),
     ("gemm: input block unique per core",
      [(LOAD_B, "aie::load_buffer(b, {pn * 16, pm * 64}, {16, 64})")],
      "unique per core"),
@@ -197,9 +204,33 @@ DATAFLOW_CASES = [
      "does not divide the block (16,256)"),
     ("dataflow: .tile row below a 32-bit word", [(OPT_A, "{.depth = 2, .tile = {8, 2}}")],
      "must be multiples of 4 bytes"),
+    ("dataflow: .depth = 1 on a store (an output window is always ping-pong)",
+     [("{GD_TS, cn});", "{GD_TS, cn}, {.depth = 1});")],
+     "an output window is always ping-pong"),
     ("dataflow: .tile on a store",
      [("{GD_TS, cn});", "{GD_TS, cn}, {.tile = {8, 8}});")],
      "aie::store_buffer takes only {.depth}"),
+]
+
+# The same options on the spatial-halo conv (simpleconv2dkernel_port_opts.cc).
+CONVOPTS_BASE = CCODE / "simpleconv2dkernel_port_opts.cc"
+CONVOPTS_CASES = [
+    ("convopts: baseline (.resident weights, .depth = 2 slab / output)", [], None),
+    ("convopts: .depth = 1 on the halo slab",
+     [("{ih_t, iw_t, C}, {.depth = 2}", "{ih_t, iw_t, C}, {.depth = 1}")],
+     "is not supported on a spatial-halo (conv) kernel yet"),
+]
+
+# bfloat16 ports (simpleconv2dkernel_port_bf16.cc): 2-byte blocks through the
+# trace (elemBytesOf), the x86 `bfloat16` (aie_api_x86emu.h) and the conv
+# cross-check with the ports' element size.
+BF16_BASE = CCODE / "simpleconv2dkernel_port_bf16.cc"
+BF16_CASES = [
+    ("bf16: baseline (bf16 in / out, fp32 accumulate)", [], None),
+    ("bf16: data used past the bf16 block (an int8-sized index)",
+     [("(float)x[((oh * S + kh) * iw_t + ow * S + kw) * C + c]",
+       "(float)x[((oh * S + kh) * iw_t + ow * S + kw) * C + c + 2 * iw_t * C]")],
+     "data used without being loaded"),
 ]
 
 # Hand-written GemmSpaces + block loads (verifySpaceKernels): each side may be
@@ -238,6 +269,36 @@ SPACE_CASES = [
 ]
 
 
+# C++ templates on a __global__ (example/aiednn/gemm_kacc_bf16.cc): the launch
+# `gemm_kacc<GM, GN, GK, GTK, GRELU><<<mesh>>>` picks the instance.
+TEMPLATE_BASE = REPO / "example" / "aiednn" / "gemm_kacc_bf16.cc"
+TLAUNCH = "gemm_kacc<GM, GN, GK, GTK, GRELU><<<mesh>>>"
+TEMPLATE_CASES = [
+    ("template: baseline (one instance, keeps its name)", [], "PASS:instance gemm_kacc<256, 64, 2304, 64, 1> -> gemm_kacc"),
+    ("template: trailing arguments from the defaults (TK = 64, RELU = true)",
+     [(TLAUNCH, "gemm_kacc<GM, GN, GK><<<mesh>>>")],
+     "PASS:instance gemm_kacc<256, 64, 2304, 64, 1> -> gemm_kacc"),
+    ("template: arguments are expressions over #defines",
+     [(TLAUNCH, "gemm_kacc<2 * 128, GN, GK, GTK * 2, false><<<mesh>>>")],
+     "PASS:instance gemm_kacc<256, 64, 2304, 128, 0> -> gemm_kacc"),
+    ("template: an instance the kernel cannot cover (M = 200, not a multiple of 4 * 16)",
+     [(TLAUNCH, "gemm_kacc<200, GN, GK, GTK, GRELU><<<mesh>>>")],
+     "ERROR"),
+    ("template: never launched",
+     [(TLAUNCH, "gemm_kacc_typo<GM, GN, GK, GTK, GRELU><<<mesh>>>")],
+     "is never launched as gemm_kacc<...><<<mesh>>>(...): nothing to instantiate"),
+    ("template: launched without template arguments",
+     [(TLAUNCH, "gemm_kacc<<<mesh>>>")],
+     "launched without template arguments"),
+    ("template: too many arguments",
+     [(TLAUNCH, "gemm_kacc<GM, GN, GK, GTK, GRELU, 1><<<mesh>>>")],
+     "6 template arguments, the kernel has 5"),
+    ("template: no argument and no default",
+     [(TLAUNCH, "gemm_kacc<GM, GN><<<mesh>>>")],
+     "no argument and no default for template parameter K"),
+]
+
+
 def run_case(cli, name, edits, expect, base=BASE):
     src = base.read_text()
     for old, new in edits:
@@ -245,7 +306,7 @@ def run_case(cli, name, edits, expect, base=BASE):
             return False, f"mutation anchor not found: {old[:60]!r}"
         src = src.replace(old, new, 1)
     with tempfile.TemporaryDirectory() as tmp:
-        for h in CCODE.glob("*.h"):
+        for h in list(CCODE.glob("*.h")) + list(base.parent.glob("*.h")):
             shutil.copy(h, tmp)
         path = pathlib.Path(tmp) / "case.cc"
         path.write_text(src)
@@ -253,6 +314,8 @@ def run_case(cli, name, edits, expect, base=BASE):
         out = p.stdout + p.stderr
     if expect is None:
         return p.returncode == 0, out
+    if expect.startswith("PASS:"):  # must pass AND print this
+        return p.returncode == 0 and expect[5:] in out, out
     return p.returncode == 2 and expect in out, out
 
 
@@ -262,7 +325,10 @@ def main():
     cases = [(n, e, x, BASE) for n, e, x in CASES] + [(n, e, x, TENSOR_BASE) for n, e, x in TENSOR_CASES]
     cases += [(n, e, x, GEMM_BASE) for n, e, x in GEMM_CASES]
     cases += [(n, e, x, DATAFLOW_BASE) for n, e, x in DATAFLOW_CASES]
+    cases += [(n, e, x, CONVOPTS_BASE) for n, e, x in CONVOPTS_CASES]
+    cases += [(n, e, x, BF16_BASE) for n, e, x in BF16_CASES]
     cases += [(n, e, x, SPACE_BASE) for n, e, x in SPACE_CASES]
+    cases += [(n, e, x, TEMPLATE_BASE) for n, e, x in TEMPLATE_CASES]
     if len(sys.argv) > 2:  # a name filter
         cases = [c for c in cases if sys.argv[2] in c[0]]
     for name, edits, expect, base in cases:
@@ -273,7 +339,7 @@ def main():
             print("     expected:", expect)
             print("     " + "\n     ".join(out.strip().splitlines()[-8:]))
         elif expect:
-            line = next((l for l in out.splitlines() if expect in l), "")
+            line = next((l for l in out.splitlines() if expect.removeprefix("PASS:") in l), "")
             print("     " + line.strip()[:200])
     print(f"kernel_trace_cases: {len(cases) - failed} passed, {failed} failed")
     return 1 if failed else 0

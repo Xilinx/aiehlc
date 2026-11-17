@@ -51,13 +51,15 @@ class CheckResult:
     buffers: dict            # kernel window buffers: name -> bytes
     core_free_bytes: int     # core data memory left after the buffers (-1 unknown)
     lint: list               # RoutingIR.lint() of the checked IR
+    flowcheck: dict          # script/test/flowcheck.py on the artifacts: {ok, errors, flows}
     artifacts: str           # generated host.cc / kernel.cc / routing.cc
     log: str                 # the whole pipeline log
 
     def summary(self):
-        state = "OK" if self.ok else "FAIL"
-        return (f"{state}: {len(self.errors)} error(s), {len(self.lint)} lint finding(s), buffers "
-                f"{self.buffers}, core free {self.core_free_bytes} B")
+        state = "OK" if self.ok and self.flowcheck.get("ok", True) else "FAIL"
+        return (f"{state}: {len(self.errors)} error(s), {len(self.lint)} lint finding(s), "
+                f"{len(self.flowcheck.get('errors', []))} flowcheck error(s), buffers {self.buffers}, "
+                f"core free {self.core_free_bytes} B")
 
 
 class RoutingIR:
@@ -181,8 +183,21 @@ class RoutingIR:
         m = re.search(r"Free space: (\d+) bytes", log)
         if m:
             free = int(m.group(1))
+        flow = {}
+        if r["ok"]:
+            flow = _flowcheck().check(r["artifacts"])
         return CheckResult(bool(r["ok"]), bool(r["verified"]), list(r["diagnostics"]), errors, buffers, free,
-                           self.lint() if r["verified"] else [], r.get("artifacts", ""), log)
+                           self.lint() if r["verified"] else [], flow, r.get("artifacts", ""), log)
+
+
+def _flowcheck():
+    """script/test/flowcheck.py (stdlib only), loaded by path from the checkout."""
+    import importlib.util
+    path = Path(__file__).resolve().parents[5] / "script" / "test" / "flowcheck.py"
+    spec = importlib.util.spec_from_file_location("aiehlc_flowcheck", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def build(src, ir_path, aie_version=5, work_dir=None, repo=None, timeout=1800):

@@ -34,6 +34,10 @@ Round trip (`script/test/routing_ir_roundtrip.sh <src.cc>`: build, feed
 host.cc / aieml.bcf / aieml.prx and all 28 IR stage dumps for
 `simplegemm_kernel_port.cc` and `simpleconv2dkernel_port.cc` -- the routing IR holds
 the whole tiling decision for both; no frontend state outside it changed the result.
+A normal build never parses its own dump, so every attribute must be covered by a
+round trip: `#routing.kernel_block` (kernel-only ports) first printed its arrays
+unbracketed and re-entry failed to parse it (skill **mlirattrarrayroundtrip**);
+`simplegemm_dataflow.cc` exercises it with `.resident` / `.tile`.
 
 Edits that take effect, board-verified (palmyra 213): output C `pp_depth` 2 -> 1
 (host.cc + aieml.bcf change, `PASS: all 4096 output elements match`).
@@ -72,6 +76,62 @@ conv `0_initial.mlir`), `script/test/routing_ir_roundtrip.sh`.
 - **Real edits propagate.** A's K chunk 64 -> 128 (`set_level(0, dim=1, depth=1, ...)`)
   doubles the input windows to 2048 B and shrinks free core memory 28416 -> 24064 B in
   `check()`.
+
+## dmaphop re-entry (`AIEHLC_DMAPHOP_IR_IN`) -- round trip yes, edits not yet
+
+Phase 1 (routing -> dmap -> dmaphop) runs as usual, keeping `rtopology` as a normal
+build leaves it; then `AIEHLC_DMAPHOP_IR_IN` (the `3_DmapToDmaphopPass.mlir` dump)
+replaces the module and everything downstream continues from it: the blueprint pass
+takes no topology, the routing path (routing.cc) rebuilds its resources from the
+dmaphop IR with a fresh `RoutingTopology`, pkt ids and core placement are in the IR.
+The only consumer of Phase-1 state, the control-plane placement, is refused with an
+edited file. `routing_ir_roundtrip.sh --stage dmaphop`: **byte-identical** outputs and
+28 IR stages for the GEMM and the conv example.
+
+**Edits are not safe yet** (board, simplegemm_kernel_port.cc, per-core diagnosis):
+
+| edit | build | board |
+|---|---|---|
+| swap the shim columns of B's col-0 and col-1 flows (2 lines) | ok, routing.cc 325 / host.cc 22 lines differ, RoutingHWVerify 0 errors | wrong: col-0 cores get col-1's B; A rows >= 2 shifted one mesh row, row 1 garbage |
+| swap the shim channels of B col-0 (ch 0) and A row-0 (ch 1) in shim col 0 (4 lines) | ok | the same pattern |
+
+The blueprint and schedule IR follow the edit correctly (only the edited flows'
+`declaretile`s change; host.cc BDs land on the right tiles). The breakage is in the
+stream routing: the dmaphop IR holds resource decisions made in allocation order
+(switch port indices, shim DMA channel <-> stream port pairing), and the routing path
+re-allocates from a fresh topology and reuses shim DataIOs by (column, channel)
+(`passdmaphoptoroutinghw.cpp`), so changing one flow's shim resource re-pairs others
+-- unrelated A flows break. RoutingHWVerify only checks that neighbour ports pair up
+and does not see it. flowcheck (below) now flags such a build before the board.
+Until the routing path re-solves every flow from the IR consistently (or edits go
+through a resource-aware API), treat dmaphop as **read-only for tuning**: inspect it, round-trip it, but make placement changes
+through the routing IR or the source.
+
+dmap re-entry is not implemented: `RoutingToDmapPass` occupies links and creates
+DataIOs in `rtopology` that `DmapToDmaphopPass` continues from, so a dmap edit hits
+the same problem one stage earlier.
+
+## flowcheck: catch a re-paired flow at build time
+
+`script/test/flowcheck.py <worklocal>` (static, well under a second) checks that
+routing.cc and host.cc deliver every dataflow where the dmaphop IR says it goes.
+Intent comes from `dmaphopprovenacemap.json`, which the pipeline writes from the
+dmaphop IR it actually used (so it follows `AIEHLC_DMAPHOP_IR_IN`); routing.cc is
+simulated as a port graph -- circuit connections, packet-switch slots (id & mask ->
+arbiter / msel) and master ports, the shim mux / demux (Gen5: MM2S ch0/ch1 ->
+SOUTH 3/7, S2MM ch0/ch1 <- SOUTH 1/3) and same-index neighbour links; host.cc's
+`Create IO` comments must name each flow's shim tile and channel. A flow passes
+when it reaches exactly its consumers and no other flow reaches them.
+
+It runs at the end of every `aiehlc.sh` tiling build (non-fatal, prints
+`flowcheck: OK` or a `WARNING: flowcheck FAILED` block) and inside
+`RoutingIR.check()` (`CheckResult.flowcheck`). Validated against every
+board-verified build of this work: the four PASS builds (GEMM kernel-only and
+hand-written, two routing-IR edits) are OK, as are conv and simplematmul2; both
+failing dmaphop edits FAIL with 9 errors that are exactly the board diagnosis --
+B col 0 misses column 0 and lands on mesh row 1's A port, B col 1 also feeds column
+0, A rows 1/2 slide one mesh row down, A row 3's shim port is never opened.
+Tests: `script/test/test_flowcheck.py` (fixtures `script/test/flowcheck_data/`).
 
 ## Limits
 

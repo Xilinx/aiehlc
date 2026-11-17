@@ -1,0 +1,103 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1000' height='510' viewBox='0 0 1000 510'>
+<defs><marker id='arr' markerUnits='userSpaceOnUse' markerWidth='12' markerHeight='10' refX='11' refY='5' orient='auto'><path d='M0,0 L12,5 L0,10 z' fill='#444'/></marker></defs>
+<rect width='100%' height='100%' fill='white'/>
+<text x='500.0' y='24.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='14' text-anchor='middle' fill='#222' font-weight='bold'>simpleconv2dkernel_port.cc: one aie::mmul&lt;8,8,8&gt; step = 8 output columns x 8 tap bytes x 8 channels</text>
+<text x='40.0' y='60.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='start' fill='#222' font-weight='bold'>one slab row  r = x + (oh*2 + kh) * 244   (61 input columns x 4 channels = 244 bytes)</text>
+<rect x='40.0' y='70.0' width='854.0' height='26.0' rx='0' fill='#fff7ef' fill-opacity='1.0' stroke='#555555' stroke-width='1.0'/>
+<line x1='40.0' y1='70.0' x2='40.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='68.0' y1='70.0' x2='68.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='96.0' y1='70.0' x2='96.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='124.0' y1='70.0' x2='124.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='152.0' y1='70.0' x2='152.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='180.0' y1='70.0' x2='180.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='208.0' y1='70.0' x2='208.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='236.0' y1='70.0' x2='236.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='264.0' y1='70.0' x2='264.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='292.0' y1='70.0' x2='292.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='320.0' y1='70.0' x2='320.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='348.0' y1='70.0' x2='348.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='376.0' y1='70.0' x2='376.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='404.0' y1='70.0' x2='404.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='432.0' y1='70.0' x2='432.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='460.0' y1='70.0' x2='460.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='488.0' y1='70.0' x2='488.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='516.0' y1='70.0' x2='516.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='544.0' y1='70.0' x2='544.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='572.0' y1='70.0' x2='572.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='600.0' y1='70.0' x2='600.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='628.0' y1='70.0' x2='628.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='656.0' y1='70.0' x2='656.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='684.0' y1='70.0' x2='684.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='712.0' y1='70.0' x2='712.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='740.0' y1='70.0' x2='740.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='768.0' y1='70.0' x2='768.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='796.0' y1='70.0' x2='796.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='824.0' y1='70.0' x2='824.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='852.0' y1='70.0' x2='852.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<line x1='880.0' y1='70.0' x2='880.0' y2='96.0' stroke='#ddd' stroke-width='0.6'/>
+<rect x='40.0' y='104.0' width='98.0' height='12.0' rx='0' fill='#f4a261' fill-opacity='0.85' stroke='#333' stroke-width='1'/>
+<text x='144.0' y='114.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#222' font-weight='normal'>output column ow=0: bytes 0..27</text>
+<rect x='68.0' y='120.0' width='98.0' height='12.0' rx='0' fill='#e9c46a' fill-opacity='0.85' stroke='#333' stroke-width='1'/>
+<text x='172.0' y='130.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#222' font-weight='normal'>output column ow=1: bytes 8..35</text>
+<rect x='236.0' y='136.0' width='98.0' height='12.0' rx='0' fill='#e76f51' fill-opacity='0.85' stroke='#333' stroke-width='1'/>
+<text x='340.0' y='146.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#222' font-weight='normal'>output column ow=7: bytes 56..83</text>
+<text x='510.0' y='120.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#666' font-weight='normal'>(7 taps x 4 channels = 28 bytes; the next column starts 2 px x 4 ch = 8 bytes later)</text>
+<text x='40.0' y='172.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='start' fill='#222' font-weight='bold'>aie::load_unaligned_v&lt;64&gt;(r + owA*8 + off, 4): 64 consecutive bytes</text>
+<rect x='40.0' y='180.0' width='224.0' height='20.0' rx='0' fill='#f4a261' fill-opacity='0.8' stroke='#333' stroke-width='1'/>
+<line x1='40.0' y1='180.0' x2='40.0' y2='200.0' stroke='#333' stroke-width='0.8'/>
+<text x='54.0' y='194.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#222' font-weight='normal'>ow0</text>
+<line x1='68.0' y1='180.0' x2='68.0' y2='200.0' stroke='#333' stroke-width='0.8'/>
+<text x='82.0' y='194.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#222' font-weight='normal'>ow1</text>
+<line x1='96.0' y1='180.0' x2='96.0' y2='200.0' stroke='#333' stroke-width='0.8'/>
+<text x='110.0' y='194.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#222' font-weight='normal'>ow2</text>
+<line x1='124.0' y1='180.0' x2='124.0' y2='200.0' stroke='#333' stroke-width='0.8'/>
+<text x='138.0' y='194.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#222' font-weight='normal'>ow3</text>
+<line x1='152.0' y1='180.0' x2='152.0' y2='200.0' stroke='#333' stroke-width='0.8'/>
+<text x='166.0' y='194.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#222' font-weight='normal'>ow4</text>
+<line x1='180.0' y1='180.0' x2='180.0' y2='200.0' stroke='#333' stroke-width='0.8'/>
+<text x='194.0' y='194.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#222' font-weight='normal'>ow5</text>
+<line x1='208.0' y1='180.0' x2='208.0' y2='200.0' stroke='#333' stroke-width='0.8'/>
+<text x='222.0' y='194.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#222' font-weight='normal'>ow6</text>
+<line x1='236.0' y1='180.0' x2='236.0' y2='200.0' stroke='#333' stroke-width='0.8'/>
+<text x='250.0' y='194.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#222' font-weight='normal'>ow7</text>
+<text x='274.0' y='194.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#222' font-weight='normal'>= an 8x8 A matrix: row m = output column owA+m, 8 tap bytes of it</text>
+<text x='274.0' y='210.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#666' font-weight='normal'>(stride 2 x 4 channels = 8 bytes = exactly one A row: im2col for free)</text>
+<text x='40.0' y='246.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='start' fill='#222' font-weight='bold'>K: the 28 bytes of a kernel row in 4 chunks of 8 (off = 0, 8, 16, 20)</text>
+<rect x='40.0' y='254.0' width='72.0' height='14.0' rx='0' fill='#cfe2f3' fill-opacity='1.0' stroke='#333' stroke-width='1'/>
+<text x='76.0' y='265.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#222' font-weight='normal'>kb=0</text>
+<rect x='112.0' y='272.0' width='72.0' height='14.0' rx='0' fill='#cfe2f3' fill-opacity='1.0' stroke='#333' stroke-width='1'/>
+<text x='148.0' y='283.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#222' font-weight='normal'>kb=1</text>
+<rect x='184.0' y='290.0' width='72.0' height='14.0' rx='0' fill='#cfe2f3' fill-opacity='1.0' stroke='#333' stroke-width='1'/>
+<text x='220.0' y='301.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#222' font-weight='normal'>kb=2</text>
+<rect x='220.0' y='308.0' width='72.0' height='14.0' rx='0' fill='#f4cccc' fill-opacity='1.0' stroke='#333' stroke-width='1'/>
+<text x='256.0' y='319.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='9' text-anchor='middle' fill='#222' font-weight='normal'>kb=3</text>
+<rect x='220.0' y='308.0' width='36.0' height='14.0' rx='0' fill='#999999' fill-opacity='0.8' stroke='#333' stroke-width='1'/>
+<text x='306.0' y='319.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='start' fill='#990000' font-weight='normal'>bytes 20..23 overlap kb=2: their weights in Bp are 0</text>
+<text x='40.0' y='338.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='8' text-anchor='middle' fill='#222' font-weight='normal'>0</text>
+<text x='76.0' y='338.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='8' text-anchor='middle' fill='#222' font-weight='normal'>4</text>
+<text x='112.0' y='338.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='8' text-anchor='middle' fill='#222' font-weight='normal'>8</text>
+<text x='148.0' y='338.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='8' text-anchor='middle' fill='#222' font-weight='normal'>12</text>
+<text x='184.0' y='338.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='8' text-anchor='middle' fill='#222' font-weight='normal'>16</text>
+<text x='220.0' y='338.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='8' text-anchor='middle' fill='#222' font-weight='normal'>20</text>
+<text x='256.0' y='338.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='8' text-anchor='middle' fill='#222' font-weight='normal'>24</text>
+<text x='292.0' y='338.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='8' text-anchor='middle' fill='#222' font-weight='normal'>28</text>
+<text x='40.0' y='366.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='start' fill='#222' font-weight='bold'>per kernel row kh (7) and chunk kb (4):  4 accumulators</text>
+<rect x='40.0' y='374.0' width='90.0' height='90.0' rx='0' fill='#f4a261' fill-opacity='0.8' stroke='#333' stroke-width='1'/>
+<text x='85.0' y='414.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>aA</text>
+<text x='85.0' y='432.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#222' font-weight='normal'>8 ow x 8 K</text>
+<text x='150.0' y='424.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='16' text-anchor='middle' fill='#222' font-weight='normal'>x</text>
+<rect x='170.0' y='374.0' width='90.0' height='90.0' rx='0' fill='#6fa8dc' fill-opacity='0.8' stroke='#333' stroke-width='1'/>
+<text x='215.0' y='414.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>b0 / b1</text>
+<text x='215.0' y='432.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#222' font-weight='normal'>8 K x 8 oc</text>
+<text x='280.0' y='424.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='16' text-anchor='middle' fill='#222' font-weight='normal'>-&gt;</text>
+<rect x='310.0' y='374.0' width='90.0' height='90.0' rx='0' fill='#93c47d' fill-opacity='0.8' stroke='#333' stroke-width='1'/>
+<text x='355.0' y='414.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#222' font-weight='bold'>cA0 / cA1</text>
+<text x='355.0' y='432.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#222' font-weight='normal'>8 ow x 8 oc</text>
+<text x='430.0' y='384.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#333' font-weight='normal'>cA0 += aA * b0   (ow owA..+7,  oc 0..7)</text>
+<text x='430.0' y='401.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#333' font-weight='normal'>cA1 += aA * b1   (ow owA..+7,  oc 8..15)</text>
+<text x='430.0' y='418.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#333' font-weight='normal'>cB0 += aB * b0   (ow owB..+7,  oc 0..7)</text>
+<text x='430.0' y='435.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#333' font-weight='normal'>cB1 += aB * b1   (ow owB..+7,  oc 8..15)</text>
+<text x='430.0' y='452.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#333' font-weight='normal'>pass 0: owA = 0, owB = 8;  pass 1: owA = 16, owB = 20</text>
+<text x='430.0' y='469.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#333' font-weight='normal'>(28 columns = 0..7, 8..15, 16..23, 20..27; 20..23 written twice, same values)</text>
+<text x='430.0' y='486.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='start' fill='#333' font-weight='normal'>7 kh x 4 kb = 28 mmul steps per accumulator: K = 224 (196 real taps)</text>
+</svg>

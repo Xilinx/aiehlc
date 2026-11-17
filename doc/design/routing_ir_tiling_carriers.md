@@ -32,11 +32,12 @@ module attributes {routing.control_packet_mode = 0 : i64, ..., routing.output_ti
 | `routing.{tile_m,tile_rows,m_rounds,tile_n,tile_cols,n_rounds,effective_k,full_k,k_rounds}` on the `fullconnect_auto=0` / spatial-halo paths | `#routing.kernel_tiling<...>` | routing `func.func` (`routing.kernel_tiling`) |
 | `routing.spatial_out_rounds` | `#routing.kernel_tiling` `out_rounds` | same |
 | GEMM `fullconnect_auto=1` tiling | unchanged: `#routing.tiling` on `routing.partitiontensor` (`readGemmTilingScalars`) | `routing.partitiontensor` |
+| (new) the blocks a kernel-only kernel takes on one port | `#routing.kernel_block<tensor_shape, shape, rounds_i, rounds_j, step_i, step_j, resident, tile_r, tile_c>` | `routing.routingcreatescheduletensor` (`kernel_block`) |
 
 `DmaphopTodfscheblueprintPass` replaces each `routingcreatescheduletensor` by a
-`dfscheblueprint.declare_data` and copies the four per-tensor attributes onto it
+`dfscheblueprint.declare_data` and copies the five per-tensor attributes onto it
 as `routing.halo` / `routing.shim_dma` / `routing.layout_transform` /
-`routing.pp_depth` (`routing::copyTensorRoutingInfo`). The dfscheblueprint
+`routing.pp_depth` / `routing.kernel_block` (`routing::copyTensorRoutingInfo`). The dfscheblueprint
 dialect does not depend on the routing dialect, so on `declare_data` they are
 discardable, dialect-prefixed attributes; on the routing op they are declared in
 ODS and type-checked. The routing `func.func` survives every stage of both the
@@ -48,6 +49,19 @@ That is exactly how the old readers treated a missing dictionary key (`if (auto 
 = getAs(...))` with a 0 default; the `l2_rounds`/`k_rounds` reads that defaulted
 to 1 are all guarded `> 0 ? x : 1`). `pp_depth` is the exception: it is
 `std::optional` in `TensorRoutingInfo` because 0 is a value, not absence.
+
+`kernel_block` is set only for kernel-only sources (convautotile's kernel
+analysis traced the `aie::load_buffer` / `store_buffer` calls). Its
+`tensor_shape` is the tensor **as the kernel declares it** -- not the
+`TensorParam` shape, which the GEMM path relabels (B as `[K, N]` while its bytes
+are `[N, K]`). The blueprint lowering resolves it through one shared helper,
+`blueprint_sched::resolveKernelBlock` (`helper/flowtransfer_common.cpp`), so host
+and kernel always agree: on the GEMM path (`fullconnect_auto = 1`, no halo) every
+such port is **checked** (final core window and round count = the kernel's block
+and block count, else a build error), and an input whose blocks are
+row-contiguous is **followed** (window, rounds, per-round DDR offset, `.tile`
+shim dims and its own `pp_depth` come from the kernel). Design:
+[trace_to_routing.md](trace_to_routing.md), "Dataflow options".
 
 ## Reading it (`routing/routingmanager.h`)
 

@@ -48,30 +48,83 @@ Key features:
 
 AIEHLC enables developers to easily build AIE applications by relying solely on the AIE driver C API and CUDA/ROCm-compatible APIs, eliminating the need to learn additional domain-specific languages (DSLs). This streamlined approach target to accelerates the development process and reduces barriers to entry for AIE application development.
 
-### Emaple code conv2d
+### Conv2d on 16 Tile Parallel Compute Example
 
-```c
-//kernel code 
-constexpr aie::GlobalPolicy conv_policy = {.fullconnect_auto = 0};
-__global__(conv_policy) void conv2d_spatial(
-    aie::port<input_window_int8 *, RowBC_spatial> win_a, // raw slab [halo_slice, W*C] (derived)
-    aie::port<input_window_int8 *, ColBC> win_b,         // filter [K, tile_N]
-    aie::port<output_window_int8 *, LtoR_Merge> win_c    // output [oh_per_row*OW, tile_N]
-) {
-   .....
+The whole program -- kernel and host -- of a 7x7 stride-2 int8 convolution
+(224 x 224 x 3 -> 112 x 112 x 64, the ResNet stem) on 16 AIE tiles. The kernel
+says, in the coordinates of the whole tensor, which block each tile reads and
+writes (`aie::load_buffer` / `aie::store_buffer`, indexed by `aie::program_id`);
+the compiler traces those blocks and derives the DMA, the stream routing and
+the ping-pong buffers. There is no DMA, routing or buffer code to write.
+
+- mesh row `pid_h` (4 rows) takes 28 output rows, mesh column `pid_c` (4
+  columns) takes 16 of the 64 output channels -- 16 tiles in parallel;
+- each tile computes 4 x 4 blocks of 7 x 28 x 16 outputs, reading the 19 x 61 x 4
+  input footprint of each (the halo) and its 16 filters once;
+- the full example also checks the result bit-exactly against a CPU
+  convolution (board: `PASS: 0 mismatches out of 802816`).
+
+<!-- code: example/tileprogram/ccode/simpleconv2dkernel_port_less.cc nocomments notimer nocheck devicelast; after init_conv2d_test_data(: kernel call to parallel compute in 4x4 tiles -->
+```cpp
+#include "simpleconv2d_new_load.h"
+__global__ void conv2d_spatial(aie::port<input_window_int8 *, aie::IFM, aie::shape<230, 230, 4>> win_a,
+                               aie::port<input_window_int8 *, aie::WEIGHTS, aie::shape<64, 7, 7, 4>> win_b,
+                               aie::port<output_window_int8 *, aie::OFM, aie::shape<112, 112, 64>> win_c) {
+    const int KH = 7, KW = 7, S = 2, C = 4;
+    const int oh_t = 7, ow_t = 28, oc_t = 16;
+    const int ih_t = (oh_t - 1) * S + KH;
+    const int iw_t = (ow_t - 1) * S + KW;
+    const int oh_core = 112 / aie::num_programs(0);
+    const int pid_h = aie::program_id(0);
+    const int pid_c = aie::program_id(1);
+    const int8_t *w = aie::load_buffer(win_b, {pid_c * oc_t, 0, 0, 0}, {oc_t, KH, KW, C});
+
+    for (int i = 0; i < oh_core / oh_t; i++) {
+        for (int j = 0; j < 112 / ow_t; j++) {
+            const int oh0 = pid_h * oh_core + i * oh_t;
+            const int ow0 = j * ow_t;
+            const int8_t *x = aie::load_buffer(win_a, {oh0 * S, ow0 * S, 0}, {ih_t, iw_t, C});
+            int8_t *y = aie::store_buffer(win_c, {oh0, ow0, pid_c * oc_t}, {oh_t, ow_t, oc_t});
+            for (int oh = 0; oh < oh_t; oh++)
+                for (int ow = 0; ow < ow_t; ow++)
+                    for (int oc = 0; oc < oc_t; oc++) {
+                        int acc = 0;
+                        for (int kh = 0; kh < KH; kh++)
+                            for (int kw = 0; kw < KW; kw++)
+                                for (int c = 0; c < C; c++)
+                                    acc += x[((oh * S + kh) * iw_t + ow * S + kw) * C + c] *
+                                           w[((oc * KH + kh) * KW + kw) * C + c];
+                        y[(oh * ow_t + ow) * oc_t + oc] = (int8_t)(acc > 127 ? 127 : acc < -128 ? -128 : acc);
+                    }
+            aie::release(win_a);
+            aie::commit(win_c);
+        }
+    }
+    aie::release(win_b);
 }
-
-//host code 
 int main() {
-    //...
+    const int in_n = INPUT_H_PAD * INPUT_W_PAD * INPUT_C_ALIGN, w_n = K * NUM_FILTERS, out_n = M * N;
+    int8_t *input = (int8_t *)__Runtime_Alloc(in_n), *filter = (int8_t *)__Runtime_Alloc(w_n);
+    int8_t *output = (int8_t *)__Runtime_Alloc(out_n), *ref = (int8_t *)__Runtime_Alloc(out_n);
+    memset(output, 0, out_n);
+    init_conv2d_test_data(input, filter);
+    // kernel call to parallel compute in 4x4 tiles
     aieSetDevice(0);
     aieArray device;
     aieMesh mesh = device.partition({3, 6, 0, 6}, HW_ROWS, HW_COLS);
-    //...
     conv2d_spatial<<<mesh>>>(input, filter, output, M, N, K);
-    //...
+    return 0;
 }
 ```
+<!-- /code -->
+
+(Comments, timing and the result check omitted here; the full file is
+[example/tileprogram/ccode/simpleconv2dkernel_port_less.cc](example/tileprogram/ccode/simpleconv2dkernel_port_less.cc).)
+
+Line-by-line walkthrough, figures of the tiling and of how the compiler gets
+from these calls to DMA, routing and C++:
+[tutorial/aieprogram/01_contraction/conv2d.md](tutorial/aieprogram/01_contraction/conv2d.md)
+(all tutorials: [tutorial/aieprogram/README.md](tutorial/aieprogram/README.md)).
 
 ### Architecture
 
@@ -178,39 +231,6 @@ bash script/runsim.sh \
 ```
 
 On success the sim ends with `Sucess: CPU result matches AIE.` / `Sim result: 0`.
-
-## rcom: ROCm/HIP GEMM Front End
-
-`rcom` is a standalone Python front end that reads a canonical ROCm/HIP int8
-GEMM source, recognizes it as a GEMM, and emits a CUDA-style `<name>.cc/.h`
-(the same dialect as `example/tileprogram/ccode/simplematmul2.cc`). It then
-hands the generated `.cc` to the unchanged `script/aiehlc.sh` pipeline to build
-host + kernel ELFs.
-
-```
-matmul_hip.cpp --(rcom.py)--> <name>.cc + <name>.h --(aiehlc.sh)--> aout/main.elf
-```
-
-The HIP kernel body is *recognized and templated* (the proven AIE cache-A /
-stream-B matmul), not translated line-for-line. v1 supports **int8 only** and
-defaults to the HW-validated `M=N=K=256`, `4x4` mesh config; `M/N/K` and mesh
-are overridable but deviations are heuristic (untested on HW) and emit a
-warning.
-
-```bash
-source script/setup.sh
-
-# One-shot: HIP source -> generated .cc/.h -> ELF (aout/main.elf)
-source script/rcom.sh --rocm-source-file example/tileprogram/rocm/matmul_hip.cpp --aie-version 5
-
-# Emit only (no build), e.g. for inspection:
-python3 src/tool/frontend/rcom.py example/tileprogram/rocm/matmul_hip.cpp \
-    --emit-only --out ./gen
-
-# Overrides: kernel name, mesh, dims
-python3 src/tool/frontend/rcom.py example/tileprogram/rocm/matmul_hip.cpp \
-    --name gemm --mesh 4x4 --M 256 --N 256 --K 256 --out ./gen
-```
 
 ## Runtime Debug Level
 

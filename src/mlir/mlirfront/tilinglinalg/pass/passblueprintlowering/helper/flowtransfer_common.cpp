@@ -683,7 +683,9 @@ KernelBlockUse resolveKernelBlock(const routing::TensorRoutingInfoMap &info, int
                                   bool fullConnect, int64_t elemBytes) {
     KernelBlockUse u;
     const routing::TensorRoutingInfo *ti = routing::lookupTensorRoutingInfo(info, funcArgIdx);
-    if (!ti || !ti->kernelBlock || ti->halo || !fullConnect)
+    // fullconnect_auto = 0 (spatial-halo conv): only a {.resident} input -- a
+    // block taken once, e.g. the conv weights -- leaves its schedule to the kernel.
+    if (!ti || !ti->kernelBlock || ti->halo || (!fullConnect && !ti->kernelBlock.getResident()))
         return u;
     routing::KernelBlockAttr kb = ti->kernelBlock;
     ArrayRef<int64_t> shape = kb.getShape(), tensor = kb.getTensorShape();

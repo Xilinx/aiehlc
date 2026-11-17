@@ -13,6 +13,8 @@ Unit tests need only onnx. ``deployed`` tests adopt ``worklocal/tvmrelay_deploy`
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -276,6 +278,8 @@ assert sys.stdin.read().strip(), "the prompt comes on stdin"
 if os.environ.get("FAKE_CLAUDE_MODE") == "port":
     (entry,) = [p for p in cwd.iterdir() if p.stem.endswith("_l4")]
     shutil.copy({conv3!r}, entry)
+if os.environ.get("FAKE_CLAUDE_MODE") == "fill":       # ai_offload_prototype: the solved layer-1 file
+    shutil.copy(os.environ["FAKE_CLAUDE_SOLUTION"], cwd / "aiek_layer01.cc")
 print(json.dumps({{"type": "assistant", "message": {{"content": [
     {{"type": "tool_use", "name": "Edit", "input": {{"file_path": "x.cc"}}}}]}}}}))
 print(json.dumps({{"type": "result", "session_id": "s-1", "result": "done"}}))
@@ -355,13 +359,43 @@ def test_offload_prototype_layer_is_proven(tmp_path):
     # conv + requantize: the reference is complete, so offload_check passes as written
     assert itf.requant and "TODO" not in itf.reference_source() and "return AIEK_OK;" in itf.reference_source()
     files = itf.write(tmp_path)
-    assert {p.name for p in files} == {"aiek_layer01.cc", "aiek_layer01_ref.c"}
+    names = {p.name for p in files}
+    assert {"aiek_layer01.cc", "aiek_layer01_ref.c", "test_aiek_layer01.cc"} <= names
+    # the test: an aiehlc entry file (main() + the kernel spliced in) over the entry
+    test = (tmp_path / "test_aiek_layer01.cc").read_text()
+    for part in ('#include "aiek_layer01.cc"', "int main()", "aiek_layer01(aiekt_args, AIEKT_NARGS)",
+                 "TEST PASS", '__has_include("aiek_layer01_test_data.h")',
+                 # timed: every call on the clock, first apart, PMU split, one summary line
+                 "aiekt_ms(t0, aiekt_now())", "PERF SUMMARY", "__Runtime_phase_cycles",
+                 "#define AIEKT_MACS 118013952.0"):
+        assert part in test, part
+    assert "__global__" not in test and "<<<" not in test  # silent frontend traps
+    if "aiek_layer01_test_data.h" in names:  # a make TRACE=1 deploy: real tensors + golden
+        hdr = (tmp_path / "aiek_layer01_test_data.h").read_text()
+        assert hdr.count("#define AIEKT_DATA_") == len(itf.args)
+        assert all((tmp_path / inc).is_file() for inc in re.findall(r'#include "(l\d+_\w+\.h)"', hdr))
     assert not [f for f in ag.lint(tmp_path / "aiek_layer01.cc").findings if f.level == "error"]
     with pytest.raises(ag.AiegraphError, match="already exist"):
         itf.write(tmp_path)
     # what detect sees in the written file is the same signature
     rep = emod.detect(tmp_path / "aiek_layer01.cc")
     assert 1 in rep.matches
+
+
+def test_offload_prototype_test_without_dumps(tmp_path):
+    from aiegraph.prototype import OffloadPrototype, ProtoArg
+    p = OffloadPrototype(layer=7, symbol="s", dir="07_x", calls=[7], label="op", entry="aiek_x", op="op",
+                         match="s", args=[ProtoArg(0, "in", "int8", (1, 8), "ifm", "activation"),
+                                          ProtoArg(1, "param", "int32", (8,), "bias", "bias", requires=("zero",)),
+                                          ProtoArg(2, "out", "uint8", (1, 8), "ofm", "output")])
+    dumps, why = p.test_data()
+    assert dumps is None and "TRACE=1" in why
+    files = p.write(tmp_path)
+    assert {f.name for f in files} == {"aiek_x.cc", "aiek_x_ref.c", "test_aiek_x.cc"}
+    test = (tmp_path / "test_aiek_x.cc").read_text()
+    assert "(int32_t)aiekt_rand(0LL, 0LL)" in test  # require=zero honoured by the synthetic fill
+    assert "#define AIEKT_MACS 0.0" in test and "PERF SUMMARY" in test  # timed, no conv -> no GOPS
+    assert p.write(tmp_path / "no_test", test=False) and not (tmp_path / "no_test" / "test_aiek_x.cc").exists()
 
 
 @deployed
@@ -776,3 +810,61 @@ def test_accelerate_an_accelerated_kernel_with_a_stale_report(tmp_path, monkeypa
     assert cur.read_text().endswith("// accelerated once\n")               # the running kernel survived
     assert Path(res).parent.name == "layer1_aiek_t_r2" and res.original == cur
     assert "// accelerated once" in Path(res).read_text()                   # staged from the CURRENT kernel
+
+
+# ── ai_offload_prototype: kemu + prototype_check + the AI loop ──────────────
+
+SOLVED_L1 = REPO / "example" / "tileprogram" / "ccode" / "model" / "resnet18" / "layer1" / "aiek_layer01.cc"
+traced = pytest.mark.skipif(not (DEPLOY / "arm_build" / "layeriohex").is_dir() or not SOLVED_L1.is_file(),
+                            reason="needs a make TRACE=1 deploy and the solved layer-1 example")
+
+
+@deployed
+@traced
+def test_kemu_judges_the_kernel_not_the_reference(tmp_path):
+    from aiegraph.kemu import kemu
+    proto = ag.open(DEPLOY).offload_prototype("layer1")
+    assert kemu(proto, SOLVED_L1.parent).ok                      # vs TVM's own output
+    proto.write(tmp_path / "backbone", test=False)
+    r = kemu(proto, tmp_path / "backbone")                       # offload_check says READY here
+    assert not r.ok and "returned -4" in r.detail
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    shutil.copy(SOLVED_L1.with_name("aiek_layer01_ref.c"), bad)
+    (bad / "aiek_layer01.cc").write_text(SOLVED_L1.read_text().replace("(s - 1))", "(s - 2))"))  # rounding
+    r = kemu(proto, bad)
+    assert not r.ok and "differ from TVM" in r.detail
+    proto.iohex_dir = ""                                         # no dumps: the reference is the golden
+    r = kemu(proto, SOLVED_L1.parent)
+    assert r.ok and r.golden == "reference"
+
+
+@deployed
+@traced
+def test_ai_offload_prototype_fills_and_verifies(fake_claude, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "fill")
+    monkeypatch.setenv("FAKE_CLAUDE_SOLUTION", str(SOLVED_L1))
+    emod = ag.open(DEPLOY)
+    res = emod.ai_offload_prototype("layer1", claude=fake_claude, out_dir=tmp_path / "p", build=False)
+    assert res.ok and res.rounds == 1, res
+    assert [g for g, ok, _ in res.verdict.rows] == ["todo", "kemu", "trace", "check"]
+    assert Path(res) == tmp_path / "p" / "aiek_layer01.cc"
+    argv = json.loads((tmp_path / "p" / "fake_calls.txt").read_text().splitlines()[0])
+    tools = argv[argv.index("--allowedTools") + 1]
+    assert f"Edit(/{tmp_path / 'p'}/**)" in tools and "-m aiegraph protocheck" in tools
+
+
+@deployed
+@traced
+def test_ai_offload_prototype_gives_up_and_never_deletes(fake_claude, tmp_path):
+    emod = ag.open(DEPLOY)
+    (tmp_path / "p").mkdir()
+    (tmp_path / "p" / "mine.cc").write_text("// the user's")
+    res = emod.ai_offload_prototype("layer1", claude=fake_claude, out_dir=tmp_path / "p", rounds=2, build=False)
+    assert not res.ok and res.rounds == 2 and "NOT CORRECT" in repr(res)
+    assert dict((g, ok) for g, ok, _ in res.verdict.rows)["kemu"] is False
+    prev = [d for d in tmp_path.iterdir() if d.name.startswith("p.prev-")]
+    assert len(prev) == 1 and (prev[0] / "mine.cc").read_text() == "// the user's"
+    with pytest.raises(ag.AiegraphError):
+        res.raise_for_status()
+
