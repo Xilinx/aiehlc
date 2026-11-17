@@ -164,6 +164,11 @@ class Group:
     outputs: list               # GroupTensor produced inside, read outside (or a graph output)
     internal: list              # GroupTensor produced inside, read only inside
     symbols: dict = field(default_factory=dict)     # call -> symbol
+    # one-call weighted groups (callsite.py, S1): activation in / out, weight, geometry
+    x: object = None
+    y: object = None
+    w: object = None
+    info: dict = field(default_factory=dict)
 
     def __repr__(self) -> str:
         f = lambda ts: ", ".join(str(t) for t in ts) or "-"   # noqa: E731

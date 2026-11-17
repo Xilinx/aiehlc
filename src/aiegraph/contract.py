@@ -222,6 +222,9 @@ class Step:
     writes: tuple = ()
     consts: dict = field(default_factory=dict)
     weights: object = None
+    call: tuple = None              # "args" ABI: the C argument names, in order (S1)
+    wrap: tuple = None              # (BEGIN, END) macros put around the call, given the call index
+    tag: str = None                 # GRAPH_PROF tag of the call
 
     def __repr__(self) -> str:
         c = ", ".join(f"{k}={v!r}" for k, v in self.consts.items())
@@ -229,7 +232,16 @@ class Step:
                 f"writes [{', '.join(map(str, self.writes))}] consts {{{c}}}")
 
 
-def step(name: str, reads=None, writes=None, consts=None, weights=None) -> Step:
+#: names the "args" ABI fills in itself (everything else in ``call=`` is a const)
+CALL_SPECIALS = {"args": "void *args", "nargs": "int nargs", "wbf": "const uint16_t *wbf"}
+
+
+def step(name: str, reads=None, writes=None, consts=None, weights=None, call=None,
+         wrap=None, tag=None) -> Step:
+    """``call=`` selects the "args" ABI of a one-call group (S1): the step entry is
+    called in place of the TVM call as ``name(<call>)``, where ``args`` / ``nargs`` are
+    the TVM call's packed arguments, ``wbf`` the step's bf16 weight read in place from
+    ``weights.bin`` (``weights=g.w.as_bf16(...)``) and every other name a const."""
     if not isinstance(name, str) or not name.isidentifier():
         raise AiegraphError("step", f"step name {name!r}", hint="the C entry name of the step")
     r = tuple(_as_buf(x, f"{name} reads") for x in _as_list(reads))
@@ -241,7 +253,28 @@ def step(name: str, reads=None, writes=None, consts=None, weights=None) -> Step:
         if isinstance(v, bool) or not isinstance(v, (int, float)) and not hasattr(v, "__index__") \
                 and not hasattr(v, "__float__"):
             raise AiegraphError("step", f"{name}: const {k}={v!r} is not a number")
-    return Step(name, r, w, c, weights)
+    if call is not None:
+        call = tuple(call)
+        for a in call:
+            if not isinstance(a, str) or not a.isidentifier():
+                raise AiegraphError("step", f"{name}: call argument {a!r}", hint="C names")
+            if a not in CALL_SPECIALS and a not in c:
+                raise AiegraphError("step", f"{name}: call argument {a!r} is neither a const nor "
+                                    f"one of {sorted(CALL_SPECIALS)}")
+        if len(set(call)) != len(call):
+            raise AiegraphError("step", f"{name}: call arguments repeat {call}")
+        if "wbf" in call and weights is None:
+            raise AiegraphError("step", f"{name}: call passes wbf but the step has no weights=",
+                                hint="weights=g.w.as_bf16(layout=...)")
+        if weights is not None and "wbf" not in call:
+            raise AiegraphError("step", f"{name}: weights= given but call does not pass wbf")
+        unused = [k for k in c if k not in call]
+        if unused:
+            raise AiegraphError("step", f"{name}: consts {unused} are not in call={call}")
+    if wrap is not None and (len(tuple(wrap)) != 2 or not all(
+            isinstance(m, str) and m.isidentifier() for m in wrap)):
+        raise AiegraphError("step", f"{name}: wrap={wrap!r}", hint="(BEGIN_MACRO, END_MACRO)")
+    return Step(name, r, w, c, weights, call, None if wrap is None else tuple(wrap), tag)
 
 
 @dataclass
