@@ -631,6 +631,36 @@ def aie_entries(layers_dir) -> dict:
     return out
 
 
+def group_sites(layers_dir) -> dict:
+    """Group offload (aiegraph ``offload_group(..., emit=)``, design 2026-11-16 §6, S3):
+    ``{call index: ("step", group, step record) | ("removed", group, None)}`` from the
+    ``groups`` of ``layers/partition.json``. A recorded group whose steps carry no driver
+    code (``c``) is an error -- the driver would silently keep running the TVM calls."""
+    part = Path(layers_dir) / "partition.json"
+    if not part.is_file():
+        return {}
+    try:
+        doc = json.loads(part.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    out = {}
+    for g in doc.get("groups", []):
+        steps = {s["name"]: s for s in g.get("steps", [])}
+        bad = [n for n, s in steps.items() if not s.get("c")]
+        if bad:
+            raise ValueError(f"partition.json group {g['name']}: step(s) {bad} have no driver code "
+                             f"(offload_group(..., emit=)) -- reset the group or record it with emit")
+        for m in g.get("members", []):
+            k = int(m["call"])
+            if k in out:
+                raise ValueError(f"partition.json: call [{k}] in groups {out[k][1]['name']} and {g['name']}")
+            if m["action"] == "removed":
+                out[k] = ("removed", g, None)
+            else:
+                out[k] = ("step", g, steps[m["step"]])
+    return out
+
+
 def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                     c_source=None, verbose: bool = True) -> dict:
     """Emit ``graph_driver.c``, ``tvm_runtime_shim.c`` and ``main.c``.
@@ -848,6 +878,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
     ]
 
     n_calls = 0
+    gsites = group_sites(graph_path.parent / "layers")
     for node_idx, node in enumerate(nodes):
         if node.get("op") != "tvm_op":
             continue
@@ -867,6 +898,26 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         tl = dict(param_of=param_of, roles=roles.get(fn, {}), nodes=nodes,
                   flow=flow)
         lines += _trace_lines(n_calls, fn, in_eids, out_eids, "in", **tl)
+        gs = gsites.get(n_calls)
+        if gs is not None:
+            # group offload: the call is a step of the group, or removed (the group's
+            # steps produce its result); args / expands above stay, as for any call
+            mem = next(m for m in gs[1]["members"] if int(m["call"]) == n_calls)
+            if mem.get("symbol") and mem["symbol"] != fn:
+                raise ValueError(f"partition.json group {gs[1]['name']}: call [{n_calls}] is {fn}, "
+                                 f"recorded {mem['symbol']} (stale group record)")
+            if gs[0] == "removed":
+                lines.append(f"    /* [{n_calls}] removed: group {gs[1]['name']} */")
+            else:
+                st = gs[2]
+                lines.append(f"    /* [{n_calls}] group {gs[1]['name']} step {st['name']} */")
+                lines.append(f"    GRAPH_PROF_BEGIN({n_calls});")
+                lines += ["    " + c.replace("@K@", str(n_calls)) for c in st["c"]]
+                lines.append(f'    GRAPH_PROF_END({n_calls}, "aie {st["tag"]}");')
+            lines += _trace_lines(n_calls, fn, in_eids, out_eids, "out", **tl)
+            lines.append("")
+            n_calls += 1
+            continue
         lines.append(f"    GRAPH_PROF_BEGIN({n_calls});")
         # The PROF tag says where the call RAN: an offloaded call is "aie" only
         # in the build that defines GRAPH_AIE_OFFLOAD (the board Makefile);

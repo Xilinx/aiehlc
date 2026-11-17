@@ -246,41 +246,26 @@ def bmm_geom(H: int, M: int, K: int, N: int) -> dict:
                 kch=geo["kch"], tr=geo["tr"], splitpx=int(mode == "px"), S=S, chs=chs, pxs=pxs)
 
 
-def map_attn(partition: dict, work: Path) -> list:
-    """GATT (GAP-aiegraph-attn-site): partition 'attn' layers (aiegraph.partition.match_attention bmm groups,
-    autopart --mode attn) -> TVM nn_batch_matmul calls (transpose_b: X [H][M][K], W [H][N][K], Y [H][M][N]).
-    Both operands are activations. Matched in graph order (TVM keeps the ONNX topological order of the bmms);
-    every pair must agree on (H, M, K, N) or the build fails."""
-    graphs = sorted(work.glob("*_graph.json"))
-    assert len(graphs) == 1, graphs
-    g = json.loads(graphs[0].read_text())
-    nodes, row_ptr = g["nodes"], g["node_row_ptr"]
-    shapes = g["attrs"]["shape"][1]
-    bmm = []
-    for i, n in enumerate(nodes):
-        if n.get("op") != "tvm_op" or "nn_batch_matmul" not in n["attrs"]["func_name"]:
-            continue
-        ins = [s for s, _, _ in n["inputs"]]
-        f = n["attrs"]["func_name"]
-        bmm.append(dict(node=i, symbol=f if f.startswith("tvmgen_") else "tvmgen_default_" + f, func=f,
-                        eids=[row_ptr[s] for s in ins], yeid=row_ptr[i], nargs=len(ins) + 1,
-                        xshape=shapes[row_ptr[ins[0]]], wshape=shapes[row_ptr[ins[1]]], yshape=shapes[row_ptr[i]]))
-    att = sorted((L for L in partition["layers"] if L.get("cls") == "attn"), key=lambda L: (L["part"], L["idx"]))
-    log(f"TVM graph {graphs[0].name}: {len(bmm)} nn_batch_matmul calls; partition has {len(att)} attn bmm layers")
-    if len(bmm) != len(att):
-        raise SystemExit(f"map_attn: {len(att)} partition attn layers vs {len(bmm)} TVM nn_batch_matmul calls")
+def map_attn(partition: dict, work: Path, onnx=None) -> list:
+    """GATT (GAP-aiegraph-attn-site), sprint unet-m3 S3: the matching moved into aiegraph --
+    ``aiegraph.attention.partition_attention`` finds the attention groups on graph.json (+ ONNX for the
+    Q/K/V sources and the scale) and joins the partition 'attn' rows to their TVM nn_batch_matmul calls by
+    ONNX node name. Here only the kernel geometry is added (bmm_geom). ``ag_group`` = the AttentionGroup."""
+    import sys
+    src = str(Path(__file__).resolve().parents[3] / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from aiegraph.attention import partition_attention
+    from aiegraph.group import CallGraph
+    cg = CallGraph.load(work)
+    att = partition_attention(cg, partition, onnx=onnx, workdir=work)
+    log(f"TVM graph: {len(att)} attention bmm calls in {len({c['ag_group'].name for c in att})} aiegraph attention "
+        f"groups ({sum(len(g.calls) for g in {c['ag_group'].name: c['ag_group'] for c in att}.values())} calls)")
     out = []
-    for L, c in zip(att, bmm):
-        M, K, N = L["pad"]["orig"] if "pad" in L else L["mkn"][0]
-        H = int(L["batch"])
-        want = ([H, M, K], [H, N, K], [H, M, N])
-        if (c["xshape"], c["wshape"], c["yshape"]) != want:
-            raise SystemExit(f"map_attn: {L['node']} (H={H} M={M} K={K} N={N}) vs TVM node {c['node']} {c['func']} "
-                             f"x{c['xshape']} w{c['wshape']} y{c['yshape']}")
+    for c in att:
+        H, M, K, N = c["H"], c["M"], c["K"], c["N"]
         geo = bmm_geom(H, M, K, N)
-        out.append(dict(c, kind="attn", cid=L["idx"], onnx=L["node"], group=int(L["attn_group"]),
-                        role=L["attn_role"], softmax=L.get("softmax"), geo=geo, launches=H * geo["S"],
-                        macs=H * M * N * K, M=M, N=N, K=K))
+        out.append(dict(c, geo=geo, launches=H * geo["S"], macs=H * M * N * K))
     log(f"mapped {len(out)} partition attn bmm layers ({len({c['group'] for c in out})} groups) to TVM "
         f"nn_batch_matmul calls, {sum(c['launches'] for c in out)} gemm_kacc launches")
     return out
@@ -798,7 +783,10 @@ def patch_driver(text: str, sel: list) -> tuple:
     fam = bool(att) and all(c.get("fa") is not None for c in att)   # GFA: fused flash-attention sites
     if fam:
         import fa_attn
-    text = text[:i] + DECL + ((fa_attn.DECL_FA if fam else DECL_ATTN) if att else "") + \
+        # S3: the FA groups are aiegraph group offloads (build_unet.fa_offload_groups): arm_build already placed
+        # their steps and removed the other calls (softmax included); only the declarations are added here
+        assert all(c.get("fa_steps") for c in att), "GFA sites must be aiegraph group steps"
+    text = text[:i] + DECL + ((fa_attn.DECL_FA + fa_attn.DECL_KL if fam else DECL_ATTN) if att else "") + \
         (prof_c_attn() if att else PROF_C) + "\n" + text[i:]
     exp_body = "    for (uint64_t i = 0; i < n; ++i) d[i] = (uint32_t)src[i] << 16;\n}\n"
     assert text.count(exp_body) == 1, text.count(exp_body)
@@ -846,39 +834,17 @@ def patch_driver(text: str, sel: list) -> tuple:
         n += 1
     nl = sum(1 for c in sel if c.get("kind") == "linear")
     assert text.count("    unet_aie_conv(") == len(sel) - nl and text.count("    unet_aie_linear(") == nl
+    if fam:   # S3: count the group steps arm_build emitted (2 per bmm site: pack_q+pack_k / pack_v+run_o)
+        nkl = len(re.findall(r"^    unet_aie_attn_kl\(", text, re.M))
+        assert nkl == 2 * len(att), (nkl, len(att))
+        assert not re.search(r"\btvmgen_default_fused_nn_(softmax|batch_matmul)\w*\(args, ",
+                             text.split("float *graph_run(void)")[1]), "attention call left in graph_run"
+        return text, n + len(att)
     for c in att:   # GATT: tag "aie unet_aie_attn <cid>" -> PROF op=aie_host_attn<cid>
         text = _patch_attn_site(text, c)
         n += 1
     assert text.count("    unet_aie_attn(") == len(att)
-    if fam:
-        text = _remove_fa_softmax(text, att)
     return text, n
-
-
-SOFTMAX_RE = re.compile(r"    GRAPH_PROF_BEGIN\((\d+)\);\n    (tvmgen_default_fused_nn_softmax\w*)\(args, codes, 2, 0, 0, 0\);\n"
-                        r"    GRAPH_PROF_END\(\1, \"[^\"]*\"\);\n")
-
-
-def _remove_fa_softmax(text: str, att: list) -> str:
-    """GFA: the TVM softmax call between a group's QK site and its PV site is fused into the AIE attention:
-    exactly one per group, removed (no PROF part, no CPU time)"""
-    groups = {}
-    for c in att:
-        groups.setdefault(c["group"], {})[c["role"]] = c
-    nrm = 0
-    for g, d in sorted(groups.items()):
-        a = text.index("    unet_aie_attn(%d, args, 3, 0, %d);" % (d["qk"]["cid"], d["qk"]["fa"]))
-        b = text.index("    unet_aie_attn(%d, args, 3, 1, %d);" % (d["pv"]["cid"], d["pv"]["fa"]))
-        assert a < b, (g, a, b)
-        hits = list(SOFTMAX_RE.finditer(text, a, b))
-        assert len(hits) == 1, (g, len(hits))
-        m = hits[0]
-        text = text[:m.start()] + "    /* GFA: %s (call %s) fused into AIE attention group %d */\n" % (
-            m.group(2), m.group(1), g) + text[m.end():]
-        nrm += 1
-    assert nrm == len(groups) and not re.search(r"\btvmgen_default_fused_nn_softmax\w*\(args, ",
-                                                text.split("float *graph_run(void)")[1]), "softmax call left in graph_run"
-    return text
 
 
 def _patch_attn_site(text: str, c: dict) -> str:
