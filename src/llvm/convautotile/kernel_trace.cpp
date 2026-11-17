@@ -59,10 +59,14 @@ std::vector<std::string> splitTop(const std::string &s) {
 }
 
 int elemBytesOf(const std::string &windowType) {
+    // most specific first: "cint16" contains "int16", "bfloat16" contains "float"
+    if (windowType.find("cint32") != std::string::npos || windowType.find("cfloat") != std::string::npos)
+        return 8;
+    if (windowType.find("cint16") != std::string::npos)
+        return 4;
     if (windowType.find("int16") != std::string::npos || windowType.find("bfloat16") != std::string::npos)
         return 2;
-    if (windowType.find("int32") != std::string::npos || windowType.find("float") != std::string::npos ||
-        windowType.find("cint16") != std::string::npos)
+    if (windowType.find("int32") != std::string::npos || windowType.find("float") != std::string::npos)
         return 4;
     return 1;
 }

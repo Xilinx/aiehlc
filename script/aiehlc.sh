@@ -205,6 +205,7 @@ USE_LOCAL_AIERT_BSP=0
 PRETTY_DEBUG=0
 SIM_TILES=""
 GDB_MODE=0
+GEN_ONLY=0   # --gen-only: stop after code generation (host.cc / kernel*.cc / routing*.cc under aout/)
 # Reset every run: this script is sourced, so a flag from a previous invocation
 # in the same shell would otherwise persist.
 PROFILING=0
@@ -216,6 +217,10 @@ while [[ $# -gt 0 ]]; do
         -help)
             usage
             return 0
+            ;;
+        --gen-only)
+            GEN_ONLY=1
+            shift
             ;;
         --runtime-source-file)
             runtime_source_file="$2"
@@ -537,6 +542,10 @@ rm -f "$AIEHLC_ERRLOG"
 # compilation, prettydebug). The IR is already emitted under aout/.
 if [ "$GDB_MODE" -eq 1 ]; then
     echo "gdb session finished (-gdb): skipping kernel/host build. Generated IR is under aout/."
+    return 0
+fi
+if [ "$GEN_ONLY" -eq 1 ]; then
+    echo "[aiehlc] --gen-only: code generated under $(pwd)/aout/ (kernel / host builds skipped)."
     return 0
 fi
 
