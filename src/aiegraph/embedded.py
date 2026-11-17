@@ -340,6 +340,19 @@ class EmbeddedModel:
         from .group import recorded_groups
         return recorded_groups(self.workdir)
 
+    def keep_layout(self, plan=None, *, model=None, partition=None, log=print):
+        """Keep the AIE layout between layers in the generated driver (S5, GAP 6a9d38): from now on every
+        driver ``arm_build`` generates for this workdir goes through ``keep_layout_codegen`` (temb SiLU fold
+        into the pre-packed weight, FA packs at the head split ops, residual into the linear scatter, AIE conv
+        writes the consumer layout), all checked on graph.json. ``plan`` = ``partition.plan_keep_layout``
+        result (or give ``model`` + ``partition`` to compute it); its edges, tagged with the producer's
+        graph.json ``node_id``, must all be realized. Returns the registered pass (``.last`` = its report)."""
+        from .keep_layout_codegen import register
+        if plan is None and partition is not None:
+            from .partition import plan_keep_layout
+            plan = plan_keep_layout(model, partition)
+        return register(self.workdir, plan, log)
+
     def offload_group(self, group, source=None, steps=(), record: bool = True):
         """Place *steps* on *group*'s calls, run the placement / deletion / early-write
         checks on the graph and record the group in ``layers/partition.json``.

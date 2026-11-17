@@ -419,21 +419,21 @@ def aie_conv(a, emod, out: Path, hdr: Path):
             # P4w: weights of the kincore layers go into weights.bin already in the kacc chunk layout
             nb = ua.prelayout_weights(Path(out_dir) / "weights.bin", sel)
             log(f"WPRE layers={len(sel)} bytes={nb} ({Path(out_dir) / 'weights.bin'})")
-        if a.keep_layout:
-            # P4a: keep the AIE layout between layers -- the A78 head split/merge + temb weight re-pack ops go
-            import keep_layout_rt
-            csrc = [q for q in sorted(Path(graph_path).parent.glob("*.c"))
-                    if "tvmgen_default_fused_" in q.read_text(errors="replace")]
-            assert len(csrc) == 1, csrc
-            t2, nt, na = keep_layout_rt.keep_layout_driver(f.read_text(), csrc[0].read_text(),
-                                                           Path(out_dir) / "weights.bin", log)
-            f.write_text(t2)
         log(f"graph_driver.c: {n} partition call sites -> unet_aie_conv ({n - len(lin) - len(att)}) + "
             f"unet_aie_linear ({len(lin)})" + (f" + unet_aie_attn ({len(att)})" if att else ""))
         return r
     generate_driver._p35w_orig = orig
     ab.generate_driver = generate_driver
 
+    if a.keep_layout:
+        # P4a/S5: keep the AIE layout between layers -- aiegraph codegen (keep_layout_codegen) runs on every
+        # generated driver: the A78 head split/merge, transformer-out and conv-out layout ops + the temb weight
+        # re-pack go; partition keep_layout edges (plan_keep_layout) carry the producer's graph.json node
+        plan = None
+        if keep is not None:
+            by = {c.get("onnx"): c for c in sel + lin + att}
+            plan = dict(keep, edges=[dict(e, node_id=by[e["node"]]["node"]) for e in keep["edges"]])
+        emod.keep_layout(plan, log=log)
     rep = emod.offload(f"layer{lidx}", str(kcc), force=True, verbose=a.verbose)
     log(f"offload: {rep}")
     lp = json.loads((work / "layers" / "partition.json").read_text())
@@ -475,7 +475,7 @@ def main(argv=None) -> int:
                     help="GFA (P2): with --aie conv,linear,attn, every attention group (QK bmm, softmax, PV bmm) runs as "
                          "ONE flash-attention (online softmax, fa_attn.py) on the AIE; the TVM softmax call is removed")
     ap.add_argument("--keep-layout", action="store_true",
-                    help="P4a (needs --attn-fa): keep the AIE layout between layers (keep_layout_rt.py) -- FA packs read "
+                    help="P4a (needs --attn-fa): keep the AIE layout between layers (aiegraph keep_layout_codegen) -- FA packs read "
                          "the linear outputs by stride (TVM head split/merge ops removed), temb dense weights pre-packed "
                          "in weights.bin (TVM per-call W*s re-pack removed)")
     ap.add_argument("--aie", choices=("none", "conv", "conv,linear", "conv,linear,attn"), default="none",

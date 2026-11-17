@@ -92,7 +92,28 @@ import subprocess
 from pathlib import Path
 
 __all__ = ["build_arm_elf", "build_local_elf", "toolchain_status",
-           "generate_driver", "write_readme", "graph_sha"]
+           "generate_driver", "write_readme", "graph_sha",
+           "register_driver_pass", "clear_driver_passes"]
+
+#: Codegen passes on the generated driver, per workdir (``register_driver_pass``):
+#: resolved out_dir -> [(name, fn)], run in order by every ``build_arm_elf`` of that
+#: workdir right after ``generate_driver`` (aiegraph keep-layout / temb fold, S5).
+_DRIVER_PASSES: dict = {}
+
+
+def register_driver_pass(out_dir, name: str, fn) -> None:
+    """Run ``fn(graph_driver.c, <stem>_graph.json, weights.bin, <stem>.c)`` on every
+    driver ``build_arm_elf`` generates for ``out_dir`` (same name: replaced)."""
+    key = str(Path(out_dir).resolve())
+    lst = [(n, f) for n, f in _DRIVER_PASSES.get(key, []) if n != name]
+    _DRIVER_PASSES[key] = lst + [(name, fn)]
+
+
+def clear_driver_passes(out_dir=None) -> None:
+    if out_dir is None:
+        _DRIVER_PASSES.clear()
+    else:
+        _DRIVER_PASSES.pop(str(Path(out_dir).resolve()), None)
 
 #: Set by the BSP linker script (``thirdparty/arch/cortexa78_0/lscript.ld``):
 #: noc_ddr4_C0_DDR_LOW0 is 0x80000000. Generation fails rather than emitting a
@@ -2793,6 +2814,9 @@ def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
     _write_tvm_header_stubs(build)
     if not params_inplace():
         shutil.copyfile(params, build / "weights.bin")   # else: aligned blob written above
+    for name, fn in _DRIVER_PASSES.get(str(out_dir), ()):
+        summary.setdefault("driver_passes", {})[name] = fn(
+            build / "graph_driver.c", graph, build / "weights.bin", out_dir / c_name)
 
     # The image the ELF classifies, plus the names it prints. Written before
     # the Makefile so a missing image fails here rather than as a mysterious
