@@ -953,6 +953,17 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
                 llvm::errs() << "[BlueprintToSchedule] 3D K BD covers all " << kR << " k-rounds: len=" << full
                              << " B, repeat 1, no BD iteration (was len=" << c.perTileShimLen
                              << " iter_wrap=" << c.shimIterWrap << " repeat=" << perIterRepeat << ")\n";
+            } else if (kR > 1 && wr && st && wr.size() == 3 && st.size() == 3 &&
+                       cast<IntegerAttr>(wr[2]).getInt() == kR && cast<IntegerAttr>(st[0]).getInt() == 4 &&
+                       c.perTileShimLen == full && c.shimIterWrap <= 1 && perIterRepeat == kR) {
+                // The BD already IS the whole walk and has no BD iteration to step strips with, so a
+                // repeat of k_rounds (the fallback when there is no M / N sub-tiling) re-sends the same
+                // strip k_rounds times: the cores take one copy and the shim never drains (VEK280,
+                // kernel-only gemm_s8 with M rounds: wait_io TIMEOUT on the A shims, half of C wrong).
+                // simplematmul2 keeps its repeat: there the iteration steps the N strips.
+                loopRepeat = 1;
+                llvm::errs() << "[BlueprintToSchedule] 3D K BD is the whole walk with no BD iteration: repeat "
+                             << perIterRepeat << " -> 1\n";
             }
         }
         auto loopPktConst =
