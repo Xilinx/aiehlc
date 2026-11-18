@@ -26,7 +26,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "src"))
-import build_unet as bu  # noqa: E402
+import unet_offload as bu  # noqa: E402
 import unet_aie as ua  # noqa: E402
 from aiegraph.errors import AiegraphError  # noqa: E402
 

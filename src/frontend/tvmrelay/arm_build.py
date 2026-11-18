@@ -3,12 +3,12 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Link the generated ResNet-18 C into a baremetal aarch64 ELF for the board.
+"""Link the generated model C into a baremetal aarch64 ELF for the board.
 
 ``relay.build(target="c")`` gives kernels but no program: there is no ``main``,
 no weights in memory, and no code calling the kernels in order. TVM normally
 supplies that from its graph *runtime* (C++, host-side). This module generates
-the missing pieces from ``resnet18_graph.json`` instead, so the result is plain
+the missing pieces from ``<stem>_graph.json`` instead, so the result is plain
 C that the aiehlc aarch64 toolchain can link:
 
     layers/NN_op/NN_op.c one kernel per operator       (stage 5)
@@ -16,7 +16,7 @@ C that the aiehlc aarch64 toolchain can link:
     tvm_runtime_shim.c   the ~4 TVM runtime symbols the kernels call   <- here
     graph_driver.c       storage plan + kernel calls in graph order    <- here
     main.c               entry point, weight load, argmax, timing      <- here
-    weights.bin          resnet18_params.bin, linked via ld -r         <- here
+    weights.bin          <stem>_params.bin,   linked via ld -r         <- here
     Makefile             the build recipe                              <- here
       -> make -> main.elf
 
@@ -27,9 +27,9 @@ makes a single operator independently rebuildable -- editing one layer
 recompiles one TU, not a 536 KB module -- and it is the natural place for a
 layer's AIE artifacts to sit next to the C they replace.
 
-The monolithic ``resnet18.c`` remains the fallback, used when stage 5 was
+The monolithic ``<stem>.c`` remains the fallback, used when stage 5 was
 skipped (``--no-split``). Exactly one of the two is wired into the Makefile,
-so no kernel is ever compiled twice. Measured difference on ResNet-18 int8:
+so no kernel is ever compiled twice. Measured difference on an int8 18-layer residual CNN:
 1,312,864 vs 1,312,608 bytes of .text (+0.02%, slightly less cross-TU
 inlining), same 65 ``tvmgen_*`` symbols.
 
@@ -60,7 +60,7 @@ kernels run on the array).
 **Why not TVM's AOT executor.** ``Executor("aot")`` does emit a real
 ``tvmgen_default_run`` entry point, which looks like exactly the right answer.
 It was tried and rejected: AOT inlines every weight into the C source as
-initializer text, which for ResNet-18 is a **188 MB** .c file. That is not
+initializer text, which for an int8 18-layer CNN is a **188 MB** .c file. That is not
 compilable in practice, and ``link-params=False`` does not prevent it. Reading
 the weights from a binary blob at runtime keeps the source at ~340 KB and the
 weights in ``.rodata`` where they belong.
@@ -97,7 +97,7 @@ __all__ = ["build_arm_elf", "build_local_elf", "toolchain_status",
 
 #: Codegen passes on the generated driver, per workdir (``register_driver_pass``):
 #: resolved out_dir -> [(name, fn)], run in order by every ``build_arm_elf`` of that
-#: workdir right after ``generate_driver`` (aiegraph keep-layout / temb fold, S5).
+#: workdir right after ``generate_driver`` (aiegraph keep-layout / time-embedding fold, S5).
 _DRIVER_PASSES: dict = {}
 
 
@@ -237,15 +237,15 @@ def param_offsets(blob_path: Path) -> dict:
 
 
 def params_inplace() -> bool:
-    """``AIEGRAPH_PARAMS_INPLACE=1`` (aiegraph-unet-multiinput): kernels read the
+    """``AIEGRAPH_PARAMS_INPLACE=1`` (aiegraph multi-input graphs): kernels read the
     weights straight out of the linked blob instead of a ``.bss`` copy. For
     graphs whose weights are too big to hold twice in the 2 GiB DDR_LOW0 region
-    (bk-sdm-tiny UNet: 1.29 GB fp32). Off by default -- ResNet is unchanged."""
+    (a 1.29 GB fp32 diffusion denoiser). Off by default -- small graphs are unchanged."""
     return os.environ.get("AIEGRAPH_PARAMS_INPLACE") == "1"
 
 
 def params_wdtype() -> str:
-    """``AIEGRAPH_WDTYPE=bf16`` (sprint unet-bf16-streamload, needs
+    """``AIEGRAPH_WDTYPE=bf16`` (sprint bf16-streamload, needs
     PARAMS_INPLACE): fp32 weights are stored in weights.bin as compact bf16
     (round-to-nearest-even) and expanded per kernel call into one reusable
     static fp32 scratch (``g_wscratch``, .bss -- never malloc). Default fp32."""
@@ -442,7 +442,7 @@ static double ticks_to_ms(XTime start, XTime end) {
 int main(void) {
     XTime t_init0, t_init1, t_run0, t_run1, t_top0, t_top1;
 
-    printf("resnet18: init\\n");
+    printf("graph: init\\n");
     XTime_GetTime(&t_init0);
     graph_init(_binary_weights_bin_start);
     XTime_GetTime(&t_init1);
@@ -453,7 +453,7 @@ int main(void) {
     for (int i = 0; i < INPUT_IMAGE_ELEMS; ++i)
         in[i] = input_image[i];
 
-    printf("resnet18: run\\n");
+    printf("graph: run\\n");
     XTime_GetTime(&t_run0);
     float *out = graph_run();
 #ifdef GRAPH_PROFILE
@@ -480,14 +480,14 @@ int main(void) {
     }
     XTime_GetTime(&t_top1);
 
-    printf("resnet18: top%d\\n", TOPK);
+    printf("graph: top%d\\n", TOPK);
     for (int k = 0; k < TOPK && k < n; ++k) {
         int c = idx[k];
         const char *name = (c < IMAGENET_NUM_CLASSES) ? imagenet_labels[c] : "?";
         printf("  %d. class=%-4d %-30s logit=%.4f\\n",
                k + 1, c, name, (double)out[c]);
     }
-    printf("resnet18: top1 class=%d logit=%.6f\\n", idx[0], (double)out[idx[0]]);
+    printf("graph: top1 class=%d logit=%.6f\\n", idx[0], (double)out[idx[0]]);
 
     /* Timing last, so it cannot be mistaken for part of the measured work and
      * so the logits stay adjacent to the CPU reference they are diffed with. */
@@ -495,7 +495,7 @@ int main(void) {
         double init_ms = ticks_to_ms(t_init0, t_init1);
         double run_ms  = ticks_to_ms(t_run0,  t_run1);
         double top_ms  = ticks_to_ms(t_top0,  t_top1);
-        printf("resnet18: timing (timer %llu Hz, 1 tick = %.1f ns)\\n",
+        printf("graph: timing (timer %llu Hz, 1 tick = %.1f ns)\\n",
                (unsigned long long)COUNTS_PER_SECOND,
                1e9 / (double)COUNTS_PER_SECOND);
         printf("  init       %10.3f ms\\n", init_ms);
@@ -749,7 +749,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
     liveness analysis and aliased what it can), the weights pointed at the
     linked blob, and one call per graph node in order.
 
-    *c_source* is the generated module C (``resnet18.c``). It is read only to
+    *c_source* is the generated module C (``<stem>.c``). It is read only to
     name the ``GRAPH_TRACE_HEX`` parameter dumps by ROLE -- weight, bias,
     zero-point, requant multiplier, requant shift -- which cannot be told apart
     from the graph alone: they are all just int32 constants wired into a kernel.
@@ -986,7 +986,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
     for dim in shapes[out_eid]:
         out_elems *= dim
 
-    # aiegraph-unet-multiinput: every graph input (null node, not a weight), in
+    # aiegraph multi-input graphs: every graph input (null node, not a weight), in
     # graph order, reachable by index; graph_input() stays input 0.
     in_idxs = [i for i, node in enumerate(nodes)
                if node.get("op") == "null" and node["name"] not in offsets]
@@ -1292,7 +1292,7 @@ static inline void graph_dump_tensor(const char *tag, int idx, int n) {
 #endif
 
 /* 0 = the whole tensor. A cap matters most on the console sink, where the
- * full int8 ResNet-18 is ~100 MB of text over a UART. */
+ * full int8 18-layer CNN is ~100 MB of text over a UART. */
 #ifndef GRAPH_TRACE_HEX_MAX_BYTES
 #define GRAPH_TRACE_HEX_MAX_BYTES 0
 #endif
@@ -1726,7 +1726,7 @@ def split_layeriohex(log_path, out_dir=None, verbose: bool = True) -> dict:
 
 
 #: Scratch for TVMBackendAllocWorkspace. Kernels allocate inside a fused op
-#: (im2col-style packing buffers); 16 MB clears ResNet-18's largest by a wide
+#: (im2col-style packing buffers); 16 MB clears an int8 18-layer CNN's largest by a wide
 #: margin and the shim reports rather than corrupting if it were ever short.
 _KERNEL_WS = 16 * 1024 * 1024
 
@@ -1765,7 +1765,7 @@ typedef union {
 def _write_tvm_header_stubs(build: Path) -> None:
     """Provide ``tvm/runtime/c_{runtime,backend}_api.h`` for the kernel file.
 
-    The generated ``resnet18.c`` opens with::
+    The generated ``<stem>.c`` opens with::
 
         #include "tvm/runtime/c_runtime_api.h"
         #include "tvm/runtime/c_backend_api.h"
@@ -1836,7 +1836,7 @@ LSCRIPT := $(ARCH)/lscript.ld
 # ../layers/09_conv.../09_conv....o` touches one operator -- and it is why
 # split_layers' _clear_stale already sweeps `*/*.o` as well as `*/*.c`.
 #
-# FALLBACK: the single resnet18.c, used when stage 5 was skipped (--no-split)
+# FALLBACK: the single <stem>.c, used when stage 5 was skipped (--no-split)
 # or produced nothing. Exactly one of the two is active; KERNELS is empty in
 # the layer case, so the file is never compiled twice.
 LAYERS  := {layers_dir}
@@ -1844,7 +1844,7 @@ KERNELS := {kernels}
 
 # The monolithic object, named whether or not it is built. Only `clean` uses it
 # in the per-layer build: switching modes (or an older tree) can leave a stale
-# resnet18.o here, and a `clean` that skipped it would strand a 52 KB object
+# <stem>.o here, and a `clean` that skipped it would strand a 52 KB object
 # that LOOKS like it is part of the link but is not in OBJS and never linked.
 KERNEL_OBJ := {kernel_obj}
 
@@ -1869,13 +1869,13 @@ AIE_LAYER_LIBS := $(sort $(wildcard $(LAYERS)/*/aie/build/*.a) \
 ifeq ($(strip $(KERNELS)$(LAYER_SRCS)),)
 $(error no kernels found: $(LAYERS) contains no */*.c and KERNELS is empty. \
 Re-run deploy_flow.py, or build the monolithic file with \
-`make KERNELS=/path/to/resnet18.c`)
+`make KERNELS=/path/to/<stem>.c`)
 endif
 
 # -I$(REPO)/include reaches aie_timer.h (main.c times each phase with it).
 # -DAIE_GEN=5 picks its xiltimer.h branch, which is what this cortexa78 BSP
 # ships -- the default branch wants xtime_l.h, which the BSP does not have.
-# -O3 -funroll-loops, not -Os: on int8 ResNet-18 with the stem on the AIE,
+# -O3 -funroll-loops, not -Os: on an int8 18-layer CNN with the stem on the AIE,
 # graph_run() measured 2232 ms at -Os, 1282 ms at -O3, 1270 ms adding
 # -funroll-loops (-flto: no gain), all with bit-identical logits. .text grows
 # from ~0.4 MB to ~1.3 MB, small next to the 11.9 MB weight blob.
@@ -1921,7 +1921,7 @@ SRCS := $(KERNELS) graph_driver.c tvm_runtime_shim.c main.c
 OBJS := $(notdir $(SRCS:.c=.o))
 
 # The kernels' entry to the link. Empty in the monolithic fallback (where they
-# arrive as resnet18.o inside OBJS instead), so `make` never archives zero
+# arrive as <stem>.o inside OBJS instead), so `make` never archives zero
 # objects into a library nothing needs.
 LAYER_LIB := $(if $(LAYER_OBJS),liblayers.a,)
 
@@ -2241,7 +2241,7 @@ def _layer_cflags_block(layer_cflags: str) -> str:
     if not flags:
         return ""
     return ("\n# Extra flags for the per-layer TVM kernels only (arm_build layer_cflags,\n"
-            "# build_unet.py --arm-layer-cflags-file). Target-specific: the driver,\n"
+            "# --arm-layer-cflags-file of a model build). Target-specific: the driver,\n"
             "# main.c and the AIE host glue are compiled with plain CFLAGS.\n"
             f"LAYER_CFLAGS ?= {flags}\n"
             "$(LAYER_OBJS): CFLAGS += $(LAYER_CFLAGS)\n")
@@ -2300,7 +2300,7 @@ def write_makefile(build: Path, repo_root: Path, kernel_src: Path,
 #  Local (x86) build
 # ═══════════════════════════════════════════════════════════════════════════
 
-#: How long ``main_local.elf`` may run before it is killed. ResNet-18 int8 in
+#: How long ``main_local.elf`` may run before it is killed. An int8 18-layer CNN in
 #: unvectorized portable C is seconds on a workstation; a cap this generous
 #: only ever fires on a genuine hang, and a hang is what a miscompiled kernel
 #: looks like when a loop bound goes wrong.
@@ -2369,13 +2369,13 @@ def build_local_elf(build, run: bool = True, jobs: int = 0,
 
 
 def _parse_top1(stdout: str):
-    """``(class, logit)`` from main.c's ``resnet18: top1 class=N logit=F`` line.
+    """``(class, logit)`` from main.c's ``<name>: top1 class=N logit=F`` line.
 
     Parsed rather than recomputed so the number compared against the CPU
     reference is the one the program actually printed.
     """
     for line in stdout.splitlines():
-        if line.startswith("resnet18: top1 "):
+        if re.match(r"\S+: top1 ", line):
             cls = logit = None
             for tok in line.split():
                 if tok.startswith("class="):
@@ -2430,7 +2430,7 @@ make -j8
 | `input_image.h` | the preprocessed photo as `static const float[@@INELEMS@@]` |
 | `imagenet_labels.h` | the 1000 class names |
 | `tvm_graph_types.h`, `tvm/runtime/c_*_api.h` | baremetal stand-ins, so the kernel C is used **verbatim** rather than patched |
-| `weights.bin` | `resnet18_params.bin`, linked in via `ld -r -b binary` |
+| `weights.bin` | `<stem>_params.bin`, linked in via `ld -r -b binary` |
 | `Makefile` | the build recipe — nothing is hidden in Python |
 | `liblayers.a` | built: the @@LAYERS@@ per-layer objects from stage 5 — **the kernels** |
 | `localobj/` | built: host objects for `make local`, kept apart from the aarch64 ones |
@@ -2549,7 +2549,7 @@ nothing is lost:
 ```
 
 Two kernels may well slug the same; that cannot collide, because the call index
-disambiguates. Verified on int8 ResNet-18: **417 files** (240 in/out groups +
+disambiguates. Verified on an int8 18-layer CNN: **417 files** (240 in/out groups +
 177 parameters) holding 446 tensors, all stems unique.
 
 ### Activations say where they came from
@@ -2639,7 +2639,7 @@ way to misread this data.
 | `TRACE_HEX_MAX=N` | cap each file at N bytes of payload (`_TRUNCATED` is defined in the header when it bites) |
 | `make clean-hex` | delete `layeriohex/` — deliberately **not** part of `clean-local`, so rebuilding does not discard a dump |
 
-It is not small: the full int8 ResNet-18 is roughly **100 MB** of text for the
+It is not small: a full int8 18-layer CNN is roughly **100 MB** of text for the
 per-call dumps plus **~72 MB** for `param_*.h`, because parameters are kernel
 inputs too and a weight read by several calls is dumped for each of them. They
 are dumped rather than skipped because a mismatch lands in a parameter as often
@@ -2756,7 +2756,7 @@ archives are aarch64 and their kernels run on the array. Re-run
 
 By default the per-layer sources stage 5 split out: `../layers/NN_op/NN_op.c`
 -> `NN_op.o` beside its source -> `liblayers.a`, so editing one operator
-recompiles one translation unit. The monolithic `../resnet18.c` is the
+recompiles one translation unit. The monolithic `../<stem>.c` is the
 fallback when stage 5 was skipped (`--no-split`). Exactly one of the two is
 wired in; if neither resolves, `make` stops with a named error instead of a
 wall of undefined `tvmgen_default_*` references.
@@ -2800,8 +2800,8 @@ def write_readme(build: Path, summary: dict, layers: int = 0,
 #  Runtime IO section (.aiehlc_io) -- swap the inputs of a built ELF
 # ───────────────────────────────────────────────────────────────────────────
 #
-# A board ELF normally bakes its inputs into .rodata (unet_inputs.h), so every
-# new input means a full rebuild (~1 h for the UNet). With ``runtime_io`` the
+# A board ELF normally bakes its inputs into .rodata (<model>_inputs.h), so every
+# new input means a full rebuild (~1 h for a large diffusion denoiser). With ``runtime_io`` the
 # inputs live in ONE aligned section ``.aiehlc_io`` instead; the host tool
 # ``src/tool/elfio/aiehlc_elfio.py patch`` rewrites only that section in a
 # copy of the ELF (and fixes its crc), so A/B inputs share one build.
@@ -2809,7 +2809,7 @@ def write_readme(build: Path, summary: dict, layers: int = 0,
 # Layout (little endian, AIO_ALIGN-aligned, initialised from the build's own
 # inputs, so the default behaviour of the ELF is unchanged):
 #   0   magic "AIO1"   4 u32 version   8 u32 n_in   12 u32 flags (bit0 dump_out)
-#   16  u32 crc32 of all inputs concatenated in order (= unet_in.crc32)
+#   16  u32 crc32 of all inputs concatenated in order (= the build's input crc32 file)
 #   20  u32 hdr_bytes  24 u32 total_bytes  28 u32 reserved
 #   32 + 64*k: char name[40], u32 offset, u32 bytes, u32 crc32, u32 rsv, u64 rsv
 #   data: input k at its offset (AIO_ALIGN aligned)
@@ -2981,7 +2981,7 @@ def write_runtime_io(out_dir, inputs, dump_out: bool = False, verbose: bool = Tr
     return [pc, ph]
 
 
-def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
+def build_arm_elf(out_dir, repo_root=None, c_name=None,
                   run_make: bool = True, jobs: int = 0, image=None,
                   local: bool = False, local_run: bool = True,
                   verbose: bool = True, make_vars: dict = None,
@@ -2995,7 +2995,7 @@ def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
     ``main_c`` (text) replaces the generated classifier ``main.c``;
     ``extra_sources`` (paths: .c compiled and linked, anything else copied next
     to them, e.g. headers) and ``extra_cflags`` go into the same build. For
-    non-classifier graphs (aiegraph-unet-multiinput).
+    non-classifier graphs (aiegraph multi-input graphs).
     ``layer_cflags`` is added to CFLAGS for the per-layer kernel objects
     (liblayers.a) only; empty leaves the Makefile unchanged.
 
@@ -3019,6 +3019,9 @@ def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
     """
     out_dir = Path(out_dir).resolve()
     repo_root = Path(repo_root) if repo_root else Path(__file__).resolve().parents[3]
+    if c_name is None:   # the one <stem>_graph.json the deploy flow wrote -> <stem>.c
+        gs = sorted(out_dir.glob("*_graph.json"))
+        c_name = gs[0].name[:-len("_graph.json")] + ".c" if len(gs) == 1 else "model.c"
 
     graph = out_dir / f"{Path(c_name).stem}_graph.json"
     params = out_dir / f"{Path(c_name).stem}_params.bin"

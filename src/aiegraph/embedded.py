@@ -17,6 +17,8 @@ import fnmatch
 import json
 import re
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -590,16 +592,32 @@ class EmbeddedModel:
     def build(self, target: str = "a78", output=None, *, local: bool = False,
               profile: bool = False, verbose: bool = False,
               main_c=None, extra_sources=(), extra_cflags: str = "",
-              layer_cflags: str = "") -> BuildReport:
+              layer_cflags: str = "", runtime_io=None, dump_out: bool = False,
+              launch: str = None) -> BuildReport:
         """Link ``main.elf`` (A78; needs the Vitis cross toolchain), or with
         ``target="x86"`` ``main_local.elf`` for this host. ``local=True`` builds
         both. ``profile=True`` links ``main.elf`` with ``make PROFILE=1`` (a
         per-call time table after "inference", read by ``profile()``).
         ``output=`` copies the ELF(s), ``partition.json`` and ``network.md``
-        into that directory. Never runs anything on a board."""
+        into that directory. Never runs anything on a board.
+
+        ``runtime_io=[(name, bytes | path), ...]`` (graph-input order): the inputs go into the
+        ``.aiehlc_io`` ELF section (``arm_build.write_runtime_io``; swap them later with
+        ``src/tool/elfio/aiehlc_elfio.py patch``), ``dump_out`` sets the section's output-dump flag;
+        the built ELF is checked to carry a loadable section. ``launch="warm"`` asserts the warm
+        launch options were set before the kernels were built (``aiegraph.boardmain.launch_env``)."""
         if target not in BUILD_TARGETS:
             raise AiegraphError("build", f"target={target!r}", hint=f"one of {', '.join(BUILD_TARGETS)}")
+        from . import boardmain
+        if not boardmain.launch_applied(launch):
+            raise AiegraphError("build", f"launch={launch!r} but the environment has no {launch} launch options",
+                                hint="call aiegraph.boardmain.launch_env(launch) before convert / offload")
+        if dump_out and not runtime_io:
+            raise AiegraphError("build", "dump_out=True needs runtime_io")
         ab = _env.frontend("arm_build")
+        if runtime_io:
+            extra_sources = list(extra_sources) + ab.write_runtime_io(Path(self.workdir) / "runtime_io",
+                                                                      list(runtime_io), dump_out=dump_out)
         x86 = target == "x86"
         res = ab.build_arm_elf(self.workdir, c_name=f"{self._stem()}.c", run_make=not x86,
                                image=self.image, local=local or x86, local_run=False,
@@ -612,6 +630,13 @@ class EmbeddedModel:
         else:
             rep = BuildReport(bool(res.get("elf")), res.get("elf"), res.get("reason", ""),
                               res.get("local"))
+            if rep.ok and runtime_io:
+                tool = _env.repo_root() / "src" / "tool" / "elfio" / "aiehlc_elfio.py"
+                r = subprocess.run([sys.executable, str(tool), "info", str(rep.elf)], capture_output=True, text=True)
+                info = (r.stdout + r.stderr).strip()
+                rep = (BuildReport(True, rep.elf, "", rep.local, io_info=info) if r.returncode == 0 else
+                       BuildReport(False, rep.elf, f"main.elf has no loadable {ab.AIO_SECTION} section: {info}",
+                                   rep.local))
         if output and rep.ok:
             rep.output, rep.files = self._export(output, rep)
         self.last_build = rep
