@@ -41,7 +41,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from ._env import doctor, setup
-from .contract import KernelContract
+from .contract import Buf, BoundStep, KernelContract, Step, buf, check_steps, load_steps, step
+from .group import CallGraph, Group, GroupPlan, group_step
 from .board import PALMYRA, VEK385
 from .embedded import EmbeddedModel, Layer, convert, current, embedded_convert
 from .embedded import open_workdir as open  # noqa: A001  (ag.open(workdir))
@@ -65,7 +66,9 @@ __all__ = ["load", "from_onnx", "from_torch", "download_model", "ZOO", "Model",
            "PerfReport", "KernelOptResult",
            "compile", "guide", "doctor", "setup", "AiegraphError", "CheckReport",
            "DetectReport", "BuildReport", "AIProtoResult", "offload_prototype", "ai_offload_prototype",
-           "OffloadPrototype", "Prototypes", "KernelFormat"]
+           "OffloadPrototype", "Prototypes", "KernelFormat",
+           "step", "Step", "buf", "Buf", "BoundStep", "check_steps", "load_steps",
+           "CallGraph", "Group", "GroupPlan", "group_step"]
 
 
 # ── module-level forms: act on ag.current() (pyplot-style convenience) ─────

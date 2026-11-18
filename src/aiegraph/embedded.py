@@ -264,9 +264,31 @@ class EmbeddedModel:
         part = self.workdir / "layers" / "partition.json"
         if not part.is_file():
             return []
+        from .group import recorded_groups, reset_groups
+        refs = layers if isinstance(layers, (list, tuple, set)) else [layers]
+        gnames = [r for r in refs if isinstance(r, str) and r.startswith("group:")]
+        rest = [r for r in refs if not (isinstance(r, str) and r.startswith("group:"))]
+        if layers is not None and gnames and not rest:          # only groups named
+            dropped = reset_groups(self.workdir, names=gnames)
+            if dropped:
+                print(f"[aiegraph] offload reset: group {', '.join(dropped)} back on the CPU "
+                      f"(whole group)")
+            return [f"group:{n}" for n in dropped]
+        if layers is not None:
+            layers = rest if isinstance(layers, (list, tuple, set)) else rest[0]
         want = None if layers is None else set(self.resolve(layers))
+        if gnames:
+            reset_groups(self.workdir, names=gnames)
+        if want is None:
+            dropped = reset_groups(self.workdir)
+        elif recorded_groups(self.workdir):            # a member layer takes its whole group
+            calls = {c for l in self.layers if l.index in want for c in l.calls}
+            dropped = reset_groups(self.workdir, calls=calls)
+        else:
+            dropped = []
+        dropped = sorted(set(dropped) | {g.removeprefix("group:") for g in gnames})
         doc = json.loads(part.read_text())
-        reset = []
+        reset = [f"group:{n}" for n in dropped]
         for row in doc.get("layers", []):
             if row.get("target") != "aie" or (want is not None and row.get("index") not in want):
                 continue
@@ -275,8 +297,10 @@ class EmbeddedModel:
                        reason="offload reset (aiegraph): back on the APU")
             if f"layer{row.get('index')}" not in reset:
                 reset.append(f"layer{row.get('index')}")
-        if not reset:
-            return []
+        if not any(r.startswith("layer") for r in reset):
+            if reset:
+                print(f"[aiegraph] offload reset: {', '.join(reset)} back on the CPU (whole group)")
+            return reset
         targets = [r for r in doc["layers"] if r.get("target") == "aie"]
         doc["aie_count"], doc["cpu_count"] = len(targets), len(doc["layers"]) - len(targets)
         doc["aie_dirs"] = len({r["dir"] for r in targets})
@@ -289,6 +313,55 @@ class EmbeddedModel:
         self.last_build = None
         print(f"[aiegraph] offload reset: {', '.join(reset)} back on the CPU (driver regenerated)")
         return reset
+
+    # ── group offload (design 2026-11-16 §6, S2: graph-level checks + record) ──
+
+    def call_graph(self):
+        """The network as calls / tensors / storage, from ``<stem>_graph.json``."""
+        from .group import CallGraph
+        return CallGraph.load(self.workdir)
+
+    def group(self, calls, name: str = None):
+        """A group of whole TVM calls (``[31, 32, ...]``) with its boundary tensors."""
+        from .group import make_group
+        return make_group(self.call_graph(), calls, name)
+
+    def match(self, kind: str = "attention", *, partition=None, onnx=None, model=None) -> list:
+        """Groups by pattern. ``"attention"``: every bmm -> softmax -> bmm core with its
+        Q/K/V layout calls and the O merge (data flow on graph.json).
+        ``"conv"`` / ``"linear"`` (S1): one group of ONE call per partition row
+        (``partition=`` partition.json path or dict, ``onnx=`` the model it was planned
+        on), with ``g.x`` / ``g.y`` / ``g.w`` / ``g.info`` -- see ``aiegraph.callsite``."""
+        from .group import attention_groups
+        if kind == "attention":
+            return attention_groups(self.call_graph())
+        if kind in ("conv", "linear"):
+            from .callsite import conv_groups, linear_groups
+            if partition is None or (onnx is None and model is None):
+                raise AiegraphError("group", f"match({kind!r}) needs partition= and onnx=")
+            fn = conv_groups if kind == "conv" else linear_groups
+            return fn(self.call_graph(), self.workdir, onnx, partition, model=model)
+        raise AiegraphError("group", f"match({kind!r})", hint="'attention', 'conv', 'linear'")
+
+    @property
+    def groups(self) -> list:
+        """The groups ``layers/partition.json`` records."""
+        from .group import recorded_groups
+        return recorded_groups(self.workdir)
+
+    def offload_group(self, group, source=None, steps=(), record: bool = True):
+        """Place *steps* on *group*'s calls, run the placement / deletion / early-write
+        checks on the graph and record the group in ``layers/partition.json``.
+        Undo with ``offload_reset("group:<name>")`` (the whole group)."""
+        from .group import Group, make_group, plan_group, record_group
+        cg = self.call_graph()
+        if not isinstance(group, Group):
+            group = make_group(cg, group)
+        plan = plan_group(cg, group, steps)
+        _emit_steps(self.workdir, cg, plan, steps)
+        if record:
+            record_group(self.workdir, plan, source)
+        return plan
 
     def offload_check(self, spec, source=None, verbose: bool = False) -> CheckReport:
         """lint + detect + calibrate + whole-network emulate, all on x86.
@@ -623,6 +696,53 @@ class EmbeddedModel:
                                    "print(module.regions)  /  module.register_kernel(name=..., "
                                    "source=..., op=...)"))
         return "\n".join(lines)
+
+
+def _emit_steps(workdir: Path, cg, plan, steps) -> None:
+    """S1: steps with the "args" ABI (``ag.step(..., call=...)``) become driver code --
+    record their call form, and write each bf16 weight (layout applied) beside the
+    group so ``arm_build.generate_driver`` puts it into ``weights.bin`` and drops the
+    ``graph_bf16_expand`` of that weight at that call."""
+    import hashlib
+    from .callsite import WeightSpec, params_file, weight_bytes
+    from .contract import CALL_SPECIALS
+    by_name = {getattr(s, "name", None): s for s in steps}
+    emit = [by_name[p["name"]] for p in plan.steps if getattr(by_name[p["name"]], "call", None)]
+    if not emit:
+        return
+    if len(emit) != len(plan.steps) or plan.removed:
+        raise AiegraphError("group", f"group {plan.group.name}: the args ABI (call=) is for "
+                            f"one-call groups; this group has {len(plan.steps)} steps, "
+                            f"{len(plan.removed)} removed calls",
+                            hint="multi-call groups use the AIEK_STEP ABI (S3)")
+    params = params_file(workdir)
+    for rec in plan.steps:
+        st = by_name[rec["name"]]
+        call = cg.calls[rec["at"]]
+        types = {k: ("float" if isinstance(v, float) else "int") for k, v in st.consts.items()}
+        rec["call"] = list(st.call)
+        rec["decl"] = "int %s(%s);" % (st.name, ", ".join(
+            CALL_SPECIALS.get(a) or f"{types[a]} {a}" for a in st.call))
+        rec["nargs"] = len(call.ins) + len(call.outs)
+        rec["wrap"] = list(st.wrap) if st.wrap else None
+        rec["tag"] = st.tag or f"aie {st.name}"
+        w = st.weights
+        if w is None:
+            continue
+        if not isinstance(w, WeightSpec):
+            raise AiegraphError("group", f"step {st.name}: weights={w!r}",
+                                hint="g.w.as_bf16(layout=...)")
+        if w.ref.tensor not in call.ins:
+            raise AiegraphError("group", f"step {st.name}: weight {w.ref} is not read by call "
+                                f"[{call.call}] {call.fn}")
+        data = weight_bytes(w, params)
+        d = workdir / "layers" / "groups"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / f"{plan.group.name}.{w.ref.name}.bf16"
+        f.write_bytes(data)
+        rec["weights"] = {"param": w.ref.name, "tensor": w.ref.tensor, "dtype": "bfloat16",
+                          "file": str(f.relative_to(workdir)), "nbytes": len(data),
+                          "sha1": hashlib.sha1(data).hexdigest()}
 
 
 def _clean(workdir: Path) -> None:

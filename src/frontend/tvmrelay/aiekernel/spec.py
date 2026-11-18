@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 __all__ = ["SourceText", "ArgSpec", "KernelSpec", "SpecError", "load_source",
+           "BufSpec", "ConstSpec", "StepSpec", "parse_steps", "parse_step_text",
            "parse_specs", "DTYPES", "strip_comments_and_strings"]
 
 #: dtype name -> (DLPack code, bits). Code 0 int, 1 uint, 2 float.
@@ -395,3 +396,192 @@ def parse_specs(src: SourceText) -> list:
         spec.name = spec.name or spec.entry
         specs.append(spec)
     return specs
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  AIEK_STEP: the group-offload step ABI (include/aie_user_kernel.h)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#   AIEK_STEP(<entry>, reads(<bufs>), writes(<bufs>), consts(<consts>));
+#
+#   <bufs>   = N                     N unnamed buffers (0 allowed)
+#            | item {, item}         item = NAME[:qual ...], qual = dense | <dtype>
+#   <consts> = (empty) | NAME[:int|:float] {, NAME[:int|:float]}
+#
+# Unlike AIEK_SPEC the clauses are C tokens, not string literals (the macro
+# stringifies them), so they are read from the comment-stripped text.
+
+_STEP_CALL = re.compile(r"\bAIEK_STEP\s*\(")
+_STEP_CLAUSES = ("reads", "writes", "consts")
+CONST_TYPES = ("int", "float")
+
+
+@dataclass
+class BufSpec:
+    """One aiek_buf of a step: ``in[index]`` (reads) or ``out[index]`` (writes)."""
+
+    index: int
+    name: str = ""
+    dtype: str = ""            # "" = any
+    dense: bool = False        # True: the step ignores ld
+
+    def __str__(self) -> str:
+        quals = ([self.dtype] if self.dtype else []) + (["dense"] if self.dense else [])
+        return (self.name or f"#{self.index}") + "".join(":" + q for q in quals)
+
+
+@dataclass
+class ConstSpec:
+    index: int
+    name: str
+    type: str = "int"
+
+
+@dataclass
+class StepSpec:
+    """Everything one ``AIEK_STEP`` declares."""
+
+    entry: str
+    source: Path
+    where: str
+    reads: list = field(default_factory=list)
+    writes: list = field(default_factory=list)
+    consts: list = field(default_factory=list)
+    raw: str = ""
+
+    @property
+    def const_names(self) -> tuple:
+        return tuple(c.name for c in self.consts)
+
+    def describe(self) -> str:
+        return (f"AIEK_STEP({self.entry}, reads({', '.join(map(str, self.reads)) or 0}), "
+                f"writes({', '.join(map(str, self.writes)) or 0}), "
+                f"consts({', '.join(c.name + ':' + c.type for c in self.consts)}))")
+
+
+def _split_top(text: str) -> list:
+    """Split on commas at paren depth 0."""
+    out, depth, cur = [], 0, []
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    out.append("".join(cur))
+    return [s.strip() for s in out]
+
+
+def _parse_bufs(body: str, where: str, what: str) -> list:
+    body = body.strip()
+    if re.fullmatch(r"\d+", body):
+        return [BufSpec(index=i) for i in range(int(body))]
+    if not body:
+        raise SpecError(f"{what}() is empty; write {what}(0) for none", where)
+    bufs, names = [], set()
+    for i, item in enumerate(_split_top(body)):
+        parts = [p.strip() for p in item.split(":")]
+        if not re.fullmatch(r"[A-Za-z_]\w*", parts[0]):
+            raise SpecError(f"{what}: {item!r} is not NAME[:dense][:dtype] or a count", where)
+        if parts[0] in names:
+            raise SpecError(f"{what}: buffer {parts[0]!r} declared twice", where)
+        names.add(parts[0])
+        b = BufSpec(index=i, name=parts[0])
+        for q in parts[1:]:
+            if q == "dense":
+                b.dense = True
+            elif q in DTYPES:
+                if b.dtype:
+                    raise SpecError(f"{what}: {item!r} has two dtypes", where)
+                b.dtype = q
+            else:
+                raise SpecError(f"{what}: qualifier {q!r} in {item!r}; want dense or one of "
+                                f"{', '.join(DTYPES)}", where)
+        bufs.append(b)
+    return bufs
+
+
+def _parse_consts(body: str, where: str) -> list:
+    body = body.strip()
+    if not body:
+        return []
+    out, names = [], set()
+    for i, item in enumerate(_split_top(body)):
+        m = re.fullmatch(r"([A-Za-z_]\w*)\s*(?::\s*(\w+))?", item)
+        if not m:
+            raise SpecError(f"consts: {item!r} is not NAME[:int|:float]", where)
+        name, typ = m.group(1), m.group(2) or "int"
+        if typ not in CONST_TYPES:
+            raise SpecError(f"consts: {name}:{typ}; want :int or :float", where)
+        if name in names:
+            raise SpecError(f"consts: {name!r} declared twice", where)
+        names.add(name)
+        out.append(ConstSpec(index=i, name=name, type=typ))
+    return out
+
+
+def _paren_end(clean: str, open_idx: int) -> int:
+    """Offset just past the ``)`` matching the ``(`` at *open_idx*."""
+    depth = 0
+    for i in range(open_idx, len(clean)):
+        if clean[i] == "(":
+            depth += 1
+        elif clean[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    raise SpecError("AIEK_STEP( has no closing parenthesis")
+
+
+def parse_step_text(entry: str, args: str, where: str = "", source=None) -> StepSpec:
+    """Parse the clause text of one AIEK_STEP (everything after ``entry,``)."""
+    parts = _split_top(args)
+    step = StepSpec(entry=entry, source=Path(source) if source else None, where=where, raw=args)
+    if len(parts) != 3:
+        raise SpecError(f"AIEK_STEP({entry}, ...) needs exactly reads(...), writes(...), "
+                        f"consts(...); got {len(parts)} clause(s)", where)
+    for want, part in zip(_STEP_CLAUSES, parts):
+        m = re.fullmatch(r"(\w+)\s*\((.*)\)", part, re.S)
+        if not m or m.group(1) != want:
+            raise SpecError(f"AIEK_STEP({entry}): clause {part!r}; want {want}(...) "
+                            f"(order: reads, writes, consts)", where)
+        body = m.group(2)
+        if want == "consts":
+            step.consts = _parse_consts(body, where)
+        else:
+            setattr(step, want, _parse_bufs(body, where, want))
+    if not step.reads and not step.writes:
+        raise SpecError(f"AIEK_STEP({entry}) reads and writes nothing", where)
+    return step
+
+
+def parse_steps(src: SourceText) -> list:
+    """Every ``AIEK_STEP`` in *src*, parsed; each entry must also be defined
+    in the text (``AIEK_STEP_ENTRY(entry)`` or a plain ``entry(`` definition).
+    Raises :class:`SpecError` on the first malformed one."""
+    clean = strip_comments_and_strings(src.text)
+    steps, seen = [], {}
+    for m in _STEP_CALL.finditer(clean):
+        if clean[max(0, m.start() - 8):m.start()].rstrip().endswith("define"):
+            continue                                   # the macro definition itself
+        where = src.where(m.start())
+        end = _paren_end(clean, m.end() - 1)
+        inner = clean[m.end():end - 1]
+        em = re.match(r"\s*([A-Za-z_]\w*)\s*,", inner)
+        if not em:
+            raise SpecError("AIEK_STEP(entry, reads(...), writes(...), consts(...))", where)
+        entry = em.group(1)
+        if entry in seen:
+            raise SpecError(f"AIEK_STEP({entry}) declared twice (first at {seen[entry]})", where)
+        seen[entry] = where
+        step = parse_step_text(entry, inner[em.end():], where, src.path)
+        rest = clean[:m.start()] + " " * (end - m.start()) + clean[end:]
+        if not re.search(r"\bAIEK_STEP_ENTRY\s*\(\s*%s\s*\)|\b%s\s*\([^;{]*\)\s*\{" % (entry, entry), rest):
+            raise SpecError(f"AIEK_STEP({entry}) but no definition of {entry} "
+                            f"(write AIEK_STEP_ENTRY({entry}) {{ ... }})", where)
+        steps.append(step)
+    return steps

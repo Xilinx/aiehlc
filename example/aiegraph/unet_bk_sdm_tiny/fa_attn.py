@@ -736,3 +736,64 @@ def fa_host(classes: list) -> str:
 
 
 DECL_FA = "int unet_aie_attn(int cid, void *args, int nargs, int role, int cls);   /* --attn-fa (GFA) */\n"
+
+
+# ── Group-offload steps (design 2026-11-16-aiegraph-group-offload §5.3, sprint unet-m3 P1abi) ─────────────────────
+# Thin AIEK_STEP wrappers over unet_aie_attn_kl, so aiegraph's offload_group can place them instead of
+# keep_layout_rt.py's text rewrite. One wrapper per keep-layout role (aie_user_kernel.h has the step <-> role
+# table): a step's aiek_buf carries the [rows][H*D] linear output's pointer and row stride (ld = H*D), which is
+# exactly the (a, lda) / (b, ldb) the kl roles take today, so the generated call is the same kl call.
+# Not appended to the kernel source yet (that is S3: the driver must stay byte-equivalent until then).
+FA_STEPS = r"""
+#include "aie_user_kernel.h"
+extern "C" int unet_aie_attn_kl(int cid, int role, int cls, const float *a, int lda, float *b, int ldb, float s);
+
+static int fa_step_buf_ok(const aiek_buf *b) {
+    return b && b->data && b->code == AIEK_FLOAT && b->bits == 32 && b->lanes == 1 && b->ndim >= 2 &&
+           b->ld >= b->shape[b->ndim - 1];
+}
+
+AIEK_STEP(fa_step_pack_q, reads(q:float32), writes(0), consts(cid, cls, s:float));
+AIEK_STEP_ENTRY(fa_step_pack_q) {
+    (void)out;
+    if (!fa_step_buf_ok(&in[0]) || c->n != 3)
+        return AIEK_ERR_ARGS;
+    return unet_aie_attn_kl((int)AIEK_CI(c, 0), 2, (int)AIEK_CI(c, 1), (const float *)in[0].data, (int)in[0].ld, 0,
+                            0, AIEK_CF(c, 2));
+}
+
+AIEK_STEP(fa_step_pack_k, reads(k:float32), writes(0), consts(cid, cls, s:float));
+AIEK_STEP_ENTRY(fa_step_pack_k) {
+    (void)out;
+    if (!fa_step_buf_ok(&in[0]) || c->n != 3)
+        return AIEK_ERR_ARGS;
+    return unet_aie_attn_kl((int)AIEK_CI(c, 0), 3, (int)AIEK_CI(c, 1), (const float *)in[0].data, (int)in[0].ld, 0,
+                            0, AIEK_CF(c, 2));
+}
+
+AIEK_STEP(fa_step_pack_v, reads(v:float32), writes(0), consts(cid, cls));
+AIEK_STEP_ENTRY(fa_step_pack_v) {
+    (void)out;
+    if (!fa_step_buf_ok(&in[0]) || c->n != 2)
+        return AIEK_ERR_ARGS;
+    return unet_aie_attn_kl((int)AIEK_CI(c, 0), 5, (int)AIEK_CI(c, 1), (const float *)in[0].data, (int)in[0].ld, 0,
+                            0, 1.0f);
+}
+
+AIEK_STEP(fa_step_run_o, reads(0), writes(o:float32), consts(cid, cls));
+AIEK_STEP_ENTRY(fa_step_run_o) {
+    (void)in;
+    if (!fa_step_buf_ok(&out[0]) || c->n != 2)
+        return AIEK_ERR_ARGS;
+    return unet_aie_attn_kl((int)AIEK_CI(c, 0), 6, (int)AIEK_CI(c, 1), 0, 0, (float *)out[0].data, (int)out[0].ld,
+                            1.0f);
+}
+"""
+
+#: step -> keep-layout role of unet_aie_attn_kl (keep_layout_rt.py roles 2/3/5/6)
+FA_STEP_ROLES = {"fa_step_pack_q": 2, "fa_step_pack_k": 3, "fa_step_pack_v": 5, "fa_step_run_o": 6}
+
+
+def fa_steps() -> str:
+    """The AIEK_STEP wrapper text (C++), for the group-offload kernel source."""
+    return FA_STEPS

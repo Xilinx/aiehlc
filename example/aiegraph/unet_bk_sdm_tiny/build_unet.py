@@ -298,20 +298,43 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     env.frontend("")
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import unet_aie as ua
+    import aiegraph as ag
     import frontend.tvmrelay.arm_build as ab
     import frontend.tvmrelay.aiekernel.flow as flow
+    import onnx
+    from aiegraph.callsite import all_conv_calls
     part = json.loads(a.partition.resolve().read_text())
     work = Path(emod.workdir)
-    sel, convs = ua.map_layers(a.onnx.resolve(), part, work, ab.param_offsets)
+    # S1 (unet-m3): aiegraph matches every partition conv / linear row to its TVM call -- one group
+    # of one call each (g.x / g.y / g.w / g.info); the steps are placed by emod.offload_group below
+    onnx_model = onnx.load(str(a.onnx.resolve()))
+    cgroups = emod.match("conv", partition=part, model=onnx_model)
+    folded = [g.info["onnx"] for g in cgroups if g.info["folded"]]
+    assert all("proj_in" in x for x in folded), f"weight mismatch outside proj_in: {folded}"
+    sel = [dict(g.info, group=g) for g in cgroups]
+    for c in sel:
+        launches = ua.ceil64(c["M"]) * ua.ceil64(c["N"]) * ua.ceil64(c["K"])
+        L = next(L for L in part["layers"] if L["idx"] == c["cid"])
+        assert launches == L["launches"], (c["onnx"], launches, L["launches"])
+        c["launches"] = launches
+    convs = all_conv_calls(emod.call_graph())
+    log(f"aiegraph match('conv'): {len(sel)} partition conv layers -> one-call groups "
+        f"({len(convs)} TVM conv calls, {len(folded)} with a TVM-folded weight: proj_in)")
     nlin_part = sum(1 for L in part["layers"] if L.get("cls") == "linear")
     lin = []
     if "linear" in a.aie.split(","):
         # PDN: the partition's linear layers (TVM nn_contrib_dense_pack) -> unet_aie_linear, gemm_kacc
-        lin = ua.map_linears(a.onnx.resolve(), part, work, ab.param_offsets)
+        lin = [dict(g.info, group=g) for g in emod.match("linear", partition=part, model=onnx_model)]
+        for c in lin:
+            c["S"], c["pxs"] = ua.kacc_split(c["N"], c["K"], -(-c["M"] // 64) * 64)
+            c["launches"] = c["S"]
+        log(f"aiegraph match('linear'): {len(lin)} partition linear layers -> one-call groups "
+            f"(weights equal by value), {sum(c['S'] for c in lin)} gemm_kacc launches")
         if len(lin) != nlin_part:
             raise SystemExit(f"mapped {len(lin)} linear layers, partition has {nlin_part}")
     elif nlin_part:
         raise SystemExit(f"partition has {nlin_part} linear layers: build with --aie conv,linear")
+    del onnx_model
     if lin and not a.kincore:
         raise SystemExit("--aie conv,linear needs --kincore (gemm_kacc)")
     att = []
@@ -404,6 +427,29 @@ def aie_conv(a, emod, out: Path, hdr: Path):
         log(f"ctrlpkt=aot pragmas={ua.CTRLPKT_NPRAGMAS}")
     log(f"kernel source {kcc}")
 
+    # S1: conv / linear call sites through aiegraph -- one-call groups, the "args" step ABI, bf16 weights
+    # pre-laid out for gemm_kacc in weights.bin (aiegraph drops their graph_bf16_expand)
+    if not a.kincore:
+        raise SystemExit("aiegraph conv/linear groups need --kincore (kacc weight layout)")
+    nw = 0
+    for c in sel:
+        g = c["group"]
+        if c["kind"] == "linear":
+            st = ag.step("unet_aie_linear", reads=g.x, writes=g.y,
+                         weights=g.w.as_bf16(layout=lambda w, c=c: ua.kacc_dense_wlayout(w, c["N"], c["K"], c["pxs"])),
+                         consts=dict(cid=c["cid"], S=c["S"]), call=("cid", "args", "nargs", "wbf", "S"),
+                         wrap=("UP_AIE_BEGIN", "UP_AIE_END"), tag=f"aie unet_aie_lin {c['cid']}")
+        else:
+            st = ag.step("unet_aie_conv", reads=g.x, writes=g.y,
+                         weights=g.w.as_bf16(layout=lambda w, c=c: ua.kacc_wlayout(w, c["N"], c["K"], c["M"])),
+                         consts=dict(cid=c["cid"], sh=c["sh"], sw=c["sw"], ph=c["ph"], pw=c["pw"]),
+                         call=("cid", "args", "nargs", "wbf", "sh", "sw", "ph", "pw"),
+                         wrap=("UP_AIE_BEGIN", "UP_AIE_END"), tag=f"aie unet_aie_conv {c['cid']}")
+        plan = emod.offload_group(g, kcc, steps=[st])
+        nw += plan.steps[0]["weights"]["nbytes"]
+    log(f"aiegraph offload_group: {len(sel)} one-call groups ({len(sel) - len(lin)} unet_aie_conv + "
+        f"{len(lin)} unet_aie_linear), WPRE bf16 kacc-layout weights {nw} B (layers/partition.json groups)")
+
     # calibrate/emulate would run the whole UNet twice on x86; force=True ignores their
     # verdicts anyway -- skipped (the board run is the check).
     flow._calibrate = lambda net, plans, verbose: log("offload: calibrate skipped (UNet)")
@@ -413,12 +459,9 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     def generate_driver(graph_path, params_path, out_dir, *args, **kw):
         r = orig(graph_path, params_path, out_dir, *args, **kw)
         f = Path(out_dir) / "graph_driver.c"
-        t, n = ua.patch_driver(f.read_text(), sel + att)
+        t, n = ua.patch_driver(f.read_text(), att)   # conv / linear sites: aiegraph group steps
+        n += len(sel)
         f.write_text(t)
-        if a.kincore:
-            # P4w: weights of the kincore layers go into weights.bin already in the kacc chunk layout
-            nb = ua.prelayout_weights(Path(out_dir) / "weights.bin", sel)
-            log(f"WPRE layers={len(sel)} bytes={nb} ({Path(out_dir) / 'weights.bin'})")
         if a.keep_layout:
             # P4a: keep the AIE layout between layers -- the A78 head split/merge + temb weight re-pack ops go
             import keep_layout_rt

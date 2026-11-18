@@ -789,16 +789,24 @@ CALL_RE = re.compile(r"    GRAPH_PROF_BEGIN\((\d+)\);\n(#ifdef GRAPH_AIE_OFFLOAD
 
 
 def patch_driver(text: str, sel: list) -> tuple:
-    if "unet_aie_conv(int cid, void" in text.split("static uint8_t kernel_ws[")[0]:
+    """The text patches aiegraph does not do yet. S1 (unet-m3): when aiegraph already placed the
+    conv / linear group steps (its declarations sit before kernel_ws), only the attention sites,
+    the attention declaration and the PROF glue are added here; *sel* must then hold attn layers
+    only. Without aiegraph steps (test_attn_sites.py) the conv / linear sites are patched as before."""
+    head = text.split("static uint8_t kernel_ws[")[0]
+    if "UP_AIE_BEGIN(" in head or "up_pending_exp" in head:
         raise RuntimeError("driver already patched")
+    ag_steps = "int unet_aie_conv(int cid, void" in head
     att = [c for c in sel if c.get("kind") == "attn"]
     sel = [c for c in sel if c.get("kind") != "attn"]
+    if ag_steps and sel:
+        raise RuntimeError("aiegraph placed the conv/linear steps: patch_driver takes attn layers only")
     i = text.index("static uint8_t kernel_ws[")
     # GATT: the attn declaration / PROF branch only when there are attn sites (--aie conv,linear stays byte-identical)
     fam = bool(att) and all(c.get("fa") is not None for c in att)   # GFA: fused flash-attention sites
     if fam:
         import fa_attn
-    text = text[:i] + DECL + ((fa_attn.DECL_FA if fam else DECL_ATTN) if att else "") + \
+    text = text[:i] + ("" if ag_steps else DECL) + ((fa_attn.DECL_FA if fam else DECL_ATTN) if att else "") + \
         (prof_c_attn() if att else PROF_C) + "\n" + text[i:]
     exp_body = "    for (uint64_t i = 0; i < n; ++i) d[i] = (uint32_t)src[i] << 16;\n}\n"
     assert text.count(exp_body) == 1, text.count(exp_body)
@@ -845,7 +853,8 @@ def patch_driver(text: str, sel: list) -> tuple:
         text = text[:cm.start()] + rep + text[cm.end():]
         n += 1
     nl = sum(1 for c in sel if c.get("kind") == "linear")
-    assert text.count("    unet_aie_conv(") == len(sel) - nl and text.count("    unet_aie_linear(") == nl
+    if not ag_steps:
+        assert text.count("    unet_aie_conv(") == len(sel) - nl and text.count("    unet_aie_linear(") == nl
     for c in att:   # GATT: tag "aie unet_aie_attn <cid>" -> PROF op=aie_host_attn<cid>
         text = _patch_attn_site(text, c)
         n += 1

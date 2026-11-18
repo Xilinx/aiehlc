@@ -631,6 +631,51 @@ def aie_entries(layers_dir) -> dict:
     return out
 
 
+def group_steps(layers_dir) -> dict:
+    """``{call index: step record}`` of the one-call group steps with the "args" ABI
+    (``ag.step(..., call=...)``, aiegraph S1) that ``layers/partition.json`` records,
+    each with its group name under ``"group"``. Groups without driver code (no
+    ``call``) are not driver-visible."""
+    part = Path(layers_dir) / "partition.json"
+    if not part.is_file():
+        return {}
+    doc = json.loads(part.read_text())
+    out = {}
+    for g in doc.get("groups", []):
+        for st in g.get("steps", []):
+            if not st.get("call"):
+                continue
+            if st["at"] in out:
+                raise ValueError(f"call [{st['at']}] has two group steps "
+                                 f"({out[st['at']]['group']}, {g['name']})")
+            out[st["at"]] = dict(st, group=g["name"])
+    decls = {}
+    for st in out.values():
+        if decls.setdefault(st["name"], st["decl"]) != st["decl"]:
+            raise ValueError(f"step {st['name']}: two C signatures {decls[st['name']]!r} "
+                             f"vs {st['decl']!r}")
+    return out
+
+
+def _step_call_lines(st: dict, call_idx: int, wbf_off, note: str = "") -> list:
+    args = []
+    for a in st["call"]:
+        if a == "args":
+            args.append("args")
+        elif a == "nargs":
+            args.append(str(st["nargs"]))
+        elif a == "wbf":
+            args.append(f"(const uint16_t *)(g_params + {wbf_off})")
+        else:
+            v = st["consts"][a]
+            args.append(repr(float(v)) + "f" if isinstance(v, float) else str(int(v)))
+    body = [f"    {st['name']}({', '.join(args)});" + (f"   {note}" if note else "")]
+    if st.get("wrap"):
+        b, e = st["wrap"]
+        body = [f"    {b}({call_idx});"] + body + [f"    {e}({call_idx});"]
+    return body
+
+
 def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                     c_source=None, verbose: bool = True) -> dict:
     """Emit ``graph_driver.c``, ``tvm_runtime_shim.c`` and ``main.c``.
@@ -681,6 +726,30 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                      if node.get("op") == "null" and node["name"] in bf16_names}
     elif params_wdtype() != "fp32":
         raise ValueError("AIEGRAPH_WDTYPE=bf16 needs AIEGRAPH_PARAMS_INPLACE=1")
+    # aiegraph one-call group steps (S1): the step replaces the call; its bf16 weight
+    # sits in weights.bin already in the kernel's layout and is read in place
+    steps = group_steps(graph_path.parent / "layers")
+    inplace_w = {}          # call index -> weight eid not expanded at that call
+    if steps:
+        wsteps = [st for st in steps.values() if st.get("weights")]
+        if wsteps and not bf16_eids:
+            raise ValueError("group steps with bf16 weights need AIEGRAPH_PARAMS_INPLACE=1 "
+                             "AIEGRAPH_WDTYPE=bf16")
+        with open(out_dir / "weights.bin", "r+b") as wf:
+            for st in wsteps:
+                w = st["weights"]
+                off, nb = offsets[w["param"]]
+                data = (graph_path.parent / w["file"]).read_bytes()
+                if w["tensor"] not in bf16_eids or len(data) != nb or nb != w["nbytes"]:
+                    raise ValueError(f"group {st['group']}: weight {w['param']} is "
+                                     f"{len(data)} B, weights.bin holds {nb} B "
+                                     f"(bf16={w['tensor'] in bf16_eids})")
+                wf.seek(off)
+                wf.write(data)
+                inplace_w[st["at"]] = w["tensor"]
+        if verbose and wsteps:
+            print(f"  [arm] group steps: {len(steps)} calls, {len(wsteps)} bf16 weights "
+                  f"in the kernel layout in weights.bin")
     act_sids = {sid for e, sid in enumerate(sids) if e not in param_eids}
 
     # One buffer per storage id, sized by the largest tensor assigned to it.
@@ -761,8 +830,13 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
     for sid in sorted(sizes):
         lines.append(f"static uint8_t buf_{sid}[{sizes[sid]}] "
                      "__attribute__((aligned(64)));")
+    lines.append("")
+    seen_steps = []
+    for k in sorted(steps):
+        if steps[k]["name"] not in seen_steps:
+            seen_steps.append(steps[k]["name"])
+            lines.append(steps[k]["decl"] + "   /* aiegraph group step */")
     lines += [
-        "",
         f"static uint8_t kernel_ws[{_KERNEL_WS}] __attribute__((aligned(64)));",
         "static const uint8_t *g_params;",
     ] + _bf16_scratch_decl(nodes, eid, bf16_eids) + [
@@ -861,7 +935,19 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         n_out = int(node["attrs"].get("num_outputs", 1))
         out_eids = [eid(node_idx, k) for k in range(n_out)]
         arg_eids = in_eids + out_eids
-        lines += _bf16_expand_lines(in_eids, bf16_eids)
+        exp = _bf16_expand_lines(in_eids, bf16_eids)
+        st = steps.get(n_calls)
+        wbf_off = None
+        if st is not None and n_calls in inplace_w:
+            e = inplace_w[n_calls]
+            wbf_off = bf16_eids[e][0]
+            hit = [j for j, ln in enumerate(exp) if ln.startswith("    graph_bf16_expand(")
+                   and f"(g_params + {wbf_off}), " in ln]
+            if len(hit) != 1:
+                raise ValueError(f"call [{n_calls}]: weight tensors[{e}] has no bf16 expand")
+            exp[hit[0]:hit[0] + 2] = [f"    tensors[{e}].data = 0;   /* group {st['group']}: "
+                                      f"bf16 weight read in place by {st['name']} */"]
+        lines += exp
         for slot, tensor_idx in enumerate(arg_eids):
             lines.append(f"    args[{slot}].v_handle = &tensors[{tensor_idx}];")
         tl = dict(param_of=param_of, roles=roles.get(fn, {}), nodes=nodes,
@@ -872,7 +958,16 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         # in the build that defines GRAPH_AIE_OFFLOAD (the board Makefile);
         # `make local` runs the CPU kernel and must say "cpu".
         op = fn.replace("tvmgen_default_fused_", "")[:68]
-        if fn in offload:
+        if st is not None:
+            if "wbf" in st["call"] and wbf_off is None:
+                raise ValueError(f"call [{n_calls}]: step {st['name']} passes wbf, no weight")
+            if st["nargs"] != len(arg_eids):
+                raise ValueError(f"call [{n_calls}]: step {st['name']} recorded for "
+                                 f"{st['nargs']} args, the call has {len(arg_eids)}")
+            lines += _step_call_lines(st, n_calls, wbf_off,
+                                      f"/* [{n_calls}] group {st['group']}: {fn} */")
+            lines.append(f'    GRAPH_PROF_END({n_calls}, "{st["tag"]}");')
+        elif fn in offload:
             lines += ["#ifdef GRAPH_AIE_OFFLOAD",
                       f"    {offload[fn]}(args, codes, {len(arg_eids)}, 0, 0, 0);",
                       f'    GRAPH_PROF_END({n_calls}, "aie {op}");',
