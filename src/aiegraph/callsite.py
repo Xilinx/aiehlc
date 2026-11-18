@@ -186,8 +186,19 @@ def _onnx(onnx_path):
     return onnx.load(str(onnx_path))
 
 
-def conv_groups(cg, workdir, onnx_path, partition, model=None) -> list:
-    """One group per partition conv row (``cls`` not linear/attn), partition order."""
+def _conv_group(at, cin: int) -> int | None:
+    """The ONNX Conv ``group`` attribute if it is plain (1) or depthwise (== input channels)."""
+    g = int(at.get("group", 1))
+    return g if g == 1 or g == cin else None
+
+
+def conv_groups(cg, workdir, onnx_path, partition, model=None, groups=(1,)) -> list:
+    """One group per partition conv row (``cls`` not linear/attn), partition order.
+
+    *groups*: which ONNX Conv ``group`` kinds are taken -- ``1`` (plain) and/or ``"dw"``
+    (depthwise, group == Cin == Cout; ``g.info["groups"]`` = that count, ``K`` = KH*KW).
+    ONNX Convs are paired with TVM conv2d calls by unpacked weight shape and weight value
+    (graph order only breaks ties), so a TVM schedule that reorders branches still matches."""
     import numpy as np
     from onnx import helper, numpy_helper
     part = _partition(partition)
@@ -213,18 +224,29 @@ def conv_groups(cg, workdir, onnx_path, partition, model=None) -> list:
     if len(oconv) != len(convs):
         raise AiegraphError(_STAGE, f"match('conv'): {len(oconv)} ONNX Conv vs {len(convs)} TVM "
                             f"conv2d calls", hint="conv matching needs TVM to keep every Conv")
-    by_name, folded = {}, []
-    for n, c in zip(oconv, convs):
+    def oihw(ws):
+        return (ws[0] * ws[5], ws[1] * ws[4], ws[2], ws[3]) if len(ws) == 6 else None
+
+    def same(a, b):
+        return (a[0] == b[0] and abs(a[1] - b[1]) <= 1e-6 * b[3] + 1e-9
+                and abs(a[2] - b[2]) <= 1e-6 * b[2] + 1e-12)
+
+    by_shape = {}
+    for c in convs:
+        by_shape.setdefault(oihw(c["wshape"]), []).append(c)
+    by_name, folded, taken = {}, [], set()
+    for n in oconv:
         w = numpy_helper.to_array(inits[n.input[1]])
-        ws = c["wshape"]
-        if len(ws) != 6 or list(w.shape) != [ws[0] * ws[5], ws[1] * ws[4], ws[2], ws[3]]:
-            raise AiegraphError(_STAGE, f"match('conv'): ONNX {n.name} weight {list(w.shape)} vs "
-                                f"TVM call [{c['call']}] weight {ws} (graph order differs)")
+        cand = [c for c in by_shape.get(tuple(w.shape), []) if c["call"] not in taken]
+        if not cand:
+            raise AiegraphError(_STAGE, f"match('conv'): ONNX {n.name} weight {list(w.shape)}: no "
+                                "unmatched TVM conv2d call with that (unpacked OIHW) weight")
         st = _stats(w)
-        same = (c["stats"][0] == st[0] and abs(c["stats"][1] - st[1]) <= 1e-6 * st[3] + 1e-9
-                and abs(c["stats"][2] - st[2]) <= 1e-6 * st[2] + 1e-12)
-        if not same:
+        hit = [c for c in cand if same(c["stats"], st)]
+        c = hit[0] if hit else cand[0]
+        if not hit:
             folded.append(n.name)
+        taken.add(c["call"])
         by_name[n.name] = c
     onodes = {n.name: n for n in m.graph.node}
     out, used = [], set()
@@ -237,11 +259,15 @@ def conv_groups(cg, workdir, onnx_path, partition, model=None) -> list:
                                 f"with weight {L.get('weight')}")
         at = {a.name: helper.get_attribute_value(a) for a in n.attribute}
         pads = list(at.get("pads", [0, 0, 0, 0]))
-        if at.get("group", 1) != 1 or list(at.get("dilations", [1, 1])) != [1, 1] \
-                or pads[0] != pads[2] or pads[1] != pads[3]:
-            raise AiegraphError(_STAGE, f"{L['node']}: grouped / dilated / asymmetric-pad conv",
-                                hint="one-call conv groups take plain 2-D convs")
         c = by_name[L["node"]]
+        G = _conv_group(at, c["xshape"][1] * c["xshape"][4] if len(c["xshape"]) == 5 else -1)
+        kind = None if G is None else (1 if G == 1 else "dw")
+        if kind not in groups or list(at.get("dilations", [1, 1])) != [1, 1] \
+                or pads[0] != pads[2] or pads[1] != pads[3]:
+            raise AiegraphError(_STAGE, f"{L['node']}: group={at.get('group', 1)} (taken: {groups}) / "
+                                "dilated / asymmetric-pad conv",
+                                hint="one-call conv groups take plain 2-D convs; groups=(1, 'dw') "
+                                "adds depthwise")
         if c["call"] in used:
             raise AiegraphError(_STAGE, f"{L['node']}: call [{c['call']}] matched twice")
         used.add(c["call"])
@@ -249,7 +275,7 @@ def conv_groups(cg, workdir, onnx_path, partition, model=None) -> list:
         ws = c["wshape"]
         O, C, KH, KW = ws[0] * ws[5], ws[1] * ws[4], ws[2], ws[3]
         M = c["yshape"][2] * c["yshape"][3]
-        if c["xshape"][1] * c["xshape"][4] != C or c["yshape"][1] * c["yshape"][4] != O \
+        if c["xshape"][1] * c["xshape"][4] != C * G or c["yshape"][1] * c["yshape"][4] != O \
                 or [KH, KW] != list(at["kernel_shape"]):
             raise AiegraphError(_STAGE, f"{L['node']}: TVM call [{c['call']}] shapes x{c['xshape']} "
                                 f"y{c['yshape']} w{ws} disagree with the ONNX Conv")
@@ -265,7 +291,7 @@ def conv_groups(cg, workdir, onnx_path, partition, model=None) -> list:
                     wshape=ws, xshape=c["xshape"], yshape=c["yshape"], cid=L["idx"],
                     onnx=L["node"], weight=L["weight"], macs=M * O * C * KH * KW,
                     sh=at["strides"][0], sw=at["strides"][1], ph=pads[0], pw=pads[1],
-                    M=M, N=O, K=C * KH * KW, folded=L["node"] in folded)
+                    M=M, N=O, K=C * KH * KW, groups=G, folded=L["node"] in folded)
         out.append(_one_call(cg, gc, f"conv{L['idx']}", c["wt"], info))
     return out
 

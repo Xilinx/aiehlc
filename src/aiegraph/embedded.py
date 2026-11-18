@@ -327,7 +327,7 @@ class EmbeddedModel:
         return make_group(self.call_graph(), calls, name)
 
     def match(self, kind: str = "attention", onnx=None, nodes=None, wdtype: str = None, *,
-              partition=None, model=None) -> list:
+              partition=None, model=None, groups=(1,)) -> list:
         """Groups by pattern. ``"attention"`` (S3): every bmm -> softmax -> bmm core with its
         Q/K/V layout calls and the O merge (data flow on graph.json), as
         ``attention.AttentionGroup`` (q/k/v/o, H/N/M/D, cls, scale, ONNX node names).
@@ -336,14 +336,17 @@ class EmbeddedModel:
         ``AIEGRAPH_WDTYPE`` (bf16 rounds the scale as the deployed call reads it).
         ``"conv"`` / ``"linear"`` (S1): one group of ONE call per partition row
         (``partition=`` partition.json path or dict, ``onnx=`` / ``model=`` the model it was
-        planned on), with ``g.x`` / ``g.y`` / ``g.w`` / ``g.info`` -- see ``aiegraph.callsite``."""
+        planned on), with ``g.x`` / ``g.y`` / ``g.w`` / ``g.info`` -- see ``aiegraph.callsite``;
+        ``groups=(1, "dw")`` also takes depthwise convs (conv only)."""
         import os
         if kind in ("conv", "linear"):
             from .callsite import conv_groups, linear_groups
             if partition is None or (onnx is None and model is None):
                 raise AiegraphError("group", f"match({kind!r}) needs partition= and onnx=")
-            fn = conv_groups if kind == "conv" else linear_groups
-            return fn(self.call_graph(), self.workdir, onnx, partition, model=model)
+            if kind == "conv":
+                return conv_groups(self.call_graph(), self.workdir, onnx, partition, model=model,
+                                   groups=groups)
+            return linear_groups(self.call_graph(), self.workdir, onnx, partition, model=model)
         if kind != "attention":
             raise AiegraphError("group", f"match({kind!r})", hint="'attention', 'conv', 'linear'")
         from .attention import match_attention
