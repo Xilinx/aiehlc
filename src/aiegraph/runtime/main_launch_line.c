@@ -1,4 +1,4 @@
-#ifdef UNET_LAUNCH_WARM
+#ifdef @MU@_LAUNCH_WARM
     {
         double aie_ms = 0.0;
         int kloads = 0;
@@ -8,7 +8,7 @@
         unet_aie_launch_stats(&aie_ms, &kloads, &cold_tiles);
         printf("LAUNCH warm ms_per_launch=%.3f launches=%d aie_wall_ms=%.3f kloads=%d opts=%s,cold_tile_loads=%u"
                " ctrlpkt=%s aot_fallbacks=%llu\n",
-               wl ? aie_ms / wl : 0.0, wl, aie_ms, kloads, UNET_LAUNCH_OPTS, cold_tiles, UNET_CTRLPKT,
+               wl ? aie_ms / wl : 0.0, wl, aie_ms, kloads, @MU@_LAUNCH_OPTS, cold_tiles, @MU@_CTRLPKT,
                __Runtime_ctrl_aot_fallbacks());
         /* P1: per-launch split of aie_wall_ms by runtime phase (A78 pmccntr, AIEHLC_PROFILING=1 runtime).
          * PH_COREEN is the A78 cost of the core-enable writes, not AIE compute: the AIE compute is

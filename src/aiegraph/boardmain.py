@@ -38,7 +38,7 @@ HEAP_LDFLAG = "-Wl,--defsym,_HEAP_SIZE=0x8000000"
 CMP_CFLAGS = "-DP1_COS_NO_MAIN"
 
 __all__ = ["MARKER", "WARM_DEFS", "LAUNCH_OPTS_WARM", "HEAP_LDFLAG", "CMP_CFLAGS", "launch_env", "profiling_env",
-           "launch_applied", "kt_select", "main_c", "inputs_header", "append_defines", "prof_c", "driver_glue",
+           "launch_applied", "kt_select", "main_c", "inputs_header", "ref_header", "append_defines", "prof_c", "driver_glue",
            "input_int32", "cross_toolchain", "read_cflags_file", "cmp_source"]
 
 
@@ -137,10 +137,10 @@ def main_c(model: str, io_names, *, aie: bool = False, ktimer: bool = False, run
     else:
         inb = _fill(_rt("board_main_in_embed.c"), M=m, MU=mu, IN_DESC=desc, NOTE_FMT=nf, NOTE_EARG=ne)
     if aie:
-        decl = kt_select(_rt("main_extra_decl.h"), ktimer)
-        cmp_ = kt_select(_rt("main_cmp.c"), ktimer)
+        decl = _fill(kt_select(_rt("main_extra_decl.h"), ktimer), M=m)
+        cmp_ = _fill(kt_select(_rt("main_cmp.c"), ktimer), M=m, MU=mu)
         pre, post = _fill(_rt("board_main_pmc.c"), M=m), _fill(_rt("board_main_pmc1.c"), M=m)
-        after = _rt("main_launch_line.c") + _rt("main_prof_line.c")
+        after = _fill(_rt("main_launch_line.c"), MU=mu) + _rt("main_prof_line.c")
         init = "aiegraph C on A78 + conv on AIE gemm_bf16"
     else:
         decl = pre = post = after = ""
@@ -192,6 +192,23 @@ def inputs_header(path, model: str, inputs, defines=None, origin: str = "") -> s
                                                                                 for _, _, a in inputs)), ""]
     Path(path).write_text("\n".join(txt))
     return "%08x" % crc
+
+
+def ref_header(path, model: str, ref_out, in_crc: str, data: str) -> Path:
+    """``p1_ref.h`` for a model whose reference output comes from the example (e.g. onnxruntime on the build's
+    own input): ``REF_<MODEL>_OUT_N`` / ``P1_<MODEL>_IN_CRC32`` for the board main and the names the board
+    compare tool (``cmp_cos.c``) reads, aliased to them. *ref_out*: float32 array; *in_crc*: the inputs crc32
+    :func:`inputs_header` returned; *data*: what the reference is (printed on the ``CMP`` line)."""
+    import numpy as np
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", model):
+        raise ValueError(f"ref_header: model {model!r} must be a lower-case C identifier")
+    if not re.fullmatch(r"[0-9a-f]{8}", in_crc):
+        raise ValueError(f"ref_header: in_crc {in_crc!r} is not a crc32 hex string")
+    ref = np.ascontiguousarray(ref_out, dtype=np.float32).reshape(-1)
+    m, mu = model, model.upper()
+    t = _fill(_rt("cmp_ref_model.h"), M=m, MU=mu, DATA=data.replace('"', "'"), CRC=in_crc, N=ref.size)
+    Path(path).write_text(t + _c_array("float", f"ref_{m}_out", ref, lambda v: "%.9ef" % float(v)))
+    return Path(path)
 
 
 def _define_lines(mu: str, defines: dict) -> list:
