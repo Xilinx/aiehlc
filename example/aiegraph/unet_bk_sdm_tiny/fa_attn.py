@@ -797,3 +797,39 @@ FA_STEP_ROLES = {"fa_step_pack_q": 2, "fa_step_pack_k": 3, "fa_step_pack_v": 5, 
 def fa_steps() -> str:
     """The AIEK_STEP wrapper text (C++), for the group-offload kernel source."""
     return FA_STEPS
+
+
+# ── S3: FA groups as aiegraph group steps ─────────────────────────────────────────────────────────────────────────
+#: the keep-layout entry the steps call (was inserted by keep_layout_rt.fa_pass)
+DECL_KL = ("int unet_aie_attn_kl(int cid, int role, int cls, const float *a, int lda, float *b, int ldb,\n"
+           "                     float s);   /* FA group steps (aiegraph offload_group, fa_attn.fa_step_emit) */\n")
+
+
+def fa_group_steps(ag, g, cid_qk: int, cid_pv: int, cls: int) -> list:
+    """The four ag.step()s of one attention group (design §5.2): pack Q / K / V at the reads, run + write O"""
+    if g.scale is None or g.scale_k is None:
+        raise SystemExit(f"{g.name}: no Q/K scale from the matcher (match with onnx=)")
+    return [ag.step("fa_step_pack_q", reads=g.q, consts=dict(cid=cid_qk, cls=cls, s=g.scale)),
+            ag.step("fa_step_pack_k", reads=g.k, consts=dict(cid=cid_qk, cls=cls, s=g.scale_k)),
+            ag.step("fa_step_pack_v", reads=g.v, consts=dict(cid=cid_pv, cls=cls)),
+            ag.step("fa_step_run_o", writes=g.o, consts=dict(cid=cid_pv, cls=cls))]
+
+
+def fa_step_emit(g):
+    """offload_group(emit=): the driver code of a step = the unet_aie_attn_kl call its AIEK_STEP wrapper makes
+    (FA_STEP_ROLES, aie_user_kernel.h step <-> role table), with the boundary buffer's pointer and row stride"""
+    bufs = {"fa_step_pack_q": g.q, "fa_step_pack_k": g.k, "fa_step_pack_v": g.v, "fa_step_run_o": g.o}
+
+    def emit(s):
+        role, b, c = FA_STEP_ROLES[s["name"]], bufs[s["name"]], s["consts"]
+        t = (s["writes"] if role == 6 else s["reads"])
+        assert t == [b.tensor], (g.name, s["name"], t, b.tensor)
+        if role == 6:
+            call = "unet_aie_attn_kl(%d, 6, %d, 0, 0, (float *)tensors[%d].data, %d, 1.0f);" % (
+                c["cid"], c["cls"], b.tensor, b.ld)
+        else:
+            call = "unet_aie_attn_kl(%d, %d, %d, (const float *)tensors[%d].data, %d, 0, 0, %.9ef);" % (
+                c["cid"], role, c["cls"], b.tensor, b.ld, float(c.get("s", 1.0)))
+        return {"c": ["UP_AIE_BEGIN(@K@);", call + "   /* %s %s */" % (g.name, s["name"]), "UP_AIE_END(@K@);"],
+                "tag": "unet_aie_attn %d" % c["cid"]}
+    return emit

@@ -291,6 +291,43 @@ def keep_layout_step(ua, onnx_path, part: dict, layers: list, out: Path):
     return keep
 
 
+def fa_offload_groups(emod, att: list, kcc: Path, out: Path) -> int:
+    """S3 (design 2026-11-16 §5.2): every attention group = one aiegraph group offload with the four FA steps
+    (fa_attn.FA_STEPS, checked against their AIEK_STEP declarations); aiegraph places them, removes the other
+    calls (QK bmm, softmax, O merge) after its liveness / external-reader / early-write checks, and records the
+    group in layers/partition.json, from which arm_build emits the driver."""
+    import aiegraph as ag
+    import fa_attn
+    from aiegraph.group import reset_groups
+    stepsrc = out / "aiek_src" / "fa_steps.cc"
+    stepsrc.write_text(fa_attn.fa_steps())
+    specs = ag.load_steps(stepsrc)
+    reset_groups(emod.workdir)
+    by = {}
+    for c in att:
+        by.setdefault(c["ag_group"].name, {})[c["role"]] = c
+    ncalls = 0
+    for name, d in by.items():
+        qk, pv = d["qk"], d["pv"]
+        g = qk["ag_group"]
+        if qk["fa"] != pv["fa"] or qk["fa"] != g.cls:
+            raise SystemExit(f"{name}: FA class {qk['fa']}/{pv['fa']} != aiegraph class {g.cls}")
+        steps = fa_attn.fa_group_steps(ag, g, qk["cid"], pv["cid"], qk["fa"])
+        ag.check_steps(specs, steps)
+        plan = emod.offload_group(g, source=str(kcc), steps=steps, emit=fa_attn.fa_step_emit(g))
+        want = {"fa_step_pack_q": g.q_call, "fa_step_pack_k": g.k_call, "fa_step_pack_v": g.v_call,
+                "fa_step_run_o": g.pv}
+        if plan.placement != want or sorted(plan.removed) != sorted([g.qk, g.softmax, g.merge]):
+            raise SystemExit(f"{name}: placement {plan.placement} removed {plan.removed}, expected {want} "
+                             f"removed {[g.qk, g.softmax, g.merge]}")
+        for c in (qk, pv):
+            c["fa_steps"] = True
+        ncalls += len(g.calls)
+    log(f"FA_GROUPS groups={len(by)} calls={ncalls} steps={4 * len(by)} removed={3 * len(by)} "
+        f"(aiegraph offload_group, layers/partition.json)")
+    return len(by)
+
+
 def aie_conv(a, emod, out: Path, hdr: Path):
     """--aie conv: map partition layers, build the AIE archive on a carrier layer,
     patch every partition call site in graph_driver.c. Returns (main.c, n_sites)."""
@@ -345,7 +382,7 @@ def aie_conv(a, emod, out: Path, hdr: Path):
             raise SystemExit("--aie conv,linear,attn: partition has no attn layers (autopart --mode attn)")
         if not a.kincore:
             raise SystemExit("--aie conv,linear,attn needs --kincore (gemm_kacc)")
-        att = ua.map_attn(part, work)
+        att = ua.map_attn(part, work, onnx=a.onnx.resolve())   # S3: aiegraph attention matcher
         if len(att) != natt_part:
             raise SystemExit(f"mapped {len(att)} attn layers, partition has {natt_part}")
     fa = []
@@ -426,6 +463,8 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     if a.ctrlpkt == "aot":
         log(f"ctrlpkt=aot pragmas={ua.CTRLPKT_NPRAGMAS}")
     log(f"kernel source {kcc}")
+    if fa:
+        fa_offload_groups(emod, att, kcc, out)
 
     # S1: conv / linear call sites through aiegraph -- one-call groups, the "args" step ABI, bf16 weights
     # pre-laid out for gemm_kacc in weights.bin (aiegraph drops their graph_bf16_expand)
@@ -516,7 +555,8 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--attn-fa", action="store_true",
                     help="GFA (P2): with --aie conv,linear,attn, every attention group (QK bmm, softmax, PV bmm) runs as "
-                         "ONE flash-attention (online softmax, fa_attn.py) on the AIE; the TVM softmax call is removed")
+                         "ONE flash-attention (online softmax, fa_attn.py) on the AIE -- an aiegraph group offload "
+                         "(S3): pack Q/K/V + run O steps, the other group calls (softmax included) removed by aiegraph")
     ap.add_argument("--keep-layout", action="store_true",
                     help="P4a (needs --attn-fa): keep the AIE layout between layers (keep_layout_rt.py) -- FA packs read "
                          "the linear outputs by stride (TVM head split/merge ops removed), temb dense weights pre-packed "

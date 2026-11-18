@@ -292,6 +292,8 @@ def _partition_doc(net) -> dict:
     doc = json.loads(path.read_text()) if path.is_file() else {}
     if doc.get("layers"):
         return doc
+    # no file, or one that only holds aiegraph groups (offload_group recorded before the
+    # first per-layer offload): the layer rows are made here, the groups are kept
     rows = [{"index": c.layer, "dir": c.dir, "kind": c.dir[3:], "symbol": c.symbol,
              "graph_node": c.node, "aiegraph": [], "target": "cpu",
              "reason": "not offloaded", "aie_dir": None, "backend": None,

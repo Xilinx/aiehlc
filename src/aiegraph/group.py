@@ -41,7 +41,7 @@ from .errors import AiegraphError
 
 __all__ = ["CallGraph", "GraphCall", "GroupTensor", "Group", "GroupStep", "GroupPlan",
            "group_step", "make_group", "plan_group", "attention_groups",
-           "record_group", "recorded_groups", "reset_groups", "load_call_graph"]
+           "record_group", "recorded_groups", "reset_groups", "load_call_graph", "emit_steps"]
 
 _STAGE = "group"
 
@@ -241,6 +241,24 @@ class GroupPlan:
             a = self.actions[c]
             lines.append(f"  {self.driver_comments()[c]}" + ("" if a == "removed" else f" {a}"))
         return "\n".join(lines)
+
+
+def emit_steps(plan: GroupPlan, emit) -> GroupPlan:
+    """Attach the driver code of every step (S3): ``emit`` maps a step name -- or is a callable
+    taking the step record -- to ``{"c": [statement, ...], "tag": "..."}``. The statements are
+    emitted verbatim at the step's call (``@K@`` -> the call index) between
+    ``GRAPH_PROF_BEGIN/END``; ``arm_build.generate_driver`` refuses a group with a step that has none."""
+    for s in plan.steps:
+        e = emit(s) if callable(emit) else emit.get(s["name"])
+        if not isinstance(e, dict) or not e.get("c"):
+            raise AiegraphError(_STAGE, f"group {plan.group.name}: no driver code for step {s['name']}",
+                                hint='emit={step: {"c": [...], "tag": ...}}')
+        c = [e["c"]] if isinstance(e["c"], str) else list(e["c"])
+        if not all(isinstance(x, str) and x.strip() for x in c):
+            raise AiegraphError(_STAGE, f"group {plan.group.name}: step {s['name']}: c must be statements")
+        s["c"] = c
+        s["tag"] = str(e.get("tag") or s["name"])
+    return plan
 
 
 def make_group(cg: CallGraph, calls, name: str = None) -> Group:

@@ -326,22 +326,33 @@ class EmbeddedModel:
         from .group import make_group
         return make_group(self.call_graph(), calls, name)
 
-    def match(self, kind: str = "attention", *, partition=None, onnx=None, model=None) -> list:
-        """Groups by pattern. ``"attention"``: every bmm -> softmax -> bmm core with its
-        Q/K/V layout calls and the O merge (data flow on graph.json).
+    def match(self, kind: str = "attention", onnx=None, nodes=None, wdtype: str = None, *,
+              partition=None, model=None) -> list:
+        """Groups by pattern. ``"attention"`` (S3): every bmm -> softmax -> bmm core with its
+        Q/K/V layout calls and the O merge (data flow on graph.json), as
+        ``attention.AttentionGroup`` (q/k/v/o, H/N/M/D, cls, scale, ONNX node names).
+        *onnx* defaults to the loaded model; *nodes* is the explicit ONNX node list
+        fallback ``[{"qk", "softmax", "pv"}, ...]`` (design §9 (1)); *wdtype* defaults to
+        ``AIEGRAPH_WDTYPE`` (bf16 rounds the scale as the deployed call reads it).
         ``"conv"`` / ``"linear"`` (S1): one group of ONE call per partition row
-        (``partition=`` partition.json path or dict, ``onnx=`` the model it was planned
-        on), with ``g.x`` / ``g.y`` / ``g.w`` / ``g.info`` -- see ``aiegraph.callsite``."""
-        from .group import attention_groups
-        if kind == "attention":
-            return attention_groups(self.call_graph())
+        (``partition=`` partition.json path or dict, ``onnx=`` / ``model=`` the model it was
+        planned on), with ``g.x`` / ``g.y`` / ``g.w`` / ``g.info`` -- see ``aiegraph.callsite``."""
+        import os
         if kind in ("conv", "linear"):
             from .callsite import conv_groups, linear_groups
             if partition is None or (onnx is None and model is None):
                 raise AiegraphError("group", f"match({kind!r}) needs partition= and onnx=")
             fn = conv_groups if kind == "conv" else linear_groups
             return fn(self.call_graph(), self.workdir, onnx, partition, model=model)
-        raise AiegraphError("group", f"match({kind!r})", hint="'attention', 'conv', 'linear'")
+        if kind != "attention":
+            raise AiegraphError("group", f"match({kind!r})", hint="'attention', 'conv', 'linear'")
+        from .attention import match_attention
+        if onnx is None and self.model is not None and getattr(self.model, "onnx_path", None):
+            onnx = self.model.onnx_path
+        if wdtype is None:
+            wdtype = os.environ.get("AIEGRAPH_WDTYPE", "fp32")
+        return match_attention(self.call_graph(), onnx=onnx, nodes=nodes, wdtype=wdtype,
+                               workdir=self.workdir)
 
     @property
     def groups(self) -> list:
@@ -349,16 +360,23 @@ class EmbeddedModel:
         from .group import recorded_groups
         return recorded_groups(self.workdir)
 
-    def offload_group(self, group, source=None, steps=(), record: bool = True):
+    def offload_group(self, group, source=None, steps=(), record: bool = True, emit=None):
         """Place *steps* on *group*'s calls, run the placement / deletion / early-write
         checks on the graph and record the group in ``layers/partition.json``.
-        Undo with ``offload_reset("group:<name>")`` (the whole group)."""
-        from .group import Group, make_group, plan_group, record_group
+        Undo with ``offload_reset("group:<name>")`` (the whole group).
+
+        *emit* (S3): ``{step name: {"c": [C statements], "tag": str}}`` or a callable
+        ``(step record) -> that dict`` -- what the generated ``graph_driver.c`` runs at the
+        step's slot (``@K@`` = the call index). With it the driver generator places the
+        steps and drops the removed calls (``arm_build.group_sites``)."""
+        from .group import Group, emit_steps, make_group, plan_group, record_group
         cg = self.call_graph()
         if not isinstance(group, Group):
             group = make_group(cg, group)
         plan = plan_group(cg, group, steps)
         _emit_steps(self.workdir, cg, plan, steps)
+        if emit is not None:
+            emit_steps(plan, emit)
         if record:
             record_group(self.workdir, plan, source)
         return plan
