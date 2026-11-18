@@ -9,6 +9,7 @@ to the AIE (every matched conv group, aiegraph.cnn). aiegraph generates the kern
 the driver steps, the board main and the .aiehlc_io runtime-input section.
 """
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -44,6 +45,7 @@ def main(argv=None) -> int:
     root = Path(ag.__file__).resolve().parents[2]
     os.environ.setdefault("AIEHLC_ROOT", str(root))
     os.environ["AIEGRAPH_WDTYPE"] = "bf16"                 # bf16 weights, fp32 accumulation
+    os.environ["AIEGRAPH_PARAMS_INPLACE"] = "1"            # (bf16) weights read in place from the linked blob
     os.environ.setdefault("HOSTCOMPILE_HOST_OPT", "-O2")
     bm.profiling_env()
     opts = bm.launch_env("warm")
@@ -68,8 +70,8 @@ def main(argv=None) -> int:
 
     # 2. convert (TVM, per-layer C) and match every Conv, depthwise included, to its TVM call
     shutil.rmtree(out / "ag_work", ignore_errors=True)
-    emod = ag.load(str(out / f"{MODEL}_cut.onnx")).convert(target="a78", quantize="fp32", workdir=out / "ag_work",
-                                                           verbose=a.verbose)
+    emod = ag.load(str(out / f"{MODEL}_cut.onnx")).convert(target="a78", quantize="fp32", image=str(xin),
+                                                           workdir=out / "ag_work", verbose=a.verbose)
     bm.cross_toolchain(root, log=log)
     inv = inventory(cut)
     rows = [dict(idx=i, node=r["node"], weight=r["weight"], cls="conv" if r["op"] == "Conv" else "linear",
@@ -96,11 +98,17 @@ def main(argv=None) -> int:
     log(f"carrier layer {lidx} ({car.symbol}); kernel source {kcc}")
     planned = cnn.offload_convs(emod, groups, plans, kcc, kprefix=KPREFIX, log=log)
     emod.driver_template(**bm.driver_glue(kprefix=KPREFIX))
-    log(f"offload: {emod.offload(f'layer{lidx}', str(kcc), check='group', verbose=a.verbose)}")
+    rep = emod.offload(f"layer{lidx}", str(kcc), check="group", verbose=a.verbose)
+    log(f"offload: {rep}")
+    if not any(L.get("target") == "aie" and L.get("archive") for L in
+               json.loads((Path(emod.workdir) / "layers" / "partition.json").read_text())["layers"]):
+        log("offload FAILED: the carrier layer has no AIE archive")
+        return 1
 
     # 4. board main + inputs header + reference, link
     hdr = out / f"{MODEL}_inputs.h"
-    bm.inputs_header(hdr, MODEL, [(iname, iname, x.reshape(-1))], dict(AIE_MODE="conv", WDTYPE="bf16"), origin=xin)
+    gin = emod.input_names      # the converted graph's name of the ONNX input
+    bm.inputs_header(hdr, MODEL, [(gin[0], iname, x.reshape(-1))], dict(AIE_MODE="conv", WDTYPE="bf16"), origin=xin)
     bm.append_defines(hdr, MODEL, dict(LAUNCH_WARM=1, LAUNCH_OPTS=bm.LAUNCH_OPTS_WARM, CTRLPKT="off",
                                        AIE_PLANNED_LAUNCHES=planned, AIE_PLANNED_CALLS=len(plans),
                                        TOTAL_GEMM_MACS=(total, "ULL")))

@@ -87,6 +87,7 @@ CASES = [
     ("dw3x3s2", 32, 16, 16, 32, 3, 2, 1, 1, 0, 0),
     ("square_w_128x256", 32, 8, 8, 128, 3, 1, 1, 0, 0, 1),  # K = 288 -> Kk 320; Np=128 -> no; see below
     ("square_w_64x128", 128, 16, 16, 64, 1, 1, 0, 0, 1, 0),  # Np=64, Kk=128: W square -> zero chunk
+    ("ch256_mc512_res", 128, 24, 24, 256, 1, 1, 0, 0, 0, 1),  # Np == 256 == MC -> chunk 512, partial
 ]
 
 
@@ -202,6 +203,14 @@ def test_plan_refuses_unknown_epilogue():
     info["nargs"] = 5
     with pytest.raises(AiegraphError):
         cnn.plan_conv(info)
+
+
+def test_ch_equal_px_takes_another_chunk():
+    info, _ = _info(128, 20, 20, 256, 1, 1, 0, 0, 1, 0, 0)
+    pl = cnn.plan_conv(info)
+    assert pl.Np == 256 and pl.mc == 512 and pl.launches == 1
+    with pytest.raises(AiegraphError):
+        cnn.kacc_geom(256, 128, 256)
 
 
 def test_square_w_gets_zero_chunk():

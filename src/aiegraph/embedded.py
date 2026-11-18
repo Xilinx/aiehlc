@@ -322,6 +322,16 @@ class EmbeddedModel:
 
     # ── group offload (design 2026-11-16 §6, S2: graph-level checks + record) ──
 
+    @property
+    def input_names(self) -> list:
+        """The converted graph's runtime inputs in order (``graph.json`` arg nodes that are not parameters):
+        what the board main's ``graph_input_name(k)`` returns (a one-input model is renamed ``data``)."""
+        import json
+        from .callsite import _offsets, params_file
+        g = json.loads(next(Path(self.workdir).glob("*_graph.json")).read_text())
+        params = set(_offsets(params_file(self.workdir)))
+        return [g["nodes"][i]["name"] for i in g["arg_nodes"] if g["nodes"][i]["name"] not in params]
+
     def call_graph(self):
         """The network as calls / tensors / storage, from ``<stem>_graph.json``."""
         from .group import CallGraph

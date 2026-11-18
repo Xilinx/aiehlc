@@ -42,9 +42,13 @@ def _c64(v: int) -> int:
 def kacc_geom(ch: int, k: int, px: int) -> dict:
     """The non-transposed gemm_kacc walk of one (ch, k, px) instance: core (pm, pn) owns ch/4 channels
     (ntile 16-row tiles) x px/4 pixels (S 16-px sub-tiles); K chunk kch = 2*tkw bf16, tkw = min(32, 4096/px);
-    K gains one zero chunk when the W port would be square (ch == k/2: aiehlc mis-sizes that window)."""
+    K gains one zero chunk when the W port would be square (ch == k/2: aiehlc mis-sizes that window).
+    ch == px is refused: aiehlc's link cannot place that instance's ping-pong windows (gemm_kacc_256x*x256,
+    "cannot find free area ... in memory DMb"); :func:`plan_conv` takes another chunk."""
     if ch % 64 or px % 64 or k % 64:
         raise AiegraphError(_STAGE, f"gemm_kacc ({ch}, {k}, {px}): every dim must be a multiple of 64")
+    if ch == px:
+        raise AiegraphError(_STAGE, f"gemm_kacc ({ch}, {k}, {px}): ch == px does not link (DM placement)")
     tkw = min(32, 4096 // px)
     l1 = 2 * (16 * tkw * 4 + (px // 4) * tkw * 4 + 16 * (px // 4) * 4)
     if l1 > L1_PORTS or tkw < 4 or (k // 2) % tkw:
@@ -111,6 +115,8 @@ def plan_conv(info: dict, mc: int = MC) -> ConvPlan:
     N, M = int(info["N"]), int(info["M"])
     K = int(info["K"]) * (int(info["groups"]) if dw else 1)
     Np, Kk = _c64(N), _c64(K)
+    if Np == mc:    # ch == px: aiehlc cannot place the instance's ping-pong windows in data memory
+        mc = 2 * mc if 2 * mc <= 512 else mc // 2
     g = kacc_geom(Np, Kk, mc)
     return ConvPlan(cid=int(info["cid"]), call=int(info["call"]), onnx=info["onnx"], symbol=sym, M=M, N=N, K=K,
                     dw=dw, act=int(bool(m.group(3))), sh=int(info["sh"]), sw=int(info["sw"]), ph=int(info["ph"]),

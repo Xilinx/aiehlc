@@ -1,8 +1,8 @@
 /* aiednn/conv2d/kacc_chunk_board.cc -- board glue of kacc_chunk_conv.cc (A78 + aiehlc runtime): port buffers,
  * cache sync, the gemm_kacc dispatch of every (Np, Kk, MC) instance, and the host ABI the generated board
- * main / driver read (@K@_aie_stats, @K@_aie_launch_stats, @K@_aie_split_stats, @K@_aie_host_split_*).
- * Parameters: @K@ host ABI prefix, @WARM@ warm launch, @CTRLPKT@ control-packet aot, @PART_C0@ first mesh
- * column, @MAXW@ / @MAXX@ / @MAXY@ port sizes (elements), @DISPATCH@ the instance switch. */
+ * main / driver read (<K>_aie_stats, <K>_aie_launch_stats, <K>_aie_split_stats, <K>_aie_host_split_*).
+ * Parameters (aiegraph.cnn.write_kernel): K host ABI prefix, WARM warm launch, CTRLPKT control-packet aot,
+ * PART_C0 first mesh column, MAXW / MAXX / MAXY port sizes (elements), DISPATCH the instance switch. */
 #include <math.h>
 #include "aie_user_kernel.h"
 #include "xil_cache.h"
