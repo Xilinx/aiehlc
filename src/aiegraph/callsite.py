@@ -187,7 +187,10 @@ def _onnx(onnx_path):
 
 
 def _groups_ok(groups, g: int, C: int, O: int) -> bool:
-    """ONNX conv ``group`` attribute *g* accepted by ``match("conv", groups=...)``"""
+    """ONNX conv ``group`` attribute *g* accepted by ``match("conv", groups=...)``; *groups* is one of
+    1 (or any int), ``"dw"`` (plain + depthwise, g == C == O) or ``"any"``, or a tuple/list of them."""
+    if isinstance(groups, (tuple, list)):
+        return any(_groups_ok(x, g, C, O) for x in groups)
     if groups == "any":
         return True
     if groups == "dw":
@@ -195,12 +198,21 @@ def _groups_ok(groups, g: int, C: int, O: int) -> bool:
     return g == int(groups)
 
 
+def _groups_valid(groups) -> bool:
+    if isinstance(groups, (tuple, list)):
+        return len(groups) > 0 and all(_groups_valid(x) for x in groups)
+    return groups in ("dw", "any") or (isinstance(groups, int) and not isinstance(groups, bool) and groups >= 1)
+
+
 def conv_groups(cg, workdir, onnx_path, partition, model=None, groups=1) -> list:
     """One group per partition conv row (``cls`` not linear/attn), partition order. ``groups``: the
     ONNX ``group`` attribute accepted -- 1 (plain convs), ``"dw"`` (plain + depthwise, group == C ==
-    O) or ``"any"``; ``g.info["groups"]`` carries it, ``K`` is the per-group reduction ``C/g*KH*KW``."""
-    if groups not in ("dw", "any") and not (isinstance(groups, int) and groups >= 1):
-        raise AiegraphError(_STAGE, f"match('conv', groups={groups!r})", hint="1, 'dw' or 'any'")
+    O), ``"any"``, or a tuple of those (e.g. ``(1, "dw")``); ``g.info["groups"]`` carries it, ``K``
+    is the per-group reduction ``C/g*KH*KW``.
+    ONNX Convs are paired with TVM conv2d calls by unpacked weight shape and weight value
+    (graph order only breaks ties), so a TVM schedule that reorders branches still matches."""
+    if not _groups_valid(groups):
+        raise AiegraphError(_STAGE, f"match('conv', groups={groups!r})", hint="1, 'dw', 'any' or a tuple of them")
     import numpy as np
     from onnx import helper, numpy_helper
     part = _partition(partition)
@@ -226,18 +238,29 @@ def conv_groups(cg, workdir, onnx_path, partition, model=None, groups=1) -> list
     if len(oconv) != len(convs):
         raise AiegraphError(_STAGE, f"match('conv'): {len(oconv)} ONNX Conv vs {len(convs)} TVM "
                             f"conv2d calls", hint="conv matching needs TVM to keep every Conv")
-    by_name, folded = {}, []
-    for n, c in zip(oconv, convs):
+    def oihw(ws):
+        return (ws[0] * ws[5], ws[1] * ws[4], ws[2], ws[3]) if len(ws) == 6 else None
+
+    def same(a, b):
+        return (a[0] == b[0] and abs(a[1] - b[1]) <= 1e-6 * b[3] + 1e-9
+                and abs(a[2] - b[2]) <= 1e-6 * b[2] + 1e-12)
+
+    by_shape = {}
+    for c in convs:
+        by_shape.setdefault(oihw(c["wshape"]), []).append(c)
+    by_name, folded, taken = {}, [], set()
+    for n in oconv:
         w = numpy_helper.to_array(inits[n.input[1]])
-        ws = c["wshape"]
-        if len(ws) != 6 or list(w.shape) != [ws[0] * ws[5], ws[1] * ws[4], ws[2], ws[3]]:
-            raise AiegraphError(_STAGE, f"match('conv'): ONNX {n.name} weight {list(w.shape)} vs "
-                                f"TVM call [{c['call']}] weight {ws} (graph order differs)")
+        cand = [c for c in by_shape.get(tuple(w.shape), []) if c["call"] not in taken]
+        if not cand:
+            raise AiegraphError(_STAGE, f"match('conv'): ONNX {n.name} weight {list(w.shape)}: no "
+                                "unmatched TVM conv2d call with that (unpacked OIHW) weight")
         st = _stats(w)
-        same = (c["stats"][0] == st[0] and abs(c["stats"][1] - st[1]) <= 1e-6 * st[3] + 1e-9
-                and abs(c["stats"][2] - st[2]) <= 1e-6 * st[2] + 1e-12)
-        if not same:
+        hit = [c for c in cand if same(c["stats"], st)]
+        c = hit[0] if hit else cand[0]
+        if not hit:
             folded.append(n.name)
+        taken.add(c["call"])
         by_name[n.name] = c
     onodes = {n.name: n for n in m.graph.node}
     out, used = [], set()

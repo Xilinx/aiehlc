@@ -344,7 +344,7 @@ class EmbeddedModel:
         (``partition=`` partition.json path or dict, ``onnx=`` / ``model=`` the model it was
         planned on), with ``g.x`` / ``g.y`` / ``g.w`` / ``g.info`` -- see ``aiegraph.callsite``.
         ``groups`` (conv): the ONNX ``group`` attribute accepted -- 1, ``"dw"`` (depthwise,
-        group == C == O) or ``"any"``.
+        group == C == O), ``"any"`` or a tuple of them, e.g. ``(1, "dw")``.
         Folds (``aiegraph.fold``): ``"conv+layout"`` (``base=`` the conv groups),
         ``"linear+layout"`` (``base=`` the linear groups, ``convs=`` the conv groups),
         ``"dense+silu"``; join overlapping ones with ``merge_groups``."""
