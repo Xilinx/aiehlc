@@ -74,35 +74,96 @@ int rt_cpe_target(const rt_cpe_dev *d, int col, int row, uint32_t paddr, uint32_
     return 0;
 }
 
+/* True if [lo, hi) is fully covered by the kernel's DMA port buffers
+ * (buf_in_ping_N / buf_in_pong_N / buf_out_ping_N / buf_out_pong_N symbols in
+ * the ELF .symtab). Port buffers are always written before they are read, so
+ * they need no zero-fill. No symtab, or any byte that is not a port buffer -> 0. */
+int rt_cpe_elf_range_is_port_bufs(const unsigned char *elf, uint32_t lo, uint32_t hi) {
+    const Elf32_Ehdr *ehdr = (const Elf32_Ehdr *)elf;
+    if (ehdr->e_shoff == 0U || ehdr->e_shnum == 0U || ehdr->e_shentsize != sizeof(Elf32_Shdr))
+        return 0;
+    const Elf32_Shdr *sh = (const Elf32_Shdr *)(elf + ehdr->e_shoff);
+    const Elf32_Shdr *symsh = NULL;
+    for (uint32_t i = 0U; i < ehdr->e_shnum; i++) {
+        if (sh[i].sh_type == (uint32_t)SHT_SYMTAB) {
+            symsh = &sh[i];
+            break;
+        }
+    }
+    if (!symsh || symsh->sh_entsize != sizeof(Elf32_Sym) || symsh->sh_link >= ehdr->e_shnum)
+        return 0;
+    const Elf32_Sym *sym = (const Elf32_Sym *)(elf + symsh->sh_offset);
+    const char *strtab = (const char *)(elf + sh[symsh->sh_link].sh_offset);
+    const uint32_t nsym = symsh->sh_size / (uint32_t)sizeof(Elf32_Sym);
+    uint32_t cur = lo;
+    while (cur < hi) {
+        uint32_t best_end = cur;
+        for (uint32_t k = 0U; k < nsym; k++) {
+            const uint32_t a = sym[k].st_value, e = sym[k].st_value + sym[k].st_size;
+            if (sym[k].st_size == 0U || a > cur || e <= best_end)
+                continue;
+            const char *n = strtab + sym[k].st_name;
+            if (strncmp(n, "buf_in_ping_", 12) != 0 && strncmp(n, "buf_in_pong_", 12) != 0 &&
+                strncmp(n, "buf_out_ping_", 13) != 0 && strncmp(n, "buf_out_pong_", 13) != 0)
+                continue;
+            best_end = e;
+        }
+        if (best_end == cur)
+            return 0;
+        cur = best_end;
+    }
+    return 1;
+}
+
+/* Bytes of a PT_LOAD segment the control-packet loader must write: the file
+ * bytes plus the zero-initialised tail [filesz, memsz) (.bss), unless that tail
+ * is made only of DMA port buffers. XAie_LoadElfMem zero-fills the tail; the
+ * control-packet encoders used to drop it, leaving stale DM in kernel statics. */
+uint32_t rt_cpe_seg_load_len(const unsigned char *elf, const void *phdr_v) {
+    const Elf32_Phdr *phdr = (const Elf32_Phdr *)phdr_v;
+    if (phdr->p_type != (uint32_t)PT_LOAD)
+        return 0U;
+    uint32_t filesz = phdr->p_filesz, memsz = phdr->p_memsz;
+    if (memsz <= filesz)
+        return filesz;
+    if (rt_cpe_elf_range_is_port_bufs(elf, phdr->p_vaddr + filesz, phdr->p_vaddr + memsz))
+        return filesz;
+    return memsz;
+}
+
 uint32_t rt_cpe_count_pkts(const rt_cpe_dev *d, const unsigned char *elf, int col, int row) {
     const Elf32_Ehdr *ehdr = (const Elf32_Ehdr *)elf;
     uint32_t npkt = 0U;
     for (uint32_t i = 0U; i < ehdr->e_phnum; i++) {
         const Elf32_Phdr *phdr = (const Elf32_Phdr *)(elf + ehdr->e_phoff + (uint64_t)i * ehdr->e_phentsize);
-        if (phdr->p_type != (uint32_t)PT_LOAD || phdr->p_filesz == 0U)
+        const uint32_t len = rt_cpe_seg_load_len(elf, phdr);
+        if (len == 0U)
             continue;
         uint32_t tile_addr = 0U;
         if (rt_cpe_target(d, col, row, phdr->p_paddr, &tile_addr) != 0 || tile_addr == RT_CPE_SKIP_ADDR)
             continue;
-        npkt += (phdr->p_filesz + (uint32_t)sizeof(uint32_t) * RT_CPE_CHUNK_WORDS - 1U) /
+        npkt += (len + (uint32_t)sizeof(uint32_t) * RT_CPE_CHUNK_WORDS - 1U) /
                 ((uint32_t)sizeof(uint32_t) * RT_CPE_CHUNK_WORDS);
     }
     return npkt;
 }
 
-static int cpe_seg(uint32_t stream_id, const unsigned char *src, uint32_t filesz, uint32_t tile_addr, uint32_t *pkt,
-                   uint32_t cap, uint32_t *pw_io, uint32_t *nacc, uint32_t *last_addr, uint32_t *last_val) {
+/* Encodes @len bytes at @tile_addr: the first @filesz come from @src, the rest
+ * (the .bss tail) are zero. */
+static int cpe_seg(uint32_t stream_id, const unsigned char *src, uint32_t filesz, uint32_t len, uint32_t tile_addr,
+                   uint32_t *pkt, uint32_t cap, uint32_t *pw_io, uint32_t *nacc, uint32_t *last_addr,
+                   uint32_t *last_val) {
     const uint32_t hdr = cpe_stream_hdr(stream_id);
     uint32_t pw = *pw_io, acc = *nacc, off = 0U, nwords = 0U;
     uint32_t words[RT_CPE_CHUNK_WORDS];
-    for (; off < filesz; off += (uint32_t)sizeof(words)) {
-        uint32_t chunk = filesz - off < (uint32_t)sizeof(words) ? filesz - off : (uint32_t)sizeof(words);
+    for (; off < len; off += (uint32_t)sizeof(words)) {
+        uint32_t chunk = len - off < (uint32_t)sizeof(words) ? len - off : (uint32_t)sizeof(words);
         nwords = (chunk + 3U) / 4U;
         if (pw + 2U + nwords > cap)
             return -1;
-        if (chunk < (uint32_t)sizeof(words))
-            memset(words, 0, sizeof(words));
-        memcpy(words, src + off, chunk);
+        memset(words, 0, sizeof(words));
+        if (off < filesz)
+            memcpy(words, src + off, filesz - off < chunk ? filesz - off : chunk);
         uint32_t ctrl = (((nwords - 1U) & 0x3U) << 20U) | ((tile_addr + off) & 0xFFFFFU);
         pkt[pw] = hdr;
         pkt[pw + 1U] = ctrl | (cpe_parity(ctrl) << 31U);
@@ -152,14 +213,15 @@ int rt_cpe_encode_body(const rt_cpe_dev *d, const unsigned char *elf, int col, i
     const Elf32_Ehdr *ehdr = (const Elf32_Ehdr *)elf;
     for (uint32_t i = 0U; i < ehdr->e_phnum; i++) {
         const Elf32_Phdr *phdr = (const Elf32_Phdr *)(elf + ehdr->e_phoff + (uint64_t)i * ehdr->e_phentsize);
-        if (phdr->p_type != (uint32_t)PT_LOAD || phdr->p_filesz == 0U)
+        const uint32_t len = rt_cpe_seg_load_len(elf, phdr);
+        if (len == 0U)
             continue;
         uint32_t tile_addr = 0U;
         if (rt_cpe_target(d, col, row, phdr->p_paddr, &tile_addr) != 0)
             return -1;
         if (tile_addr == RT_CPE_SKIP_ADDR)
             continue;
-        if (cpe_seg(stream_id, elf + phdr->p_offset, phdr->p_filesz, tile_addr, pkt, cap, &pw, &acc, &last_addr,
+        if (cpe_seg(stream_id, elf + phdr->p_offset, phdr->p_filesz, len, tile_addr, pkt, cap, &pw, &acc, &last_addr,
                     &last_val) != 0)
             return -1;
     }

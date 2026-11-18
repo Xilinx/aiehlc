@@ -3,12 +3,12 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Link the generated ResNet-18 C into a baremetal aarch64 ELF for the board.
+"""Link the generated model C into a baremetal aarch64 ELF for the board.
 
 ``relay.build(target="c")`` gives kernels but no program: there is no ``main``,
 no weights in memory, and no code calling the kernels in order. TVM normally
 supplies that from its graph *runtime* (C++, host-side). This module generates
-the missing pieces from ``resnet18_graph.json`` instead, so the result is plain
+the missing pieces from ``<stem>_graph.json`` instead, so the result is plain
 C that the aiehlc aarch64 toolchain can link:
 
     layers/NN_op/NN_op.c one kernel per operator       (stage 5)
@@ -16,7 +16,7 @@ C that the aiehlc aarch64 toolchain can link:
     tvm_runtime_shim.c   the ~4 TVM runtime symbols the kernels call   <- here
     graph_driver.c       storage plan + kernel calls in graph order    <- here
     main.c               entry point, weight load, argmax, timing      <- here
-    weights.bin          resnet18_params.bin, linked via ld -r         <- here
+    weights.bin          <stem>_params.bin,   linked via ld -r         <- here
     Makefile             the build recipe                              <- here
       -> make -> main.elf
 
@@ -27,9 +27,9 @@ makes a single operator independently rebuildable -- editing one layer
 recompiles one TU, not a 536 KB module -- and it is the natural place for a
 layer's AIE artifacts to sit next to the C they replace.
 
-The monolithic ``resnet18.c`` remains the fallback, used when stage 5 was
+The monolithic ``<stem>.c`` remains the fallback, used when stage 5 was
 skipped (``--no-split``). Exactly one of the two is wired into the Makefile,
-so no kernel is ever compiled twice. Measured difference on ResNet-18 int8:
+so no kernel is ever compiled twice. Measured difference on an int8 18-layer residual CNN:
 1,312,864 vs 1,312,608 bytes of .text (+0.02%, slightly less cross-TU
 inlining), same 65 ``tvmgen_*`` symbols.
 
@@ -60,7 +60,7 @@ kernels run on the array).
 **Why not TVM's AOT executor.** ``Executor("aot")`` does emit a real
 ``tvmgen_default_run`` entry point, which looks like exactly the right answer.
 It was tried and rejected: AOT inlines every weight into the C source as
-initializer text, which for ResNet-18 is a **188 MB** .c file. That is not
+initializer text, which for an int8 18-layer CNN is a **188 MB** .c file. That is not
 compilable in practice, and ``link-params=False`` does not prevent it. Reading
 the weights from a binary blob at runtime keeps the source at ~340 KB and the
 weights in ``.rodata`` where they belong.
@@ -92,7 +92,28 @@ import subprocess
 from pathlib import Path
 
 __all__ = ["build_arm_elf", "build_local_elf", "toolchain_status",
-           "generate_driver", "write_readme", "graph_sha"]
+           "generate_driver", "write_readme", "graph_sha",
+           "register_driver_pass", "clear_driver_passes"]
+
+#: Codegen passes on the generated driver, per workdir (``register_driver_pass``):
+#: resolved out_dir -> [(name, fn)], run in order by every ``build_arm_elf`` of that
+#: workdir right after ``generate_driver`` (aiegraph keep-layout / time-embedding fold, S5).
+_DRIVER_PASSES: dict = {}
+
+
+def register_driver_pass(out_dir, name: str, fn) -> None:
+    """Run ``fn(graph_driver.c, <stem>_graph.json, weights.bin, <stem>.c)`` on every
+    driver ``build_arm_elf`` generates for ``out_dir`` (same name: replaced)."""
+    key = str(Path(out_dir).resolve())
+    lst = [(n, f) for n, f in _DRIVER_PASSES.get(key, []) if n != name]
+    _DRIVER_PASSES[key] = lst + [(name, fn)]
+
+
+def clear_driver_passes(out_dir=None) -> None:
+    if out_dir is None:
+        _DRIVER_PASSES.clear()
+    else:
+        _DRIVER_PASSES.pop(str(Path(out_dir).resolve()), None)
 
 #: Set by the BSP linker script (``thirdparty/arch/cortexa78_0/lscript.ld``):
 #: noc_ddr4_C0_DDR_LOW0 is 0x80000000. Generation fails rather than emitting a
@@ -215,6 +236,103 @@ def param_offsets(blob_path: Path) -> dict:
     return out
 
 
+def params_inplace() -> bool:
+    """``AIEGRAPH_PARAMS_INPLACE=1`` (aiegraph multi-input graphs): kernels read the
+    weights straight out of the linked blob instead of a ``.bss`` copy. For
+    graphs whose weights are too big to hold twice in the 2 GiB DDR_LOW0 region
+    (a 1.29 GB fp32 diffusion denoiser). Off by default -- small graphs are unchanged."""
+    return os.environ.get("AIEGRAPH_PARAMS_INPLACE") == "1"
+
+
+def params_wdtype() -> str:
+    """``AIEGRAPH_WDTYPE=bf16`` (sprint bf16-streamload, needs
+    PARAMS_INPLACE): fp32 weights are stored in weights.bin as compact bf16
+    (round-to-nearest-even) and expanded per kernel call into one reusable
+    static fp32 scratch (``g_wscratch``, .bss -- never malloc). Default fp32."""
+    return os.environ.get("AIEGRAPH_WDTYPE", "fp32")
+
+
+def f32_to_bf16_rne(a):
+    """fp32 -> bf16 bits (uint16), round-to-nearest-even. Same rounding as
+    ``torch.Tensor.to(torch.bfloat16)`` (Shuhua's ``bf()``); NaN stays quiet NaN."""
+    import numpy as np
+    u = np.ascontiguousarray(a, dtype="<f4").view("<u4").astype(np.uint64)
+    r = ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16)
+    nan = np.isnan(np.asarray(a, dtype="<f4"))
+    if nan.any():
+        r[nan] = ((u[nan] >> 16) | 0x40).astype(np.uint16)
+    return r
+
+
+def write_aligned_blob(params_path: Path, offsets: dict, out_path: Path,
+                       align: int = 64, bf16_names=()) -> dict:
+    """Raw weights, each at an ``align``-byte offset, into ``out_path``.
+    Returns the new ``{name: (offset, nbytes)}``. Bytes are copied verbatim,
+    except names in ``bf16_names`` (fp32 tensors) which are written as bf16 RNE
+    (nbytes halves)."""
+    data = params_path.read_bytes()
+    new, pos = {}, 0
+    with open(out_path, "wb") as f:
+        for name, (off, nbytes) in sorted(offsets.items(), key=lambda kv: kv[1][0]):
+            pad = (-pos) % align
+            f.write(b"\0" * pad)
+            pos += pad
+            raw = data[off:off + nbytes]
+            if name in bf16_names:
+                import numpy as np
+                raw = f32_to_bf16_rne(np.frombuffer(raw, dtype="<f4")).tobytes()
+            f.write(raw)
+            new[name] = (pos, len(raw))
+            pos += len(raw)
+    return new
+
+
+def _bf16_layout(in_eids, bf16_eids):
+    """``[(eid, blob_off, elems, scratch_byte_off)]`` for one call's bf16 weights."""
+    out, pos, seen = [], 0, set()
+    for e in in_eids:
+        if e in bf16_eids and e not in seen:
+            seen.add(e)
+            off, elems = bf16_eids[e]
+            out.append((e, off, elems, pos))
+            pos += (elems * 4 + 63) // 64 * 64
+    return out, pos
+
+
+def _bf16_scratch_decl(nodes, eid, bf16_eids) -> list:
+    """The static fp32 scratch every APU call expands its bf16 weights into,
+    sized by the call with the most fp32 weight bytes. .bss, never malloc."""
+    if not bf16_eids:
+        return []
+    need = 0
+    for node in nodes:
+        if node.get("op") != "tvm_op" or node["attrs"]["func_name"] == "__nop":
+            continue
+        _, pos = _bf16_layout([eid(s, k) for s, k, _ in node["inputs"]], bf16_eids)
+        need = max(need, pos)
+    return [
+        "/* AIEGRAPH_WDTYPE=bf16: weights.bin holds bf16 (RNE); each call expands its",
+        " * weights into this one reusable fp32 scratch (largest call: %d B). */" % need,
+        "#define GRAPH_WSCRATCH_BYTES %dULL" % need,
+        "static uint8_t g_wscratch[GRAPH_WSCRATCH_BYTES] __attribute__((aligned(64)));",
+        "static void graph_bf16_expand(float *dst, const uint16_t *src, uint64_t n) {",
+        "    uint32_t *d = (uint32_t *)dst;",
+        "    for (uint64_t i = 0; i < n; ++i) d[i] = (uint32_t)src[i] << 16;",
+        "}",
+        "unsigned long long graph_wscratch_bytes(void) { return GRAPH_WSCRATCH_BYTES; }",
+    ]
+
+
+def _bf16_expand_lines(in_eids, bf16_eids) -> list:
+    lay, _ = _bf16_layout(in_eids, bf16_eids)
+    out = []
+    for e, off, elems, so in lay:
+        out += [f"    graph_bf16_expand((float *)(g_wscratch + {so}), "
+                f"(const uint16_t *)(g_params + {off}), {elems}ULL);",
+                f"    tensors[{e}].data = g_wscratch + {so};"]
+    return out
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  Driver generation
 # ═══════════════════════════════════════════════════════════════════════════
@@ -324,7 +442,7 @@ static double ticks_to_ms(XTime start, XTime end) {
 int main(void) {
     XTime t_init0, t_init1, t_run0, t_run1, t_top0, t_top1;
 
-    printf("resnet18: init\\n");
+    printf("graph: init\\n");
     XTime_GetTime(&t_init0);
     graph_init(_binary_weights_bin_start);
     XTime_GetTime(&t_init1);
@@ -335,7 +453,7 @@ int main(void) {
     for (int i = 0; i < INPUT_IMAGE_ELEMS; ++i)
         in[i] = input_image[i];
 
-    printf("resnet18: run\\n");
+    printf("graph: run\\n");
     XTime_GetTime(&t_run0);
     float *out = graph_run();
 #ifdef GRAPH_PROFILE
@@ -362,14 +480,14 @@ int main(void) {
     }
     XTime_GetTime(&t_top1);
 
-    printf("resnet18: top%d\\n", TOPK);
+    printf("graph: top%d\\n", TOPK);
     for (int k = 0; k < TOPK && k < n; ++k) {
         int c = idx[k];
         const char *name = (c < IMAGENET_NUM_CLASSES) ? imagenet_labels[c] : "?";
         printf("  %d. class=%-4d %-30s logit=%.4f\\n",
                k + 1, c, name, (double)out[c]);
     }
-    printf("resnet18: top1 class=%d logit=%.6f\\n", idx[0], (double)out[idx[0]]);
+    printf("graph: top1 class=%d logit=%.6f\\n", idx[0], (double)out[idx[0]]);
 
     /* Timing last, so it cannot be mistaken for part of the measured work and
      * so the logits stay adjacent to the CPU reference they are diffed with. */
@@ -377,7 +495,7 @@ int main(void) {
         double init_ms = ticks_to_ms(t_init0, t_init1);
         double run_ms  = ticks_to_ms(t_run0,  t_run1);
         double top_ms  = ticks_to_ms(t_top0,  t_top1);
-        printf("resnet18: timing (timer %llu Hz, 1 tick = %.1f ns)\\n",
+        printf("graph: timing (timer %llu Hz, 1 tick = %.1f ns)\\n",
                (unsigned long long)COUNTS_PER_SECOND,
                1e9 / (double)COUNTS_PER_SECOND);
         printf("  init       %10.3f ms\\n", init_ms);
@@ -447,7 +565,8 @@ def graph_widths(nodes: list, shapes: list) -> tuple:
     return max_ndim, max_args
 
 
-def _driver_init(sids, shapes, dltypes, offsets, nodes, eid) -> list:
+def _driver_init(sids, shapes, dltypes, offsets, nodes, eid, inplace=False,
+                 has_buf=None, bf16_eids=None) -> list:
     """``(lines, n_params)`` -- the body of ``graph_init()``.
 
     DLTensor headers, then one ``memcpy`` per weight out of the linked blob.
@@ -465,8 +584,10 @@ def _driver_init(sids, shapes, dltypes, offsets, nodes, eid) -> list:
             0 if dltype.startswith("int") else 1)
         for d, dim in enumerate(shape):
             init.append(f"    shape_store[{i}][{d}] = {dim};")
+        data = (f"buf_{sid}" if not inplace or sid in has_buf
+                else "0 /* in-place param, set below */")
         init += [
-            f"    tensors[{i}].data = buf_{sid};",
+            f"    tensors[{i}].data = {data};",
             f"    tensors[{i}].device.device_type = 1;",
             f"    tensors[{i}].device.device_id = 0;",
             f"    tensors[{i}].ndim = {len(shape)};",
@@ -487,8 +608,15 @@ def _driver_init(sids, shapes, dltypes, offsets, nodes, eid) -> list:
         if name not in offsets:
             continue            # the network input, not a parameter
         off, nbytes = offsets[name]
-        init.append(f"    memcpy(buf_{sids[eid(node_idx)]}, "
-                    f"g_params + {off}, {nbytes});   /* {name} */")
+        if inplace and eid(node_idx) in (bf16_eids or {}):
+            init.append(f"    tensors[{eid(node_idx)}].data = 0;"
+                        f"   /* {name}: bf16 @{off}+{nbytes} B, expanded per call */")
+        elif inplace:
+            init.append(f"    tensors[{eid(node_idx)}].data = (void *)(g_params + {off});"
+                        f"   /* {name}, {nbytes} B in place */")
+        else:
+            init.append(f"    memcpy(buf_{sids[eid(node_idx)]}, "
+                        f"g_params + {off}, {nbytes});   /* {name} */")
         n_params += 1
     init += ["}", ""]
     return init, n_params
@@ -524,6 +652,94 @@ def aie_entries(layers_dir) -> dict:
     return out
 
 
+def group_steps(layers_dir) -> dict:
+    """``{call index: step record}`` of the one-call group steps with the "args" ABI
+    (``ag.step(..., call=...)``, aiegraph S1) that ``layers/partition.json`` records,
+    each with its group name under ``"group"``. Groups without driver code (no
+    ``call``) are not driver-visible."""
+    part = Path(layers_dir) / "partition.json"
+    if not part.is_file():
+        return {}
+    doc = json.loads(part.read_text())
+    out = {}
+    for g in doc.get("groups", []):
+        for st in g.get("steps", []):
+            if not st.get("call"):
+                continue
+            if st["at"] in out:
+                raise ValueError(f"call [{st['at']}] has two group steps "
+                                 f"({out[st['at']]['group']}, {g['name']})")
+            out[st["at"]] = dict(st, group=g["name"])
+    decls = {}
+    for st in out.values():
+        if decls.setdefault(st["name"], st["decl"]) != st["decl"]:
+            raise ValueError(f"step {st['name']}: two C signatures {decls[st['name']]!r} "
+                             f"vs {st['decl']!r}")
+    return out
+
+
+def _step_call_lines(st: dict, call_idx: int, wbf_off, note: str = "") -> list:
+    args = []
+    for a in st["call"]:
+        if a == "args":
+            args.append("args")
+        elif a == "nargs":
+            args.append(str(st["nargs"]))
+        elif a == "wbf":
+            args.append(f"(const uint16_t *)(g_params + {wbf_off})")
+        else:
+            v = st["consts"][a]
+            args.append(repr(float(v)) + "f" if isinstance(v, float) else str(int(v)))
+    body = [f"    {st['name']}({', '.join(args)});" + (f"   {note}" if note else "")]
+    if st.get("wrap"):
+        b, e = st["wrap"]
+        body = [f"    {b}({call_idx});"] + body + [f"    {e}({call_idx});"]
+    return body
+
+
+def group_sites(layers_dir) -> dict:
+    """Group offload (aiegraph ``offload_group(..., emit=)``, design 2026-11-16 §6, S3):
+    ``{call index: ("step", group, step record) | ("removed", group, None)}`` from the
+    ``groups`` of ``layers/partition.json``. A recorded group whose steps carry no driver
+    code (``c``) is an error -- the driver would silently keep running the TVM calls."""
+    part = Path(layers_dir) / "partition.json"
+    if not part.is_file():
+        return {}
+    try:
+        doc = json.loads(part.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    out = {}
+    for g in doc.get("groups", []):
+        if g.get("steps") and all(s.get("call") for s in g["steps"]):
+            # "args" ABI groups: group_steps() emits the steps; their other calls are removed
+            for m in g.get("members", []):
+                if m.get("action") == "removed":
+                    k = int(m["call"])
+                    if k in out:
+                        raise ValueError(f"partition.json: call [{k}] in groups {out[k][1]['name']} "
+                                         f"and {g['name']}")
+                    out[k] = ("removed", g, None)
+            continue
+        if not any(s.get("c") for s in g.get("steps", [])) and \
+                not any(m.get("action") == "removed" for m in g.get("members", [])):
+            continue    # record-only (no driver code, no call removed): the driver keeps the TVM calls
+        steps = {s["name"]: s for s in g.get("steps", [])}
+        bad = [n for n, s in steps.items() if not s.get("c")]
+        if bad:
+            raise ValueError(f"partition.json group {g['name']}: step(s) {bad} have no driver code "
+                             f"(offload_group(..., emit=)) -- reset the group or record it with emit")
+        for m in g.get("members", []):
+            k = int(m["call"])
+            if k in out:
+                raise ValueError(f"partition.json: call [{k}] in groups {out[k][1]['name']} and {g['name']}")
+            if m["action"] == "removed":
+                out[k] = ("removed", g, None)
+            else:
+                out[k] = ("step", g, steps[m["step"]])
+    return out
+
+
 def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                     c_source=None, verbose: bool = True) -> dict:
     """Emit ``graph_driver.c``, ``tvm_runtime_shim.c`` and ``main.c``.
@@ -533,7 +749,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
     liveness analysis and aliased what it can), the weights pointed at the
     linked blob, and one call per graph node in order.
 
-    *c_source* is the generated module C (``resnet18.c``). It is read only to
+    *c_source* is the generated module C (``<stem>.c``). It is read only to
     name the ``GRAPH_TRACE_HEX`` parameter dumps by ROLE -- weight, bias,
     zero-point, requant multiplier, requant shift -- which cannot be told apart
     from the graph alone: they are all just int32 constants wired into a kernel.
@@ -553,9 +769,80 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
 
     max_ndim, max_args = graph_widths(nodes, shapes)
 
+    offsets = param_offsets(params_path)
+    inplace = params_inplace()
+    param_eids = set()
+    bf16_eids = {}          # eid -> (blob offset, elems) of a bf16-stored fp32 weight
+    if inplace:
+        bf16_names = set()
+        if params_wdtype() == "bf16":
+            bf16_names = {node["name"] for i, node in enumerate(nodes)
+                          if node.get("op") == "null" and node["name"] in offsets
+                          and dltypes[row_ptr[i]] == "float32"}
+        elif params_wdtype() != "fp32":
+            raise ValueError(f"AIEGRAPH_WDTYPE={params_wdtype()!r}: fp32|bf16")
+        offsets = write_aligned_blob(params_path, offsets, out_dir / "weights.bin",
+                                     bf16_names=bf16_names)
+        param_eids = {row_ptr[i] for i, node in enumerate(nodes)
+                      if node.get("op") == "null" and node["name"] in offsets}
+        bf16_eids = {row_ptr[i]: (offsets[node["name"]][0], offsets[node["name"]][1] // 2)
+                     for i, node in enumerate(nodes)
+                     if node.get("op") == "null" and node["name"] in bf16_names}
+    elif params_wdtype() != "fp32":
+        raise ValueError("AIEGRAPH_WDTYPE=bf16 needs AIEGRAPH_PARAMS_INPLACE=1")
+    # aiegraph one-call group steps (S1): the step replaces the call; its bf16 weight
+    # sits in weights.bin already in the kernel's layout and is read in place
+    steps = group_steps(graph_path.parent / "layers")
+    inplace_w = {}          # call index -> weight eid not expanded at that call
+    if steps:
+        wsteps = [st for st in steps.values() if st.get("weights")]
+        if wsteps and not bf16_eids:
+            raise ValueError("group steps with bf16 weights need AIEGRAPH_PARAMS_INPLACE=1 "
+                             "AIEGRAPH_WDTYPE=bf16")
+        with open(out_dir / "weights.bin", "r+b") as wf:
+            for st in wsteps:
+                w = st["weights"]
+                off, nb = offsets[w["param"]]
+                data = (graph_path.parent / w["file"]).read_bytes()
+                if w["tensor"] not in bf16_eids or len(data) != nb or nb != w["nbytes"]:
+                    raise ValueError(f"group {st['group']}: weight {w['param']} is "
+                                     f"{len(data)} B, weights.bin holds {nb} B "
+                                     f"(bf16={w['tensor'] in bf16_eids})")
+                wf.seek(off)
+                wf.write(data)
+                inplace_w[st["at"]] = w["tensor"]
+        if verbose and wsteps:
+            print(f"  [arm] group steps: {len(steps)} calls, {len(wsteps)} bf16 weights "
+                  f"in the kernel layout in weights.bin")
+    # S3 (emit=) group steps with a bf16 weight: same contract, the statements name it @WBF@
+    gsites = group_sites(graph_path.parent / "layers")
+    s3w = {k: v[2] for k, v in gsites.items() if v[0] == "step" and v[2].get("weights")}
+    if s3w:
+        if not bf16_eids:
+            raise ValueError("group steps with bf16 weights need AIEGRAPH_PARAMS_INPLACE=1 "
+                             "AIEGRAPH_WDTYPE=bf16")
+        with open(out_dir / "weights.bin", "r+b") as wf:
+            for k, st in sorted(s3w.items()):
+                w = st["weights"]
+                off, nb = offsets[w["param"]]
+                data = (graph_path.parent / w["file"]).read_bytes()
+                if w["tensor"] not in bf16_eids or len(data) != nb or nb != w["nbytes"]:
+                    raise ValueError(f"group step {st['name']} at [{k}]: weight {w['param']} is "
+                                     f"{len(data)} B, weights.bin holds {nb} B "
+                                     f"(bf16={w['tensor'] in bf16_eids})")
+                wf.seek(off)
+                wf.write(data)
+                inplace_w[k] = w["tensor"]
+        if verbose:
+            print(f"  [arm] group steps (emit): {len(s3w)} bf16 weights in the step layout in weights.bin")
+    act_sids = {sid for e, sid in enumerate(sids) if e not in param_eids}
+
     # One buffer per storage id, sized by the largest tensor assigned to it.
+    # In-place params own no buffer (unless an activation shares the sid).
     sizes: dict = {}
-    for sid, shape, dltype in zip(sids, shapes, dltypes):
+    for e, (sid, shape, dltype) in enumerate(zip(sids, shapes, dltypes)):
+        if inplace and sid not in act_sids:
+            continue
         elems = 1
         for dim in shape:
             elems *= dim
@@ -564,8 +851,6 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
     if total > DDR_BYTES:
         raise ValueError(f"graph needs {total:,} B of buffers, over the "
                          f"{DDR_BYTES:,} B the BSP linker script maps")
-
-    offsets = param_offsets(params_path)
 
     # entry index -> flat tensor index, so a node's inputs resolve to storage.
     def eid(node_idx: int, slot: int = 0) -> int:
@@ -630,10 +915,33 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
     for sid in sorted(sizes):
         lines.append(f"static uint8_t buf_{sid}[{sizes[sid]}] "
                      "__attribute__((aligned(64)));")
+    lines.append("")
+    seen_steps = []
+    for k in sorted(steps):
+        if steps[k]["name"] not in seen_steps:
+            seen_steps.append(steps[k]["name"])
+            lines.append(steps[k]["decl"] + "   /* aiegraph group step */")
+    # "args" ABI labels: a packed argument seen through another shape (same buffer)
+    for k in sorted(steps):
+        for i, a in enumerate(steps[k].get("args") or ()):
+            if "shape" in a:
+                nm = f"g_lbl_{k}_{i}"
+                lines.append(f"static DLTensor {nm};   /* group {steps[k]['group']}: tensors[{a['tensor']}] "
+                             f"as {a['shape']} */")
+                lines.append(f"static int64_t {nm}_shape[{len(a['shape'])}] = "
+                             f"{{{', '.join(str(int(d)) for d in a['shape'])}}};")
+    # file-scope C of emit= (template) steps, once per distinct text
+    seen_decl = []
+    for k in sorted(gsites):
+        d = gsites[k][2].get("decl") if gsites[k][0] == "step" else None
+        if d and d not in seen_decl:
+            seen_decl.append(d)
+            lines += [f"/* aiegraph group step {gsites[k][2]['name']} ({gsites[k][2].get('template', 'emit')}) */",
+                      d]
     lines += [
-        "",
         f"static uint8_t kernel_ws[{_KERNEL_WS}] __attribute__((aligned(64)));",
         "static const uint8_t *g_params;",
+    ] + _bf16_scratch_decl(nodes, eid, bf16_eids) + [
         "",
         "/* Both widths come from the graph, not from a round number: the",
         " * widest node takes %d kernel arguments and the widest tensor is"
@@ -651,7 +959,8 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
     ]
 
     init_lines, n_params = _driver_init(sids, shapes, dltypes,
-                                        offsets, nodes, eid)
+                                        offsets, nodes, eid, inplace=inplace,
+                                        has_buf=set(sizes), bf16_eids=bf16_eids)
     lines += init_lines
 
     # Entry index -> (graph name, blob offset, bytes) for every weight, as
@@ -677,6 +986,22 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
     for dim in shapes[out_eid]:
         out_elems *= dim
 
+    # aiegraph multi-input graphs: every graph input (null node, not a weight), in
+    # graph order, reachable by index; graph_input() stays input 0.
+    in_idxs = [i for i, node in enumerate(nodes)
+               if node.get("op") == "null" and node["name"] not in offsets]
+    lines += ["#define GRAPH_N_INPUTS %d" % len(in_idxs),
+              "int graph_n_inputs(void) { return %d; }" % len(in_idxs),
+              "void *graph_input_k(int k) {"]
+    for k, i in enumerate(in_idxs):
+        lines.append("    if (k == %d) return (void *)buf_%d;   /* %s %s %s */"
+                     % (k, sids[eid(i)], nodes[i]["name"], shapes[eid(i)],
+                        dltypes[eid(i)]))
+    lines += ["    return 0;", "}",
+              "const char *graph_input_name(int k) {"]
+    for k, i in enumerate(in_idxs):
+        lines.append('    if (k == %d) return "%s";' % (k, nodes[i]["name"]))
+    lines += ["    return \"\";", "}"]
     lines += [
         "float *graph_input(void) { return (float *)buf_%d; }"
         % sids[eid(input_idx)],
@@ -699,6 +1024,9 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
     ]
 
     n_calls = 0
+    both = sorted(set(gsites) & set(steps))
+    if both:
+        raise ValueError(f"calls {both} are both S1 group steps and S3 group members")
     for node_idx, node in enumerate(nodes):
         if node.get("op") != "tvm_op":
             continue
@@ -712,17 +1040,79 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         n_out = int(node["attrs"].get("num_outputs", 1))
         out_eids = [eid(node_idx, k) for k in range(n_out)]
         arg_eids = in_eids + out_eids
-        for slot, tensor_idx in enumerate(arg_eids):
-            lines.append(f"    args[{slot}].v_handle = &tensors[{tensor_idx}];")
+        exp = _bf16_expand_lines(in_eids, bf16_eids)
+        st = steps.get(n_calls)
+        wbf_off = None
+        if n_calls in inplace_w:
+            e = inplace_w[n_calls]
+            wbf_off = bf16_eids[e][0]
+            who = st if st is not None else dict(gsites[n_calls][2], group=gsites[n_calls][1]["name"])
+            hit = [j for j, ln in enumerate(exp) if ln.startswith("    graph_bf16_expand(")
+                   and f"(g_params + {wbf_off}), " in ln]
+            if len(hit) != 1:
+                raise ValueError(f"call [{n_calls}]: weight tensors[{e}] has no bf16 expand")
+            exp[hit[0]:hit[0] + 2] = [f"    tensors[{e}].data = 0;   /* group {who['group']}: "
+                                      f"bf16 weight read in place by {who['name']} */"]
+        lines += exp
+        if st is not None and st.get("args"):
+            # the step's own packed arguments (ag.arg): a tensor, or a label of its buffer
+            for slot, a in enumerate(st["args"]):
+                t = int(a["tensor"])
+                if t in param_eids and t not in in_eids:
+                    raise ValueError(f"call [{n_calls}]: step {st['name']} arg {slot} is weight "
+                                     f"tensors[{t}], which this call does not expand")
+                if "shape" in a:
+                    nm = f"g_lbl_{n_calls}_{slot}"
+                    lines.append(f"    {nm} = tensors[{t}]; {nm}.ndim = {len(a['shape'])}; "
+                                 f"{nm}.shape = {nm}_shape;   /* label {a['shape']} */")
+                    lines.append(f"    args[{slot}].v_handle = &{nm};")
+                else:
+                    lines.append(f"    args[{slot}].v_handle = &tensors[{t}];")
+        else:
+            for slot, tensor_idx in enumerate(arg_eids):
+                lines.append(f"    args[{slot}].v_handle = &tensors[{tensor_idx}];")
         tl = dict(param_of=param_of, roles=roles.get(fn, {}), nodes=nodes,
                   flow=flow)
         lines += _trace_lines(n_calls, fn, in_eids, out_eids, "in", **tl)
+        gs = gsites.get(n_calls)
+        if gs is not None:
+            # group offload: the call is a step of the group, or removed (the group's
+            # steps produce its result); args / expands above stay, as for any call
+            mem = next(m for m in gs[1]["members"] if int(m["call"]) == n_calls)
+            if mem.get("symbol") and mem["symbol"] != fn:
+                raise ValueError(f"partition.json group {gs[1]['name']}: call [{n_calls}] is {fn}, "
+                                 f"recorded {mem['symbol']} (stale group record)")
+            if gs[0] == "removed":
+                lines.append(f"    /* [{n_calls}] removed: group {gs[1]['name']} */")
+            else:
+                st = gs[2]
+                lines.append(f"    /* [{n_calls}] group {gs[1]['name']} step {st['name']} */")
+                lines.append(f"    GRAPH_PROF_BEGIN({n_calls});")
+                if any("@WBF@" in c for c in st["c"]) and wbf_off is None:
+                    raise ValueError(f"call [{n_calls}]: step {st['name']} uses @WBF@, no weight")
+                wbf = f"(const uint16_t *)(g_params + {wbf_off})"
+                lines += ["    " + c.replace("@K@", str(n_calls)).replace("@WBF@", wbf) for c in st["c"]]
+                tag = st["tag"] if st["tag"].startswith(("cpu ", "aie ")) else f"aie {st['tag']}"
+                lines.append(f'    GRAPH_PROF_END({n_calls}, "{tag}");')
+            lines += _trace_lines(n_calls, fn, in_eids, out_eids, "out", **tl)
+            lines.append("")
+            n_calls += 1
+            continue
         lines.append(f"    GRAPH_PROF_BEGIN({n_calls});")
         # The PROF tag says where the call RAN: an offloaded call is "aie" only
         # in the build that defines GRAPH_AIE_OFFLOAD (the board Makefile);
         # `make local` runs the CPU kernel and must say "cpu".
         op = fn.replace("tvmgen_default_fused_", "")[:68]
-        if fn in offload:
+        if st is not None:
+            if "wbf" in st["call"] and wbf_off is None:
+                raise ValueError(f"call [{n_calls}]: step {st['name']} passes wbf, no weight")
+            if st["nargs"] != (len(st["args"]) if st.get("args") else len(arg_eids)):
+                raise ValueError(f"call [{n_calls}]: step {st['name']} recorded for "
+                                 f"{st['nargs']} args, the call has {len(arg_eids)}")
+            lines += _step_call_lines(st, n_calls, wbf_off,
+                                      f"/* [{n_calls}] group {st['group']}: {fn} */")
+            lines.append(f'    GRAPH_PROF_END({n_calls}, "{st["tag"]}");')
+        elif fn in offload:
             lines += ["#ifdef GRAPH_AIE_OFFLOAD",
                       f"    {offload[fn]}(args, codes, {len(arg_eids)}, 0, 0, 0);",
                       f'    GRAPH_PROF_END({n_calls}, "aie {op}");',
@@ -902,7 +1292,7 @@ static inline void graph_dump_tensor(const char *tag, int idx, int n) {
 #endif
 
 /* 0 = the whole tensor. A cap matters most on the console sink, where the
- * full int8 ResNet-18 is ~100 MB of text over a UART. */
+ * full int8 18-layer CNN is ~100 MB of text over a UART. */
 #ifndef GRAPH_TRACE_HEX_MAX_BYTES
 #define GRAPH_TRACE_HEX_MAX_BYTES 0
 #endif
@@ -1336,7 +1726,7 @@ def split_layeriohex(log_path, out_dir=None, verbose: bool = True) -> dict:
 
 
 #: Scratch for TVMBackendAllocWorkspace. Kernels allocate inside a fused op
-#: (im2col-style packing buffers); 16 MB clears ResNet-18's largest by a wide
+#: (im2col-style packing buffers); 16 MB clears an int8 18-layer CNN's largest by a wide
 #: margin and the shim reports rather than corrupting if it were ever short.
 _KERNEL_WS = 16 * 1024 * 1024
 
@@ -1375,7 +1765,7 @@ typedef union {
 def _write_tvm_header_stubs(build: Path) -> None:
     """Provide ``tvm/runtime/c_{runtime,backend}_api.h`` for the kernel file.
 
-    The generated ``resnet18.c`` opens with::
+    The generated ``<stem>.c`` opens with::
 
         #include "tvm/runtime/c_runtime_api.h"
         #include "tvm/runtime/c_backend_api.h"
@@ -1446,7 +1836,7 @@ LSCRIPT := $(ARCH)/lscript.ld
 # ../layers/09_conv.../09_conv....o` touches one operator -- and it is why
 # split_layers' _clear_stale already sweeps `*/*.o` as well as `*/*.c`.
 #
-# FALLBACK: the single resnet18.c, used when stage 5 was skipped (--no-split)
+# FALLBACK: the single <stem>.c, used when stage 5 was skipped (--no-split)
 # or produced nothing. Exactly one of the two is active; KERNELS is empty in
 # the layer case, so the file is never compiled twice.
 LAYERS  := {layers_dir}
@@ -1454,7 +1844,7 @@ KERNELS := {kernels}
 
 # The monolithic object, named whether or not it is built. Only `clean` uses it
 # in the per-layer build: switching modes (or an older tree) can leave a stale
-# resnet18.o here, and a `clean` that skipped it would strand a 52 KB object
+# <stem>.o here, and a `clean` that skipped it would strand a 52 KB object
 # that LOOKS like it is part of the link but is not in OBJS and never linked.
 KERNEL_OBJ := {kernel_obj}
 
@@ -1479,13 +1869,13 @@ AIE_LAYER_LIBS := $(sort $(wildcard $(LAYERS)/*/aie/build/*.a) \
 ifeq ($(strip $(KERNELS)$(LAYER_SRCS)),)
 $(error no kernels found: $(LAYERS) contains no */*.c and KERNELS is empty. \
 Re-run deploy_flow.py, or build the monolithic file with \
-`make KERNELS=/path/to/resnet18.c`)
+`make KERNELS=/path/to/<stem>.c`)
 endif
 
 # -I$(REPO)/include reaches aie_timer.h (main.c times each phase with it).
 # -DAIE_GEN=5 picks its xiltimer.h branch, which is what this cortexa78 BSP
 # ships -- the default branch wants xtime_l.h, which the BSP does not have.
-# -O3 -funroll-loops, not -Os: on int8 ResNet-18 with the stem on the AIE,
+# -O3 -funroll-loops, not -Os: on an int8 18-layer CNN with the stem on the AIE,
 # graph_run() measured 2232 ms at -Os, 1282 ms at -O3, 1270 ms adding
 # -funroll-loops (-flto: no gain), all with bit-identical logits. .text grows
 # from ~0.4 MB to ~1.3 MB, small next to the 11.9 MB weight blob.
@@ -1531,7 +1921,7 @@ SRCS := $(KERNELS) graph_driver.c tvm_runtime_shim.c main.c
 OBJS := $(notdir $(SRCS:.c=.o))
 
 # The kernels' entry to the link. Empty in the monolithic fallback (where they
-# arrive as resnet18.o inside OBJS instead), so `make` never archives zero
+# arrive as <stem>.o inside OBJS instead), so `make` never archives zero
 # objects into a library nothing needs.
 LAYER_LIB := $(if $(LAYER_OBJS),liblayers.a,)
 
@@ -1563,7 +1953,7 @@ liblayers.a: $(LAYER_OBJS)
 # Every layer includes ../layers_common.h, so a regenerated prologue must
 # rebuild all of them.
 $(LAYER_OBJS): $(LAYERS)/layers_common.h
-
+{layer_cflags_block}
 # main.c embeds the preprocessed image and the label table, so regenerating
 # either must force it to recompile.
 main.o: main.c input_image.h imagenet_labels.h
@@ -1574,6 +1964,7 @@ main.o: main.c input_image.h imagenet_labels.h
 # otherwise main.c's extern symbol will not resolve.
 weights.o: weights.bin
 \t$(LD) -r -b binary -o $@ $<
+\t$(CROSS)objcopy --set-section-alignment .data=64 $@
 
 # ───────────────────────────────────────────────────────────────────────────
 #  LOCAL (x86 / this host) build -- `make local`, `make run-local`
@@ -1835,8 +2226,30 @@ def layer_sources(layers_dir) -> list:
     return sorted(layers_dir.glob("*/*.c"))
 
 
+def _layer_cflags_block(layer_cflags: str) -> str:
+    """Makefile text for the ``layer_cflags`` knob, or ``""`` when it is empty.
+
+    Empty -> the generated Makefile is byte-identical to the one without the
+    knob. Non-empty -> ``LAYER_CFLAGS ?= <flags>`` plus a target-specific
+    ``$(LAYER_OBJS): CFLAGS += $(LAYER_CFLAGS)``, so ONLY the per-layer TVM
+    kernels (the members of liblayers.a) see the extra flags. The driver,
+    main.c, extra sources and the AIE host glue (aiek_*.cc, whose NaN sentinel
+    breaks under -ffinite-math-only) keep the plain CFLAGS.
+    ``make LAYER_CFLAGS=...`` overrides the value without regenerating.
+    """
+    flags = " ".join(str(layer_cflags or "").split())
+    if not flags:
+        return ""
+    return ("\n# Extra flags for the per-layer TVM kernels only (arm_build layer_cflags,\n"
+            "# --arm-layer-cflags-file of a model build). Target-specific: the driver,\n"
+            "# main.c and the AIE host glue are compiled with plain CFLAGS.\n"
+            f"LAYER_CFLAGS ?= {flags}\n"
+            "$(LAYER_OBJS): CFLAGS += $(LAYER_CFLAGS)\n")
+
+
 def write_makefile(build: Path, repo_root: Path, kernel_src: Path,
-                   layers_dir=None, verbose: bool = True) -> Path:
+                   layers_dir=None, verbose: bool = True,
+                   layer_cflags: str = "") -> Path:
     """Write the Makefile that actually builds the ELF. Returns its path.
 
     The recipe lives here rather than in Python so the build is reproducible
@@ -1875,6 +2288,7 @@ def write_makefile(build: Path, repo_root: Path, kernel_src: Path,
         repo=repo_root, arch=arch, bsp=bsp,
         layers_dir=layers_dir, kernels=kernels, kernel_rule=rule,
         kernel_obj=f"{kernel_src.stem}.o",
+        layer_cflags_block=_layer_cflags_block(layer_cflags),
         **_aie_link_vars(repo_root, kernel_src, build, layers_dir),
     )
     path = build / "Makefile"
@@ -1886,7 +2300,7 @@ def write_makefile(build: Path, repo_root: Path, kernel_src: Path,
 #  Local (x86) build
 # ═══════════════════════════════════════════════════════════════════════════
 
-#: How long ``main_local.elf`` may run before it is killed. ResNet-18 int8 in
+#: How long ``main_local.elf`` may run before it is killed. An int8 18-layer CNN in
 #: unvectorized portable C is seconds on a workstation; a cap this generous
 #: only ever fires on a genuine hang, and a hang is what a miscompiled kernel
 #: looks like when a loop bound goes wrong.
@@ -1955,13 +2369,13 @@ def build_local_elf(build, run: bool = True, jobs: int = 0,
 
 
 def _parse_top1(stdout: str):
-    """``(class, logit)`` from main.c's ``resnet18: top1 class=N logit=F`` line.
+    """``(class, logit)`` from main.c's ``<name>: top1 class=N logit=F`` line.
 
     Parsed rather than recomputed so the number compared against the CPU
     reference is the one the program actually printed.
     """
     for line in stdout.splitlines():
-        if line.startswith("resnet18: top1 "):
+        if re.match(r"\S+: top1 ", line):
             cls = logit = None
             for tok in line.split():
                 if tok.startswith("class="):
@@ -2016,7 +2430,7 @@ make -j8
 | `input_image.h` | the preprocessed photo as `static const float[@@INELEMS@@]` |
 | `imagenet_labels.h` | the 1000 class names |
 | `tvm_graph_types.h`, `tvm/runtime/c_*_api.h` | baremetal stand-ins, so the kernel C is used **verbatim** rather than patched |
-| `weights.bin` | `resnet18_params.bin`, linked in via `ld -r -b binary` |
+| `weights.bin` | `<stem>_params.bin`, linked in via `ld -r -b binary` |
 | `Makefile` | the build recipe — nothing is hidden in Python |
 | `liblayers.a` | built: the @@LAYERS@@ per-layer objects from stage 5 — **the kernels** |
 | `localobj/` | built: host objects for `make local`, kept apart from the aarch64 ones |
@@ -2135,7 +2549,7 @@ nothing is lost:
 ```
 
 Two kernels may well slug the same; that cannot collide, because the call index
-disambiguates. Verified on int8 ResNet-18: **417 files** (240 in/out groups +
+disambiguates. Verified on an int8 18-layer CNN: **417 files** (240 in/out groups +
 177 parameters) holding 446 tensors, all stems unique.
 
 ### Activations say where they came from
@@ -2225,7 +2639,7 @@ way to misread this data.
 | `TRACE_HEX_MAX=N` | cap each file at N bytes of payload (`_TRUNCATED` is defined in the header when it bites) |
 | `make clean-hex` | delete `layeriohex/` — deliberately **not** part of `clean-local`, so rebuilding does not discard a dump |
 
-It is not small: the full int8 ResNet-18 is roughly **100 MB** of text for the
+It is not small: a full int8 18-layer CNN is roughly **100 MB** of text for the
 per-call dumps plus **~72 MB** for `param_*.h`, because parameters are kernel
 inputs too and a weight read by several calls is dumped for each of them. They
 are dumped rather than skipped because a mismatch lands in a parameter as often
@@ -2342,7 +2756,7 @@ archives are aarch64 and their kernels run on the array. Re-run
 
 By default the per-layer sources stage 5 split out: `../layers/NN_op/NN_op.c`
 -> `NN_op.o` beside its source -> `liblayers.a`, so editing one operator
-recompiles one translation unit. The monolithic `../resnet18.c` is the
+recompiles one translation unit. The monolithic `../<stem>.c` is the
 fallback when stage 5 was skipped (`--no-split`). Exactly one of the two is
 wired in; if neither resolves, `make` stops with a named error instead of a
 wall of undefined `tvmgen_default_*` references.
@@ -2382,11 +2796,208 @@ def write_readme(build: Path, summary: dict, layers: int = 0,
 #  Build
 # ═══════════════════════════════════════════════════════════════════════════
 
-def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
+# ───────────────────────────────────────────────────────────────────────────
+#  Runtime IO section (.aiehlc_io) -- swap the inputs of a built ELF
+# ───────────────────────────────────────────────────────────────────────────
+#
+# A board ELF normally bakes its inputs into .rodata (<model>_inputs.h), so every
+# new input means a full rebuild (~1 h for a large diffusion denoiser). With ``runtime_io`` the
+# inputs live in ONE aligned section ``.aiehlc_io`` instead; the host tool
+# ``src/tool/elfio/aiehlc_elfio.py patch`` rewrites only that section in a
+# copy of the ELF (and fixes its crc), so A/B inputs share one build.
+#
+# Layout (little endian, AIO_ALIGN-aligned, initialised from the build's own
+# inputs, so the default behaviour of the ELF is unchanged):
+#   0   magic "AIO1"   4 u32 version   8 u32 n_in   12 u32 flags (bit0 dump_out)
+#   16  u32 crc32 of all inputs concatenated in order (= the build's input crc32 file)
+#   20  u32 hdr_bytes  24 u32 total_bytes  28 u32 reserved
+#   32 + 64*k: char name[40], u32 offset, u32 bytes, u32 crc32, u32 rsv, u64 rsv
+#   data: input k at its offset (AIO_ALIGN aligned)
+# The board reads the section through a laundered pointer (aiehlc_io.c), so the
+# compiler can never constant-fold the build-time bytes into the code.
+AIO_SECTION = ".aiehlc_io"
+AIO_MAGIC = b"AIO1"
+AIO_VERSION = 1
+AIO_ALIGN = 64
+AIO_HDR = struct.Struct("<4sIIIIIII")       # 32 B
+AIO_ENT = struct.Struct("<40sIIIIQ")        # 64 B
+AIO_FLAG_DUMP_OUT = 1
+
+
+def _aio_round(n: int) -> int:
+    return (n + AIO_ALIGN - 1) // AIO_ALIGN * AIO_ALIGN
+
+
+def aio_pack(inputs, dump_out: bool = False) -> bytes:
+    """``inputs``: [(name, bytes)] in graph-input order -> the .aiehlc_io image."""
+    import zlib
+    if not inputs:
+        raise ValueError("runtime_io: no inputs")
+    hdr_bytes = _aio_round(AIO_HDR.size + AIO_ENT.size * len(inputs))
+    ents, off, crc = [], hdr_bytes, 0
+    for name, data in inputs:
+        nb = name.encode()
+        if not 0 < len(nb) < 40:
+            raise ValueError(f"runtime_io: bad input name {name!r}")
+        ents.append(AIO_ENT.pack(nb, off, len(data), zlib.crc32(data), 0, 0))
+        crc = zlib.crc32(data, crc)
+        off = _aio_round(off + len(data))
+    total = off
+    img = bytearray(total)
+    img[:AIO_HDR.size] = AIO_HDR.pack(AIO_MAGIC, AIO_VERSION, len(inputs),
+                                      AIO_FLAG_DUMP_OUT if dump_out else 0,
+                                      crc, hdr_bytes, total, 0)
+    for k, ((_, data), e) in enumerate(zip(inputs, ents)):
+        p = AIO_HDR.size + AIO_ENT.size * k
+        img[p:p + AIO_ENT.size] = e
+        o = AIO_ENT.unpack(e)[1]
+        img[o:o + len(data)] = data
+    return bytes(img)
+
+
+AIO_H = r"""/* aiehlc_io.h -- generated by arm_build.write_runtime_io (do not edit).
+ * Inputs of this ELF live in the .aiehlc_io section; aiehlc_elfio.py patch swaps them. */
+#pragma once
+#include <stdint.h>
+#define AIEHLC_IO_N_IN @N@
+int           aiehlc_io_check(void);          /* 0 ok; <0 bad magic/version/layout */
+int           aiehlc_io_n(void);
+const char   *aiehlc_io_name(int k);
+const void   *aiehlc_io_ptr(int k);
+unsigned long aiehlc_io_bytes(int k);
+uint32_t      aiehlc_io_hdr_crc(void);        /* crc32 stored in the header */
+uint32_t      aiehlc_io_crc(void);            /* crc32 recomputed on the target over all inputs */
+int           aiehlc_io_dump_out(void);       /* header flag bit0 */
+uint32_t      aiehlc_io_crc32_upd(uint32_t c, const void *p, unsigned long n);
+/* prints AIO_BEGIN / AIO_D <off> <hex> ... / AIO_END (read back by aiehlc_elfio.py readout) */
+void          aiehlc_io_dump(const char *tag, const void *p, unsigned long bytes, unsigned long elems);
+"""
+
+AIO_C = r"""/* aiehlc_io.c -- generated by arm_build.write_runtime_io (do not edit). */
+#include <stdio.h>
+#include <string.h>
+#include "aiehlc_io.h"
+#include "aie_timer.h"
+
+/* writable (not const) + external + read through a laundered pointer: the
+ * build-time bytes are never folded into code, so a patched section is what runs */
+__attribute__((section("@SECT@"), aligned(@ALIGN@), used))
+uint8_t aiehlc_io_blob[@TOTAL@] = {
+@BYTES@
+};
+
+static const uint8_t *aio(void) {
+    const uint8_t *p = aiehlc_io_blob;
+    __asm__ volatile("" : "+r"(p) : : "memory");
+    return p;
+}
+static uint32_t rd32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static const uint8_t *ent(int k) { return aio() + @HDR@ + @ENT@ * k; }
+
+int aiehlc_io_check(void) {
+    const uint8_t *b = aio();
+    if (memcmp(b, "AIO1", 4) != 0) return -1;
+    if (rd32(b + 4) != @VER@u) return -2;
+    if (rd32(b + 8) != AIEHLC_IO_N_IN) return -3;
+    if (rd32(b + 24) != sizeof aiehlc_io_blob) return -4;
+    for (int k = 0; k < AIEHLC_IO_N_IN; ++k)
+        if (rd32(ent(k) + 40) + (unsigned long)rd32(ent(k) + 44) > sizeof aiehlc_io_blob) return -5;
+    return 0;
+}
+int aiehlc_io_n(void) { return (int)rd32(aio() + 8); }
+const char *aiehlc_io_name(int k) { return (const char *)ent(k); }
+const void *aiehlc_io_ptr(int k) { return aio() + rd32(ent(k) + 40); }
+unsigned long aiehlc_io_bytes(int k) { return rd32(ent(k) + 44); }
+uint32_t aiehlc_io_hdr_crc(void) { return rd32(aio() + 16); }
+int aiehlc_io_dump_out(void) { return (int)(rd32(aio() + 12) & 1u); }
+
+uint32_t aiehlc_io_crc32_upd(uint32_t c, const void *p_, unsigned long n) {
+    const uint8_t *p = (const uint8_t *)p_;
+    for (unsigned long i = 0; i < n; ++i) {
+        c ^= p[i];
+        for (int k = 0; k < 8; ++k) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+    }
+    return c;
+}
+uint32_t aiehlc_io_crc(void) {
+    uint32_t c = 0xFFFFFFFFu;
+    for (int k = 0; k < AIEHLC_IO_N_IN; ++k) c = aiehlc_io_crc32_upd(c, aiehlc_io_ptr(k), aiehlc_io_bytes(k));
+    return c ^ 0xFFFFFFFFu;
+}
+
+void aiehlc_io_dump(const char *tag, const void *p_, unsigned long bytes, unsigned long elems) {
+    static const char hx[] = "0123456789abcdef";
+    const uint8_t *p = (const uint8_t *)p_;
+    char line[2 * 64 + 1];
+    XTime t0, t1;
+    XTime_GetTime(&t0);
+    printf("AIO_BEGIN tag=%s bytes=%lu elems=%lu dtype=f32\n", tag, bytes, elems);
+    for (unsigned long o = 0; o < bytes; o += 64) {
+        unsigned long n = bytes - o < 64 ? bytes - o : 64;
+        for (unsigned long i = 0; i < n; ++i) {
+            line[2 * i] = hx[p[o + i] >> 4];
+            line[2 * i + 1] = hx[p[o + i] & 15];
+        }
+        line[2 * n] = 0;
+        printf("AIO_D %06lx %s\n", o, line);
+    }
+    XTime_GetTime(&t1);
+    printf("AIO_END tag=%s bytes=%lu elems=%lu crc32=%08x dump_ms=%.3f\n", tag, bytes, elems,
+           (unsigned)(aiehlc_io_crc32_upd(0xFFFFFFFFu, p, bytes) ^ 0xFFFFFFFFu),
+           1000.0 * (double)(t1 - t0) / (double)COUNTS_PER_SECOND);
+    fflush(stdout);
+}
+"""
+
+
+def write_runtime_io(out_dir, inputs, dump_out: bool = False, verbose: bool = True) -> list:
+    """Write ``aiehlc_io.c`` + ``aiehlc_io.h`` (the .aiehlc_io section holding
+    ``inputs`` = [(name, bytes | path)]) into ``out_dir``; returns their paths,
+    ready to pass as ``build_arm_elf(extra_sources=...)``."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ins = [(n, Path(d).read_bytes() if isinstance(d, (str, Path)) else bytes(d)) for n, d in inputs]
+    img = aio_pack(ins, dump_out)
+    hdr_bytes = AIO_HDR.unpack_from(img)[5]
+    rows = []
+    for i in range(0, len(img), 32):
+        rows.append(",".join(str(b) for b in img[i:i + 32]) + ",")
+    c = (AIO_C.replace("@SECT@", AIO_SECTION).replace("@ALIGN@", str(AIO_ALIGN))
+         .replace("@TOTAL@", str(len(img))).replace("@BYTES@", "\n".join(rows))
+         .replace("@HDR@", str(AIO_HDR.size)).replace("@ENT@", str(AIO_ENT.size))
+         .replace("@VER@", str(AIO_VERSION)))
+    h = AIO_H.replace("@N@", str(len(ins)))
+    pc, ph = out_dir / "aiehlc_io.c", out_dir / "aiehlc_io.h"
+    pc.write_text(c)
+    ph.write_text(h)
+    if verbose:
+        import zlib
+        crc = zlib.crc32(b"".join(d for _, d in ins))
+        print(f"  [arm] runtime_io: {AIO_SECTION} {len(img):,} B, {len(ins)} inputs "
+              f"({', '.join(f'{n}={len(d)}' for n, d in ins)}), hdr {hdr_bytes} B, "
+              f"crc32={crc:08x} dump_out={int(dump_out)}")
+    return [pc, ph]
+
+
+def build_arm_elf(out_dir, repo_root=None, c_name=None,
                   run_make: bool = True, jobs: int = 0, image=None,
                   local: bool = False, local_run: bool = True,
-                  verbose: bool = True, make_vars: dict = None) -> dict:
+                  verbose: bool = True, make_vars: dict = None,
+                  main_c=None, extra_sources=(), extra_cflags: str = "",
+                  layer_cflags: str = "", runtime_io=None) -> dict:
     """Generate the sources + Makefile, then run ``make`` to link ``main.elf``.
+
+    ``runtime_io`` ({"inputs": [(name, bytes|path)], "dump_out": bool}) adds the
+    ``.aiehlc_io`` input section (``write_runtime_io``) to the build.
+
+    ``main_c`` (text) replaces the generated classifier ``main.c``;
+    ``extra_sources`` (paths: .c compiled and linked, anything else copied next
+    to them, e.g. headers) and ``extra_cflags`` go into the same build. For
+    non-classifier graphs (aiegraph multi-input graphs).
+    ``layer_cflags`` is added to CFLAGS for the per-layer kernel objects
+    (liblayers.a) only; empty leaves the Makefile unchanged.
 
     Python only *generates*; ``make`` does the building, so the same Makefile
     the flow used is the one a person re-runs by hand. ``run_make=False``
@@ -2408,6 +3019,9 @@ def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
     """
     out_dir = Path(out_dir).resolve()
     repo_root = Path(repo_root) if repo_root else Path(__file__).resolve().parents[3]
+    if c_name is None:   # the one <stem>_graph.json the deploy flow wrote -> <stem>.c
+        gs = sorted(out_dir.glob("*_graph.json"))
+        c_name = gs[0].name[:-len("_graph.json")] + ".c" if len(gs) == 1 else "model.c"
 
     graph = out_dir / f"{Path(c_name).stem}_graph.json"
     params = out_dir / f"{Path(c_name).stem}_params.bin"
@@ -2420,7 +3034,11 @@ def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
     summary = generate_driver(graph, params, build, c_source=out_dir / c_name,
                               verbose=verbose)
     _write_tvm_header_stubs(build)
-    shutil.copyfile(params, build / "weights.bin")
+    if not params_inplace():
+        shutil.copyfile(params, build / "weights.bin")   # else: aligned blob written above
+    for name, fn in _DRIVER_PASSES.get(str(out_dir), ()):
+        summary.setdefault("driver_passes", {})[name] = fn(
+            build / "graph_driver.c", graph, build / "weights.bin", out_dir / c_name)
 
     # The image the ELF classifies, plus the names it prints. Written before
     # the Makefile so a missing image fails here rather than as a mysterious
@@ -2441,7 +3059,27 @@ def build_arm_elf(out_dir, repo_root=None, c_name="resnet18.c",
     # Stage 5 splits into <out_dir>/layers/ and runs before this stage, so the
     # per-layer sources are already on disk when the Makefile is written.
     makefile = write_makefile(build, repo_root, out_dir / c_name,
-                              layers_dir=out_dir / "layers", verbose=verbose)
+                              layers_dir=out_dir / "layers", verbose=verbose,
+                              layer_cflags=layer_cflags)
+    if main_c is not None:
+        (build / "main.c").write_text(main_c)
+    extra_c = []
+    if runtime_io:
+        extra_sources = list(extra_sources or ()) + write_runtime_io(
+            out_dir / "runtime_io", runtime_io["inputs"], bool(runtime_io.get("dump_out")),
+            verbose=verbose)
+    for src in extra_sources or ():
+        src = Path(src)
+        shutil.copyfile(src, build / src.name)
+        if src.suffix == ".c":
+            extra_c.append(src.name)
+    if extra_c or extra_cflags:
+        mk = makefile.read_text()
+        old = "SRCS := $(KERNELS) graph_driver.c tvm_runtime_shim.c main.c"
+        assert old in mk, "Makefile template changed: SRCS line not found"
+        mk = mk.replace(old, old + "".join(" " + c for c in extra_c)
+                        + (f"\nCFLAGS += {extra_cflags}" if extra_cflags else ""), 1)
+        makefile.write_text(mk)
     summary["makefile"] = str(makefile)
     summary["layer_objects"] = len(layer_sources(out_dir / "layers"))
     if verbose:

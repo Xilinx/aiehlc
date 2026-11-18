@@ -506,7 +506,7 @@ AIEK_ENTRY({e}) {{
 
 # The fused conv + requantize signature TVM emits for these int8 networks
 # (zp_a, bias, zp_b, multiplier, unused, shift around the weights): the
-# reference for it is generated in full, bit-exact (calibrated on ResNet-18).
+# reference for it is generated in full, bit-exact (calibrated on the zoo default CNN).
 _REQUANT_ROLES = {2: "zero-point", 3: "bias", 4: "zero-point", 5: "requant multiplier", 7: "requant shift"}
 
 

@@ -92,11 +92,14 @@
 
 /*
  * The anchor. Gives the compiler an object in TM; every access derived from its
- * address inherits that space. Declared `inline` so multiple translation units
- * that include this header collapse to one definition instead of colliding at
- * link time (same reasoning as the vendor header).
+ * address inherits that space. Declared `static` like the vendor header
+ * (adf/aie/tile_control_aie2gen.h: TM_Address_Space_Start): each translation unit
+ * gets its own address-bound symbol, so nothing collides at link time. `inline`
+ * became a linkonce_odr comdat, which the Vitis 2026.1 chess linker (clang 18
+ * front end) rejects: "address of non DefSymbol/SpaceSymbol '__aiehlc_tm_anchor'
+ * is undefined" (GAP-KCO-TMANCHOR).
  */
-inline volatile unsigned int chess_storage(TM : TM_BASE_ADDR) __aiehlc_tm_anchor;
+static volatile unsigned int chess_storage(TM : TM_BASE_ADDR) __aiehlc_tm_anchor;
 
 /* Pointer arithmetic is in uint32 units, hence /4: the result is the byte
  * address TM_BASE_ADDR + off. `off` must be 4-byte aligned. */

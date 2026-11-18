@@ -1,0 +1,1434 @@
+{
+ "sprint": "unet-bf16-streamload",
+ "phase": "P35x",
+ "data": "p00/step0/cond",
+ "in_crc32": "a5b911e2",
+ "wdtype": "bf16",
+ "numerics": "act fp32->bf16 at tile input, weights bf16, bf16 out per 64-K slice, fp32 K-sum on APU, no final round; RNE = shuhua/tasks/2026-11-13_p3a_bf16w/bf16_rne.py",
+ "rule": {
+  "start": "Steve run E (parts 0,1,21,23,24 on CPU)",
+  "exclude_parts": [
+   0,
+   1,
+   21,
+   23,
+   24
+  ],
+  "classes": [
+   "conv"
+  ],
+  "trim": "greedy by MAC/launch desc, ties graph order, N*ms_per_launch <= budget_ms",
+  "ms_per_launch": 6.9,
+  "budget_ms": 600000.0,
+  "n_max": 86956,
+  "ms_per_launch_src": "xiaojiang/tasks/2026-11-13_sprint-1112164514-p0p4-summary.md:12"
+ },
+ "N": 86600,
+ "aie_ms_est": 597540.0,
+ "aie_macs": 22701670400,
+ "total_gemm_macs": 54392913920,
+ "aie_flop_frac": 0.41736448305360435,
+ "schemeE_flop_frac": 0.8945323324939456,
+ "cos_vs_fp32_ref": 0.9999998592683562,
+ "maxabs_vs_fp32_ref": 0.003148794174194336,
+ "cos_bf16w_only_vs_fp32_ref": 0.9999998568116127,
+ "cos_vs_bf16w_only": 0.999999998554282,
+ "machine": "x86_64",
+ "pass": true,
+ "layers": [
+  {
+   "part": 2,
+   "file": "part_02_down_blocks_0_resnets_0.onnx",
+   "node": "/u/down_blocks.0/resnets.0/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.0.resnets.0.conv1.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     1024,
+     2880,
+     320
+    ]
+   ],
+   "idx": 0
+  },
+  {
+   "part": 2,
+   "file": "part_02_down_blocks_0_resnets_0.onnx",
+   "node": "/u/down_blocks.0/resnets.0/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.0.resnets.0.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     1024,
+     2880,
+     320
+    ]
+   ],
+   "idx": 1
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "/u/down_blocks.0/attentions.0/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.0.attentions.0.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 2
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "/u/down_blocks.0/attentions.0/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.0.attentions.0.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 3
+  },
+  {
+   "part": 4,
+   "file": "part_04_down_blocks_0_downsamplers_0.onnx",
+   "node": "/u/down_blocks.0/downsamplers.0/conv/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.0.downsamplers.0.conv.weight",
+   "macs": 235929600,
+   "launches": 900,
+   "mkn": [
+    [
+     256,
+     2880,
+     320
+    ]
+   ],
+   "idx": 4
+  },
+  {
+   "part": 5,
+   "file": "part_05_down_blocks_1_resnets_0.onnx",
+   "node": "/u/down_blocks.1/resnets.0/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.1.resnets.0.conv1.weight",
+   "macs": 471859200,
+   "launches": 1800,
+   "mkn": [
+    [
+     256,
+     2880,
+     640
+    ]
+   ],
+   "idx": 5
+  },
+  {
+   "part": 5,
+   "file": "part_05_down_blocks_1_resnets_0.onnx",
+   "node": "/u/down_blocks.1/resnets.0/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.1.resnets.0.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     256,
+     5760,
+     640
+    ]
+   ],
+   "idx": 6
+  },
+  {
+   "part": 5,
+   "file": "part_05_down_blocks_1_resnets_0.onnx",
+   "node": "/u/down_blocks.1/resnets.0/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.1.resnets.0.conv_shortcut.weight",
+   "macs": 52428800,
+   "launches": 200,
+   "mkn": [
+    [
+     256,
+     320,
+     640
+    ]
+   ],
+   "idx": 7
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "/u/down_blocks.1/attentions.0/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.1.attentions.0.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 8
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "/u/down_blocks.1/attentions.0/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.1.attentions.0.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 9
+  },
+  {
+   "part": 7,
+   "file": "part_07_down_blocks_1_downsamplers_0.onnx",
+   "node": "/u/down_blocks.1/downsamplers.0/conv/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.1.downsamplers.0.conv.weight",
+   "macs": 235929600,
+   "launches": 900,
+   "mkn": [
+    [
+     64,
+     5760,
+     640
+    ]
+   ],
+   "idx": 10
+  },
+  {
+   "part": 8,
+   "file": "part_08_down_blocks_2_resnets_0.onnx",
+   "node": "/u/down_blocks.2/resnets.0/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.2.resnets.0.conv1.weight",
+   "macs": 471859200,
+   "launches": 1800,
+   "mkn": [
+    [
+     64,
+     5760,
+     1280
+    ]
+   ],
+   "idx": 11
+  },
+  {
+   "part": 8,
+   "file": "part_08_down_blocks_2_resnets_0.onnx",
+   "node": "/u/down_blocks.2/resnets.0/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.2.resnets.0.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     64,
+     11520,
+     1280
+    ]
+   ],
+   "idx": 12
+  },
+  {
+   "part": 8,
+   "file": "part_08_down_blocks_2_resnets_0.onnx",
+   "node": "/u/down_blocks.2/resnets.0/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.2.resnets.0.conv_shortcut.weight",
+   "macs": 52428800,
+   "launches": 200,
+   "mkn": [
+    [
+     64,
+     640,
+     1280
+    ]
+   ],
+   "idx": 13
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "/u/down_blocks.2/attentions.0/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.2.attentions.0.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 14
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "/u/down_blocks.2/attentions.0/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.2.attentions.0.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 15
+  },
+  {
+   "part": 10,
+   "file": "part_10_up_blocks_0_resnets_0.onnx",
+   "node": "/u/up_blocks.0/resnets.0/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.resnets.0.conv1.weight",
+   "macs": 1887436800,
+   "launches": 7200,
+   "mkn": [
+    [
+     64,
+     23040,
+     1280
+    ]
+   ],
+   "idx": 16
+  },
+  {
+   "part": 10,
+   "file": "part_10_up_blocks_0_resnets_0.onnx",
+   "node": "/u/up_blocks.0/resnets.0/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.resnets.0.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     64,
+     11520,
+     1280
+    ]
+   ],
+   "idx": 17
+  },
+  {
+   "part": 10,
+   "file": "part_10_up_blocks_0_resnets_0.onnx",
+   "node": "/u/up_blocks.0/resnets.0/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.resnets.0.conv_shortcut.weight",
+   "macs": 209715200,
+   "launches": 800,
+   "mkn": [
+    [
+     64,
+     2560,
+     1280
+    ]
+   ],
+   "idx": 18
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "/u/up_blocks.0/attentions.0/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.attentions.0.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 19
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "/u/up_blocks.0/attentions.0/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.attentions.0.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 20
+  },
+  {
+   "part": 12,
+   "file": "part_12_up_blocks_0_resnets_1.onnx",
+   "node": "/u/up_blocks.0/resnets.1/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.resnets.1.conv1.weight",
+   "macs": 1415577600,
+   "launches": 5400,
+   "mkn": [
+    [
+     64,
+     17280,
+     1280
+    ]
+   ],
+   "idx": 21
+  },
+  {
+   "part": 12,
+   "file": "part_12_up_blocks_0_resnets_1.onnx",
+   "node": "/u/up_blocks.0/resnets.1/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.resnets.1.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     64,
+     11520,
+     1280
+    ]
+   ],
+   "idx": 22
+  },
+  {
+   "part": 12,
+   "file": "part_12_up_blocks_0_resnets_1.onnx",
+   "node": "/u/up_blocks.0/resnets.1/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.resnets.1.conv_shortcut.weight",
+   "macs": 157286400,
+   "launches": 600,
+   "mkn": [
+    [
+     64,
+     1920,
+     1280
+    ]
+   ],
+   "idx": 23
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "/u/up_blocks.0/attentions.1/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.attentions.1.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 24
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "/u/up_blocks.0/attentions.1/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.attentions.1.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 25
+  },
+  {
+   "part": 14,
+   "file": "part_14_up_blocks_0_upsamplers_0.onnx",
+   "node": "/u/up_blocks.0/upsamplers.0/conv/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.upsamplers.0.conv.weight",
+   "macs": 3774873600,
+   "launches": 14400,
+   "mkn": [
+    [
+     256,
+     11520,
+     1280
+    ]
+   ],
+   "idx": 26
+  },
+  {
+   "part": 15,
+   "file": "part_15_up_blocks_1_resnets_0.onnx",
+   "node": "/u/up_blocks.1/resnets.0/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.resnets.0.conv1.weight",
+   "macs": 2831155200,
+   "launches": 10800,
+   "mkn": [
+    [
+     256,
+     17280,
+     640
+    ]
+   ],
+   "idx": 27
+  },
+  {
+   "part": 15,
+   "file": "part_15_up_blocks_1_resnets_0.onnx",
+   "node": "/u/up_blocks.1/resnets.0/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.resnets.0.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     256,
+     5760,
+     640
+    ]
+   ],
+   "idx": 28
+  },
+  {
+   "part": 15,
+   "file": "part_15_up_blocks_1_resnets_0.onnx",
+   "node": "/u/up_blocks.1/resnets.0/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.resnets.0.conv_shortcut.weight",
+   "macs": 314572800,
+   "launches": 1200,
+   "mkn": [
+    [
+     256,
+     1920,
+     640
+    ]
+   ],
+   "idx": 29
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "/u/up_blocks.1/attentions.0/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.attentions.0.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 30
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "/u/up_blocks.1/attentions.0/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.attentions.0.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 31
+  },
+  {
+   "part": 17,
+   "file": "part_17_up_blocks_1_resnets_1.onnx",
+   "node": "/u/up_blocks.1/resnets.1/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.resnets.1.conv1.weight",
+   "macs": 1415577600,
+   "launches": 5400,
+   "mkn": [
+    [
+     256,
+     8640,
+     640
+    ]
+   ],
+   "idx": 32
+  },
+  {
+   "part": 17,
+   "file": "part_17_up_blocks_1_resnets_1.onnx",
+   "node": "/u/up_blocks.1/resnets.1/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.resnets.1.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     256,
+     5760,
+     640
+    ]
+   ],
+   "idx": 33
+  },
+  {
+   "part": 17,
+   "file": "part_17_up_blocks_1_resnets_1.onnx",
+   "node": "/u/up_blocks.1/resnets.1/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.resnets.1.conv_shortcut.weight",
+   "macs": 157286400,
+   "launches": 600,
+   "mkn": [
+    [
+     256,
+     960,
+     640
+    ]
+   ],
+   "idx": 34
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "/u/up_blocks.1/attentions.1/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.attentions.1.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 35
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "/u/up_blocks.1/attentions.1/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.attentions.1.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 36
+  }
+ ],
+ "cpu_gemm_layers": [
+  {
+   "part": 1,
+   "node": "/u/conv_in/Conv",
+   "cls": "conv",
+   "macs": 11796480
+  },
+  {
+   "part": 3,
+   "node": "MatMul_0",
+   "cls": "linear",
+   "macs": 314572800
+  },
+  {
+   "part": 3,
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn1/MatMul",
+   "cls": "attn",
+   "macs": 335544320
+  },
+  {
+   "part": 3,
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn1/MatMul_1",
+   "cls": "attn",
+   "macs": 335544320
+  },
+  {
+   "part": 3,
+   "node": "Gemm_3",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 3,
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn2/to_q/MatMul",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 3,
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn2/to_k/MatMul",
+   "cls": "linear",
+   "macs": 18923520
+  },
+  {
+   "part": 3,
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn2/to_v/MatMul",
+   "cls": "linear",
+   "macs": 18923520
+  },
+  {
+   "part": 3,
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn2/MatMul",
+   "cls": "attn",
+   "macs": 25231360
+  },
+  {
+   "part": 3,
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn2/MatMul_1",
+   "cls": "attn",
+   "macs": 25231360
+  },
+  {
+   "part": 3,
+   "node": "Gemm_6",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 3,
+   "node": "Gemm_9",
+   "cls": "linear",
+   "macs": 838860800
+  },
+  {
+   "part": 3,
+   "node": "Gemm_12",
+   "cls": "linear",
+   "macs": 419430400
+  },
+  {
+   "part": 6,
+   "node": "MatMul_14",
+   "cls": "linear",
+   "macs": 314572800
+  },
+  {
+   "part": 6,
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn1/MatMul",
+   "cls": "attn",
+   "macs": 41943040
+  },
+  {
+   "part": 6,
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn1/MatMul_1",
+   "cls": "attn",
+   "macs": 41943040
+  },
+  {
+   "part": 6,
+   "node": "Gemm_17",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 6,
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn2/to_q/MatMul",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 6,
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn2/to_k/MatMul",
+   "cls": "linear",
+   "macs": 37847040
+  },
+  {
+   "part": 6,
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn2/to_v/MatMul",
+   "cls": "linear",
+   "macs": 37847040
+  },
+  {
+   "part": 6,
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn2/MatMul",
+   "cls": "attn",
+   "macs": 12615680
+  },
+  {
+   "part": 6,
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn2/MatMul_1",
+   "cls": "attn",
+   "macs": 12615680
+  },
+  {
+   "part": 6,
+   "node": "Gemm_20",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 6,
+   "node": "Gemm_23",
+   "cls": "linear",
+   "macs": 838860800
+  },
+  {
+   "part": 6,
+   "node": "Gemm_26",
+   "cls": "linear",
+   "macs": 419430400
+  },
+  {
+   "part": 9,
+   "node": "MatMul_28",
+   "cls": "linear",
+   "macs": 314572800
+  },
+  {
+   "part": 9,
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn1/MatMul",
+   "cls": "attn",
+   "macs": 5242880
+  },
+  {
+   "part": 9,
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn1/MatMul_1",
+   "cls": "attn",
+   "macs": 5242880
+  },
+  {
+   "part": 9,
+   "node": "Gemm_31",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 9,
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn2/to_q/MatMul",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 9,
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn2/to_k/MatMul",
+   "cls": "linear",
+   "macs": 75694080
+  },
+  {
+   "part": 9,
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn2/to_v/MatMul",
+   "cls": "linear",
+   "macs": 75694080
+  },
+  {
+   "part": 9,
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn2/MatMul",
+   "cls": "attn",
+   "macs": 6307840
+  },
+  {
+   "part": 9,
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn2/MatMul_1",
+   "cls": "attn",
+   "macs": 6307840
+  },
+  {
+   "part": 9,
+   "node": "Gemm_34",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 9,
+   "node": "Gemm_37",
+   "cls": "linear",
+   "macs": 838860800
+  },
+  {
+   "part": 9,
+   "node": "Gemm_40",
+   "cls": "linear",
+   "macs": 419430400
+  },
+  {
+   "part": 11,
+   "node": "MatMul_42",
+   "cls": "linear",
+   "macs": 314572800
+  },
+  {
+   "part": 11,
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn1/MatMul",
+   "cls": "attn",
+   "macs": 5242880
+  },
+  {
+   "part": 11,
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn1/MatMul_1",
+   "cls": "attn",
+   "macs": 5242880
+  },
+  {
+   "part": 11,
+   "node": "Gemm_45",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 11,
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn2/to_q/MatMul",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 11,
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn2/to_k/MatMul",
+   "cls": "linear",
+   "macs": 75694080
+  },
+  {
+   "part": 11,
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn2/to_v/MatMul",
+   "cls": "linear",
+   "macs": 75694080
+  },
+  {
+   "part": 11,
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn2/MatMul",
+   "cls": "attn",
+   "macs": 6307840
+  },
+  {
+   "part": 11,
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn2/MatMul_1",
+   "cls": "attn",
+   "macs": 6307840
+  },
+  {
+   "part": 11,
+   "node": "Gemm_48",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 11,
+   "node": "Gemm_51",
+   "cls": "linear",
+   "macs": 838860800
+  },
+  {
+   "part": 11,
+   "node": "Gemm_54",
+   "cls": "linear",
+   "macs": 419430400
+  },
+  {
+   "part": 13,
+   "node": "MatMul_56",
+   "cls": "linear",
+   "macs": 314572800
+  },
+  {
+   "part": 13,
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn1/MatMul",
+   "cls": "attn",
+   "macs": 5242880
+  },
+  {
+   "part": 13,
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn1/MatMul_1",
+   "cls": "attn",
+   "macs": 5242880
+  },
+  {
+   "part": 13,
+   "node": "Gemm_59",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 13,
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn2/to_q/MatMul",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 13,
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn2/to_k/MatMul",
+   "cls": "linear",
+   "macs": 75694080
+  },
+  {
+   "part": 13,
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn2/to_v/MatMul",
+   "cls": "linear",
+   "macs": 75694080
+  },
+  {
+   "part": 13,
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn2/MatMul",
+   "cls": "attn",
+   "macs": 6307840
+  },
+  {
+   "part": 13,
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn2/MatMul_1",
+   "cls": "attn",
+   "macs": 6307840
+  },
+  {
+   "part": 13,
+   "node": "Gemm_62",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 13,
+   "node": "Gemm_65",
+   "cls": "linear",
+   "macs": 838860800
+  },
+  {
+   "part": 13,
+   "node": "Gemm_68",
+   "cls": "linear",
+   "macs": 419430400
+  },
+  {
+   "part": 16,
+   "node": "MatMul_70",
+   "cls": "linear",
+   "macs": 314572800
+  },
+  {
+   "part": 16,
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn1/MatMul",
+   "cls": "attn",
+   "macs": 41943040
+  },
+  {
+   "part": 16,
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn1/MatMul_1",
+   "cls": "attn",
+   "macs": 41943040
+  },
+  {
+   "part": 16,
+   "node": "Gemm_73",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 16,
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn2/to_q/MatMul",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 16,
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn2/to_k/MatMul",
+   "cls": "linear",
+   "macs": 37847040
+  },
+  {
+   "part": 16,
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn2/to_v/MatMul",
+   "cls": "linear",
+   "macs": 37847040
+  },
+  {
+   "part": 16,
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn2/MatMul",
+   "cls": "attn",
+   "macs": 12615680
+  },
+  {
+   "part": 16,
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn2/MatMul_1",
+   "cls": "attn",
+   "macs": 12615680
+  },
+  {
+   "part": 16,
+   "node": "Gemm_76",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 16,
+   "node": "Gemm_79",
+   "cls": "linear",
+   "macs": 838860800
+  },
+  {
+   "part": 16,
+   "node": "Gemm_82",
+   "cls": "linear",
+   "macs": 419430400
+  },
+  {
+   "part": 18,
+   "node": "MatMul_84",
+   "cls": "linear",
+   "macs": 314572800
+  },
+  {
+   "part": 18,
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn1/MatMul",
+   "cls": "attn",
+   "macs": 41943040
+  },
+  {
+   "part": 18,
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn1/MatMul_1",
+   "cls": "attn",
+   "macs": 41943040
+  },
+  {
+   "part": 18,
+   "node": "Gemm_87",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 18,
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn2/to_q/MatMul",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 18,
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn2/to_k/MatMul",
+   "cls": "linear",
+   "macs": 37847040
+  },
+  {
+   "part": 18,
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn2/to_v/MatMul",
+   "cls": "linear",
+   "macs": 37847040
+  },
+  {
+   "part": 18,
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn2/MatMul",
+   "cls": "attn",
+   "macs": 12615680
+  },
+  {
+   "part": 18,
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn2/MatMul_1",
+   "cls": "attn",
+   "macs": 12615680
+  },
+  {
+   "part": 18,
+   "node": "Gemm_90",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 18,
+   "node": "Gemm_93",
+   "cls": "linear",
+   "macs": 838860800
+  },
+  {
+   "part": 18,
+   "node": "Gemm_96",
+   "cls": "linear",
+   "macs": 419430400
+  },
+  {
+   "part": 19,
+   "node": "/u/up_blocks.1/upsamplers.0/conv/Conv",
+   "cls": "conv",
+   "macs": 3774873600
+  },
+  {
+   "part": 20,
+   "node": "/u/up_blocks.2/resnets.0/conv1/Conv",
+   "cls": "conv",
+   "macs": 2831155200
+  },
+  {
+   "part": 20,
+   "node": "/u/up_blocks.2/resnets.0/conv2/Conv",
+   "cls": "conv",
+   "macs": 943718400
+  },
+  {
+   "part": 20,
+   "node": "/u/up_blocks.2/resnets.0/conv_shortcut/Conv",
+   "cls": "conv",
+   "macs": 314572800
+  },
+  {
+   "part": 21,
+   "node": "/u/up_blocks.2/attentions.0/proj_in/Conv",
+   "cls": "conv",
+   "macs": 104857600
+  },
+  {
+   "part": 21,
+   "node": "MatMul_98",
+   "cls": "linear",
+   "macs": 314572800
+  },
+  {
+   "part": 21,
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn1/MatMul",
+   "cls": "attn",
+   "macs": 335544320
+  },
+  {
+   "part": 21,
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn1/MatMul_1",
+   "cls": "attn",
+   "macs": 335544320
+  },
+  {
+   "part": 21,
+   "node": "Gemm_101",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 21,
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn2/to_q/MatMul",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 21,
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn2/to_k/MatMul",
+   "cls": "linear",
+   "macs": 18923520
+  },
+  {
+   "part": 21,
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn2/to_v/MatMul",
+   "cls": "linear",
+   "macs": 18923520
+  },
+  {
+   "part": 21,
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn2/MatMul",
+   "cls": "attn",
+   "macs": 25231360
+  },
+  {
+   "part": 21,
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn2/MatMul_1",
+   "cls": "attn",
+   "macs": 25231360
+  },
+  {
+   "part": 21,
+   "node": "Gemm_104",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 21,
+   "node": "Gemm_107",
+   "cls": "linear",
+   "macs": 838860800
+  },
+  {
+   "part": 21,
+   "node": "Gemm_110",
+   "cls": "linear",
+   "macs": 419430400
+  },
+  {
+   "part": 21,
+   "node": "/u/up_blocks.2/attentions.0/proj_out/Conv",
+   "cls": "conv",
+   "macs": 104857600
+  },
+  {
+   "part": 22,
+   "node": "/u/up_blocks.2/resnets.1/conv1/Conv",
+   "cls": "conv",
+   "macs": 1887436800
+  },
+  {
+   "part": 22,
+   "node": "/u/up_blocks.2/resnets.1/conv2/Conv",
+   "cls": "conv",
+   "macs": 943718400
+  },
+  {
+   "part": 22,
+   "node": "/u/up_blocks.2/resnets.1/conv_shortcut/Conv",
+   "cls": "conv",
+   "macs": 209715200
+  },
+  {
+   "part": 23,
+   "node": "/u/up_blocks.2/attentions.1/proj_in/Conv",
+   "cls": "conv",
+   "macs": 104857600
+  },
+  {
+   "part": 23,
+   "node": "MatMul_112",
+   "cls": "linear",
+   "macs": 314572800
+  },
+  {
+   "part": 23,
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn1/MatMul",
+   "cls": "attn",
+   "macs": 335544320
+  },
+  {
+   "part": 23,
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn1/MatMul_1",
+   "cls": "attn",
+   "macs": 335544320
+  },
+  {
+   "part": 23,
+   "node": "Gemm_115",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 23,
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn2/to_q/MatMul",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 23,
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn2/to_k/MatMul",
+   "cls": "linear",
+   "macs": 18923520
+  },
+  {
+   "part": 23,
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn2/to_v/MatMul",
+   "cls": "linear",
+   "macs": 18923520
+  },
+  {
+   "part": 23,
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn2/MatMul",
+   "cls": "attn",
+   "macs": 25231360
+  },
+  {
+   "part": 23,
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn2/MatMul_1",
+   "cls": "attn",
+   "macs": 25231360
+  },
+  {
+   "part": 23,
+   "node": "Gemm_118",
+   "cls": "linear",
+   "macs": 104857600
+  },
+  {
+   "part": 23,
+   "node": "Gemm_121",
+   "cls": "linear",
+   "macs": 838860800
+  },
+  {
+   "part": 23,
+   "node": "Gemm_124",
+   "cls": "linear",
+   "macs": 419430400
+  },
+  {
+   "part": 23,
+   "node": "/u/up_blocks.2/attentions.1/proj_out/Conv",
+   "cls": "conv",
+   "macs": 104857600
+  },
+  {
+   "part": 24,
+   "node": "/u/conv_out/Conv",
+   "cls": "conv",
+   "macs": 11796480
+  }
+ ]
+}

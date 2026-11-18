@@ -13,6 +13,7 @@ when it is absent; ``isolate`` needs the aarch64 binutils and skips without.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -114,6 +115,49 @@ def test_spec_rejects_code_between_literals(tmp_path):
         spec.parse_specs(src)
 
 
+STEP_OK = ('#include "aie_user_kernel.h"\n'
+           '/* AIEK_STEP(not_me, reads(9), writes(9), consts()) in a comment is ignored */\n'
+           'AIEK_STEP(st_a, reads(q:float32, k:dense), writes(0), consts(cls, s:float));\n'
+           'AIEK_STEP_ENTRY(st_a) { (void)in; (void)out; (void)c; return AIEK_OK; }\n'
+           'AIEK_STEP(st_b, reads(0), writes(2), consts());\n'
+           'int st_b(const aiek_buf *in, aiek_buf *out, const aiek_const *c) { return 0; }\n')
+
+
+def test_step_spec_parses(tmp_path):
+    steps = spec.parse_steps(spec.load_source(_write(tmp_path, "s.cc", STEP_OK)))
+    assert [s.entry for s in steps] == ["st_a", "st_b"]
+    a, b = steps
+    assert [(r.name, r.dtype, r.dense) for r in a.reads] == [("q", "float32", False), ("k", "", True)]
+    assert a.writes == [] and a.const_names == ("cls", "s")
+    assert [c.type for c in a.consts] == ["int", "float"]
+    assert len(b.writes) == 2 and b.reads == [] and b.consts == []
+    assert a.where == "s.cc:3"
+    assert spec.parse_specs(spec.load_source(tmp_path / "s.cc")) == []   # AIEK_STEP is not an AIEK_SPEC
+
+
+@pytest.mark.parametrize("decl,needle", [
+    ("AIEK_STEP(e, reads(1), writes(0));", "exactly reads"),
+    ("AIEK_STEP(e, writes(0), reads(1), consts());", "order: reads, writes, consts"),
+    ("AIEK_STEP(e, reads(x:bogus), writes(0), consts());", "qualifier 'bogus'"),
+    ("AIEK_STEP(e, reads(x, x), writes(0), consts());", "declared twice"),
+    ("AIEK_STEP(e, reads(1), writes(0), consts(a:double));", "want :int or :float"),
+    ("AIEK_STEP(e, reads(1), writes(0), consts(a, a));", "declared twice"),
+    ("AIEK_STEP(e, reads(0), writes(0), consts());", "reads and writes nothing"),
+    ("AIEK_STEP(e, reads(), writes(1), consts());", "reads(0) for none"),
+])
+def test_step_spec_errors(tmp_path, decl, needle):
+    src = spec.load_source(_write(tmp_path, "s.cc", decl + "\nAIEK_STEP_ENTRY(e) { return 0; }\n"))
+    with pytest.raises(spec.SpecError, match=re.escape(needle)):
+        spec.parse_steps(src)
+
+
+def test_step_spec_needs_a_definition(tmp_path):
+    src = spec.load_source(_write(tmp_path, "s.cc", "AIEK_STEP(e, reads(1), writes(0), consts());\n"
+                                                    "int e(const aiek_buf *in, aiek_buf *out, const aiek_const *c);\n"))
+    with pytest.raises(spec.SpecError, match="no definition of e"):
+        spec.parse_steps(src)
+
+
 def test_splice_like_aiehlc(tmp_path):
     (tmp_path / "sub").mkdir()
     _write(tmp_path, "b.cc", "int b;\n")
@@ -164,6 +208,18 @@ def test_lint_clean(tmp_path):
 def test_lint_rules(tmp_path, kwargs, code):
     rep = lint.lint_source(_write(tmp_path, "k.cc", _kernel_src(**kwargs)))
     assert code in _codes(rep), rep.text()
+
+
+def test_lint_l017_prologue_helper_ok(tmp_path):
+    """GFA: a helper defined inside AIEHLC_KERNEL_PROLOGUE_BEGIN/END reaches kernel.cc -> no L017;
+    the same helper outside the block still is L017"""
+    pro = ("// AIEHLC_KERNEL_PROLOGUE_BEGIN\nstatic inline int helper(int x) { return x; }\n"
+           "// AIEHLC_KERNEL_PROLOGUE_END")
+    rep = lint.lint_source(_write(tmp_path, "k.cc", _kernel_src(top=pro, body_extra="int h = helper(s);")))
+    assert "L017" not in _codes(rep), rep.text()
+    rep = lint.lint_source(_write(tmp_path, "k2.cc", _kernel_src(top="static inline int helper(int x) { return x; }",
+                                                                 body_extra="int h = helper(s);")))
+    assert "L017" in _codes(rep), rep.text()
 
 
 def test_lint_l015_launch_without_partition(tmp_path):
@@ -295,7 +351,10 @@ def test_gate_6a_keeps_several_libraries():
 def test_header_compiles_warning_free(tmp_path, cc, std):
     src = _write(tmp_path, "t.c" if cc == "gcc" else "t.cc",
                  '#include "aie_user_kernel.h"\nAIEK_ENTRY(k) { (void)args; (void)num_args; '
-                 'return AIEK_OK; }\nAIEK_SPEC(k, "in int8 [1] x\\nout int8 [1] y\\n");\n')
+                 'return AIEK_OK; }\nAIEK_SPEC(k, "in int8 [1] x\\nout int8 [1] y\\n");\n'
+                 'AIEK_STEP(st, reads(q:float32), writes(o:dense), consts(cls, s:float));\n'
+                 'AIEK_STEP_ENTRY(st) { return aiek_buf_dense(&in[0]) && out && c->n == 2 '
+                 '&& AIEK_CI(c, 0) >= 0 && AIEK_CF(c, 1) > 0 ? AIEK_OK : AIEK_ERR_ARGS; }\n')
     proc = subprocess.run([cc, std, "-Wall", "-Wextra", "-Werror", f"-I{INC}", "-c",
                            str(src), "-o", str(tmp_path / "t.o")], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr

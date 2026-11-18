@@ -8,10 +8,10 @@ A *region* is one weighted node of the int8 ONNX model the flow compiled
 (``<workdir>/*.int8.qdq.onnx``): a ``Conv`` or a ``Gemm``. Its names:
 
     torch export   "/layer1/layer1.0/conv1/Conv"   -> "layer1.0.conv1"
-    ONNX zoo       "resnetv15_stage1_conv0_fwd"    -> "resnetv15_stage1_conv0"
+    ONNX zoo       "<net>v15_stage1_conv0_fwd"     -> "<net>v15_stage1_conv0"  
                                                       + alias "layer1.0.conv1"
 
-The zoo ResNet is gluon ``resnet*_v1``; its basic-block convs also answer to
+Gluon ``<net>v1*`` zoo exports name their nodes this way; basic-block convs also answer to
 torchvision's module paths, so one script runs on either source.
 
 The region -> call map is by **weight fingerprint** (values sorted, cast int64,
@@ -39,7 +39,7 @@ from .errors import AiegraphError
 __all__ = ["Region", "Regions", "build_regions"]
 
 _ONNX_DTYPE = {2: "uint8", 3: "int8", 5: "int16", 6: "int32", 1: "float32"}
-_GLUON = re.compile(r"(?P<net>resnetv1\d*)_(?:stage(?P<stage>\d+)_)?(?P<op>conv|dense)(?P<k>\d+)$")
+_GLUON = re.compile(r"(?P<net>[a-z]+v1\d*)_(?:stage(?P<stage>\d+)_)?(?P<op>conv|dense)(?P<k>\d+)$")
 
 
 def _fingerprint(arr) -> str:
@@ -69,7 +69,7 @@ class Region:
 
     @property
     def label(self) -> str:
-        """``layer1.0.conv1 (resnetv15_stage1_conv0)`` -- the alias users type first."""
+        """``layer1.0.conv1 (<net>v15_stage1_conv0)`` -- the alias users type first."""
         return f"{self.aliases[0]} ({self.name})" if self.aliases else self.name
 
     @property
@@ -135,7 +135,7 @@ def _canonical(node: str) -> str:
 
 
 def _gluon_aliases(regions: list) -> None:
-    """Torchvision module paths for a gluon ResNet v1 built of basic blocks."""
+    """Torchvision module paths for a gluon v1 network built of basic blocks."""
     stages = {}
     for r in regions:
         m = _GLUON.fullmatch(r.name)

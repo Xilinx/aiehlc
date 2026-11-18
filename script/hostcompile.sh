@@ -44,6 +44,11 @@ _HOSTCOMPILE_ORIG_PWD="$(pwd)"
 
 OPT_FLAGS="-Os"
 [ "${DEBUG_SYMS:-0}" -eq 1 ] && OPT_FLAGS="${OPT_FLAGS} -g"
+# HOSTCOMPILE_HOST_OPT: optimisation flags for the generated host.cc only (default: OPT_FLAGS).
+# host.cc carries the user's host code (e.g. im2col / scatter glue around the launches); -Os there
+# costs real A78 time, while the runtime .c files and the kernels keep OPT_FLAGS.
+HOST_OPT_FLAGS="${HOSTCOMPILE_HOST_OPT:-${OPT_FLAGS}}"
+[ "${DEBUG_SYMS:-0}" -eq 1 ] && [ -n "${HOSTCOMPILE_HOST_OPT:-}" ] && HOST_OPT_FLAGS="${HOST_OPT_FLAGS} -g"
 
 KERNEL_FUNC_NAME="computekernel"   # default fallback; overridden by auto-detection below
 
@@ -58,6 +63,32 @@ kernel_stamp() {
         done
         echo "$1 ${AIE_VERSION:-5} ${PLATFORM:-baremetal} ${USE_LLVM_AIE:-false} ${DEBUG_SYMS:-0}"
     } | sha256sum | cut -d' ' -f1
+}
+
+# check_kernel_stack <prx>: the BCF stack is [0x70000, buffer area start). CoreMemAllocator
+# shrinks it from the default 32 KB when the port buffers do not fit above 0x78000, so
+# compare chess's "Maximum stack size" (kernel.calltree) with the BCF _stack size.
+# rc 1 = stack overflow (hard error); unknown bound = warning only.
+check_kernel_stack() {
+    local prx="$1" bcfname bcf ct st max
+    bcfname=$(sed -nE 's/.*id="bridge.cfg" value="([^"]+)".*/\1/p' "$prx" | head -1)
+    bcf="$(dirname "$prx")/${bcfname:-aieml.bcf}"
+    ct="${BUILD_DIR}/kernel.calltree"
+    [ -f "$bcf" ] || return 0
+    st=$(awk '$1=="_stack"{print strtonum($4); exit}' "$bcf")
+    [ -n "$st" ] || return 0
+    max=$(sed -nE 's/^Maximum stack size *: *([0-9]+).*/\1/p' "$ct" 2>/dev/null | head -1)
+    if [ -z "$max" ] || grep -qiE 'recurs|indirect|unknown callee|function pointer' "$ct" 2>/dev/null; then
+        [ "$st" -lt 32768 ] && echo "[hostcompile] WARNING: core stack is ${st} B (buffers moved into the stack area) and the kernel's stack bound is unknown (${ct})"
+        return 0
+    fi
+    echo "[hostcompile] core stack: kernel needs ${max} B, BCF reserves ${st} B ($(basename "$bcf"))"
+    if [ "$max" -gt "$st" ]; then
+        echo "Error: kernel stack ${max} B exceeds the ${st} B core stack; the port buffers took the rest of data memory."
+        echo "       Use smaller blocks, or raise AIEHLC_DM_MIN_STACK (bytes) so the allocator keeps more stack."
+        return 1
+    fi
+    return 0
 }
 
 compile_one_kernel() {
@@ -97,6 +128,7 @@ compile_one_kernel() {
 
     cd "${WORKLOCAL_DIR}"
 
+    local kc_rc=0
     if [[ "${USE_LLVM_AIE:-false}" == "true" ]] && [[ -n "${LLVM_AIE_PATH:-}" ]] \
        && [[ -x "${LLVM_AIE_PATH}/bin/clang++" ]]; then
         echo "[hostcompile] Using llvm-aie (${LLVM_AIE_PATH})"
@@ -109,6 +141,7 @@ compile_one_kernel() {
             --output-dir "${BUILD_DIR}" \
             --use-llvm-aie \
             --ld-script "${WORKLOCAL_DIR}/main.ld.script"
+        kc_rc=$?
     else
         local prx_file
         if [ -f "${WORKLOCAL_DIR}/aieml.prx" ]; then
@@ -124,8 +157,11 @@ compile_one_kernel() {
             --debug-output \
             --output-dir "${BUILD_DIR}" \
             --prx "${prx_file}"
+        kc_rc=$?
+        if [ ${kc_rc} -eq 0 ] && [ -f "${prx_file}" ]; then
+            check_kernel_stack "${prx_file}" || { rm -f "${BUILD_DIR}/kernel.o"; kc_rc=1; }
+        fi
     fi
-    local kc_rc=$?
     if [ ${kc_rc} -eq 0 ] && [ -f "${BUILD_DIR}/kernel.o" ]; then
         echo "${kstamp}" > "${BUILD_DIR}/kernel.stamp"
     fi
@@ -148,6 +184,14 @@ done
 KERNEL_OBJ_LIST=""
 if [ ${#MULTI_KERNEL_FILES[@]} -gt 0 ]; then
     echo "[Multi-kernel] Detected ${#MULTI_KERNEL_FILES[@]} kernel(s)"
+    # HOSTCOMPILE_KERNEL_JOBS: kernels compiled at once (default 8; 1 = the old serial loop). Each parallel
+    # kernel builds in a private worklocal (BUILD_DIR/kpar/<name>: every worklocal entry linked in, kernel.cc /
+    # aieml.prx -> this kernel's) so kernel.cc / kernel.o / chesswork never collide; the files kc.sh writes
+    # into its cwd (host_ctrlpkt_<f>.h, kernel_<f>_ctrlpkt.h, ctrlpkt_<f>/) are moved back to the worklocal.
+    _KJOBS="${HOSTCOMPILE_KERNEL_JOBS:-8}"
+    case "${_KJOBS}" in ''|*[!0-9]*) _KJOBS=8 ;; esac
+    _KTODO=()
+    _KTODO_N=${#MULTI_KERNEL_FILES[@]}
     pushd ${WORKLOCAL_DIR}
     for kf in "${MULTI_KERNEL_FILES[@]}"; do
         kfname="$(basename "$kf")"
@@ -155,6 +199,23 @@ if [ ${#MULTI_KERNEL_FILES[@]} -gt 0 ]; then
         kname="${kfname#kernel_}"
         kname="${kname%.cc}"
         echo "[Multi-kernel] Compiling kernel: ${kname} (${kfname})"
+        # Reuse kernel_<name>.o when it is newer than everything it is built from (aiekernel install
+        # re-runs this script on aiehlc's own worklocal copy; the single-kernel path reuses kernel.o
+        # by kernel.stamp, which the rename below defeats). HOSTCOMPILE_KERNEL_REBUILD=1 forces it.
+        if [ "${HOSTCOMPILE_KERNEL_REBUILD:-0}" != "1" ] && [ -f "${BUILD_DIR}/kernel_${kname}.o" ] &&
+            [ "${BUILD_DIR}/kernel_${kname}.o" -nt "$kf" ] &&
+            { [ ! -f "${WORKLOCAL_DIR}/aieml_${kname}.prx" ] || [ "${BUILD_DIR}/kernel_${kname}.o" -nt "${WORKLOCAL_DIR}/aieml_${kname}.prx" ]; } &&
+            { [ ! -f "${WORKLOCAL_DIR}/aieml_${kname}.bcf" ] || [ "${BUILD_DIR}/kernel_${kname}.o" -nt "${WORKLOCAL_DIR}/aieml_${kname}.bcf" ]; }; then
+            echo "[Multi-kernel] Reusing ${BUILD_DIR}/kernel_${kname}.o (newer than ${kfname}, prx, bcf)"
+            KERNEL_OBJ_LIST="${KERNEL_OBJ_LIST} ${BUILD_DIR}/kernel_${kname}.o"
+            continue
+        fi
+        if [ "${_KJOBS}" -gt 1 ] && [ "${_KTODO_N}" -gt 1 ]; then
+            # parallel path: compiled below, each kernel in a private worklocal
+            _KTODO+=("$kf")
+            KERNEL_OBJ_LIST="${KERNEL_OBJ_LIST} ${BUILD_DIR}/kernel_${kname}.o"
+            continue
+        fi
 
         # Use per-kernel PRX if available, fall back to aieml.prx
         KPRX=""
@@ -181,6 +242,71 @@ if [ ${#MULTI_KERNEL_FILES[@]} -gt 0 ]; then
         echo "✓ Compiled kernel: ${BUILD_DIR}/kernel_${kname}.o (func: ${kname})"
         KERNEL_OBJ_LIST="${KERNEL_OBJ_LIST} ${BUILD_DIR}/kernel_${kname}.o"
     done
+    if [ ${#_KTODO[@]} -gt 0 ]; then
+        _kpar="${BUILD_DIR}/kpar"
+        rm -rf "${_kpar}"
+        mkdir -p "${_kpar}"
+        echo "[Multi-kernel] Compiling ${#_KTODO[@]} kernel(s), ${_KJOBS} at a time (HOSTCOMPILE_KERNEL_JOBS)"
+        for kf in "${_KTODO[@]}"; do
+            kfname="$(basename "$kf")"
+            kname="${kfname#kernel_}"
+            kname="${kname%.cc}"
+            _kd="${_kpar}/${kname}"
+            mkdir -p "${_kd}/build"
+            for f in "${WORKLOCAL_DIR}"/* "${WORKLOCAL_DIR}"/.[!.]*; do
+                [ -e "$f" ] || continue
+                [ "$(basename "$f")" = "build" ] && continue
+                ln -s "$f" "${_kd}/$(basename "$f")"
+            done
+            rm -f "${_kd}/kernel.cc"
+            ln -s "$kf" "${_kd}/kernel.cc"
+            if [ -f "${WORKLOCAL_DIR}/aieml_${kname}.prx" ]; then
+                rm -f "${_kd}/aieml.prx"
+                ln -s "${WORKLOCAL_DIR}/aieml_${kname}.prx" "${_kd}/aieml.prx"
+            fi
+            # the compiled-in tool is shared read-only: copy it in when the serial build left one
+            [ -x "${BUILD_DIR}/aiehlc_ctrlpkt" ] && cp -p "${BUILD_DIR}/aiehlc_ctrlpkt" "${_kd}/build/"
+            echo "[Multi-kernel] Compiling kernel: ${kname} (${kfname}) in ${_kd}"
+            (
+                WORKLOCAL_DIR="${_kd}"
+                BUILD_DIR="${_kd}/build"
+                compile_one_kernel "${kname}"
+                echo $? > "${_kd}/rc"
+            ) > "${_kd}/compile.log" 2>&1 < /dev/null &
+            while [ "$(jobs -rp | wc -l)" -ge "${_KJOBS}" ]; do
+                wait -n 2>/dev/null || sleep 1
+            done
+        done
+        wait
+        _kfail=0
+        for kf in "${_KTODO[@]}"; do
+            kfname="$(basename "$kf")"
+            kname="${kfname#kernel_}"
+            kname="${kname%.cc}"
+            _kd="${_kpar}/${kname}"
+            echo "----- [Multi-kernel] ${kname}: ${_kd}/compile.log"
+            cat "${_kd}/compile.log"
+            if [ "$(cat "${_kd}/rc" 2>/dev/null)" != "0" ] || [ ! -f "${_kd}/build/kernel.o" ]; then
+                echo "Error: kernel build failed for kernel ${kname} (log ${_kd}/compile.log)"
+                _kfail=1
+                continue
+            fi
+            # files kc.sh wrote into its cwd (not the links) go back to the worklocal
+            for f in "${_kd}"/* "${_kd}"/.[!.]*; do
+                [ -e "$f" ] || [ -L "$f" ] || continue
+                [ -L "$f" ] && continue
+                case "$(basename "$f")" in build|rc|compile.log) continue ;; esac
+                rm -rf "${WORKLOCAL_DIR}/$(basename "$f")"
+                mv -f "$f" "${WORKLOCAL_DIR}/"
+            done
+            mv -f "${_kd}/build/kernel.o" "${BUILD_DIR}/kernel_${kname}.o"
+            echo "✓ Compiled kernel: ${BUILD_DIR}/kernel_${kname}.o (func: ${kname})"
+        done
+        [ ${_kfail} -eq 0 ] || exit 1
+        # the last kernel's ELF / tool where the serial loop leaves them (later steps may read build/kernel)
+        cp -p "${_kd}/build/kernel" "${BUILD_DIR}/kernel" 2>/dev/null || true
+        [ -x "${BUILD_DIR}/aiehlc_ctrlpkt" ] || cp -p "${_kd}/build/aiehlc_ctrlpkt" "${BUILD_DIR}/" 2>/dev/null || true
+    fi
     # Remove temporary symlink
     rm -f "${WORKLOCAL_DIR}/kernel.cc"
     popd
@@ -493,7 +619,7 @@ HOST_SRC="${HOST_FIXED}"
 if [ "${REBUILD}" -eq 1 ] || [ ! -f host.o ]; then
     set -x
     echo "Compiling host..."
-    ${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++20 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -c "${HOST_SRC}" -o host.o
+    ${TOOL_PREFIX}g++ ${HOST_OPT_FLAGS} -std=c++20 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -c "${HOST_SRC}" -o host.o
     if [ $? -ne 0 ]; then
         echo "Error: failed to compile host.cc"
         exit 1

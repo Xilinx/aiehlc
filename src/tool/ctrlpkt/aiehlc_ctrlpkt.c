@@ -61,12 +61,13 @@ static int collect_segs(const rt_cpe_dev *d, const unsigned char *elf, cpe_seg_i
     for (uint32_t i = 0U; i < eh->e_phnum && n < CPE_MAX_SEGS; i++) {
         const Elf32_Phdr *ph = (const Elf32_Phdr *)(elf + eh->e_phoff + (uint64_t)i * eh->e_phentsize);
         uint32_t ta = 0U;
-        if (ph->p_type != (uint32_t)PT_LOAD || ph->p_filesz == 0U ||
+        const uint32_t len = rt_cpe_seg_load_len(elf, ph);
+        if (len == 0U ||
             rt_cpe_target(d, CPE_ENC_COL, CPE_ENC_ROW, ph->p_paddr, &ta) != 0 || ta == RT_CPE_SKIP_ADDR)
             continue;
         segs[n].phdr_idx = (int)i;
         segs[n].paddr = ph->p_paddr;
-        segs[n].filesz = ph->p_filesz;
+        segs[n].filesz = len; /* file bytes + zero-filled .bss tail */
         segs[n].tile_addr = ta;
         n++;
     }
@@ -82,8 +83,9 @@ static void emit_skipped(FILE *f, const char *pfx, const rt_cpe_dev *d, const un
             continue;
         uint32_t ta = 0U;
         const char *why = NULL;
-        if (ph->p_filesz == 0U)
-            why = "no file bytes (.bss); left as-is, not zeroed";
+        const uint32_t len = rt_cpe_seg_load_len(elf, ph);
+        if (len == 0U)
+            why = "only DMA port buffers (.bss); not zeroed";
         else if (rt_cpe_target(d, CPE_ENC_COL, CPE_ENC_ROW, ph->p_paddr, &ta) != 0)
             why = "address outside program/data memory";
         else if (ta == RT_CPE_SKIP_ADDR)

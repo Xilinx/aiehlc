@@ -5,7 +5,7 @@
 ###############################################################################
 """Tell TVM the target PE takes int8 operands, so int8 values are *stored* int8.
 
-The quantizer already produces genuine int8: every one of ResNet-18's
+The quantizer already produces genuine int8: every one of the reference CNN's
 11,678,912 weight values measures inside ``[-127, 127]``, using 255 distinct
 levels. What widens them to int16 is **legalization**, which happens after
 quantization and is a statement about the *hardware*, not about the numbers.
@@ -63,8 +63,8 @@ times the real value -- 23 bits here. The multiplier is a fixed-point scale in
 (TFLite, ONNX QDQ, PyTorch); narrowing them would be arithmetically wrong, not
 an optimization. They are 116 KB of a 23 MB blob.
 
-Measured effect of switching (ResNet-18 int8, dog.jpg)
-------------------------------------------------------
+Measured effect of switching (reference CNN int8, dog.jpg)
+---------------------------------------------------------
 ======================  ==============  ==============
                         int16 operands  int8 operands
 ======================  ==============  ==============

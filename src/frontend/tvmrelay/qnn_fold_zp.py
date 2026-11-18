@@ -37,7 +37,7 @@ conv::
 
     cast_sum -> multiply -> avg_pool2d -> repeat_multiply_layout_transform
 
-Measured on int8 ResNet-18: **21 such chains, ~70 of the 120 kernel calls and
+Measured on the int8 reference CNN (zoo default): **21 such chains, ~70 of the 120 kernel calls and
 10.6 MB of buffers**, every one of them computing and then subtracting zeros.
 For layer 06 alone that is 802,816 int32 zeros.
 

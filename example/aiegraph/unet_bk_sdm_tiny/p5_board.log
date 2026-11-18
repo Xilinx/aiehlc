@@ -1,0 +1,56 @@
+[devlock] acquired 10.23.224.213 (/scratch/staff/huaj/tmp/board_locks/10.23.224.213_3121.lock)
+[hws] preflight (palmyra, netload) on 10.23.224.213
+[hws] netload: hw_server is checked only if the supervisor needs JTAG
+Using: /scratch/staff/huaj/tmp/sprint1113_unet/p5_aie/main.elf
+
+============================================================
+Palboard ELF Test Script
+Board: palmyra, console com0
+Host: huaj@10.23.224.213
+ELF File: /scratch/staff/huaj/tmp/sprint1113_unet/p5_aie/main.elf
+============================================================
+[netload] staged on 10.23.224.213: nothing (up to date)
+[netload] asking the supervisor at 10.10.70.50 to run main.elf (waits up to 120 s if the board is busy)
+[netload] systest-client closed while attaching com0 (User signal 1 Shared connection to 10.23.224.213 closed.); retrying
+[21:44:22 DEBUG] console_reader thread started
+[netload] load rc=0 state=running runs=19 | 651.70 MB sent via huaj@10.23.224.213 in 11.332 s (57.5 MB/s), board rx 11182 ms, place 64 ms, entry 0x0
+[netload] board: placed 649502792 bytes, zeroed 223362204 bss bytes, entry 0x0, _exit -> park
+[netload] streamed /scratch/staff/huaj/tmp/sprint1113_unet/p5_aie/main.elf through the proxy on 10.23.224.213 in 12.27s (no scp)
+
+>>> Waiting for console output (max 2520s, no-output timeout 2520s)...
+[netboot] LOAD_RUN 651703072 B received and placed in 11182 ms (stream=1, staging copy none), sha256 ok
+[netboot] run 19: placed 649502792 bytes, zeroed 223362204 bss bytes, entry 0x0, _exit -> park, start app core at 0x0 (watchdog 2400000 ms) stream=1 elf_size=651703072
+[netboot] app core was parked: released to 0x0 (no PLM call)
+unet-conv: init (aiegraph C on A78 + conv on AIE gemm_bf16, weights=bf16, aie=conv)
+INPUT unet sample bytes=16384
+INPUT unet timestep bytes=4
+INPUT unet encoder_hidden_states bytes=236544
+INPUT unet sample+timestep_i32+ehs in_crc32_board=a5b911e2 expect=a5b911e2 MATCH (timestep=999)
+unet: graph_run 437574.594 ms, output elems=4096 (ref 4096)
+LAUNCH warm ms_per_launch=4.532 launches=86600 aie_wall_ms=392491.467 kloads=1 opts=skip-bss+ZFILL_WIDE+PMLOAD_WIDE+PM_WARM_SKIP,core_reset_unreset_per_launch,bd_warm_skip=off,cold_tile_loads=16
+HEAP max_sbrked=111488 heap=134217728
+AIE unet: unet_aie_conv calls=37 (planned 37) run_rc=0 aie_launches=86600 (planned 86600) PH_COREEN calls=86600 cycles=5299367924 aie_macs=22701670400 aie_flop_frac=0.4174
+CMP unet board=palmyra213 data=p00/step0/cond in_crc32=a5b911e2 cos=1.000000 maxabs=0.00272167 dtype=bf16 aie_launches=86600 coreen_calls=86600 run_rc=0 aie_flop_frac=0.417 PASS
+device_teardown done
+[21:51:50 DEBUG] main: program_done detected, draining trailing output...
+[21:51:50 DEBUG] 
+main: signaling console_reader thread to stop...
+[21:51:50 DEBUG] main: joining console_reader thread (timeout=5)...
+[21:51:50 DEBUG] console_reader thread exiting
+[21:51:50 DEBUG] main: console_reader thread joined
+[21:51:50 DEBUG] main finally: stopping console thread...
+[21:51:50 DEBUG] main finally: all cleanup done
+
+[Program completed after 438s]
+
+============================================================
+CONSOLE OUTPUT SUMMARY:
+============================================================
+
+>>> --netload: board left powered on, netboot supervisor stays resident
+
+============================================================
+Test complete!
+============================================================
+
+Connections closed.

@@ -86,6 +86,50 @@ encode_aot_ctrlpkt() {
     local output_dir="$2"
     local gen="$3"
     local manifest="./ctrlpkt_manifest.json"
+    # Multi-kernel host.cc (aiehlc.cc multi-kernel dispatch): one sites file per kernel,
+    # ctrlpkt_sites_<func>.txt -> host_ctrlpkt_<func>.h with every host_ctrlpkt_* symbol
+    # renamed host_ctrlpkt_<func>_* (the dispatch registers host_ctrlpkt_<func>_table).
+    if [ -f "./ctrlpkt_sites_${func_name}.txt" ]; then
+        local ktool="${output_dir}/aiehlc_ctrlpkt"
+        bash "${AIEHLC_ROOT_DIR}/script/build_ctrlpkt_tool.sh" "$ktool" "$gen" || {
+            echo "Error: aiehlc_ctrlpkt build failed"
+            return 1
+        }
+        local khdr="./host_ctrlpkt_${func_name}.h"
+        local kdbg="./ctrlpkt_${func_name}"
+        rm -rf "$kdbg"
+        "$ktool" --sites "./ctrlpkt_sites_${func_name}.txt" --host-cc ./host.cc --out-sites "${khdr}.tmp" \
+            --debug-dir "$kdbg" || {
+            echo "Error: aiehlc_ctrlpkt sites encode failed for ${func_name}"
+            return 1
+        }
+        local kguard
+        kguard="HOST_CTRLPKT_$(echo "$func_name" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9\n' '_')_H"
+        sed -e "s/\bhost_ctrlpkt_/host_ctrlpkt_${func_name}_/g" -e "s/\bHOST_CTRLPKT_H\b/${kguard}/g" \
+            "${khdr}.tmp" > "$khdr" && rm -f "${khdr}.tmp"
+        grep -q "host_ctrlpkt_${func_name}_table" "$khdr" || {
+            echo "Error: ${khdr} has no host_ctrlpkt_${func_name}_table"
+            return 1
+        }
+        echo "AOT control packets: $(pwd)/${khdr#./}"
+    fi
+    # Multi-kernel kernel-ELF load (GAP-aiehlc-multi-kernel-aot-046372): aiehlc.cc writes
+    # ctrlpkt_manifest_<func>.json per kernel; encode this kernel's ELF (just built into
+    # ${output_dir}/kernel) into kernel_<func>_ctrlpkt.h for __Runtime_ctrl_kernel_pkt_set.
+    if [ -f "./ctrlpkt_manifest_${func_name}.json" ]; then
+        local etool="${output_dir}/aiehlc_ctrlpkt"
+        [ -x "$etool" ] || bash "${AIEHLC_ROOT_DIR}/script/build_ctrlpkt_tool.sh" "$etool" "$gen" || {
+            echo "Error: aiehlc_ctrlpkt build failed"
+            return 1
+        }
+        local ehdr="./kernel_${func_name}_ctrlpkt.h"
+        "$etool" --manifest "./ctrlpkt_manifest_${func_name}.json" --func "$func_name" --elf "${output_dir}/kernel" \
+            --gen "$gen" --out "$ehdr" || {
+            echo "Error: aiehlc_ctrlpkt kernel-ELF encode failed for ${func_name}"
+            return 1
+        }
+        echo "AOT control packets (kernel ELF): $(pwd)/${ehdr#./}"
+    fi
     [ -f "$manifest" ] || return 0
     grep -q "\"func\":\"${func_name}\"" "$manifest" || return 0
 
@@ -497,8 +541,30 @@ if [[ "$use_llvm_aie" != "true" ]]; then
 
     # Step 3: xchessmk -> kernel ELF
     dbg_echo $chess_elf_compiler +o "$output_dir" "$prx_file"
-    $chess_elf_compiler +o "$output_dir" "$prx_file"
-    if [ $? -ne 0 ]; then
+    # Exit status kept with "|| rc=$?": callers run under set -e.
+    _mk_rc=0
+    $chess_elf_compiler +o "$output_dir" "$prx_file" > "$output_dir/xchessmk.log" 2>&1 || _mk_rc=$?
+    cat "$output_dir/xchessmk.log"
+    # Kernel statics (.data/.bss) are not in aiehlc's DM budget: the BCF reserves
+    # a 32 KB stack at 0x70000 and the port buffers sit above it, so a kernel with
+    # large statics (e.g. flash-attention, 18 KB) fails to link with "could not
+    # find free space ... in memory DMb". Shrink the BCF stack to
+    # AIEHLC_DM_MIN_STACK (default 4 KB) and link once more; hostcompile's
+    # check_kernel_stack then checks chess's stack bound against the new size.
+    if [ $_mk_rc -ne 0 ] && grep -q "could not find free space for SpaceSymbol .* in memory DM" "$output_dir/xchessmk.log"; then
+        _bcfname=$(sed -nE 's/.*id="bridge.cfg" value="([^"]+)".*/\1/p' "$prx_file" | head -1)
+        _bcf="$(dirname "$prx_file")/${_bcfname:-aieml.bcf}"
+        _st=$(awk '$1=="_stack"{print strtonum($4); exit}' "$_bcf" 2>/dev/null)
+        _min=$(( ${AIEHLC_DM_MIN_STACK:-0x1000} ))
+        if [ -n "$_st" ] && [ "$_st" -gt "$_min" ]; then
+            echo "[kc.sh] kernel statics do not fit next to the ${_st} B core stack; relinking with a ${_min} B stack (AIEHLC_DM_MIN_STACK)"
+            sed -i -E "s/^(_stack[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+)[^[:space:]]+/\1$(printf '0x%x' "$_min")/" "$_bcf"
+            _mk_rc=0
+            $chess_elf_compiler +o "$output_dir" "$prx_file" > "$output_dir/xchessmk.log" 2>&1 || _mk_rc=$?
+            cat "$output_dir/xchessmk.log"
+        fi
+    fi
+    if [ $_mk_rc -ne 0 ]; then
         echo "Error: xchessmk ELF linking failed"
         return 1
     fi

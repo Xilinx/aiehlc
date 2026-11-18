@@ -138,6 +138,7 @@ class BuildReport:
     local: dict = None
     output: str = None              # build(output=...): where the artifacts were copied
     files: list = field(default_factory=list)
+    io_info: str = ""              # build(runtime_io=...): aiehlc_elfio.py info of the .aiehlc_io section
 
     def __repr__(self) -> str:
         if self.ok:

@@ -1,0 +1,5 @@
+# Tests retired on purpose: a line is a test file basename or a 'file.py::test_id' (TD/check_pytest.py counts
+# a base test as retired only if it is listed here AND its file is gone).
+test_keep_layout_codegen.py  # unet-m4 P3: keep_layout_codegen.py deleted -- the folds are aiegraph groups now:
+                             # test_match_kinds.py (conv+layout / linear+layout / dense+silu, counter-examples),
+                             # test_pure_perm.py (purity), src/aiednn/test/test_fa_strided_packs.py (FA packs)

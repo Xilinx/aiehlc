@@ -86,6 +86,8 @@ def _stamp(spec) -> str:
         if p.stat().st_size < (1 << 20):          # skip multi-MB data dumps
             h.update(p.name.encode() + p.read_bytes())
     h.update((REPO / "include" / "aie_user_kernel.h").read_bytes())
+    h.update(("aiehlc.sh args: " + os.environ.get("AIEHLC_SH_ARGS", "") +
+              " defs: " + os.environ.get("EXTRA_DEFS", "")).encode())
     # The generator itself: a rebuilt aiehlc may emit different host/kernel code
     # (e.g. per-library routing), so a cached tree from an older one is stale.
     exe = REPO / "build" / "aiehlc"
@@ -108,15 +110,18 @@ def aiehlc_compile(spec, out_dir, aie_version: int = 5, verbose: bool = True) ->
     # Scratch next to the cache, not in /tmp: aiehlc's aout/ is large and /tmp
     # is often a small shared volume (a full one fails the build mid-way).
     scratch = Path(tempfile.mkdtemp(prefix="aiehlc_run_", dir=work))
+    # AIEHLC_SH_ARGS: extra aiehlc.sh options (e.g. --skip-bss), part of the stamp.
     cmd = (f'source "{REPO}/script/aiehlc.sh" --aie-version {aie_version} '
-           f'--runtime-source-file "{spec.source}"')
+           f'--runtime-source-file "{spec.source}" {os.environ.get("AIEHLC_SH_ARGS", "")}').rstrip()
     start = time.time()
     try:
         with log.open("w") as fh:
             rc = subprocess.run(["bash", "-c", cmd], cwd=str(scratch),
                                 stdout=fh, stderr=subprocess.STDOUT).returncode
         src = scratch / "aout" / "worklocal"
-        if rc != 0 or not (src / "host.cc").is_file() or not (src / "kernel.cc").is_file():
+        # one kernel -> kernel.cc; several __global__ kernels -> kernel_<name>.cc each (hostcompile.sh multi-kernel)
+        has_kernel = (src / "kernel.cc").is_file() or any(src.glob("kernel_*.cc"))
+        if rc != 0 or not (src / "host.cc").is_file() or not has_kernel:
             return {"ok": False, "log": str(log),
                     "reason": f"aiehlc.sh rc={rc}, no host.cc/kernel.cc; see {log}"}
         if dest.exists():
