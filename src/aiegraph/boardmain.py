@@ -1,4 +1,4 @@
-"""Board-side ``main.c`` generator + the build glue around it (unet-m4 P4, gaps 3 / 4).
+"""Board-side ``main.c`` generator + the build glue around it (sprint m4 P4, gaps 3 / 4).
 
 A model example used to carry its own ``MAIN_C`` (C text in Python), the runtime-io rewrite of it,
 the inputs header and the PROF / FA declaration glue of ``graph_driver.c``. All of that is generated
