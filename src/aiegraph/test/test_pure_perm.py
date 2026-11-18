@@ -149,7 +149,7 @@ def test_pos_keep_layout_pure_uses_opsem(tmp_path):
 
 # ─────────────────────────────────────────────────────────── counter-examples
 
-def test_neg_transpose_multiply_not_allowed(relay_graph):
+def test_neg_perm_with_multiply_not_allowed(relay_graph):
     cg, _ = relay_graph
     k = _call_with(cg, "reshape", "transpose", "multiply", "reshape")
     with pytest.raises(AiegraphError, match=r"not a pure permutation .*\['multiply'\] not allowed"):
@@ -175,7 +175,7 @@ def test_neg_multi_output():
     assert "2 outputs" in why_impure(f)
 
 
-def test_neg_transpose_axes_not_permutation():
+def test_neg_axes_not_a_permutation():
     f = FusedFn("tvmgen_default_fused_transpose", [_op("transpose", [[2, 3, 4]], [2, 3, 4], axes=[0, 0, 2])],
                 [[2, 3, 4]], [[2, 3, 4]])
     assert "not a permutation" in why_impure(f)
