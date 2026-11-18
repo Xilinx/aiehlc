@@ -257,10 +257,28 @@ def test_offload_reset_drops_the_step(tmp_path, monkeypatch):
     assert txt == base_txt and wbin == base_w
 
 
+def test_groups_recorded_before_the_first_offload_keep_the_layer_rows(tmp_path):
+    """A fresh deploy tree has no layers/partition.json until the first offload; offload_group
+    records its groups first. The offload must still get every layer row (the carrier layer of
+    build_unet.py), and keep the groups."""
+    from types import SimpleNamespace
+    import frontend.tvmrelay.aiekernel.flow as flow
+    wd, ids = net(tmp_path)
+    (wd / "layers" / "partition.json").unlink()
+    emod = EmbeddedModel(wd)
+    g = emod.group([0], "c0")
+    emod.offload_group(g, "k.cc", [conv_step(g, WeightRef("w", ids["w"], (8, 4)).as_bf16())])
+    fake = SimpleNamespace(out_dir=wd, calls=[SimpleNamespace(layer=0, dir="000_conv", symbol="s0", node=4),
+                                              SimpleNamespace(layer=1, dir="001_dense", symbol="s1", node=5)])
+    doc = flow._partition_doc(fake)
+    assert [r["index"] for r in doc["layers"]] == [0, 1] and doc["layers"][0]["target"] == "cpu"
+    assert [x["name"] for x in doc["groups"]] == ["c0"]
+
+
 # ── bk-sdm-tiny (slow, needs the tutorial deploy tree + ONNX) ──────────────────────────────
 UNET_WORK = Path("/scratch/staff/huaj/tmp/unet_tutorial/build/ag_work")
 UNET_ONNX = Path("/scratch/staff/huaj/modelzoo/artifacts/bk-sdm-tiny/unet_sim.onnx")
-UNET_PART = Path(__file__).resolve().parents[3] / "example/aiegraph/unet_bk_sdm_tiny/partition_p4a.json"
+UNET_PART = Path("/scratch/staff/huaj/aiengineers/xiaojiang/tasks/2026-11-17_unet-m3/base/partition_p4a.json")
 
 
 @pytest.mark.skipif(os.environ.get("AIEGRAPH_UNET_SLOW") != "1" or not UNET_WORK.is_dir()

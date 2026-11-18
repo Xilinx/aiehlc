@@ -285,16 +285,20 @@ def _build(net, plans, aie_version: int, verbose: bool) -> None:
 
 
 def _partition_doc(net) -> dict:
+    """``layers/partition.json``, or a fresh one (every call on the CPU). A file with no layer
+    rows -- aiegraph's ``offload_group`` records ``groups`` before the first offload has written
+    the rows -- gets the fresh rows and keeps its other keys (the groups)."""
     path = net.out_dir / "layers" / "partition.json"
-    if path.is_file():
-        return json.loads(path.read_text())
+    doc = json.loads(path.read_text()) if path.is_file() else {}
+    if doc.get("layers"):
+        return doc
     rows = [{"index": c.layer, "dir": c.dir, "kind": c.dir[3:], "symbol": c.symbol,
              "graph_node": c.node, "aiegraph": [], "target": "cpu",
              "reason": "not offloaded", "aie_dir": None, "backend": None,
              "source": None, "entry": None, "replaces": None, "archive": None,
              "archive_reason": None} for c in net.calls]
     return {"aie_ops": [], "counts_are": "graph invocations; a kernel called twice "
-                                         "counts twice", "layers": rows}
+                                         "counts twice", **doc, "layers": rows}
 
 
 def _rel(net, p) -> str:
