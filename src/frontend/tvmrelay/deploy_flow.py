@@ -2,9 +2,9 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Deploy a real ONNX ResNet-18 through Relay to a board ELF, stage by stage.
+"""Deploy a real ONNX model (default: the zoo CNN) through Relay to a board ELF, stage by stage.
 
-    ensure_tvm016()  ->  download resnet18-v1-7.onnx  ->  Relay
+    ensure_tvm016()  ->  download MODEL_NAME  ->  Relay
                      ->  int8 quantize  ->  target="c" codegen
                      ->  per-layer folders  ->  baremetal aarch64 main.elf
                      ->  CPU reference classification
@@ -17,7 +17,7 @@ Seven stages, matching the seven things this flow has to prove:
    ``ensure_onnx_mapping()`` restores the ``onnx.mapping`` module that onnx 1.16
    deleted and TVM 0.16 still imports. Both come from importing the package.
 
-2. **Import** — fetch the pretrained ImageNet ResNet-18 (opset 7, 46 MB) and run
+2. **Import** — fetch the pretrained ImageNet zoo default (opset 7, 46 MB) and run
    ``relay.frontend.from_onnx``. The 99 initializers arrive as inline
    ``relay.Constant`` nodes, *not* in the returned ``params`` dict (which comes
    back empty even under ``freeze_params=True``), so anything wanting weights
@@ -86,7 +86,7 @@ Seven stages, matching the seven things this flow has to prove:
    (the pytorch/hub dog by default, ``--image`` for another) run through the
    standard ImageNet preprocessing, plus ``imagenet_labels.h`` so the board
    prints "Samoyed" rather than "class 258". Preprocessing is *called*, not
-   reimplemented -- ``example/model/resnet18py/classify.py:preprocess`` -- so
+   reimplemented -- the example classifier's ``classify.py:preprocess`` -- so
    the board and the CPU reference cannot disagree over normalization.
 
    **``--local``** links the *same* generated C into ``main_local.elf`` for
@@ -190,6 +190,7 @@ Run::
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import urllib.request
@@ -203,14 +204,16 @@ _SRC = _HERE.parent.parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-#: Pretrained ImageNet ResNet-18, **v1**. The choice of v1 over v2 is
-#: load-bearing on a no-LLVM build, not cosmetic -- see ``prefold_onnx``.
-MODEL_URL = (
-    "https://github.com/onnx/models/raw/main/validated/vision/"
-    "classification/resnet/model/resnet18-v1-7.onnx"
-)
-MODEL_NAME = "resnet18-v1-7.onnx"
-FOLDED_NAME = "resnet18-v1-7.folded.onnx"
+#: The default zoo model (data: ``src/aiegraph/zoo.json``), a pretrained ImageNet
+#: **v1** export. The choice of v1 over v2 is load-bearing on a no-LLVM build, not
+#: cosmetic -- see ``prefold_onnx``.
+_ZOO = json.loads((_SRC / "aiegraph" / "zoo.json").read_text())
+_ZOO_DEFAULT = _ZOO["models"][_ZOO["default"]]
+MODEL_URL = _ZOO_DEFAULT["url"]
+MODEL_NAME = _ZOO_DEFAULT["file"]
+FOLDED_NAME = MODEL_NAME[:-len(".onnx")] + ".folded.onnx"
+#: Stem of the generated ``<stem>.c`` / ``<stem>_graph.json`` / ``<stem>_params.bin``.
+MODULE_STEM = _ZOO_DEFAULT["module"]
 INPUT_NAME = "data"
 INPUT_SHAPE = (1, 3, 224, 224)
 
@@ -381,7 +384,7 @@ def prefold_onnx(model_path: Path, verbose: bool = True) -> Path:
     ``FusedConv``, a Microsoft-domain op the Relay importer does not know.
     BASIC keeps the graph to standard ONNX ops.
 
-    **This only works on ResNet-v1.** v1 is post-activation (Conv -> BN), so BN
+    **This only works on post-activation (v1) nets.** v1 is post-activation (Conv -> BN), so BN
     folds into the preceding conv's weights and all 19 BN nodes disappear. v2 is
     pre-activation (BN -> Conv); there is no preceding conv to fold into, 10 BN
     nodes survive BASIC folding, and the ``sqrt`` problem comes back. That is
@@ -412,7 +415,7 @@ def prefold_onnx(model_path: Path, verbose: bool = True) -> Path:
 
 
 def graph_input_shapes(model) -> dict:
-    """``{name: shape}`` for every non-initializer graph input (aiegraph-unet-multiinput).
+    """``{name: shape}`` for every non-initializer graph input (aiegraph-multiinput).
 
     Static dims are taken from the ONNX file; a dynamic leading dim becomes 1.
     Falls back to ``{INPUT_NAME: INPUT_SHAPE}`` for an input with no shape info.
@@ -534,7 +537,7 @@ def _collect_c_source(lib) -> str:
         Module[const_loader] does not support GetSource
 
     So walk ``imported_modules`` and take every child whose ``type_key`` is
-    ``"c"``. Without this the wrappers are silently missing from ``resnet18.c``
+    ``"c"``. Without this the wrappers are silently missing from ``<MODULE_STEM>.c``
     and the link fails on an undefined ``tvmgen_default_aie_main_*``.
     """
     seen, parts = set(), []
@@ -618,14 +621,14 @@ def build_c(mod, params, out_dir: Path, *, opt_level: int = 3, fuse: bool = True
         lib = relay.build(mod, target=target, params=params)
 
     source = _collect_c_source(lib.lib)
-    c_path = out_dir / "resnet18.c"
+    c_path = out_dir / f"{MODULE_STEM}.c"
     c_path.write_text(source)
 
-    graph_path = out_dir / "resnet18_graph.json"
+    graph_path = out_dir / f"{MODULE_STEM}_graph.json"
     graph_path.write_text(lib.get_graph_json())
     sem = pure_perm.save_relay(cap.module, lib.get_graph_json(), pure_perm.opsem_path(graph_path))
 
-    params_path = out_dir / "resnet18_params.bin"
+    params_path = out_dir / f"{MODULE_STEM}_params.bin"
     params_path.write_bytes(relay.save_param_dict(lib.get_params()))
 
     if verbose:
@@ -950,7 +953,7 @@ def run(out_dir: Path = DEFAULT_OUT, *, skip_quantize: bool = False,
     all-equal per-channel kernel zero point to a rank-0 scalar so TVM's own
     four-term elision fires. Output-preserving, and it removes the dead
     ``cast_sum -> multiply -> avg_pool2d -> repeat_multiply`` chains: measured
-    **120 -> 41 kernel calls** on int8 ResNet-18. See ``qnn_fold_zp.py``.
+    **120 -> 41 kernel calls** on the int8 zoo default. See ``qnn_fold_zp.py``.
 
     ``local`` additionally links the same generated C into ``main_local.elf``
     for *this* host and runs it, so stage 6's output can be checked against
@@ -981,7 +984,7 @@ def run(out_dir: Path = DEFAULT_OUT, *, skip_quantize: bool = False,
     #
     # This used to auto-disable under --aie-offload / --aiegraph, because int8
     # legalization restructures the graph (30 -> 120 nodes) and renumbers
-    # `layers/` -- the ResNet stem moves from index 1 to 6 -- while
+    # `layers/` -- the network stem moves from index 1 to 6 -- while
     # `--aie-layers` was read as a position into the Relay graph. That guard is
     # obsolete: selection now resolves a layer to its conv by WEIGHT FINGERPRINT
     # (`byoc.aie_annotate.weight_fingerprint` -- sorted values hashed as int64),
@@ -1060,7 +1063,7 @@ def run(out_dir: Path = DEFAULT_OUT, *, skip_quantize: bool = False,
     # reusing the stage-5 C, and AIE layers keep theirs too so the ELF links.
     #
     # --aie-offload runs it too, over the same --aie-layers selection: BYOC
-    # above only swaps the call in resnet18.c and writes no per-layer AIE
+    # above only swaps the call in <MODULE_STEM>.c and writes no per-layer AIE
     # artifacts, while this lifts the selected conv into aiegraph and emits
     # layers/NN_op/aie/ (host.cc/kernel.cc/routing.cc). Every layer's .c is left
     # exactly as stage 5 wrote it, so layers/ still matches the default flow.
@@ -1245,7 +1248,7 @@ def main(argv=None) -> int:
                          "whether the kernel zero point is a SCALAR, and "
                          "per-channel quantization makes it a [64] tensor -- "
                          "even when every element is 0. Folding it to a scalar "
-                         "takes int8 ResNet-18 from 120 to 41 kernel calls for "
+                         "takes the int8 zoo default from 120 to 41 kernel calls for "
                          "bit-identical output; this flag turns that off to "
                          "A/B against the old graph")
     ap.add_argument("--image", default=None,
@@ -1255,7 +1258,7 @@ def main(argv=None) -> int:
                     help="offload the --aie-layers to AIE through TVM BYOC: "
                          "the generated C calls the aiehlc AIE library "
                          "(aout/libconv2dstem.a) in place of TVM's kernel. "
-                         "Only the ResNet-18 stem has an AIE kernel today")
+                         "Only the zoo default's stem has an AIE kernel today")
     ap.add_argument("--aie-layers", default="1",
                     help="which layers to offload, as numbered in layers/ by "
                          "the CPU build: an index, a comma list, or 'all'. "

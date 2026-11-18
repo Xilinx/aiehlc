@@ -2,9 +2,9 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Automatic AIE / CPU partition of an ONNX model's GEMM layers (GAP-A, unet-m2-s6).
+"""Automatic AIE / CPU partition of an ONNX model's GEMM layers (GAP-A, m2-s6).
 
-Before this pass the UNet partition.json was hand-kept (P35x: "Steve run E" excluded parts
+Before this pass the diffusion example's partition.json was hand-kept (P35x: "Steve run E" excluded parts
 0/1/21/23/24 by hand, then a launch budget N*6.9 ms <= 600 s cut parts 19/20/22). Here the
 partition is *generated* from the graph:
 
@@ -25,13 +25,13 @@ partition is *generated* from the graph:
   4. mode        conv: every legal conv; l37: the legal convs of the board-proven --base set
                  (today's 37) + every legal linear; all: every legal conv and linear;
                  attn: all + every attention bmm of a partition.match_attention core
-                 (bmm -> softmax -> bmm, GPAT, unet-m2-s7). An attn row is one bmm, batch (heads)
+                 (bmm -> softmax -> bmm, GPAT, m2-s7). An attn row is one bmm, batch (heads)
                  looped, M/K/N zero-padded to 64 (activations: no weight repack), and carries
                  attn_group (one per softmax) + attn_role (qk | pv). Optional ``budget_ms`` trims greedily by MAC/launch (the P35x rule).
 
-Output = the partition.json schema of example/aiegraph/unet_bk_sdm_tiny (layers[] with part, file,
+Output = the partition.json schema of the diffusion example's partition.json (layers[] with part, file,
 node, op, cls, weight, macs, launches (64x64x64 tile launches), mkn, idx; N; aie_macs;
-total_gemm_macs; aie_flop_frac; cpu_gemm_layers[]), so build_unet.py and kplan.py read it unchanged.
+total_gemm_macs; aie_flop_frac; cpu_gemm_layers[]), so the example build script and kplan.py read it unchanged.
 """
 
 from __future__ import annotations
@@ -103,7 +103,7 @@ def assign_parts(m) -> dict:
     sub_idx = [i for i, (_, s) in enumerate(keys) if s]
     if not sub_idx:
         raise AiegraphError("autopart", "no <blocks.X>/<kind.Y> sub-blocks in the node names",
-                            hint="autopart parts a diffusers-style UNet export (/u/down_blocks.0/resnets.0/...)")
+                            hint="autopart parts a diffusers-style export (/u/<blocks>.0/<kind>.0/...)")
     first, last = sub_idx[0], sub_idx[-1]
     conv_top = {k for (k, s), n in zip(keys, nodes) if not s and k and n.op_type == "Conv"}
 
@@ -190,7 +190,7 @@ def _legal(r, pad_kn):
 
     One kincore launch per layer when its walk fits; otherwise the GEMM is split along N
     (weight columns) into the fewest equal 64-multiple pieces whose walk fits, one launch
-    each (the 1024x320x960 fused QKV and the 1024x320x2560 GEGLU projection need 3 / 4)."""
+    each (the 1024x320x960 fused QKV and the 1024x320x2560 gated-GELU projection need 3 / 4)."""
     if r["cls"] not in ("conv", "linear") or r["why"]:
         return False, None, {}, list(r["why"]) or [r["cls"]]
     M, K, N = r["m"], r["k"], r["n"]
@@ -270,7 +270,7 @@ def autopartition(model, mode: str = "conv", base=None, ms_per_launch: float = 7
     proven = {l["node"] for l in bdoc.get("layers", []) if l.get("cls") == "conv"} if bdoc else set()
     if mode == "l37" and not proven:
         raise AiegraphError("autopart", "mode l37 needs --base (the board-proven conv set, P35x 37 convs)",
-                            hint="--base example/aiegraph/unet_bk_sdm_tiny/partition.json")
+                            hint="--base <example dir>/partition.json")
     total = sum(r["macs"] for r in gemm)
     want_cls = {"conv": ("conv",), "attn": ("conv", "linear", "attn")}.get(mode, ("conv", "linear"))
     aie, cpu = [], []
@@ -323,7 +323,7 @@ def autopartition(model, mode: str = "conv", base=None, ms_per_launch: float = 7
     aie_macs = sum(r["macs"] for r in aie)
     kin = sum(len(l["mkn"]) for l in layers)   # kincore: one launch per (N-split) piece
     doc = dict(
-        sprint="unet-m2-s6", phase="GPA", generator="aiegraph.autopart", mode=mode,
+        sprint="m2-s6", phase="GPA", generator="aiegraph.autopart", mode=mode,
         onnx=str(model) if isinstance(model, (str, Path)) else None, wdtype="bf16",
         rule=dict(classes=list(want_cls), legality="plan.kincore_geom legal and K%64==N%64==0; M padded to 64",
                   pad_kn=pad_kn, l37_convs="board-proven --base layers (P35x)" if mode == "l37" else None, budget_ms=budget_ms,

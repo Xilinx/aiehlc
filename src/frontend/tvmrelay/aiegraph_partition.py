@@ -20,7 +20,7 @@ a complete accounting: every layer gets a verdict and a reason.
 Why the IR is built over graph *nodes*, not manifest layers
 -----------------------------------------------------------
 ``layers/manifest.json`` has one entry per **distinct generated symbol** (22 for
-ResNet-18), but the graph invokes 24 -- two kernels run twice, because the two
+the zoo default), but the graph invokes 24 -- two kernels run twice, because the two
 64ch/56x56 blocks are shape-identical and TVM emits one function for each pair.
 Dataflow lives on the nodes, not the symbols, so the IR is built by walking
 ``graph["nodes"]`` in execution order. Layer folders are then keyed back by
@@ -63,7 +63,7 @@ which is the point, since each offloaded layer is launched standalone anyway
 **The block args do not alias.** Two consumers of the same CPU-produced tensor
 each get their *own* block argument, because ``-1`` is the only way to say "not
 from an aiegraph op" across the pybind boundary and it allocates a fresh one
-every time. ResNet-18 shows this at the pool: ``%1`` reads ``%arg1`` and the
+every time. The zoo default shows this at the pool: ``%1`` reads ``%arg1`` and the
 first residual's skip reads ``%arg2``, though both are really node 4's output.
 So the IR is faithful about *which ops run where* and about every edge between
 two aiegraph ops, but it under-shares at the CPU boundary. Nothing downstream
@@ -78,6 +78,7 @@ import json
 from pathlib import Path
 
 from frontend.tvmrelay.aie_offload import aie_backend
+from frontend.tvmrelay.deploy_flow import MODULE_STEM
 
 #: Repo root: .../src/frontend/tvmrelay/aiegraph_partition.py -> up three.
 #: Needed to reach script/hostcompile.sh when archiving a layer.
@@ -116,7 +117,7 @@ def _is_call(graph: dict, idx: int) -> bool:
 def _resolve_nop(graph: dict, idx: int) -> int:
     """Follow ``__nop`` passthroughs back to the node that really produces data.
 
-    ResNet-18 has one: the ``[1,512,1,1] -> [1,512]`` reshape between the global
+    The zoo default has one: the ``[1,512,1,1] -> [1,512]`` reshape between the global
     pool and the classifier, which is layout-free so TVM elides it. Without this
     the classifier looks like it consumes a non-kernel and the avgpool/dense
     fold never fires.
@@ -227,7 +228,7 @@ def _aiegraph_ops_for(kind: str, ops: list) -> list:
     Driven off the fused op list rather than the folder name so an unseen
     fusion degrades to "no aiegraph op" instead of being silently mis-mapped.
     The pattern family lives in AIEHLC ``aiegraph.partition.match_conv``: a
-    float conv(+bias)(+add) with no ReLU (UNet temb / skip / attention
+    float conv(+bias)(+add) with no ReLU (time embedding / skip / attention
     residual) is ``conv_bn`` with an fp32 epilogue (see ``_conv_pattern``);
     ``partition_layers`` keeps such a layer on the CPU unless the backend runs
     the epilogue, so the add is never dropped.
@@ -256,7 +257,7 @@ def _residual_joins(ops: list) -> int:
 
     Exactly one bias is assumed. It arrives as ``bias_add`` (one op name, not
     counted as ``add``), as tokens ``bias`` + ``add``, or as a plain ``add``
-    (BN folded, the ResNet-18 path); in the last two one ``add`` is the bias.
+    (BN folded, the int8 CNN path); in the last two one ``add`` is the bias.
     """
     adds = ops.count("add")
     if "bias_add" in ops:
@@ -506,7 +507,7 @@ def run_aiegraph(out_dir, aie_ops=DEFAULT_AIE_OPS, mesh=(2, 2),
                 "layers": verdicts}
 
     backend = aie_backend()
-    ir = backend.build_aiegraph_module(op_dicts, "resnet18")
+    ir = backend.build_aiegraph_module(op_dicts, MODULE_STEM)
     ir_path = layers_dir / "aiegraph.mlir"
     ir_path.write_text(ir)
     if verbose:
@@ -587,7 +588,7 @@ def _build_one(backend, kernels, launch: dict, rec: dict, verdict: dict,
                aie_dir: Path, out_dir: Path, mesh, verbose: bool) -> dict:
     """Run ``run_aie_pipeline`` for one launch into *aie_dir*. Returns its record.
 
-    A conv with exactly the ResNet stem geometry is built from
+    A conv with exactly the 7x7/2 stem geometry is built from
     ``conv2dstem.cc`` by aiehlc instead -- the same logic ``test_conv2d.cc``
     verifies bit-exact against this layer -- not from the generic placeholder
     body (``aie_stem_lib``).

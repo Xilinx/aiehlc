@@ -25,7 +25,7 @@ from pathlib import Path
 from . import _env
 from .contract import KernelContract, check_region, make_contract
 from .errors import AiegraphError
-from .model import Model, copy_into, load
+from .model import DEFAULT_MODULE_STEM, Model, copy_into, load
 from .plan import group_by_source, parse_offload
 from .region import Regions, build_regions
 from .report import (AIProtoResult, BuildReport, CheckReport, DetectReport, PartitionPlan,
@@ -138,7 +138,7 @@ class EmbeddedModel:
             c = calls[0]
             where, src = place.get(c.symbol, ("cpu", ""))
             if where == "cpu":
-                src = f"layers/{c.dir}/{c.dir}.c" if c.dir else "resnet18.c"
+                src = f"layers/{c.dir}/{c.dir}.c" if c.dir else f"{DEFAULT_MODULE_STEM}.c"
             out.append(Layer(idx, c.symbol, c.dir, [x.call for x in calls], _label(c),
                              _sig(c), where, src))
         return out
@@ -773,7 +773,7 @@ class EmbeddedModel:
 
     def _stem(self) -> str:
         g = next(self.workdir.glob("*_graph.json"), None)
-        return g.name[:-len("_graph.json")] if g else "resnet18"
+        return g.name[:-len("_graph.json")] if g else DEFAULT_MODULE_STEM
 
     @property
     def network_md(self) -> Path:

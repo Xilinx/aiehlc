@@ -5,7 +5,7 @@
 """Attention matcher for group offload (design 2026-11-16-aiegraph-group-offload §5.2 / §6, step S3).
 
 ``match_attention(cg, onnx=...)`` finds every attention core of the network as a group of
-whole TVM calls -- ``[q_t, k_t, qk, softmax, v_t, pv, merge]`` on bk-sdm-tiny -- and gives the
+whole TVM calls -- ``[q_t, k_t, qk, softmax, v_t, pv, merge]`` on the diffusion example -- and gives the
 user what a kernel template needs (design §5.2)::
 
     g.calls                 [31, 32, 33, 34, 35, 36, 37]
@@ -17,7 +17,7 @@ user what a kernel template needs (design §5.2)::
     g.onnx                  {"qk", "softmax", "pv", "scale": [...]} ONNX node names
     g.bmm                   {"qk": {...}, "pv": {...}}: the two nn_batch_matmul calls (node, func, shapes)
 
-This replaces the example's ``unet_aie.map_attn`` (ONNX bmm layers zipped to TVM nn_batch_matmul in
+This replaces the example's ``map_attn`` (ONNX bmm layers zipped to TVM nn_batch_matmul in
 graph order) and the C-text regexes of ``keep_layout_rt.fa_pass``:
 
 * **TVM side** (graph.json data flow): one core per ``nn_softmax`` call whose input comes from a
@@ -418,7 +418,7 @@ def match_attention(cg: CallGraph, onnx=None, nodes=None, wdtype: str = None, wo
 
 
 def attention_classes(groups) -> list:
-    """``[(H, N, M, D)]`` in class-index order (design §9 (1): six on bk-sdm-tiny)."""
+    """``[(H, N, M, D)]`` in class-index order (design §9 (1): six on the diffusion example)."""
     cls = {}
     for g in groups:
         cls.setdefault(g.cls, g.key)
@@ -429,7 +429,7 @@ def partition_attention(cg: CallGraph, partition: dict, groups=None, onnx=None, 
                         workdir=None) -> list:
     """The partition's ``attn`` rows (``autopart --mode attn``: one per bmm, ``attn_group`` /
     ``attn_role`` qk|pv) joined to the matched groups BY ONNX NODE NAME (was the example's
-    ``unet_aie.map_attn``, which zipped them in graph order). One dict per row, sorted by
+    ``map_attn``, which zipped them in graph order). One dict per row, sorted by
     (part, idx): the TVM nn_batch_matmul call (node, func, symbol, eids, yeid, nargs, x/w/yshape),
     the row's cid / group / role / softmax, M/K/N (unpadded), H, and ``ag_group`` (the
     ``AttentionGroup``). A row with no group, a group missing a row, or a shape mismatch is an error."""

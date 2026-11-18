@@ -6,7 +6,7 @@
 
     aiegraph doctor                               what works here, and the fixes
     aiegraph setup                                attach (or build) TVM 0.16, then doctor
-    aiegraph convert resnet18 [--calib a.jpg ...] [--workdir D]
+    aiegraph convert [MODEL] [--calib a.jpg ...] [--workdir D]
     aiegraph layers   [--workdir D]               the layer table
     aiegraph prototype                            the kernel-file format (no model needed)
     aiegraph prototype layer1 [--region R] [--entry NAME] [--write DIR] [--no-test] [--workdir D]
@@ -28,7 +28,7 @@
                       [--ms-per-launch MS] [--pad-kn] [--budget-ms MS]
                                                   generate the AIE/CPU GEMM partition (GAP-A)
 
-``--workdir`` defaults to ``worklocal/aiegraph/resnet18``. Exit 0 = success /
+``--workdir`` defaults to ``worklocal/aiegraph/<ag.DEFAULT_MODEL>``. Exit 0 = success /
 READY, 1 = not ready / failed, 2 = usage or environment error.
 """
 
@@ -41,7 +41,7 @@ from pathlib import Path
 
 def _emod(args):
     import aiegraph as ag
-    wd = Path(args.workdir or Path.cwd() / "worklocal" / "aiegraph" / "resnet18")
+    wd = Path(args.workdir or Path.cwd() / "worklocal" / "aiegraph" / ag.DEFAULT_MODEL)
     return ag.open(wd)
 
 
@@ -54,7 +54,7 @@ def main(argv=None) -> int:
     sub.add_parser("setup")
     sub.add_parser("guide")
     p = sub.add_parser("convert")
-    p.add_argument("model", nargs="?", default="resnet18")
+    p.add_argument("model", nargs="?", default=ag.DEFAULT_MODEL)
     p.add_argument("--target", default="a78")
     p.add_argument("--calib", nargs="*", default=None, help="calibration images")
     p.add_argument("--image", default=None, help="the image the ELF classifies")

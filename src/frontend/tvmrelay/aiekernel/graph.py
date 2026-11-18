@@ -20,7 +20,7 @@ spaces are all called layer 01"):
            is also what ``--aie-layers`` and this package's ``--layers`` take;
 ``node``   the graph-JSON node id.
 
-A layer maps to one or more calls (ResNet-18 calls layer 04's kernel twice),
+A layer maps to one or more calls (the zoo default calls layer 04's kernel twice),
 and the generated driver swaps by SYMBOL, so selecting a layer offloads every
 call of it -- each call has its own weights, and each is checked.
 """

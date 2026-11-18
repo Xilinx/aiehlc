@@ -1,4 +1,4 @@
-"""Driver template (unet-m3 S6): the application's C glue in the generated ``graph_driver.c``.
+"""Driver template (m3 S6): the application's C glue in the generated ``graph_driver.c``.
 
 A model build declares its groups (``emod.offload_group``) and, once, the C text the driver
 needs around them -- step / kernel declarations, profiling glue, enter / exit hooks -- with
