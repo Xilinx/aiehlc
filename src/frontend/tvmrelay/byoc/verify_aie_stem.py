@@ -46,7 +46,7 @@ import tvm
 from tvm import relay
 from tvm.contrib import cc, graph_executor
 
-from frontend.tvmrelay import deploy_flow as df, onnx_ptq as ptq
+from frontend.tvmrelay import deploy_flow as df, image_input, onnx_ptq as ptq
 from frontend.tvmrelay.byoc import aie_byoc, aie_codegen
 
 REPO = Path(__file__).resolve().parents[4]
@@ -90,8 +90,7 @@ def _tvm_reference(fn):
 
 def _real_input() -> np.ndarray:
     """The dog image (same resolver as stage 6), quantized + padded as the graph does."""
-    sys.path.insert(0, str(REPO / "example" / "model" / "resnet18py"))
-    import classify  # noqa: E402
+    classify = image_input._classify_mod()
 
     path = classify.resolve(None, classify.DEFAULT_IMAGE_URL, "input_image")
     img = np.asarray(classify.preprocess(path), np.float32).reshape(1, 3, 224, 224)
@@ -118,8 +117,7 @@ def _run_network(mod, image, workdir: Path, extra_c=None):
 
 
 def _float_image() -> np.ndarray:
-    sys.path.insert(0, str(REPO / "example" / "model" / "resnet18py"))
-    import classify  # noqa: E402
+    classify = image_input._classify_mod()
 
     path = classify.resolve(None, classify.DEFAULT_IMAGE_URL, "input_image")
     return np.asarray(classify.preprocess(path), np.float32).reshape(1, 3, 224, 224)
@@ -127,7 +125,10 @@ def _float_image() -> np.ndarray:
 
 def main(out_dir: str = "worklocal/tvmrelay_deploy") -> int:
     out = Path(out_dir)
-    base, params = df.import_relay(out / "resnet18-v1-7.int8.qdq.onnx", verbose=False)
+    qdq = sorted(out.glob("*.int8.qdq.onnx"))
+    if not qdq:
+        raise FileNotFoundError(f"no *.int8.qdq.onnx in {out} (run deploy_flow first)")
+    base, params = df.import_relay(qdq[0], verbose=False)
     base = ptq.to_integer_ops(base, verbose=False)
     mod, info = aie_byoc.partition_for_aie(base, params, convs=None, verbose=True)
     name, fn = _aie_function(mod)
