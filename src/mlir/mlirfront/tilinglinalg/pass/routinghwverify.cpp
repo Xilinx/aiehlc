@@ -110,6 +110,36 @@ void RoutingHWVerifyPass::runOnOperation() {
 
         // Pass 3: verify neighbor port consistency
         int checked = 0, errors = 0;
+
+        // Packet switch: no tile may forward packets out of the side they come in on.
+        // A tile's slave and master can sit on separate ops (the chain's last tile
+        // gets its circuit-facing master on its own op), so collect per tile. A
+        // same-side U-turn (slave WEST -> master WEST) loses those packets on the
+        // board while the DMA slave's own packets get through (simpleeltwise_add on
+        // VEK280, skill kernelblockgather).
+        std::map<TileKey, std::set<std::string>> pktSlaveDirs, pktMasterDirs;
+        routingCreateOp->walk([&](routinghw::ConnectStreamPktSwitchPort pktOp) {
+            Operation *tileOp = pktOp->getOperand(0).getDefiningOp();
+            auto it = opToTile.find(tileOp);
+            if (it == opToTile.end())
+                return;
+            std::string slaveDir = pktOp.getReceiveslavedirection().str();
+            std::string masterDir = pktOp.getForwardmasterdirection().str();
+            if (isDirectional(slaveDir))
+                pktSlaveDirs[it->second].insert(slaveDir);
+            if (isDirectional(masterDir))
+                pktMasterDirs[it->second].insert(masterDir);
+        });
+        for (auto &[tile, masters] : pktMasterDirs) {
+            for (const std::string &dir : masters) {
+                if (!pktSlaveDirs[tile].count(dir))
+                    continue;
+                std::cerr << "  ERROR: (" << tile.first << "," << tile.second << ") packet master " << dir
+                          << " forwards packets that arrive on its " << dir
+                          << " slave: a same-side U-turn, those packets are lost" << std::endl;
+                errors++;
+            }
+        }
         std::cout << "\n=== RoutingHW Neighbor Port Verify (Round " << roundIdx << ", " << memo << ") ===" << std::endl;
 
         for (auto &[tile, conns] : tileConnections) {

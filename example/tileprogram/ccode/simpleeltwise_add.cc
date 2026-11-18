@@ -1,6 +1,6 @@
 #include "simpleops_load.h"
-// STATUS (2026-11-17): builds; on VEK280 the mesh rows fed through shim (2,0) stall
-// (input wait_io TIMEOUT, rows 128.. stay 0). Open, see skill kernelblockgather.
+// STATUS (2026-11-17): PASS on VEK280 (2.06 ms). On VEK385 the build stops with a
+// packet "same-side U-turn" error: no output route avoids it there (skill kernelblockgather).
 #define OPS_R 256  // rows
 #define OPS_C 1024 // columns (bytes)
 // Elementwise: z = saturate_int8(x + y), x / y / z int8[256, 1024], on the 4x4 mesh

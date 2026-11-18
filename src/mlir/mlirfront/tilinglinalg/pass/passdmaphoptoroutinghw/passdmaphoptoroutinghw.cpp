@@ -1122,10 +1122,21 @@ struct DmaphopPathConversionPattern : public OpConversionPattern<dmaphop::create
             static_cast<int>(dmadir),  // dmadirection
             shimchannel  // channelused
         );
-        
+
         // Create routing path (like line 1030 or 1058)
-        auto rpath = router_.createPath(dioid, coreTileList);
-        
+        // An S2MM gather is a packet chain over the producers in this same order,
+        // and the path starts at its last tile. Leaving that tile towards the chain's
+        // predecessor would put the packet master on the side its packets arrive
+        // on -- a U-turn, and those packets never reach the shim (skill
+        // kernelblockgather). Route around it where a route exists.
+        std::optional<Point> noFirstHop;
+        if (!isShimToCore && coreTileList.size() >= 2) {
+            const Point &last = coreTileList.back(), &prev = coreTileList[coreTileList.size() - 2];
+            if (std::abs(last.r - prev.r) + std::abs(last.c - prev.c) == 1)
+                noFirstHop = prev;
+        }
+        auto rpath = router_.createPath(dioid, coreTileList, noFirstHop);
+
         if (!rpath || !(*rpath)) {
             rewriter.eraseOp(op);
             return success();
