@@ -94,7 +94,7 @@ ls -d $T/thirdparty/arch/*/workspace      # 应该能看到 workspace
 | `build_unet.py` | 构建入口：ONNX → aiegraph → TVM C + AIE kernel → `main.elf` |
 | `unet_aie.py` | 生成 `gemm_kacc_{ch}x{k}x{px}` kernel 和主机函数，改写 `graph_driver.c` |
 | `fa_attn.py` | 生成 flash-attention kernel |
-| `keep_layout_rt.py` | 层与层之间保持布局，去掉 A78 上的 layout 转换 |
+| （aiegraph `keep_layout_codegen`） | 层与层之间保持布局，去掉 A78 上的 layout 转换（`emod.keep_layout()`） |
 | `partition_p4a.json` | 哪些层上 AIE |
 | `a78_layer_cflags.txt` | A78 上 TVM C 代码的编译选项（NEON） |
 | `export_real_io.py` | 导出一份真实的 UNet 输入和 x86 参考输出 |
