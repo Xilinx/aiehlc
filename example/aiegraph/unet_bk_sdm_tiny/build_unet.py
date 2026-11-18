@@ -337,7 +337,6 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     import unet_aie as ua
     import aiegraph as ag
     import frontend.tvmrelay.arm_build as ab
-    import frontend.tvmrelay.aiekernel.flow as flow
     import onnx
     from aiegraph.callsite import all_conv_calls
     part = json.loads(a.partition.resolve().read_text())
@@ -489,10 +488,6 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     log(f"aiegraph offload_group: {len(sel)} one-call groups ({len(sel) - len(lin)} unet_aie_conv + "
         f"{len(lin)} unet_aie_linear), WPRE bf16 kacc-layout weights {nw} B (layers/partition.json groups)")
 
-    # calibrate/emulate would run the whole UNet twice on x86; force=True ignores their
-    # verdicts anyway -- skipped (the board run is the check).
-    flow._calibrate = lambda net, plans, verbose: log("offload: calibrate skipped (UNet)")
-    flow._emulate = lambda net, plans, verbose: log("offload: emulate skipped (UNet)")
     orig = getattr(ab.generate_driver, "_p35w_orig", ab.generate_driver)
 
     def generate_driver(graph_path, params_path, out_dir, *args, **kw):
@@ -516,7 +511,9 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     generate_driver._p35w_orig = orig
     ab.generate_driver = generate_driver
 
-    rep = emod.offload(f"layer{lidx}", str(kcc), force=True, verbose=a.verbose)
+    # gates 3-4 = aiegraph's group-level x86 check (TVM's C vs the step's x86 model, cos >= 0.999,
+    # nonfinite == 0), binding: a failing carrier is rejected and the build stops below
+    rep = emod.offload(f"layer{lidx}", str(kcc), check="group", verbose=a.verbose)
     log(f"offload: {rep}")
     lp = json.loads((work / "layers" / "partition.json").read_text())
     if not any(L.get("target") == "aie" and L.get("archive") for L in lp["layers"]):
@@ -673,8 +670,10 @@ def main(argv=None) -> int:
     m = ag.load(str(onnx_i32))
     log(f"loaded {m.name}: inputs {m.input_shapes} -> {m.output_shape}, "
         f"{sum(m.ops.values())} nodes {m.ops}")
+    # a fresh conversion every build (the driver and weights.bin of ag_work are rewritten below)
+    shutil.rmtree(out / "ag_work", ignore_errors=True)
     emod = m.convert(target="a78", quantize="fp32", image=str(real_io / "sample.bin"),
-                     workdir=out / "ag_work", force=True, verbose=a.verbose)
+                     workdir=out / "ag_work", verbose=a.verbose)
     log(f"converted -> {emod.workdir} ({emod.state.get('layer_count') if hasattr(emod, 'state') else '?'} layers)")
     if not shutil.which("aarch64-none-elf-gcc"):
         # the gate runs plain $AGPY: take the cross toolchain from the repo setup
