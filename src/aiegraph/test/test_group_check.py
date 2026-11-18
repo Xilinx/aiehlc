@@ -235,7 +235,8 @@ def test_force_refused_with_group_check():
 
 
 def test_build_unet_has_no_check_bypass():
-    src = (UNET_EX / "build_unet.py").read_text()
+    # P4 (unet-m4): the offload declarations moved from build_unet.py to unet_offload.py
+    src = (UNET_EX / "build_unet.py").read_text() + (UNET_EX / "unet_offload.py").read_text()
     assert src.count("force=True") == 0
     assert "_calibrate" not in src and "_emulate" not in src
     assert 'check="group"' in src

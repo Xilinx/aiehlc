@@ -89,7 +89,5 @@ def test_unet_example_templates_resolve():
 def test_unet_example_has_no_c():
     assert not [p for p in UNET.rglob("*") if p.suffix in (".c", ".cc", ".h")]
     for py in UNET.glob("*.py"):
-        if py.name == "build_unet.py":      # MAIN_C stays until P4
-            continue
         t = py.read_text()
         assert "#include" not in t and "#define" not in t, py.name

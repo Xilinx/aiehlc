@@ -3,7 +3,7 @@
 offload(a, emod, out) maps the partition's conv / linear / attention layers to aiegraph groups (match /
 offload_group / merge_groups / fold matches), places the flash-attention groups, registers the driver glue
 (aiegraph.boardmain.driver_glue) and builds the AIE archive on the carrier layer. It returns the header
-#defines of the board main and the expected (conv, linear, attn) call-site counts that check_driver()
+defines of the board main and the expected (conv, linear, attn) call-site counts that check_driver()
 verifies in the linked graph_driver.c. No C text here: kernels / host glue come from src/aiednn, the board
 main and the PROF glue from aiegraph.boardmain.
 """
@@ -70,7 +70,7 @@ def fa_offload_groups(emod, att: list, kcc: Path, out: Path) -> int:
 
 def offload(a, emod, out: Path):
     """--aie conv[,linear[,attn]]: map partition layers to aiegraph groups, build the AIE archive on a
-    carrier layer. Returns (board-main #defines, expected (conv, linear, attn) call sites)."""
+    carrier layer. Returns (board-main header defines, expected (conv, linear, attn) call sites)."""
     import aiegraph._env as env
     from aiegraph import boardmain as bm
     env.frontend("")
