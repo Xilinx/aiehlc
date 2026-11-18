@@ -271,6 +271,16 @@ LogicalResult emitCoreTileParams(FlowLoweringCtx &c, CoreTileCtx &t, const CoreT
         return failure();
     if (c.kb.follow && c.isInput)
         t.numIterations = c.kb.rounds;
+    // A checked input that does not follow keeps the GEMM model's window. The
+    // kernel lowering checks only its own window, so check this one too: a block
+    // bigger than the model's strip (lut<128,128,16>: W {32,64} next to A {16,64})
+    // would get a half-size core BD and a BCF slot the kernel's array overruns.
+    if (c.isInput && c.kb.check && !c.kb.follow && t.pingPongBufferSize != c.kb.blockElems) {
+        c.op->emitError() << "input " << c.funcArgIdx << ": the host core window is " << t.pingPongBufferSize
+                          << " elements, but the kernel's blocks (#routing.kernel_block) are " << c.kb.blockElems
+                          << " -- the core DMA and the kernel's buffer would disagree";
+        return failure();
+    }
 
     // Compute lock IDs from dirIdx to match the kernel's window ordering.
     // The kernel allocates locks sequentially per sorted window:
