@@ -14,7 +14,7 @@ Layer index -> conv identity
 ----------------------------
 ``--aie-layers`` numbers layers the way stage 5 does (``layers/NN_<name>/``,
 from the CPU build), but BYOC partitions Relay, where those layers do not exist
-yet. Position cannot bridge the two: the graph executor runs each ResNet
+yet. Position cannot bridge the two: the graph executor runs each residual
 shortcut conv AFTER its main branch (fused with the residual add) while
 Relay's post-order meets it first. So a selected layer is identified by its
 conv's **weights** (``byoc.aie_annotate.weight_fingerprint``, a hash of the
@@ -191,7 +191,7 @@ def select_layers(manifest: dict, graph: dict, indices=None,
     #
     # `call_nodes[idx]` looks right and is not: the manifest has one entry per
     # emitted C function while the graph has one node per CALL, and a function
-    # invoked twice appears once in the manifest and twice here. On ResNet-18
+    # invoked twice appears once in the manifest and twice here. On the reference CNN
     # that is 28 vs 30, and the two desynchronize from index 6 onward -- every
     # later layer then gets another layer's geometry, silently. (The same bug
     # is called out in aiegraph_partition.py's docstring.)

@@ -2,11 +2,11 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Pure-permutation check on saved Relay op semantics (unet-m4 gap 2).
+"""Pure-permutation check on saved Relay op semantics (m4 gap 2).
 
 The keep-layout codegen may only delete a TVM call whose work is a data permutation (reshape / transpose /
 layout_transform / squeeze / expand_dims), optionally with a small set of element-wise ops the rewrite folds
-elsewhere (the attention scale ``multiply``, the residual ``add``, the temb SiLU). The decision used to parse
+elsewhere (the attention scale ``multiply``, the residual ``add``, the time-embedding SiLU). The decision used to parse
 the fused *symbol name* (``tvmgen_default_fused_reshape_transpose_...``); names are truncated past 80
 characters, carry no shapes / axes, and say nothing about the number of outputs.
 

@@ -20,7 +20,7 @@ Launch planning for a conv offloaded as an im2col GEMM (Y[N][M] = W[N][K] . X[M]
     plan_conv_layers(onnx, rows, mode)  the same for ONNX Conv nodes (geometry from the graph)
 
 GAP-aiegraph-offload-7c4415: the kincore walk used to live only in
-example/aiegraph/unet_bk_sdm_tiny/unet_aie.py (kacc_geom, 0c5a932 / a2e0099).
+the diffusion example's host script (kacc_geom, 0c5a932 / a2e0099).
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ def _ceil(a: int, b: int) -> int:
 def kincore_geom(ch: int, k: int, px: int) -> dict:
     """Per-layer kincore walk of Y[ch][px] = W[ch][k] . X[px][k] (bf16 in, fp32 acc) on the 4x4 mesh.
 
-    Same arithmetic as unet_aie.kacc_geom (the board-proven P4bg/P4bx kernels):
+    Same arithmetic as the example's kacc_geom (the board-proven P4bg/P4bx kernels):
       core (pm, pn) owns ch/4 channels (ntile 16-row tiles) x px/4 pixels (S 16-wide sub-tiles);
       a (W) block {16, tkw} words, b (X) block {px/4, tkw}, c (Y) block {16, px/4} fp32 = the
       accumulator, held over the whole K walk; K chunk = 2*tkw bf16, tkw = min(32, 4096/px).

@@ -49,11 +49,11 @@ OBJECTIVES = ("latency", None)
 #
 #   conv (+bias)                         -> conv_bn
 #   conv (+bias) + relu                  -> conv_bn_relu
-#   conv (+bias) + add + relu            -> conv_bn + residual_add_relu (ResNet tail)
+#   conv (+bias) + add + relu            -> conv_bn + residual_add_relu (residual block tail)
 #   conv (+bias) + add [+ add] (no relu) -> conv_bn with an fp32 epilogue:
-#       UNet timestep add (per channel), skip / shortcut / attention residual
+#       time-embedding add (per channel), skip / shortcut / attention residual
 #       (same shape as the output). The adds run on the fp32 accumulator BEFORE
-#       any bf16/int8 cast -- the rule of the board host path (unet_aie.py
+#       any bf16/int8 cast -- the rule of the board host path (the example
 #       uc_conv epilogue, cos 1.000000); casting first and adding after is a
 #       different number (see ``conv_epilogue_ref``).
 #
@@ -67,7 +67,7 @@ _QNN_TOKENS = ("fixed", "fixed_point_multiply", "requantize", "qnn", "clip", "cl
 _FOREIGN_TOKENS = ("multiply", "divide", "subtract", "sigmoid", "tanh", "exp", "erf",
                    "power", "sqrt", "rsqrt", "mean", "variance", "silu", "gelu",
                    "clip", "maximum", "minimum", "negative")
-#: Bound on fused epilogue adds (UNet has at most one join per conv).
+#: Bound on fused epilogue adds (the diffusion example has at most one join per conv).
 MAX_EPILOGUE_ADDS = 2
 
 
@@ -76,7 +76,7 @@ class ConvPattern:
     """How one fused conv layer maps onto aiegraph ops.
 
     ``aiegraph``: the dialect ops, in order. ``adds``: the epilogue joins, each
-    ``"channel"`` (per-output-channel, e.g. UNet temb), ``"tensor"`` (same shape
+    ``"channel"`` (per-output-channel, e.g. a time embedding), ``"tensor"`` (same shape
     as the output: skip / residual) or ``"join"`` (shape not given; resolved at
     run time by element count, as the board host path does). ``epilogue_fp32``:
     the bias and adds are applied to the fp32 accumulator before the output cast.
@@ -138,7 +138,7 @@ def match_conv(ops, add_shapes=None, out_shape=None) -> ConvPattern | None:
         joins = max(adds - 1, 0)
     bias = explicit_bias or adds > 0
     if qnn:
-        # ResNet-18 QNN: a ReLU cannot be told apart from int8 saturation, so a
+        # int8 QNN CNN: a ReLU cannot be told apart from int8 saturation, so a
         # single join is the block tail (unchanged from the 1c7316a mapping).
         if joins == 0:
             return ConvPattern(("conv_bn_relu" if relu else "conv_bn",), bias, relu, qnn=True)
@@ -162,7 +162,7 @@ def match_conv(ops, add_shapes=None, out_shape=None) -> ConvPattern | None:
         return None
     if joins > MAX_EPILOGUE_ADDS:
         return None
-    # No relu: the joins are fp32 epilogue adds of conv_bn (UNet temb / skip /
+    # No relu: the joins are fp32 epilogue adds of conv_bn (time embedding / skip /
     # attention residual) -- never a residual_add_relu (that would add a ReLU).
     return ConvPattern(("conv_bn",), bias, False, kinds)
 
@@ -173,7 +173,7 @@ def match_conv(ops, add_shapes=None, out_shape=None) -> ConvPattern | None:
 #
 # The two batched matmuls of an attention block have two ACTIVATION inputs (no
 # initializer weight), so ``match_conv`` / the linear rule never see them and they
-# stayed on the A78 (unet-m2-s6 postmortem root cause 1: attn=0). ``match_attention``
+# stayed on the A78 (m2-s6 postmortem root cause 1: attn=0). ``match_attention``
 # walks an ONNX graph and returns one ``AttnPattern`` per softmax whose input comes
 # from an activation x activation MatMul (through at most ``MAX_ATTN_SCALE_OPS``
 # element-wise scale / mask / cast ops) and whose output feeds the P.V MatMul.
@@ -187,7 +187,7 @@ MAX_ATTN_SCALE_OPS = 3
 class AttnPattern:
     """One attention core: ``qk`` = node name of bmm(Q, K^T), ``softmax``, ``pv`` = bmm(P, V);
     ``scale`` = the element-wise ops between ``qk`` and ``softmax`` (empty when the
-    1/sqrt(d) scale is folded into Q/K upstream, as in the bk-sdm-tiny export); ``group`` =
+    1/sqrt(d) scale is folded into Q/K upstream, as in the diffusion example export); ``group`` =
     index of the softmax in graph order."""
     qk: str
     softmax: str

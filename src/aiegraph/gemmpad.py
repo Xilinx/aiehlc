@@ -1,7 +1,7 @@
 """Zero-pad a GEMM so M/K/N are multiples of the AIE macro tile (64).
 
 GAP (2026-11-15, Steve): the K-accumulation plan (example/.../kplan.plan) only accepts
-M%64 == K%64 == N%64 == 0, so the im2col GEMMs of UNet conv_in (4096x36x320, K=36) and
+M%64 == K%64 == N%64 == 0, so the im2col GEMMs of e.g. a 4-channel input conv (4096x36x320, K=36) and
 conv_out (4096x2880x4, N=4) have no legal schedule.  Padding is exact:
   * extra K columns of A and K rows of B are zero -> they add 0 to every dot product;
   * extra M rows / N columns only produce output that unpad_output() drops.

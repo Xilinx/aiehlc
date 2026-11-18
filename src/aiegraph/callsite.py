@@ -15,7 +15,7 @@ weight) and return it as a :class:`~aiegraph.group.Group` of ONE call, with
              kernel's layout, read in place (no ``graph_bf16_expand`` at that call),
 ``g.info``   geometry (``cid`` = partition row, ``M``/``N``/``K``, stride, pad, shapes).
 
-Matching (the graph forms of what ``unet_aie.map_layers`` / ``map_linears`` did):
+Matching (the graph forms of what the old per-example ``map_layers`` / ``map_linears`` did):
 
 conv     ONNX ``Conv`` order == TVM ``conv2d`` call order; every pair must agree on the
          weight shape (``OIHW`` vs TVM ``OIHW{i}{o}``). Weight statistics are compared

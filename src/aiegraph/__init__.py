@@ -6,7 +6,7 @@
 
     import aiegraph as ag
 
-    model  = ag.load("resnet18")                       # zoo name, .onnx path or torch.nn.Module
+    model  = ag.load(ag.DEFAULT_MODEL)                 # zoo name, .onnx path or torch.nn.Module
     module = ag.convert(model, target="a78")           # int8, one C file per layer
     print(module.regions)                              # conv1, layer1.0.conv1, ..., fc
     module.register_kernel(name="conv2dstem", op="conv2d",
@@ -15,7 +15,7 @@
     print(module.check_offload(region="conv1", kernel="conv2dstem").summary())
     module.assign(region="conv1", backend="aie:conv2dstem")
     print(module.partition(fallback="cpu").report())
-    module.build(target="a78", output="resnet18_a78")  # main.elf
+    module.build(target="a78", output="model_a78")     # main.elf
     print(module.run(profile=True))                    # on palmyra; module.run(ag.VEK385, "host")
     print(module.profile(ag.ALL))                      # each layer's time on the board
     report = module.AI_perf_analysis("layer1")         # why it is slow (claude + skill kernelperfcheck)
@@ -25,7 +25,7 @@
     proto = module.offload_prototype("layer1")         # one layer: args, AIEK_SPEC, kernel backbone
     proto.write("my_kernels/")                         # <entry>.cc (kernel+host+entry) + <entry>_ref.c
 
-    module = ag.compile("resnet18", "aie", "layer1=src/aietensorop/conv2dstem/conv2dstem_uk.cc")
+    module = ag.compile(ag.DEFAULT_MODEL, "aie", "layer1=src/aietensorop/conv2dstem/conv2dstem_uk.cc")
 
 The layer-index API (``offload_check("layer1", k.cc)``, ``offload``) still works;
 there ``layer1`` is TVM kernel 1, not torchvision's ``layer1``.
@@ -49,7 +49,7 @@ from .embedded import EmbeddedModel, Layer, convert, current, embedded_convert
 from .embedded import open_workdir as open  # noqa: A001  (ag.open(workdir))
 from .errors import AiegraphError
 from .prototype import Prototypes, KernelFormat, OffloadPrototype
-from .model import ZOO, Model, download_model, from_onnx, from_torch, load
+from .model import DEFAULT_MODEL, ZOO, Model, download_model, from_onnx, from_torch, load
 from .region import Region, Regions
 from .report import (AIProtoResult, BuildReport, CheckReport, DetectReport, PartitionPlan,
                      KernelOptResult, PerfReport, ProfileReport, RegionCheck, RunReport)
@@ -59,7 +59,7 @@ __version__ = "0.1.0"
 #: ``emod.profile(ag.ALL)``: every call / layer.
 ALL = "all"
 
-__all__ = ["load", "from_onnx", "from_torch", "download_model", "ZOO", "Model",
+__all__ = ["load", "from_onnx", "from_torch", "download_model", "ZOO", "DEFAULT_MODEL", "Model",
            "convert", "embedded_convert", "EmbeddedModel", "Layer", "open", "current",
            "Region", "Regions", "KernelContract", "RegionCheck", "PartitionPlan",
            "offload_check", "offload", "offload_reset", "detect", "lint", "build", "run_local",
@@ -183,7 +183,7 @@ def guide() -> str:
     emod = embedded._CURRENT
     if emod is None:
         msg = ("step 1/4: get a model and convert it\n"
-               '  m = ag.load("resnet18")            # or ag.from_torch(net), ag.load("x.onnx")\n'
+               '  m = ag.load(ag.DEFAULT_MODEL)     # or ag.from_torch(net), ag.load("x.onnx")\n'
                '  emod = ag.embedded_convert(m, target="a78")\n'
                "  (environment problems? ag.doctor())")
     else:

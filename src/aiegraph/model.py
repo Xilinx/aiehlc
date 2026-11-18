@@ -22,18 +22,21 @@ import os
 import shutil
 import urllib.request
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 
 from .errors import AiegraphError
 
-__all__ = ["Model", "load", "from_onnx", "from_torch", "download_model", "ZOO"]
+__all__ = ["Model", "load", "from_onnx", "from_torch", "download_model", "ZOO", "DEFAULT_MODEL"]
 
-#: Model zoo: name -> (url, file name). ResNet-18 **v1** on purpose: BN folds
-#: into the preceding conv (see deploy_flow.prefold_onnx).
-ZOO = {
-    "resnet18": ("https://github.com/onnx/models/raw/main/validated/vision/"
-                 "classification/resnet/model/resnet18-v1-7.onnx", "resnet18-v1-7.onnx"),
-}
+#: Model zoo: name -> (url, file name), read from the data file ``zoo.json`` beside this
+#: module (see its ``_doc`` for why the default is a v1 export: BN folds into the conv).
+_ZOO_DATA = json.loads((Path(__file__).resolve().parent / "zoo.json").read_text())
+ZOO = {k: (v["url"], v["file"]) for k, v in _ZOO_DATA["models"].items()}
+#: Zoo name used when the caller names no model.
+DEFAULT_MODEL = _ZOO_DATA["default"]
+#: Stem of the default model's generated ``<stem>.c`` / ``<stem>_graph.json``.
+DEFAULT_MODULE_STEM = _ZOO_DATA["models"][DEFAULT_MODEL]["module"]
 
 INPUT_NAME = "data"
 INPUT_SHAPE = [1, 3, 224, 224]
@@ -99,7 +102,7 @@ def _normalize(path: Path, name: str, source: str) -> Model:
     inputs = [i for i in proto.graph.input if i.name not in inits]
     if not inputs:
         raise AiegraphError("load", f"{name} has no graph inputs")
-    # aiegraph-unet-multiinput: N inputs, any static shape. A dynamic leading
+    # aiegraph-multiinput: N inputs, any static shape. A dynamic leading
     # (batch) dim becomes 1; any other dynamic dim is refused by name, since the
     # flow compiles one static graph.
     input_shapes = {}
@@ -156,13 +159,13 @@ def _fetch(name: str) -> Path:
     return path
 
 
-def download_model(name: str = "resnet18") -> Model:
+def download_model(name: str = DEFAULT_MODEL) -> Model:
     """Fetch a zoo model (once) and load it: ``ag.load(name)`` for zoo names.
 
-    Returns a :class:`Model`, so ``m = ag.download_model("resnet18");
+    Returns a :class:`Model`, so ``m = ag.download_model(<zoo name>);
     m.convert("a78")`` works. A ``Model`` is path-like (``os.fspath(m)`` is the
     ONNX file), for callers that used the file path this returned before. Named
-    by the file stem (``resnet18-v1-7``), as ``ag.convert(<that path>)`` named
+    by the file stem (``<zoo file>`` without ``.onnx``), as ``ag.convert(<that path>)`` named
     it, so the default workdir ``worklocal/aiegraph/<name>`` stays the same.
     """
     path = _fetch(name)
@@ -201,10 +204,10 @@ def from_torch(module, example_inputs=None, name: str = None) -> Model:
     return _normalize(out, name, "torch->onnx")
 
 
-def load(model="resnet18", source: str = None, example_inputs=None, name: str = None) -> Model:
+def load(model=DEFAULT_MODEL, source: str = None, example_inputs=None, name: str = None) -> Model:
     """Anything model-like -> :class:`Model`.
 
-    ``"resnet18"`` (ONNX zoo) | ``"resnet18", source="torchvision"`` |
+    ``"<zoo name>"`` (``ag.ZOO``) | ``"<torchvision builder>", source="torchvision"`` |
     ``"path/to/model.onnx"`` | a ``torch.nn.Module`` | a :class:`Model`.
     """
     if isinstance(model, Model):

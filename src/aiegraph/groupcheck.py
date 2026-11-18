@@ -22,8 +22,8 @@ failing number -- there is no flag that turns a failed check into a pass.
 
 ``layer_checker()`` is the same check as ``flow.offload(checker=...)``'s gates 3-4 for a
 layer offload (every call of the layer = a one-call group): it replaces calibrate
-(bit-exact, adversarial inputs) and whole-network emulation, both of which the UNet
-cannot afford and the bf16 AIE numerics cannot meet bit for bit.
+(bit-exact, adversarial inputs) and whole-network emulation, both of which a large
+fp32 network cannot afford and the bf16 AIE numerics cannot meet bit for bit.
 """
 
 from __future__ import annotations
@@ -227,7 +227,7 @@ int main(int argc, char **argv) {
 
 
 class _Params:
-    """Graph constants straight from ``<stem>_params.bin`` (memory-mapped: the UNet's is 1.3 GB)."""
+    """Graph constants straight from ``<stem>_params.bin`` (memory-mapped: can be > 1 GB)."""
 
     def __init__(self, params_path: Path):
         import numpy as np
