@@ -2193,6 +2193,11 @@ public:
                                         pti.shape = {macroDimN, macroDimK};
                                     else // Gather/Scatter -> C
                                         pti.shape = {macroDimM, macroDimN};
+                                } else if (pti.policyResolved && pti.tdD1.base > 0 && pti.tdD2.base > 0 &&
+                                           pti.tdD3.base <= 0) {
+                                    // No GEMM M / N / K (a kernel-only reduction / eltwise whose space the kernel
+                                    // analysis wrote): the port's own 2-D extent, d1 x d2 fullsize.
+                                    pti.shape = {(int64_t)pti.tdD1.base, (int64_t)pti.tdD2.base};
                                 }
 
                                 // 3D conv OUTPUT shape: when the output port's GemmSpace
