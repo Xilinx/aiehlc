@@ -2,6 +2,8 @@
 
 本教程手把手带你把 **bk-sdm-tiny**（256×256 的 Stable Diffusion 小模型）的 UNet 部署到 VEK385 一代的板子（palmyra，A78 APU + AIE2PS）上：A78 跑 TVM 生成的 C 代码，conv、Linear、attention 跑在 AIE 上；然后让文本编码器和 VAE 在 host 上跑、UNet 的每一步都在板上跑，生成一张橘子图。
 
+整个流程只用 **aiegraph**，和 [ResNet18](resnet18.md)、[YOLOv26](yolov26.md) 两篇用的是同一套框架：用户这边只写一个 `build_unet.py`（下面第 5 节贴出了全文）和一份 offload 声明 `unet_offload.py`；所有 C 文本（AIE kernel、主机胶水、板上 main）都在 aiegraph 和 [`src/aiednn/`](../../src/aiednn/) 的模板里。
+
 所有命令都在 palmyra213（10.23.224.213）上实际跑通过，结果见文末的[实测结果](#实测结果)。
 
 ![板上生成的橘子](tiny-sdm-unet-orange.png)
@@ -11,17 +13,15 @@
 ## 0. 它是怎么工作的
 
 ```
-                    ┌────────────────────── build_unet.py（x86，一次，约 26 分钟）──────────────────────┐
- unet_sim.onnx ──► aiegraph.load ──► aiegraph.convert(target="a78") ──► TVM C：graph_driver.c（A78 上逐层调用）
-                                         │
-              partition_p4a.json ──► 156 层交给 AIE：48 conv + 72 Linear + 36 attention
-                                         │
-                  unet_aie.py / fa_attn.py：按层形状生成 aiehlc kernel（gemm_kacc_*、flash-attention）
-                                         + 主机函数 unet_aie_conv / linear / attn（打包 → kernel<<<mesh>>> → 散布）
-                                         │ 改写 graph_driver.c：这 156 个调用点改为调用主机函数
-                                         ▼
-                  aiegraph build ──► main.elf（650 MB：A78 代码 + AIE kernel + bf16 权重 + .aiehlc_io 输入段）
-                    └──────────────────────────────────────────────────────────────────────────────────────┘
+                 ┌──────────────────── build_unet.py（x86，一次，约 25 分钟）────────────────────┐
+ unet_sim.onnx ─► aiegraph.load ─► m.convert(target="a78") ─► TVM C：graph_driver.c（A78 上逐层调用）
+                                      │
+           partition_p4a.json ─► unet_offload.offload()：emod.match / offload_group / driver_template
+                                      │   156 层交给 AIE：48 conv + 72 Linear + 36 attention（flash-attention 组）
+                                      │   kernel / 主机胶水来自 src/aiednn/{gemm,conv2d,attention,...}
+                                      ▼
+               emod.build(target="a78", runtime_io=...) ─► main.elf（A78 代码 + AIE kernel + bf16 权重 + .aiehlc_io 输入段）
+                 └──────────────────────────────────────────────────────────────────────────────┘
 
  出图（run_orange.sh）：
    prompt ─► CLIP 文本编码器（host）─► 25 步 × 2（CFG）= 50 次 UNet 调用 ─► VAE 解码（host）─► PNG
@@ -33,25 +33,26 @@
 
 几个关键点：
 
-- **A78 上跑的是整网的 C 代码。** `aiegraph.convert` 用 TVM 把 ONNX 编成 C，`arm_build.py` 把它摊平成一个 `graph_driver.c`，按顺序逐层调用。板上的 A78 是 bare-metal，不需要 Linux 和 python。
-- **AIE kernel 用 aiehlc 的编程模型写。** 每个 kernel 是一个 `__global__` 函数，用 `aie::program_id()`、`aie::load_buffer()`、`aie::store_buffer()` 描述每个 core 取哪块数据、写哪块；DMA、路由、锁都由 aiehlc 推导。主机端用 `device.partition(...)` 划出 4×4 共 16 个 core，再 `kernel<<<mesh>>>(...)` 启动。
-- **一层一次启动。** conv 先在 A78 上做 im2col 变成矩阵乘，再交给 `gemm_kacc`：K 方向在 core 内累加，整层只启动一次。attention 的 QKᵀ、softmax、×V 融合成一个 flash-attention kernel。
-- **运行时输入。** 输入放在 ELF 里一个专门的 `.aiehlc_io` 段，换输入不用重新构建，只要改这个段。
-- **启动加速。** 已开：warm launch（kernel 只加载一次）、control packet AOT 的 5 个 pragma，以及 KCO（`#pragma KERNELCONFIGOFFLOAD`，core 自己配 DMA）。
+- **A78 上跑的是整网的 C 代码。** `m.convert` 用 TVM 把 ONNX 编成 C，再摊平成一个 `graph_driver.c`，按顺序逐层调用。板上的 A78 是 bare-metal，不需要 Linux 和 python。
+- **offload 只用 aiegraph 的接口声明。** `emod.match(...)` 把 partition 的每一行对应到 TVM 的调用点，`emod.offload_group(...)` 声明"这组调用交给 AIE、步骤是什么"，aiegraph 在 graph.json 上做放置、删除和提前写检查，再自己改写驱动。用户代码里没有正则，也不改 `graph_driver.c`。
+- **一层一次启动。** conv 先在 A78 上做 im2col 变成矩阵乘，再交给 `gemm_kacc`（[`src/aiednn/gemm/gemm_kacc_kernel.cc`](../../src/aiednn/gemm/gemm_kacc_kernel.cc)）：K 方向在 core 内累加，整层只启动一次。attention 的 QKᵀ、softmax、×V 融合成一个 flash-attention kernel（[`src/aiednn/attention/fa_kernel.cc`](../../src/aiednn/attention/fa_kernel.cc)）。
+- **布局保持（keep-layout）。** partition 里标了 `keep_layout` 的层，AIE 输出直接写成下一层要的布局；中间的纯排列 Transpose/Reshape 由 aiegraph 判定后只当"标签"，不在 A78 上搬数据（`aiegraph.partition.plan_keep_layout`，原来的 `keep_layout_codegen.py` 已删除）。
+- **运行时输入。** 输入放在 ELF 里一个专门的 `.aiehlc_io` 段（`emod.build(runtime_io=...)`），换输入不用重新构建，只要改这个段。
+- **启动加速。** warm launch（kernel 只加载一次）、control packet AOT 的 pragma（[`src/aiednn/gemm/ctrlpkt_aot_pragmas.h`](../../src/aiednn/gemm/ctrlpkt_aot_pragmas.h)），以及 KCO（[`src/aiednn/gemm/ctrlpkt_kco_pragma.h`](../../src/aiednn/gemm/ctrlpkt_kco_pragma.h)，core 自己配 DMA）。
 
 ---
 
 ## 1. 准备
 
 **硬件**
-- 一块装好"边收边放" netboot supervisor 的 palmyra 板，例如 palmyra213（10.23.224.213）。整网 ELF 有 650 MB，旧 supervisor 的 94 MiB staging 放不下。
+- 一块装好"边收边放" netboot supervisor 的 palmyra 板，例如 palmyra213（10.23.224.213）。整网 ELF 约 1 GB，旧 supervisor 的 94 MiB staging 放不下。
 - 这台机器能通过 `script/test/apppaltest.py --netload` 访问到这块板。
 
 **软件**
 
 | 需要什么 | 本教程用的路径 | 说明 |
 |---|---|---|
-| aiehlc 源码，`unet_tutorial` 分支 | `aiehlchj` 仓库 | 本教程的所有代码都在这个分支上 |
+| aiehlc 源码，`unet_m4` 分支 | `aiehlchj` 仓库 | 本教程的所有代码都在这个分支上 |
 | LLVM/MLIR 构建 | `/scratch/staff/huaj/llvm-project/build` | 编 aiehlc 用 |
 | Vitis 2026.x 和 aarch64 bare-metal 工具链 | 由 `script/setup.sh` 找到 | 和平常用 aiehlc 一样 |
 | Python 环境（numpy、onnx、onnxruntime、Pillow，以及 aiegraph 的依赖） | `/scratch/staff/huaj/aiehlc/.venv/bin/python3` | 构建和出图都用它 |
@@ -59,7 +60,7 @@
 | bk-sdm-tiny 的模型库 | `/scratch/staff/huaj/aiehlc/model_zoo/bk-sdm-tiny/`（文本编码器、UNet、VAE、tokenizer） | 出图用 |
 | `aie_imagegen`（含 `palmyra_stage_runner`） | `/scratch/staff/huaj/aiehlc/aiehlc-sdxl-wt/palmyra-runner/script` | aiehlc-sdxl 仓库，`jane/palmyra-stage-runner` 分支，至少要 7245e1f（含读回修复） |
 
-下面用两个变量：
+下面用这几个变量：
 
 ```bash
 export AIEHLC=/scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj   # 仓库根目录
@@ -72,12 +73,12 @@ mkdir -p $WORK
 
 ## 2. 取代码
 
-用 worktree 检出 `unet_tutorial` 分支：
+用 worktree 检出 `unet_m4` 分支：
 
 ```bash
 cd $AIEHLC
-git worktree add .worktrees/unet_tutorial unet_tutorial
-export T=$AIEHLC/.worktrees/unet_tutorial
+git worktree add .worktrees/unet_m4 unet_m4
+export T=$AIEHLC/.worktrees/unet_m4
 ```
 
 worktree 里没有 BSP 的 workspace 和私有的 alib，要从一个已经装好的树链接过来（完整克隆的仓库跳过这一步）：
@@ -87,18 +88,29 @@ bash $T/script/worktree.sh link-deps $T --from $AIEHLC/.worktrees/unet_m2_int6 -
 ls -d $T/thirdparty/arch/*/workspace      # 应该能看到 workspace
 ```
 
-本教程要用到的文件都在 `$T/example/aiegraph/unet_bk_sdm_tiny/` 下：
+本教程用到的文件：
 
 | 文件 | 作用 |
 |---|---|
-| `build_unet.py` | 构建入口：ONNX → aiegraph → TVM C + AIE kernel → `main.elf` |
-| `unet_aie.py` | 生成 `gemm_kacc_{ch}x{k}x{px}` kernel 和主机函数，改写 `graph_driver.c` |
-| `fa_attn.py` | 生成 flash-attention kernel |
-| （aiegraph `keep_layout_codegen`） | 层与层之间保持布局，去掉 A78 上的 layout 转换（`emod.keep_layout()`） |
-| `partition_p4a.json` | 哪些层上 AIE |
-| `a78_layer_cflags.txt` | A78 上 TVM C 代码的编译选项（NEON） |
-| `export_real_io.py` | 导出一份真实的 UNet 输入和 x86 参考输出 |
-| `run_orange.sh` | 出图：host 跑文本编码器和 VAE，板上跑 UNet |
+| [`build_unet.py`](../../example/aiegraph/unet_bk_sdm_tiny/build_unet.py) | 构建入口（全文见第 5 节）：声明输入、选项，调用 aiegraph |
+| [`unet_offload.py`](../../example/aiegraph/unet_bk_sdm_tiny/unet_offload.py) | UNet 的 offload 声明：conv / linear / attention 组、keep-layout 计划；不含 C 文本 |
+| [`kacc_gemm.py`](../../example/aiegraph/unet_bk_sdm_tiny/kacc_gemm.py)、[`fa_attn.py`](../../example/aiegraph/unet_bk_sdm_tiny/fa_attn.py)、[`unet_aie.py`](../../example/aiegraph/unet_bk_sdm_tiny/unet_aie.py) | 按层形状实例化 `src/aiednn` 里的 gemm_kacc / flash-attention 模板 |
+| [`partition_p4a.json`](../../example/aiegraph/unet_bk_sdm_tiny/partition_p4a.json) | 哪些层上 AIE |
+| [`a78_layer_cflags.txt`](../../example/aiegraph/unet_bk_sdm_tiny/a78_layer_cflags.txt) | A78 上 TVM C 代码的编译选项（NEON） |
+| [`export_real_io.py`](../../example/aiegraph/unet_bk_sdm_tiny/export_real_io.py) | 导出一份真实的 UNet 输入和 x86 参考输出 |
+| [`run_orange.sh`](../../example/aiegraph/unet_bk_sdm_tiny/run_orange.sh) | 出图：host 跑文本编码器和 VAE，板上跑 UNet |
+
+用到的模板（都在 [`src/aiednn/`](../../src/aiednn/) 下，按类别放）：
+
+| 类别 | 模板 | 用在哪 |
+|---|---|---|
+| gemm | [`gemm_kacc_kernel.cc`](../../src/aiednn/gemm/gemm_kacc_kernel.cc)、[`kacc_linear_host.cc`](../../src/aiednn/gemm/kacc_linear_host.cc)、[`kacc_unit_head.cc`](../../src/aiednn/gemm/kacc_unit_head.cc) | conv 和 Linear 的 AIE kernel 与主机端 |
+| conv2d | [`kacc_conv_host.cc`](../../src/aiednn/conv2d/kacc_conv_host.cc)、[`kacc_conv_host_head.cc`](../../src/aiednn/conv2d/kacc_conv_host_head.cc) | conv 的 im2col / 散布 |
+| attention | [`fa_kernel.cc`](../../src/aiednn/attention/fa_kernel.cc)、[`fa_host.cc`](../../src/aiednn/attention/fa_host.cc)、[`kacc_bmm_host.cc`](../../src/aiednn/attention/kacc_bmm_host.cc) | flash-attention |
+| norm | [`fa_online_softmax.cc`](../../src/aiednn/norm/fa_online_softmax.cc) | FA 里的 online softmax |
+| elementwise | [`silu_scale_x.cc`](../../src/aiednn/elementwise/silu_scale_x.cc)、[`silu_scale_dense.cc`](../../src/aiednn/elementwise/silu_scale_dense.cc) | A78 上的融合 SiLU 片段 |
+
+aiegraph 本身的用法见 [aiegraph 教程](../../doc/tutorial_aiegraph.md)。
 
 ---
 
@@ -112,9 +124,7 @@ cmake --build $T/build --target aiehlc -j 32          # 约 1 分钟
 ls -la $T/build/aiehlc
 ```
 
-一定要用这个分支自己编出来的 aiehlc。它包含两个 KCO 的修复，用别的 aiehlc 打开 KCO 会链接失败或在板上卡死：
-- `kernel_tm.h` 的链接修复（d5ee489）；
-- 多 kernel 程序里 KCO 配置计划没有按 kernel 重置的修复（6776083）。
+一定要用这个分支自己编出来的 aiehlc（它含 KCO 的两个修复：`kernel_tm.h` 链接修复 d5ee489、多 kernel 程序 KCO 配置计划按 kernel 重置 6776083）。用别的 aiehlc 打开 KCO 会链接失败或在板上卡死。
 
 ---
 
@@ -139,6 +149,169 @@ REAL_IO OK parts=25 data=p00/step0/cond batch_idx=1 t=999 sample_crc32=150c323f 
 
 ## 5. 构建 UNet 的 ELF
 
+### 5.1 用户侧的全部源码：build_unet.py
+
+这就是 `example/aiegraph/unet_bk_sdm_tiny/build_unet.py` 的全文。它只声明模型的三个输入、offload 组（交给 `unet_offload.py`）和选项；board main、输入头文件、PROF/FA 驱动胶水由 `aiegraph.boardmain` 生成，`.aiehlc_io` 段由 `emod.build(runtime_io=...)` 生成。
+
+```python
+#!/usr/bin/env python3
+"""bk-sdm-tiny UNet (unet_sim.onnx, 3 inputs) -> aiegraph -> A78 main.elf, conv / linear / attention on the AIE.
+
+  $PY build_unet.py --onnx unet_sim.onnx --real-io <real_io> --wdtype bf16 --partition partition_p4a.json \
+      --aie conv,linear,attn --attn-fa --keep-layout --kincore --launch-opt warm --ctrlpkt aot-kco \
+      --arm-layer-cflags-file a78_layer_cflags.txt --runtime-io --dump-out --out <dir>
+
+This file only declares: the model's inputs, the offload groups (unet_offload.py) and the options.
+aiegraph generates the board main.c, the inputs header, the PROF / FA driver glue (aiegraph.boardmain)
+and the .aiehlc_io runtime-input section (emod.build(runtime_io=...)). The ONNX timestep input is int64;
+it is rewritten to int32 + Cast so the board receives exactly the 4 bytes of real_io/timestep_i32.bin.
+"""
+import argparse
+import os
+import shutil
+import sys
+from pathlib import Path
+
+import numpy as np
+
+HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(HERE.parents[2] / "src"), str(HERE)]   # this checkout's aiegraph (gate: plain $PY)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--onnx", required=True, type=Path)
+    ap.add_argument("--real-io", required=True, type=Path, help="sample.bin timestep_i32.bin ehs.bin p1_ref.h")
+    ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--aie", choices=("none", "conv", "conv,linear", "conv,linear,attn"), default="none",
+                    help="partition layer classes put on the AIE (linear / attn need --kincore)")
+    ap.add_argument("--attn-fa", action="store_true", help="each attention group = one flash-attention group")
+    ap.add_argument("--keep-layout", action="store_true", help="aiegraph layout folds (needs --attn-fa)")
+    ap.add_argument("--wdtype", choices=("fp32", "bf16"), default="fp32", help="weights.bin dtype")
+    ap.add_argument("--partition", type=Path, default=None, help="partition.json (layers on the AIE)")
+    ap.add_argument("--launch-opt", choices=("cold", "warm"), default="cold", help="warm: kernel loaded once")
+    ap.add_argument("--ctrlpkt", choices=("off", "aot", "aot-kco"), default="off", help="control-packet plan")
+    ap.add_argument("--ktimer", action="store_true", help="AIE core timer tail per launch (64x64 path only)")
+    ap.add_argument("--kincore", action="store_true", help="one launch per layer, K in the core (gemm_kacc)")
+    ap.add_argument("--kincore-layers", default="all", help="--kincore probe subset: partition conv indices")
+    ap.add_argument("--arm-layer-cflags-file", type=Path, default=None, help="extra CFLAGS of the TVM layer objects")
+    ap.add_argument("--runtime-io", action="store_true", help="inputs in the .aiehlc_io ELF section")
+    ap.add_argument("--dump-out", action="store_true", help="--runtime-io: dump the output (AIO_*) on the board")
+    ap.add_argument("--verbose", action="store_true")
+    a = ap.parse_args(argv)
+    log = lambda msg: print(f"[build_unet] {msg}", flush=True)
+    if a.ctrlpkt == "aot-kco":  # before unet_aie is imported: it reads UNET_CTRLPKT_KCO at import time
+        os.environ["UNET_CTRLPKT_KCO"], a.ctrlpkt = "1", "aot"
+    elif "unet_aie" not in sys.modules:
+        os.environ.pop("UNET_CTRLPKT_KCO", None)
+    import aiegraph as ag
+    from aiegraph import boardmain as bm
+    errs = [m for bad, m in (
+        (a.aie != "none" and (a.partition is None or a.wdtype != "bf16"), "--aie needs --partition and --wdtype bf16"),
+        (a.keep_layout and not a.attn_fa, "--keep-layout needs --attn-fa"),
+        (a.dump_out and not a.runtime_io, "--dump-out needs --runtime-io"),
+        (a.kincore_layers != "all" and not a.kincore, "--kincore-layers needs --kincore"),
+        (a.kincore and (a.aie == "none" or a.ktimer), "--kincore needs --aie conv and no --ktimer"),
+        (a.ctrlpkt == "aot" and a.aie == "none", "--ctrlpkt aot needs --aie conv"),
+        (a.launch_opt == "warm" and a.aie == "none", "--launch-opt warm needs --aie conv")) if bad]
+    try:
+        layer_cflags = bm.read_cflags_file(a.arm_layer_cflags_file) if a.arm_layer_cflags_file else ""
+    except ValueError as e:
+        errs.append(f"--arm-layer-cflags-file {e}")
+    if errs:
+        log("; ".join(errs))
+        return 2
+    if layer_cflags:
+        log(f"arm_layer_cflags ({a.arm_layer_cflags_file}): {layer_cflags}")
+    if a.aie != "none":
+        bm.profiling_env()
+        opts = bm.launch_env(a.launch_opt)
+        log(f"launch_opt={a.launch_opt} ({opts}) defs={os.environ['EXTRA_DEFS']} "
+            f"aiehlc.sh={os.environ.get('AIEHLC_SH_ARGS', '')}")
+    out, real_io = a.out.resolve(), a.real_io.resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    root = Path(ag.__file__).resolve().parents[2]
+    os.environ.setdefault("AIEHLC_ROOT", str(root))
+    os.environ["AIEGRAPH_PARAMS_INPLACE"] = "1"         # 1.29 GB weights read in place from the linked blob
+    os.environ["AIEGRAPH_WDTYPE"] = a.wdtype
+    os.environ.setdefault("HOSTCOMPILE_HOST_OPT", "-O2")  # aiek host.cc (im2col / scatter glue inside graph_run)
+    log(f"aiegraph from {ag.__file__} (repo {root}); HOSTCOMPILE_HOST_OPT={os.environ['HOSTCOMPILE_HOST_OPT']}")
+
+    # the model's inputs, in graph order: (graph name, C name, real_io file)
+    ins = [("sample", "sample", "sample.bin", "<f4"), ("timestep", "timestep", "timestep_i32.bin", "<i4"),
+           ("encoder_hidden_states", "ehs", "ehs.bin", "<f4")]
+    arrs = [(g, c, np.fromfile(real_io / f, dtype=dt)) for g, c, f, dt in ins]
+    assert [x.size for _, _, x in arrs] == [4 * 32 * 32, 1, 77 * 768], [x.size for _, _, x in arrs]
+    hdr = out / "unet_inputs.h"
+    crc = bm.inputs_header(hdr, "unet", arrs, dict(AIE_MODE=a.aie, WDTYPE=a.wdtype), origin=real_io)
+    want = (real_io / "unet_in.crc32").read_text().strip()
+    if crc != want:
+        log(f"inputs crc32 {crc} != {real_io / 'unet_in.crc32'} {want}")
+        return 1
+    log(f"inputs: {', '.join(f'{g} {x.size} {x.dtype}' for g, _, x in arrs)}; crc32={crc} == unet_in.crc32")
+
+    onnx_i32 = bm.input_int32(a.onnx.resolve(), out / "unet_sim_t32.onnx", "timestep", log=log)
+    m = ag.load(str(onnx_i32))
+    log(f"loaded {m.name}: inputs {m.input_shapes} -> {m.output_shape}, {sum(m.ops.values())} nodes")
+    shutil.rmtree(out / "ag_work", ignore_errors=True)   # a fresh conversion every build
+    emod = m.convert(target="a78", quantize="fp32", image=str(real_io / "sample.bin"),
+                     workdir=out / "ag_work", verbose=a.verbose)
+    log(f"converted -> {emod.workdir}")
+    bm.cross_toolchain(root, log=log)
+    n_patched = None
+    if a.aie != "none":
+        import unet_offload
+        defs, n_patched = unet_offload.offload(a, emod, out)
+        bm.append_defines(hdr, "unet", defs)
+    main_c = bm.main_c("unet", [Path(f).stem for _, _, f, _ in ins], aie=a.aie != "none", ktimer=a.ktimer,
+                       runtime_io=a.runtime_io, note=(1, "timestep"))
+    rio = [(Path(f).stem, real_io / f) for _, _, f, _ in ins] if a.runtime_io else None
+    rep = emod.build(target="a78", verbose=a.verbose, main_c=main_c,
+                     extra_sources=[bm.cmp_source(), real_io / "p1_ref.h", hdr],
+                     extra_cflags=f"{bm.CMP_CFLAGS} {bm.HEAP_LDFLAG}", layer_cflags=layer_cflags,
+                     runtime_io=rio, dump_out=a.dump_out, launch=a.launch_opt)
+    if not rep.ok:
+        log(f"build FAILED: {rep.reason}")
+        return 1
+    for ln in rep.io_info.splitlines():
+        log(ln)
+    if n_patched is not None:
+        unet_offload.check_driver((Path(rep.elf).parent / "graph_driver.c").read_text(), n_patched)
+    elf, wb = out / "main.elf", Path(rep.elf).parent / "weights.bin"
+    shutil.copy2(rep.elf, elf)
+    if wb.is_file():   # the blob netload streams to the board, beside the ELF
+        shutil.copy2(wb, out / "weights.bin")
+    log(f"built {rep.elf} -> {elf} ({elf.stat().st_size:,} B; weights.bin "
+        f"{wb.stat().st_size if wb.is_file() else -1:,} B)")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        rc = main()
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else (print(e.code, flush=True) or 1)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        rc = 1
+    print(f"GATE_RC={rc}", flush=True)
+    sys.exit(rc)
+```
+
+它对 aiegraph 只做这几件事：
+
+| 步骤 | aiegraph 调用 | 作用 |
+|---|---|---|
+| 载入、转换 | `ag.load(...)`、`m.convert(target="a78", ...)` | ONNX → TVM C（每层一个函数）+ graph.json |
+| 输入 | `bm.inputs_header(...)`、`bm.input_int32(...)` | 输入头文件 + crc；ONNX 的 int64 timestep 改成 int32 + Cast |
+| 匹配、声明组 | `unet_offload.offload(a, emod, out)` 内：`emod.match("conv"/"linear", partition=...)`、`emod.offload_group(g, kcc, steps=[ag.step(...)])` | conv / linear 一调用一组；flash-attention 是多调用组（pack Q/K/V + run O，softmax 等调用由 aiegraph 删除） |
+| 权重 | `weights=g.w.as_bf16(layout=...)` | weights.bin 里直接是 kernel 要的 bf16 布局，原地读 |
+| 驱动模板 | `emod.driver_template(**bm.driver_glue(...))` | FA 声明、PROF 计时宏；aiegraph 放在固定锚点上（锚点唯一，重复应用报错） |
+| 校验、构建 | `emod.offload(..., check="group")`、`emod.build(target="a78", main_c=bm.main_c(...), runtime_io=...)` | 组级 x86 校验（TVM C 链 vs 步骤，cos≥0.999）；一个库、一个 `routing()` |
+
+### 5.2 运行
+
 ```bash
 cd $T/example/aiegraph/unet_bk_sdm_tiny
 env -u AIEHLC_ROOT AIEHLC_BIN=$T/build/aiehlc $PY build_unet.py \
@@ -160,44 +333,30 @@ env -u AIEHLC_ROOT AIEHLC_BIN=$T/build/aiehlc $PY build_unet.py \
 | `--wdtype bf16` | 权重存成 bf16（0.65 GB）；AIE 上 bf16 乘法、fp32 累加 |
 | `--partition partition_p4a.json` | 哪些层上 AIE |
 | `--aie conv,linear,attn` | conv、Linear、attention 这三类上 AIE |
-| `--attn-fa` | attention 的 QKᵀ、softmax、×V 融合成一个 flash-attention kernel |
-| `--keep-layout` | AIE 的输出直接写成下一层要的布局，去掉 A78 上 56 个 layout 转换 |
-| `--kincore` | 一层一次启动，K 方向在 core 内累加（不加这个开关，就会退回到每个 64³ 小块启动一次） |
+| `--attn-fa` | attention 的 QKᵀ、softmax、×V 融合成一个 flash-attention 组 |
+| `--keep-layout` | AIE 的输出直接写成下一层要的布局，去掉 A78 上的 layout 转换 |
+| `--kincore` | 一层一次启动，K 方向在 core 内累加 |
 | `--launch-opt warm` | kernel 只加载一次，之后反复启动 |
-| `--ctrlpkt aot-kco` | control packet AOT 的 5 个 pragma，再加上 KCO |
+| `--ctrlpkt aot-kco` | control packet AOT 的 pragma，再加上 KCO |
 | `--arm-layer-cflags-file` | A78 上 TVM C 代码的 NEON 编译选项 |
 | `--runtime-io --dump-out` | 输入放进 `.aiehlc_io` 段，输出转储到控制台，出图时要用 |
 
-`partition_p4a.json` 就在这个目录里（随代码提交），build.sh / 冒烟 / 橘子用的都是它。
-
-### 5.1 build_unet.py 里只有"声明组 + 生成模板"
-
-所有 offload 都由 aiegraph 完成，`build_unet.py` 不再改写任何 C 代码（没有 `patch_driver`，也不替换
-`generate_driver`，`emod.offload` 不用 `force=True`）。它对 aiegraph 只做这几件事：
-
-| 步骤 | aiegraph 调用 | 作用 |
-|---|---|---|
-| 匹配 | `emod.match("conv"/"linear", partition=...)`、attention 匹配器 | 把 partition 的每一行对应到 TVM 调用，得到组（输入、输出、权重） |
-| 声明组 | `emod.offload_group(g, kcc, steps=[ag.step(...)])` | conv / linear 是一调用一组；flash-attention 是多调用组（pack Q/K/V + run O，softmax 等调用由 aiegraph 删除）。放置、删除、提前写的检查都在 graph.json 上做，结果记在 `layers/partition.json` |
-| 权重 | `weights=g.w.as_bf16(layout=...)` | 权重在 weights.bin 里直接是 kernel 要的 bf16 布局，原地读 |
-| 驱动模板 | `emod.driver_template(**unet_aie.driver_template(att))` | FA kernel 的声明、PROF 计时宏、`graph_bf16_expand` 计时；aiegraph 把它们放在固定锚点上（锚点必须唯一，重复应用报错） |
-| keep-layout | `emod.keep_layout(plan)` | AIE 输出直接写成下一层的布局 |
-| 校验 + 构建 | `emod.offload(..., check="group")`、`emod.build(target="a78")` | 组级 x86 校验（TVM C 链 vs 步骤，cos≥0.999），一个库、一个 `routing()` |
-
-约 26 分钟。日志里应该能看到：
+约 25 分钟（实测 1645 s）。日志里应该能看到：
 
 ```
-[build_unet] KINCORE layers=156 launches_planned=258 kernel=bf16_gemm_kacc; shapes=38
+[build_unet] loaded unet_sim_t32: inputs {'sample': [1, 4, 32, 32], 'timestep': [1], 'encoder_hidden_states': [1, 77, 768]} -> [1, 4, 32, 32], 828 nodes
+[build_unet] KINCORE layers=156 launches_planned=258 kernel=bf16_gemm_kacc; shapes=38 (old 64x64x64 launches 216200)
 [build_unet] ctrlpkt=aot pragmas=6
 [build_unet] graph_driver.c: 156 partition call sites -> unet_aie_conv (48) + unet_aie_linear (72) + unet_aie_attn (36) (aiegraph group steps + driver template)
-[build_unet] AIO section ... bytes=253248 n_in=3 crc32=a5b911e2 dump_out=1
-[build_unet] built .../main.elf -> $WORK/build/main.elf (657,579,872 B; weights.bin 646,757,376 B)
+[build_unet] AIO section off=0x403b7100 addr=0x403a7100 bytes=253248 n_in=3 crc32=a5b911e2 dump_out=1
+[build_unet] built .../main.elf -> $WORK/build/main.elf (1,080,180,080 B; weights.bin 646,757,376 B)
 GATE_RC=0
 ```
 
 想看生成出来的东西：
-- 改写后的图驱动：`$WORK/build/ag_work/arm_build/graph_driver.c`（找 `unet_aie_conv(`）；
-- 所有 AIE kernel 和主机函数：`$WORK/build/aiek_src/aiek_unetconv.cc`。
+- aiegraph 改写后的图驱动：`$WORK/build/ag_work/arm_build/graph_driver.c`（找 `unet_aie_conv(`）；
+- 每层的放置结果：`$WORK/build/ag_work/layers/partition.json`；
+- 所有 AIE kernel 和主机函数：`$WORK/build/aiek_src/`。
 
 ---
 
@@ -209,27 +368,23 @@ GATE_RC=0
 cd $T
 $PY script/test/apppaltest.py -board palmyra -host 10.23.224.213 -y --netload \
     --netload-wait 1800 --netload-reply-timeout 600 --netload-max-run-ms 300000 \
-    $WORK/build/main.elf 2>&1 | tee $WORK/smoke.log | \
+    $WORK/build/main.elf 2>&1 | tee $WORK/smoke.log | grep -v DEBUG | \
     grep -E "^Host: |\[netboot\] run|in_crc32_board|^unet: graph_run|^LAUNCH warm|^CMP unet"
 ```
 
-应该看到（约 35 秒）：
+应该看到（2026-11-18 unet_m4 实测）：
 
 ```
-[devlock] acquired 10.23.224.213 (...)
-Host: huaj@10.23.224.213
-[netboot] run 711: placed 655298632 bytes, ... stream=1 elf_size=657579872
-INPUT unet sample+timestep_i32+ehs in_crc32_board=a5b911e2 expect=a5b911e2 MATCH (timestep=999) runtime_io=1
-unet: graph_run 1295.470 ms, output elems=4096 (ref 4096)
-LAUNCH warm ms_per_launch=2.937 launches=258 aie_wall_ms=757.633 ... ctrlpkt=aot aot_fallbacks=0
+unet: graph_run 1295.310 ms, output elems=4096 (ref 4096)
+LAUNCH warm ms_per_launch=2.945 launches=258 aie_wall_ms=759.738 ... ctrlpkt=aot aot_fallbacks=0
 CMP unet board=palmyra213 data=p00/step0/cond in_crc32=a5b911e2 cos=1.000000 maxabs=0.00324592 dtype=bf16 aie_launches=258 coreen_calls=258 run_rc=0 aie_flop_frac=1.000 PASS
 ```
 
 怎么看这几行：
-- `in_crc32_board=… MATCH`：板子读到的输入就是你给的那份；
-- `aie_launches=258 coreen_calls=258`：AIE 真的被启动了 258 次，没有悄悄退回到 A78 上算；
+- `in_crc32=a5b911e2`：板子读到的输入就是你给的那份；
+- `aie_launches=258 coreen_calls=258`、`aot_fallbacks=0`：AIE 真的被启动了 258 次，没有悄悄退回到 A78 上算；
 - `cos=1.000000 … PASS`：和 x86 上 onnxruntime 的结果一致；
-- `graph_run 1295.470 ms`：一次 UNet 调用的时间。
+- `graph_run 1295.310 ms`：一次 UNet 调用的时间（其中 AIE 760 ms）。
 
 **注意：** `apppaltest.py` 就算板上打印了 FAIL 也会返回 0，所以一定要看 `CMP … PASS` 这一行，不要只看返回码。
 
@@ -243,34 +398,20 @@ cd $T/example/aiegraph/unet_bk_sdm_tiny
 ```
 
 `run_orange.sh` 做了三件事：
-1. 在 `$WORK/img/zoo/bk-sdm-tiny/` 建一个私有模型库，链接到 bk-sdm-tiny 的 ONNX 文件，再写一个 `aie/aie_manifest.json`，把 UNet 这一步交给板上的 runner。runner 的命令行大致是：
-
-   ```
-   python -m aie_imagegen.palmyra_stage_runner {in} {out} \
-       --elf $WORK/build/main.elf --elfio $T/src/tool/elfio/aiehlc_elfio.py --launcher $T \
-       --host 10.23.224.213 --calls-dir ... --steps-log ... \
-       --map timestep=timestep_i32:int32 --map encoder_hidden_states=ehs --out-shape 1,4,32,32 \
-       --ref-onnx .../bk-sdm-tiny/unet.onnx
-   ```
-
-   两个 `--map` 把 `aie_imagegen` 给出的输入名（`timestep` 是 int64、`encoder_hidden_states`）对应到 ELF 里的输入槽（`timestep_i32`、`ehs`）。
-2. 运行 `aie_imagegen --backend aie`：文本编码器和 VAE 在 host 上；每次 UNet 调用，runner 把这次的输入写进 ELF 的副本，netload 到板上跑，再读回结果。没有 host 回退：任何一次板上调用失败，这张图就失败。
-3. 汇总：每次调用写一行 `STEP …` 到 `$WORK/img/steps_s2.log`，里面有板上读到的输入 crc、`graph_run_ms`，以及和 onnxruntime 比的 cos。
+1. 在 `$WORK/img/zoo/bk-sdm-tiny/` 建一个私有模型库，再写一个 `aie/aie_manifest.json`，把 UNet 这一步交给板上的 runner（`aie_imagegen.palmyra_stage_runner`，用 `src/tool/elfio/aiehlc_elfio.py` 改 `.aiehlc_io` 段；`--map timestep=timestep_i32:int32 --map encoder_hidden_states=ehs` 把输入名对应到 ELF 的输入槽）。
+2. 运行 `aie_imagegen --backend aie`：文本编码器和 VAE 在 host 上；每次 UNet 调用都 netload 到板上跑，再读回结果。没有 host 回退：任何一次板上调用失败，这张图就失败。
+3. 汇总：每次调用写一行 `STEP …` 到 `$WORK/img/steps_s2.log`（板上读到的输入 crc、`graph_run_ms`、和 onnxruntime 比的 cos）。
 
 参数：提示词 "a photo of an orange, citrus fruit, high quality"，负提示词 "blurry, deformed, low quality"，256×256，guidance 7.5。可以用环境变量 `PROMPT`、`NEG`、`GUIDANCE`、`BOARD` 改。
 
-**和 host 版本对比（可选）。** 先在 host 上用同样的参数生成一张参考图：
+**和 host 版本对比（可选）。** 先在 host 上用同样的参数生成一张参考图，再让 `run_orange.sh` 顺便算 PSNR 和 cos：
 
 ```bash
 cd $WORK && PYTHONPATH=/scratch/staff/huaj/aiehlc/aiehlc-sdxl-wt/palmyra-runner/script $PY -m aie_imagegen \
     -p "a photo of an orange, citrus fruit, high quality" --negative-prompt "blurry, deformed, low quality" \
     -o $WORK/host_seed2.png --backend host --zoo /scratch/staff/huaj/aiehlc/model_zoo \
     --model bk-sdm-tiny --size 256 --steps 25 --seed 2 --guidance 7.5 --decoder vae
-```
-
-再让 `run_orange.sh` 顺便算 PSNR 和 cos：
-
-```bash
+cd $T/example/aiegraph/unet_bk_sdm_tiny
 REF=$WORK/host_seed2.png ./run_orange.sh $WORK/build/main.elf $WORK/img 2 25
 ```
 
@@ -278,29 +419,28 @@ REF=$WORK/host_seed2.png ./run_orange.sh $WORK/build/main.elf $WORK/img 2 25
 
 ## 实测结果
 
-2026-11-16 在 palmyra213 上实测，seed 2，25 步：
+2026-11-18 在 palmyra213 上实测（unet_m4 纯 aiegraph 流程），seed 2，25 步：
 
 ```
-[run_orange] UNet calls on the board: 50, cos_OK: 50, mean graph_run_ms: 1308.8
-[run_orange] vs host_seed2.png: PSNR 20.11 dB, cos 0.97028
+[run_orange] UNet calls on the board: 50, cos_OK: 50, mean graph_run_ms: 1307.9
+[run_orange] vs seed2.png: PSNR 20.11 dB, cos 0.97028
 ```
 
 | 指标 | 数值 |
 |---|---|
-| UNet 调用 | 50 次（25 步 × CFG 2），全部在板上，没有回退，`aot_fallbacks=0` |
-| 每次调用的板上输入 crc | 50/50 MATCH |
-| 单次调用和 onnxruntime 比的 cos | 最低 0.999972，大多数是 0.999999 |
-| 单次 UNet 的 `graph_run` | 1295–1320 ms，平均 1308.8 ms（其中 AIE 258 次启动 ≈ 758 ms，每次 2.94 ms） |
-| 每次调用的墙钟时间 | 31–39 s，绝大部分是 650 MB ELF 的 netload，不是计算 |
-| 整张图 | 1822 s：UNet 1814 s，文本编码器 0.23 s，VAE 0.75 s（这两个在 host 上） |
+| 冒烟（单次 UNet） | `graph_run` 1295.3 ms，launches 258，`aot_fallbacks=0`，cos 1.000000 PASS |
+| UNet 调用 | 50 次（25 步 × CFG 2），全部在板上，没有回退，50/50 cos_OK |
+| 平均 `graph_run` | 1307.9 ms |
+| 整图 vs host（fp32） | PSNR 20.11 dB，cos 0.97028 |
+| 整张图墙钟 | 2542 s，绝大部分是 1 GB ELF 的 netload，不是计算 |
 
 左边是板上生成的，右边是 host 上 onnxruntime（fp32）用同样参数生成的：
 
 ![板上 vs host](tiny-sdm-unet-orange-vs-host.png)
 
-两张图的构图和颜色是一样的。整图 PSNR 只有 20 dB，是因为 AIE 上的权重是 bf16，每一步的误差（单步 cos ≈ 0.99999）会沿着 25 步的去噪过程累积放大，所以细节（纹理、背景条纹）会有偏移。单次调用 cos ≥ 0.99997 才是判断"板上算对了"的标准，整图的 PSNR 只用来看有没有跑偏。
+两张图的构图和颜色是一样的。整图 PSNR 只有 20 dB，是因为 AIE 上的权重是 bf16，每一步的小误差会沿着 25 步的去噪过程累积放大，所以细节会有偏移。单次调用 cos 才是判断"板上算对了"的标准，整图的 PSNR 只用来看有没有跑偏。
 
-**墙钟时间为什么是 30 分钟，而不是 50 × 1.3 s ≈ 65 s。** 现在每次 UNet 调用都要把整个 ELF（含 0.65 GB 权重）重新 netload 到板上，只为了换 250 KB 的输入。要把一张图降到一分钟左右，需要让 ELF 常驻在板上，每步只传输入和输出（这也是下一步要做的事）。
+**墙钟为什么是 40 分钟，而不是 50 × 1.3 s ≈ 65 s。** 现在每次 UNet 调用都要把整个 ELF（含 0.65 GB 权重）重新 netload 到板上，只为了换 250 KB 的输入。要降到一分钟左右，需要让 ELF 常驻在板上，每步只传输入和输出。
 
 ---
 
@@ -308,15 +448,14 @@ REF=$WORK/host_seed2.png ./run_orange.sh $WORK/build/main.elf $WORK/img 2 25
 
 | 现象 | 原因和办法 |
 |---|---|
-| `apppaltest` 一直不动，打印 `[devlock] waiting` | 板子正被别人用（比如团队的 sprint）。它会自动排队，`--netload-wait` 内拿到锁就会继续 |
+| `apppaltest` 一直不动，打印 `[devlock] waiting` | 板子正被别人用。它会自动排队，`--netload-wait` 内拿到锁就会继续 |
 | `elf_size … exceeds staging 98566144` | 板上还是旧的 netboot supervisor，换成"边收边放"的版本 |
 | 构建时 KCO 的 kernel 链接失败（`__aiehlc_tm_anchor is undefined`） | 用的不是本分支编出来的 aiehlc。把 `AIEHLC_BIN` 指向 `$T/build/aiehlc` |
 | 打开 KCO 后，板上卡在第 4 次 launch（`wait_io TIMEOUT`） | 同上，旧的 aiehlc 没有 6776083 的修复 |
 | 构建报 `thirdparty/alib` 相关的错，或两个构建互相弄坏 | 两个构建共用了同一个 alib。worktree 里用 `link-deps … --private-alib`，或者不要同时构建 |
-| 结果行里夹着 `[DEBUG]` 打印，正则匹配不上 | `apppaltest` 的调试输出，先用 `grep -v DEBUG` 去掉；它也可能插在一行的中间（见下面 `readout_crc_ok=0` 那条） |
-| 图是糊的 | 步数太少（4 步）或者提示词不好；用 25 步和上面的提示词 |
-| `STEP k=0 rc=4`，报告里是 `readout: 16384 B of output (need 236544 B)` | runner 不知道输出形状，默认拿了第一个输入（ehs）的形状。加 `--out-shape 1,4,32,32`（`run_orange.sh` 已经加了） |
-| 前几步都好，某一步 `rc=4 … readout_crc_ok=0`，`board_crc32` 却是 MATCH 的 | 板上算对了，是读回时坏了：host 的 `[.. DEBUG] main: program_done detected…` 打印插进了某一行 `AIO_D` 的中间，把这行十六进制拆成两半，转储的 crc 就对不上。用带修复的 runner（`RE_DEBUG` 能去掉行中间的 DEBUG 片段，再把被拆开的行接回去） |
+| make 报 archiver 相关的奇怪错误 | 环境里导出了 `AR`，make 会把它当成归档工具。构建前 `unset AR` |
+| 结果行里夹着 `[DEBUG]` 打印，正则匹配不上 | `apppaltest` 的调试输出，先用 `grep -v DEBUG` 去掉 |
+| `STEP k=0 rc=4`，`readout: 16384 B of output (need 236544 B)` | runner 不知道输出形状。加 `--out-shape 1,4,32,32`（`run_orange.sh` 已经加了） |
 | `STEP … cos_OK=0` | 看那次调用的 `calls_s2/call_<k>/console.log`：输入 crc 是否 MATCH、是否 `CMP … PASS` |
 
 ---
@@ -325,12 +464,12 @@ REF=$WORK/host_seed2.png ./run_orange.sh $WORK/build/main.elf $WORK/img 2 25
 
 | 想做什么 | 改哪里 |
 |---|---|
-| 换一组层上 AIE | `partition_p4a.json`，或者用 `src/aiegraph/autopart.py` 重新生成 |
-| 改 gemm_kacc kernel 的写法或切法 | [`src/aiednn/gemm/gemm_kacc_kernel.cc`](../../src/aiednn/gemm/gemm_kacc_kernel.cc)（kernel 模板，`unet_aie.KACC_KERNEL`）和 `unet_aie.py` 的 `kacc_geom()`（切法） |
-| 改 flash-attention | [`src/aiednn/attention/fa_kernel.cc`](../../src/aiednn/attention/fa_kernel.cc) 和 [`fa_host.cc`](../../src/aiednn/attention/fa_host.cc)（`fa_attn.FA_KERNEL` / `FA_HOST`） |
-| 单独测一个 kernel | `kacc_bench.sh --gemm` / `--bmm` |
+| 换一组层上 AIE | `partition_p4a.json`，或者用 [`src/aiegraph/autopart.py`](../../src/aiegraph/autopart.py) 重新生成 |
+| 改 gemm_kacc kernel 的写法 | [`src/aiednn/gemm/gemm_kacc_kernel.cc`](../../src/aiednn/gemm/gemm_kacc_kernel.cc) |
+| 改 flash-attention | [`src/aiednn/attention/fa_kernel.cc`](../../src/aiednn/attention/fa_kernel.cc) 和 [`fa_host.cc`](../../src/aiednn/attention/fa_host.cc) |
+| 改板上 main / PROF 胶水 | [`src/aiegraph/boardmain.py`](../../src/aiegraph/boardmain.py) |
+| 单独测一个 kernel | [`kacc_bench.sh`](../../example/aiegraph/unet_bk_sdm_tiny/kacc_bench.sh) `--gemm` / `--bmm` |
 | 看时间花在哪 | 板上日志里的 `LAUNCH split` 和 `PROF` 行 |
+| 换一个 CNN 模型 | 看 [ResNet18](resnet18.md) 和 [YOLOv26](yolov26.md)：同一套 aiegraph，conv/gemm 用 `aiegraph.cnn` / `aiegraph.cnn_chunk` 一次全部 offload |
 
-现在第 5 步里，除了载入、转换和链接，offload 是 `build_unet.py` 在生成好的 `graph_driver.c` 上用正则改写的，并没有完全走 aiegraph。改成纯 aiegraph 调用的方案见 [`docs/plans/2026-11-16-aiegraph-group-offload-design.md`](../../docs/plans/2026-11-16-aiegraph-group-offload-design.md)。
-
-现在还没做完的：softmax 以外的 Norm（GroupNorm、LayerNorm）还在 A78 上（`--aie …,norm` 在 `unet_m3_int` 分支上），conv 的 im2col 还在 A78 上，层与层之间的数据都经过 DDR，每次启动都是同步的，只用了 144 个 tile 里的 16 个。
+还没做完的：GroupNorm、LayerNorm 还在 A78 上，conv 的 im2col 还在 A78 上，层与层之间的数据都经过 DDR，每次启动都是同步的，只用了 144 个 tile 里的 16 个。
