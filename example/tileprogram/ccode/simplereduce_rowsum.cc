@@ -1,7 +1,7 @@
 #include "simpleops_load.h"
-// STATUS (2026-11-15): passes the kernel analysis (`build/aiehlc-convtile trace` this file);
-// the lowering does not support this op shape yet, so aiehlc.sh stops with
-// "the core window is ... but the kernel's blocks (#routing.kernel_block) are ...".
+// STATUS (2026-11-17): builds and passes on VEK280 (skill kernelblockgather): the
+// output blocks follow the kernel (one 16 x 4 block per round), and the 16 x 256
+// input block follows as a 2-D block instead of a linear run of whole rows.
 #define OPS_R 256  // rows
 #define OPS_C 1024 // columns (bytes)
 // Reduction: s[r] = sum over c of x[r][c], x int8[256, 1024], on the 4x4 mesh by
@@ -39,16 +39,15 @@ __global__ void rowsum(aie::port<input_window_int8 *, aie::shape<OPS_R, OPS_C>> 
 int main() {
     aieSetDevice(0);
     aieArray device;
-    aieMesh mesh = device.partition({3, 6, 0, 6}, 4, 4);
+    aieMesh mesh = device.partition(OPS_PARTITION, 4, 4);
     const long n = (long)OPS_R * OPS_C;
     int8_t *x = (int8_t *)__Runtime_Alloc(n), *y = (int8_t *)__Runtime_Alloc(OPS_R * 16);
     int8_t *ref = (int8_t *)malloc(OPS_R * 16);
     ops_fill(x, n, 33);
     memset(y, 0, OPS_R * 16);
-    XTime t0, t1;
-    XTime_GetTime(&t0);
+    uint64_t t0 = ops_now(), t1;
     rowsum<<<mesh>>>(x, y);
-    XTime_GetTime(&t1);
+    t1 = ops_now();
     printf("[BENCH] aie_wall_ms=%.3f\n", ops_ms(t0, t1));
     long bad_sum = 0;
     for (int r = 0; r < OPS_R; r++) {

@@ -712,11 +712,37 @@ KernelBlockUse resolveKernelBlock(const routing::TensorRoutingInfoMap &info, int
             u.strideJBytes += kb.getStepJ()[d] * pitch[d] * elemBytes;
     }
     u.follow = isInput && rowContiguous;
+    u.rowContiguous = rowContiguous;
+    // An output whose blocks stack straight down dim 0 (one stepping loop, one
+    // block height per round) is one contiguous panel per core, written block by
+    // block: the gather keeps the per-core panel addressing and takes the block
+    // as its per-round size (applyKernelBlockGather).
+    if (!isInput) {
+        auto stacksDown = [&](ArrayRef<int64_t> step) {
+            if (step.empty() || step[0] != shape[0])
+                return false;
+            for (size_t d = 1; d < step.size(); ++d)
+                if (step[d] != 0)
+                    return false;
+            return true;
+        };
+        const int64_t ri = std::max<int64_t>(kb.getRoundsI(), 1);
+        u.follow = (ri == 1 && u.roundsJ == 1) || (ri == 1 && stacksDown(kb.getStepJ())) ||
+                   (u.roundsJ == 1 && stacksDown(kb.getStepI()));
+    }
     // .tile = {tr, tc} on a [R, C] block: panel-major, 3 shim BD dims --
     // d0 one tile row (tc elements, contiguous), d1 the R rows of the panel
     // (row pitch), d2 the C / tc panels (tc elements apart).
     const int64_t tr = kb.getTileR(), tc = kb.getTileC();
-    if (u.follow && tr > 0 && tc > 0 && shape.size() == 2) {
+    // A 2-D input block that does not span its rows: d0 one block row (tc
+    // elements, contiguous), d1 the block's rows at the tensor's row pitch.
+    if (isInput && !rowContiguous && shape.size() == 2 && tr <= 0 && (shape[1] * elemBytes) % 4 == 0 &&
+        (tensor[1] * elemBytes) % 4 == 0) {
+        u.block2D = true;
+        u.tileStrides = {4, (int32_t)(tensor[1] * elemBytes)};
+        u.tileWraps = {(int32_t)(shape[1] * elemBytes / 4), (int32_t)shape[0]};
+    }
+    if (isInput && u.follow && tr > 0 && tc > 0 && shape.size() == 2) {
         const int64_t rowBytes = tensor[1] * elemBytes, tileRowBytes = tc * elemBytes;
         u.tileStrides = {4, (int32_t)rowBytes, (int32_t)tileRowBytes};
         u.tileWraps = {(int32_t)(tileRowBytes / 4), (int32_t)shape[0], (int32_t)(shape[1] / tc)};

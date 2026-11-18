@@ -4,7 +4,7 @@
  *
  * Shared host side of the elementwise / reduction / data-movement / indexing
  * examples (tutorial/aieprogram/02_elementwise .. 05_indexing):
- * deterministic test data, compare, a timer. The kernels use none of it -- and the
+ * deterministic test data, compare, a timer, the board partition. The kernels use none of it -- and the
  * tensor sizes are #defines in each example: the kernel trace sees only the
  * object-like #defines of the .cc itself, not those of included headers.
  ******************************************************************************/
@@ -12,7 +12,6 @@
 #define SIMPLEOPS_LOAD_H
 #include "unistd.h"
 #include "xil_cache.h"
-#include "xiltimer.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,7 +32,33 @@ static void ops_fill(int8_t *p, long n, uint32_t seed) {
         p[i] = (int8_t)(ops_mix32((uint32_t)i + seed) & 0xff);
 }
 
-static double ops_ms(XTime t0, XTime t1) { return t1 > t0 ? 1000.0 * (double)(t1 - t0) / COUNTS_PER_SECOND : 0.0; }
+// VEK385 (AIE_GEN 5): partition {3, 6, 0, 6}; VEK280 (AIE-ML): {0, 8, 0, 7}.
+#if defined(AIE_GEN) && AIE_GEN == 5
+#define OPS_PARTITION {3, 6, 0, 6}
+#else
+#define OPS_PARTITION {0, 8, 0, 7}
+#endif
+
+// The Arm generic timer: the BSP's XTime needs a per-board timestamp macro the
+// A72 (VEK280) BSP does not define.
+static inline uint64_t ops_now(void) {
+#if defined(__aarch64__)
+    uint64_t v;
+    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#else
+    return 0;
+#endif
+}
+static double ops_ms(uint64_t t0, uint64_t t1) {
+#if defined(__aarch64__)
+    uint64_t f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return t1 > t0 ? 1000.0 * (double)(t1 - t0) / (double)f : 0.0;
+#else
+    return 0.0 * (double)(t1 - t0);
+#endif
+}
 
 static int8_t ops_sat8(int v) { return (int8_t)(v > 127 ? 127 : v < -128 ? -128 : v); }
 

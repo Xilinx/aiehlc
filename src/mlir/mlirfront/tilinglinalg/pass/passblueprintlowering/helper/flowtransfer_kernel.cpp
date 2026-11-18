@@ -254,22 +254,23 @@ LogicalResult emitCoreTileParams(FlowLoweringCtx &c, CoreTileCtx &t, const CoreT
         }
     }
 
-    // Kernel-only input that follows its traced blocks: one window per kernel
+    // Kernel-only port that follows its traced blocks: one window per kernel
     // block, one DMA round per block (the shim side does the same, see
-    // applyKernelBlockShim). Must run after computeCoreIterations so the GEMM
-    // model's clamp / K-round scaling do not touch it.
-    if (c.kb.follow && c.isInput) {
+    // applyKernelBlockShim / applyKernelBlockGather). Must run after
+    // computeCoreIterations so the GEMM model's clamp / K-round scaling do not
+    // touch it.
+    if (c.kb.follow) {
         t.pingPongBufferSize = c.kb.blockElems;
         t.perCorePerKRound = c.kb.blockElems;
         // The port's own buffer count ({.resident} / {.depth}); the input
         // FlowConfig does not carry it.
         const routing::TensorRoutingInfo *ti = routing::lookupTensorRoutingInfo(d.passState->tensorInfo, c.funcArgIdx);
-        if (ti && ti->ppDepth && *ti->ppDepth >= 1)
+        if (c.isInput && ti && ti->ppDepth && *ti->ppDepth >= 1)
             t.ppDepth = static_cast<int>(*ti->ppDepth);
     }
     if (failed(computeCoreIterations(c, t, d)))
         return failure();
-    if (c.kb.follow && c.isInput)
+    if (c.kb.follow)
         t.numIterations = c.kb.rounds;
     // A checked input that does not follow keeps the GEMM model's window. The
     // kernel lowering checks only its own window, so check this one too: a block
@@ -310,7 +311,7 @@ LogicalResult computeCoreIterations(FlowLoweringCtx &c, CoreTileCtx &t, const Co
     // Clamp to d.maxPingPongBytes to prevent exceeding core tile memory.
     // Skip the clamp for the spatial-halo IFM slab (must stay contiguous) and
     // for the K-split per-round slab (must match the shim per-round len exactly).
-    if (!t.hostSpatialHaloPort && !t.kSplitSlabPort && !(c.kb.follow && c.isInput) && d.maxPingPongBytes > 0 &&
+    if (!t.hostSpatialHaloPort && !t.kSplitSlabPort && !c.kb.follow && d.maxPingPongBytes > 0 &&
         t.elementSizeBytes > 0) {
         int64_t maxElements = d.maxPingPongBytes / t.elementSizeBytes;
         if (maxElements > 0 && t.pingPongBufferSize > maxElements)
@@ -326,7 +327,7 @@ LogicalResult computeCoreIterations(FlowLoweringCtx &c, CoreTileCtx &t, const Co
     // the DMA fires exactly once. If the kernel needs multiple
     // rounds (numIterations > 1), the DMA cannot re-arm and the
     // kernel will deadlock on the second acquire_window call.
-    if (t.ppDepth == 1 && t.numIterations > 1 && !(c.kb.follow && c.isInput)) {
+    if (t.ppDepth == 1 && t.numIterations > 1 && !c.kb.follow) {
         op.emitError("pp_depth=1 (single buffer) incompatible with "
                      "numIterations=")
             << t.numIterations << " (buffer_size=" << t.pingPongBufferSize

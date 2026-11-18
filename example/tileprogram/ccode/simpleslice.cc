@@ -33,15 +33,14 @@ __global__ void slice2(aie::port<input_window_int8 *, aie::shape<128, OPS_C>> xv
 int main() {
     aieSetDevice(0);
     aieArray device;
-    aieMesh mesh = device.partition({3, 6, 0, 6}, 4, 4);
+    aieMesh mesh = device.partition(OPS_PARTITION, 4, 4);
     const long n = (long)OPS_R * OPS_C;
     int8_t *x = (int8_t *)__Runtime_Alloc(n), *y = (int8_t *)__Runtime_Alloc(64 * 256), *ref = (int8_t *)malloc(64 * 256);
     ops_fill(x, n, 55);
     memset(y, 0, 64 * 256);
-    XTime t0, t1;
-    XTime_GetTime(&t0);
+    uint64_t t0 = ops_now(), t1;
     slice2<<<mesh>>>(x + SL_R0 * OPS_C + SL_C0, y); // the view starts at the crop origin
-    XTime_GetTime(&t1);
+    t1 = ops_now();
     printf("[BENCH] aie_wall_ms=%.3f\n", ops_ms(t0, t1));
     for (int r = 0; r < 64; r++)
         for (int c = 0; c < 256; c++)

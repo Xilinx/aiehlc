@@ -31,17 +31,16 @@ __global__ void eltwise_add(aie::port<input_window_int8 *, aie::shape<OPS_R, OPS
 int main() {
     aieSetDevice(0);
     aieArray device;
-    aieMesh mesh = device.partition({3, 6, 0, 6}, 4, 1); // 4 mesh rows, 1 mesh column
+    aieMesh mesh = device.partition(OPS_PARTITION, 4, 1); // 4 mesh rows, 1 mesh column
     const long n = (long)OPS_R * OPS_C;
     int8_t *x = (int8_t *)__Runtime_Alloc(n), *y = (int8_t *)__Runtime_Alloc(n);
     int8_t *z = (int8_t *)__Runtime_Alloc(n), *ref = (int8_t *)malloc(n);
     ops_fill(x, n, 11);
     ops_fill(y, n, 22);
     memset(z, 0, n);
-    XTime t0, t1;
-    XTime_GetTime(&t0);
+    uint64_t t0 = ops_now(), t1;
     eltwise_add<<<mesh>>>(x, y, z);
-    XTime_GetTime(&t1);
+    t1 = ops_now();
     printf("[BENCH] aie_wall_ms=%.3f\n", ops_ms(t0, t1));
     for (long e = 0; e < n; e++)
         ref[e] = ops_sat8(x[e] + y[e]);

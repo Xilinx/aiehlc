@@ -277,16 +277,33 @@ LogicalResult FlowTransferConversion::computeShimBdParams(FlowLoweringCtx &c) co
 // (resolveKernelBlock): one shim BD per kernel block, block-sized, with the
 // .tile panel-major dims when asked; no K-round iteration.
 // ---------------------------------------------------------------------------
-void FlowTransferConversion::applyKernelBlockShim(FlowLoweringCtx &c) const {
+LogicalResult FlowTransferConversion::applyKernelBlockShim(FlowLoweringCtx &c) const {
     if (!c.shimIsSender || c.isHaloSlab)
-        return;
+        return success();
     int64_t elemBytes = 1;
     if (c.memrefType.getElementType().isIntOrFloat())
         elemBytes = std::max<int64_t>(c.memrefType.getElementTypeBitWidth() / 8, 1);
     c.kb = resolveKernelBlock(passState->tensorInfo, traceFlowConfigToFuncArgIndex(c.shimFlowConfig), true,
                               isFullConnectAuto(c.op->getParentOfType<ModuleOp>()), elemBytes);
+    // A checked block that does not span its rows, where the GEMM model has no
+    // shim dims of its own: the model would stream the partition as one linear
+    // run, so each window would hold whole rows instead of the block. Follow the
+    // block when it is a plain 2-D one; anything else would be silent wrong data.
+    const bool linearRun = !c.shimDimStrides || c.shimDimStrides.empty();
+    if (c.kb.check && !c.kb.follow && !c.kb.rowContiguous && linearRun) {
+        if (!c.kb.block2D) {
+            c.op.emitError() << "input " << traceFlowConfigToFuncArgIndex(c.shimFlowConfig)
+                             << ": the kernel's blocks (#routing.kernel_block) do not span their rows and are not a "
+                                "plain 2-D block, but the shim would send the partition as one linear run -- each "
+                                "core window would hold whole rows, not the block";
+            return failure();
+        }
+        c.kb.follow = true;
+        llvm::errs() << "[KernelBlock] flowIdx=" << c.flowIndex
+                     << " input is a 2-D block the shim would send as a linear run: following it\n";
+    }
     if (!c.kb.follow)
-        return;
+        return success();
     c.perTileShimLen = c.kb.blockElems * elemBytes;
     c.shimIterStepSize = 0;
     c.shimIterWrap = 0;
@@ -294,7 +311,44 @@ void FlowTransferConversion::applyKernelBlockShim(FlowLoweringCtx &c) const {
     c.shimDimWraps = c.kb.tileWraps.empty() ? ArrayAttr() : c.rewriter.getI32ArrayAttr(c.kb.tileWraps);
     llvm::errs() << "[KernelBlock] flowIdx=" << c.flowIndex << " input follows the kernel's blocks: " << c.kb.rounds
                  << " x " << c.perTileShimLen << " B per core, round stride " << c.kb.strideIBytes << "/"
-                 << c.kb.strideJBytes << " B" << (c.kb.tileStrides.empty() ? "" : ", .tile panel-major") << "\n";
+                 << c.kb.strideJBytes << " B" << (c.kb.tileStrides.empty() ? "" : ", 2-D / .tile dims") << "\n";
+    return success();
+}
+
+// ---------------------------------------------------------------------------
+// applyKernelBlockGather — a kernel-only output whose blocks stack straight
+// down dim 0 (resolveKernelBlock): each core's panel keeps the gather's per-core
+// addressing; one round gathers one kernel block, so the core sends `rounds`
+// blocks instead of its whole panel in one window.
+// ---------------------------------------------------------------------------
+LogicalResult FlowTransferConversion::applyKernelBlockGather(FlowLoweringCtx &c) const {
+    if (c.shimIsSender || !c.isManyToOne)
+        return success();
+    c.kb = resolveKernelBlock(passState->tensorInfo, traceFlowConfigToFuncArgIndex(c.shimFlowConfig), false,
+                              isFullConnectAuto(c.op->getParentOfType<ModuleOp>()), c.ooElementSizeBytes);
+    if (!c.kb.follow)
+        return success();
+    // The GEMM model's own per-round gathers (M sub-tiling: one C tile per round,
+    // re-armed in a host loop; a conv width-split halo) already send what the kernel
+    // stores and are board-proven: leave those ports to it and to checkKernelBlock.
+    ModuleOp mod = c.op->getParentOfType<ModuleOp>();
+    const bool gemmMRounds = passState->tileM > 0 && passState->tileM < passState->tileRows && isFullConnectAuto(mod);
+    if (gemmMRounds || detectConvHalo(passState->tensorInfo).valid) {
+        c.kb.follow = false;
+        return success();
+    }
+    if (c.ooPerCoreElements != c.kb.blockElems * c.kb.rounds) {
+        c.op.emitError() << "output: each core's region is " << c.ooPerCoreElements
+                         << " elements, but the kernel's blocks (#routing.kernel_block) cover " << c.kb.blockElems
+                         << " x " << c.kb.rounds << " -- the gather cannot place them";
+        return failure();
+    }
+    c.ooPingPongSize = c.kb.blockElems;
+    c.ooNumIterations = c.kb.rounds;
+    c.perRoundBytes = c.kb.blockElems * c.ooElementSizeBytes;
+    llvm::errs() << "[KernelBlock] flowIdx=" << c.flowIndex << " output follows the kernel's blocks: " << c.kb.rounds
+                 << " x " << c.perRoundBytes << " B per core\n";
+    return success();
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +386,10 @@ void FlowTransferConversion::emitShimBdOoo(FlowLoweringCtx &c) const {
 
     c.oooIterWrap = (int32_t)c.ooNumIterations;
     c.oooIterStepSize = (c.oooIterWrap > 1) ? (int32_t)(rowsPerRound * ddrRowStride) : 0;
+    // A block-following output without row dims is one contiguous panel per core:
+    // round r lands r blocks further on.
+    if (c.kb.follow && c.oooIterWrap > 1 && ddrRowStride == 0)
+        c.oooIterStepSize = (int32_t)c.perRoundBytes;
 
     // Build per-tile addressing from shimDimStrides.
     {
@@ -693,7 +751,7 @@ void FlowTransferConversion::classifyScheduleMode(FlowLoweringCtx &c) const {
     }
     // A kernel-only input that follows its blocks loops once per kernel block
     // (an input the kernel takes once is sent once, outside any round loop).
-    if (c.kb.follow)
+    if (c.kb.follow && c.shimIsSender)
         c.needsOuterLoop = c.kb.rounds > 1;
 }
 
@@ -855,6 +913,10 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
     const int32_t dataId = c.dataId;
     auto moduleOp = op->getParentOfType<ModuleOp>();
     bool nOuterPolicy = isNOuterPolicy(moduleOp);
+    // A kernel-block input loop waits on every round on the host; StartioInterleavePass
+    // arms the output channels in front of it (outputsBeforeRoundLoop).
+    if (c.kb.follow && moduleOp)
+        moduleOp->setAttr("routing.kernel_block_round_loop", rewriter.getUnitAttr());
 
     MultipleInputOffsetParams p;
     computeMultipleInputOffsetParams(c, moduleOp, nOuterPolicy, p);
