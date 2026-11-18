@@ -6,6 +6,9 @@
  *   (+ same-shape adds, the residual after the activation).
  * Depthwise (dw = 1, weight [C/cb][1][KH][KW][1][cb]): the weight is expanded block-diagonally to a dense
  * [N][C*KH*KW] (zeros add exactly 0 to the fp32 accumulators).
+ * split = 3 (fp32-accurate): K is laid out as 3 segments of ks, W' = [Wh | Wh | Wl], X' = [Xh | Xl | Xh] with
+ * h = bf16(v), l = bf16(v - h): one fp32-accumulated GEMM sums Wh.Xh + Wh.Xl + Wl.Xh (the Wl.Xl term, ~2^-16
+ * relative, is dropped). split = 1: one segment, W and X rounded to bf16.
  * Ports (gemm_kacc, non-transposed walk, see aiegraph.cnn.kacc_geom): W [Np][Kp] bf16 and X [MC][Kp] bf16,
  * each 16-row block pre-tiled per K chunk of kch bf16; Y [Np][MC] fp32 in [s][mi][ni][8x8] core tiles.
  * Needs (before this text): uc_f2bf, uc_dlt, uc_numel, uc_kalloc + g_kw / g_kx / g_ky (UC_K*_ELEMS) and
@@ -15,8 +18,18 @@ typedef struct {
     int full; /* 0: per output channel, 1: the output's shape */
 } uc_ep;
 
+static inline float uc_bfv(float v) { /* bf16 RNE value */
+    const uint16_t h = uc_f2bf(v);
+    uint32_t u = (uint32_t)h << 16;
+    float f;
+    memcpy(&f, &u, 4);
+    return f;
+}
+/* segment s of a split value: 0 = hi, 1 = lo (v - hi) */
+static inline uint16_t uc_seg(float v, int lo) { return uc_f2bf(lo ? v - uc_bfv(v) : v); }
+
 static int uc_chunk_conv(void *const *argv, int nargs, int sh, int sw, int ph, int pw, int act, int dw, int Np,
-                         int Kk, int Kp, int MC, int kch) {
+                         int Kk, int Kp, int MC, int kch, int split, int ks) {
     if (nargs < 3)
         return -2;
     const uc_dlt *x = (const uc_dlt *)argv[0], *w = (const uc_dlt *)argv[1], *y = (const uc_dlt *)argv[nargs - 1];
@@ -31,7 +44,8 @@ static int uc_chunk_conv(void *const *argv, int nargs, int sh, int sw, int ph, i
     if (CI != C || (int)y->shape[1] * yb != O || OH != (H + 2 * ph - KH) / sh + 1 || OW != (W + 2 * pw - KW) / sw + 1)
         return -3;
     const int M = OH * OW, N = O, KK = KH * KW, K = C * KK;
-    if (N > Np || K > Kk || Kk > Kp || Np % 64 || Kk % 64 || MC % 64 || Kp % kch || kch % 8)
+    if (N > Np || K > ks || ks * split != Kk || (split != 1 && split != 3) || Kk > Kp || Np % 64 || Kk % 64 ||
+        MC % 64 || Kp % kch || kch % 8)
         return -3;
     if ((long)Np * Kp > UC_KW_ELEMS || (long)MC * Kp > UC_KX_ELEMS || (long)Np * MC > UC_KY_ELEMS)
         return -3;
@@ -61,8 +75,9 @@ static int uc_chunk_conv(void *const *argv, int nargs, int sh, int sw, int ph, i
         uint16_t *blk = Wd + (size_t)(n & ~15) * Kp;
         for (int k = 0; k < Kp; k++) {
             float v = 0.0f;
-            if (n < N && k < K) {
-                const int c = k / KK, t = k % KK;
+            const int sg = k < Kk ? k / ks : 0, kk = k < Kk ? k % ks : K;
+            if (n < N && kk < K) {
+                const int c = kk / KK, t = kk % KK;
                 if (dw)
                     v = c == n ? wt[((size_t)(n / ob) * KK + t) * ob + n % ob] : 0.0f;
                 else
@@ -70,7 +85,7 @@ static int uc_chunk_conv(void *const *argv, int nargs, int sh, int sw, int ph, i
             }
             const int j = k / kch, kr = k % kch;
             const int f = (r >> 3) * 8 * kch + (kr >> 3) * 64 + (r & 7) * 8 + (kr & 7);
-            blk[(size_t)(f / kch) * Kp + j * kch + f % kch] = uc_f2bf(v);
+            blk[(size_t)(f / kch) * Kp + j * kch + f % kch] = uc_seg(v, sg == 2);
         }
     }
     const int q4 = MC / 4; /* pixels per mesh column (core c block {16, MC/4}) */
@@ -82,14 +97,15 @@ static int uc_chunk_conv(void *const *argv, int nargs, int sh, int sw, int ph, i
             uint16_t *blk = Xd + (size_t)(q & ~15) * Kp;
             for (int k = 0; k < Kp; k++) {
                 float v = 0.0f;
-                if (p < M && k < K) {
-                    const int c = k / KK, t = k % KK, ih = oh * sh - ph + t / KW, iw = ow * sw - pw + t % KW;
+                const int sg = k < Kk ? k / ks : 0, kk = k < Kk ? k % ks : K;
+                if (p < M && kk < K) {
+                    const int c = kk / KK, t = kk % KK, ih = oh * sh - ph + t / KW, iw = ow * sw - pw + t % KW;
                     if (ih >= 0 && ih < H && iw >= 0 && iw < W)
                         v = xin[(((size_t)(c / cb) * H + ih) * W + iw) * cb + c % cb];
                 }
                 const int j = k / kch, kr = k % kch;
                 const int f = (r >> 3) * 8 * kch + (kr >> 3) * 64 + (kr & 7) * 8 + (r & 7);
-                blk[(size_t)(f / kch) * Kp + j * kch + f % kch] = uc_f2bf(v);
+                blk[(size_t)(f / kch) * Kp + j * kch + f % kch] = uc_seg(v, sg == 1);
             }
         }
         const int mv = M - m0 < MC ? M - m0 : MC;

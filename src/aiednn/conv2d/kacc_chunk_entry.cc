@@ -1,9 +1,9 @@
 
 /* the step every offloaded conv call site runs (aiegraph group step, "args" ABI) */
 extern "C" int @K@_aie_conv(int cid, void *args, int nargs, int sh, int sw, int ph, int pw, int act, int dw, int np,
-                            int kk, int kp, int mc, int kch) {
+                            int kk, int kp, int mc, int kch, int split, int ks) {
     g_uc_calls++;
-    const int rc = uc_chunk_conv((void *const *)args, nargs, sh, sw, ph, pw, act, dw, np, kk, kp, mc, kch);
+    const int rc = uc_chunk_conv((void *const *)args, nargs, sh, sw, ph, pw, act, dw, np, kk, kp, mc, kch, split, ks);
     if (rc != 0) {
         printf("[@K@_aie_conv] layer %d rc=%d\n", cid, rc);
         if (!g_uc_rc)

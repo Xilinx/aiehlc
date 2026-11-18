@@ -29,6 +29,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--input", type=Path, help="fp32 [1,3,640,640] build input (default: a fixed synthetic image)")
     ap.add_argument("--mc", type=int, default=256, help="output pixels per AIE launch")
+    ap.add_argument("--split", type=int, default=3, choices=(1, 3), help="3: bf16 hi/lo GEMM (~fp32), 1: bf16")
     ap.add_argument("--selfcheck", action="store_true", help="debug: every AIE launch checked on the A78")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
@@ -44,8 +45,8 @@ def main(argv=None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     root = Path(ag.__file__).resolve().parents[2]
     os.environ.setdefault("AIEHLC_ROOT", str(root))
-    os.environ["AIEGRAPH_WDTYPE"] = "bf16"                 # bf16 weights, fp32 accumulation
-    os.environ["AIEGRAPH_PARAMS_INPLACE"] = "1"            # (bf16) weights read in place from the linked blob
+    wdt = os.environ["AIEGRAPH_WDTYPE"] = "fp32" if a.split == 3 else "bf16"   # AIE: bf16 MACs, fp32 acc
+    os.environ["AIEGRAPH_PARAMS_INPLACE"] = "1"            # weights read in place from the linked blob
     os.environ.setdefault("HOSTCOMPILE_HOST_OPT", "-O2")
     bm.profiling_env()
     opts = bm.launch_env("warm")
@@ -79,13 +80,12 @@ def main(argv=None) -> int:
     groups = emod.match("conv", partition={"layers": rows}, model=cut, groups=(1, "dw"))
     nconv = sum(1 for n in cut.graph.node if n.op_type == "Conv")
     ndw = sum(1 for r in inv if r["op"] == "Conv" and r["why"])
-    plans = cnn.plan_convs(groups, mc=a.mc)
+    plans = cnn.plan_convs(groups, mc=a.mc, split=a.split)
     total = sum(r["macs"] for r in inv)
     aie = sum(r["macs"] for r in inv if r["node"] in {p.onnx for p in plans})
     for p in plans:
-        log(f"  aie conv {p.cid:3d} {p.onnx} -> call {p.call} {p.symbol.replace('tvmgen_default_fused_', '')} "
-            f"M={p.M} N={p.N} K={p.K} s={p.sh} p={p.ph} dw={p.dw} act={p.act} -> {p.Np}x{p.Kk}x{p.mc} "
-            f"launches={p.launches}")
+        log(f"  aie conv {p.cid:3d} {p.onnx} -> call {p.call} M={p.M} N={p.N} K={p.K} s={p.sh} p={p.ph} dw={p.dw} "
+            f"act={p.act} -> {p.Np}x{p.Kk}x{p.mc} split={p.split} launches={p.launches}")
     log(f"matmul (host): {sum(1 for r in inv if r['op'] != 'Conv')} nodes, "
         f"{sum(r['macs'] for r in inv if r['op'] != 'Conv')} MACs")
     print(f"OFFLOAD {MODEL} conv={len(plans)}/{nconv} dw={sum(p.dw for p in plans)}/{ndw} "
@@ -98,7 +98,7 @@ def main(argv=None) -> int:
                            selfcheck=a.selfcheck)
     log(f"carrier layer {lidx} ({car.symbol}); kernel source {kcc}")
     planned = cnn.offload_convs(emod, groups, plans, kcc, kprefix=KPREFIX, log=log)
-    emod.driver_template(**bm.driver_glue(kprefix=KPREFIX))
+    emod.driver_template(**bm.driver_glue(kprefix=KPREFIX, bf16_expand=wdt == "bf16"))
     rep = emod.offload(f"layer{lidx}", str(kcc), check="group", verbose=a.verbose)
     log(f"offload: {rep}")
     if not any(L.get("target") == "aie" and L.get("archive") for L in
@@ -109,7 +109,7 @@ def main(argv=None) -> int:
     # 4. board main + inputs header + reference, link
     hdr = out / f"{MODEL}_inputs.h"
     gin = emod.input_names      # the converted graph's name of the ONNX input
-    bm.inputs_header(hdr, MODEL, [(gin[0], iname, x.reshape(-1))], dict(AIE_MODE="conv", WDTYPE="bf16"), origin=xin)
+    bm.inputs_header(hdr, MODEL, [(gin[0], iname, x.reshape(-1))], dict(AIE_MODE="conv", WDTYPE=wdt), origin=xin)
     bm.append_defines(hdr, MODEL, dict(LAUNCH_WARM=1, LAUNCH_OPTS=bm.LAUNCH_OPTS_WARM, CTRLPKT="off",
                                        AIE_PLANNED_LAUNCHES=planned, AIE_PLANNED_CALLS=len(plans),
                                        TOTAL_GEMM_MACS=(total, "ULL")))

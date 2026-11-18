@@ -277,10 +277,12 @@ def prof_c(attn: bool = False, kprefix: str = None) -> str:
                      _PROF_BRANCH_AT.lstrip(), 1)
 
 
-def driver_glue(decls: str = "", attn: bool = False, kprefix: str = None) -> dict:
+def driver_glue(decls: str = "", attn: bool = False, kprefix: str = None, bf16_expand: bool = True) -> dict:
     """``emod.driver_template(**driver_glue(...))``: *decls* (kernel declarations of the group steps
-    that are not aiegraph-generated, e.g. fused attention) + the PROF glue + expand timing."""
-    return dict(decls=decls + prof_c(attn, kprefix) + "\n", expand_enter=EXPAND_ENTER, expand_exit=EXPAND_EXIT,
+    that are not aiegraph-generated, e.g. fused attention) + the PROF glue + expand timing
+    (*bf16_expand*: the driver has ``graph_bf16_expand``, i.e. ``AIEGRAPH_WDTYPE=bf16``)."""
+    ee, ex = (EXPAND_ENTER, EXPAND_EXIT) if bf16_expand else ("", "")
+    return dict(decls=decls + prof_c(attn, kprefix) + "\n", expand_enter=ee, expand_exit=ex,
                 run_enter=RUN_ENTER)
 
 

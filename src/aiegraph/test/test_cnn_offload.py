@@ -36,7 +36,7 @@ MAIN = r"""
 #include <vector>
 int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "r");
-    int nargs, c[12];
+    int nargs, c[13];
     if (fscanf(f, "%d", &nargs) != 1) return 2;
     std::vector<uc_dlt> t(nargs);
     std::vector<void *> a(nargs);
@@ -55,10 +55,11 @@ int main(int argc, char **argv) {
         t[i] = uc_dlt{p, 1, 0, nd, 2, 32, 1, shp[i].data(), nullptr, 0};
         a[i] = &t[i];
     }
-    for (int i = 0; i < 12; i++) if (fscanf(f, "%d", &c[i]) != 1) return 2;
+    for (int i = 0; i < 13; i++) if (fscanf(f, "%d", &c[i]) != 1) return 2;
     if (fscanf(f, "%511s", path) != 1) return 2;
     fclose(f);
-    const int rc = cnn_aie_conv(7, a.data(), nargs, c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10]);
+    const int rc = cnn_aie_conv(7, a.data(), nargs, c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10],
+                                c[11], c[12]);
     long n = 1;
     for (auto v : shp[nargs - 1]) n *= v;
     FILE *o = fopen(path, "wb");
@@ -106,7 +107,8 @@ def harness(tmp_path_factory):
     t = tmp_path_factory.mktemp("cnn")
     plans = []
     for i, (_, C, H, W, O, KH, s, p, dw, act, res) in enumerate(CASES):
-        plans.append(cnn.plan_conv(_info(C, H, W, O, KH, s, p, dw, act, res, i)[0], mc=64 if i == 1 else cnn.MC))
+        plans.append(cnn.plan_conv(_info(C, H, W, O, KH, s, p, dw, act, res, i)[0], mc=64 if i == 1 else cnn.MC,
+                                   split=3 if i % 2 else 1))
     kcc = cnn.write_kernel(t / "src", SPEC, plans, kprefix="cnn", entry="aiek_cnntest", warm=False,
                            selfcheck=True)
     text = _LAUNCH.sub(r"kemu::launch(\2, \1, ", kcc.read_text())
@@ -156,7 +158,8 @@ def test_chunk_conv_vs_numpy(harness, i):
     rng = np.random.default_rng(i)
     x = rng.uniform(-2, 2, (C, H, W)).astype(np.float32)
     w = (rng.standard_normal((O, 1 if dw else C, KH, KH)) / np.sqrt(KH * KH * (1 if dw else C))).astype(np.float32)
-    w = bf16(w)  # weights.bin holds bf16 (AIEGRAPH_WDTYPE=bf16): the call's expanded fp32 weight is bf16-exact
+    if pl.split == 1:
+        w = bf16(w)  # weights.bin holds bf16 (AIEGRAPH_WDTYPE=bf16): the call's expanded fp32 weight is bf16-exact
     b = rng.standard_normal(O).astype(np.float32)
     OH = (H + 2 * p - KH) // s + 1
     r = rng.standard_normal((O, OH, OH)).astype(np.float32) if res else None
@@ -178,7 +181,7 @@ def test_chunk_conv_vs_numpy(harness, i):
         _nchwc(r, ob).tofile(d / "r.bin")
         args.append((5, (1, O // ob, OH, OH, ob), d / "r.bin"))
     args.append((5, (1, O // ob, OH, OH, ob), d / "none"))
-    consts = [pl.sh, pl.sw, pl.ph, pl.pw, pl.act, pl.dw, pl.Np, pl.Kk, pl.Kp, pl.mc, pl.kch, 0]
+    consts = [pl.sh, pl.sw, pl.ph, pl.pw, pl.act, pl.dw, pl.Np, pl.Kk, pl.Kp, pl.mc, pl.kch, pl.split, pl.ks]
     lines = [str(len(args))] + [f"{nd} {' '.join(map(str, sh))} {f}" for nd, sh, f in args]
     lines += [" ".join(map(str, consts)), str(d / "y.bin")]
     (d / "case.txt").write_text("\n".join(lines) + "\n")
@@ -189,12 +192,15 @@ def test_chunk_conv_vs_numpy(harness, i):
     assert " BAD" not in rr.stdout, [l for l in rr.stdout.splitlines() if "[CHK]" in l]
     print("".join(l + "\n" for l in rr.stdout.splitlines() if "[CHK]" in l), end="")
     got = np.fromfile(d / "y.bin", np.float32).reshape(O // ob, OH, OH, ob).transpose(0, 3, 1, 2).reshape(O, OH, OH)
-    ref = _conv_ref(bf16(x).astype(np.float64), w, b.astype(np.float64), s, p, dw, act, r)
+    xr = bf16(x) if pl.split == 1 else x     # split 3: hi/lo parts ~ the fp32 activation and weight
+    ref = _conv_ref(xr.astype(np.float64), w.astype(np.float64), b.astype(np.float64), s, p, dw, act, r)
     cos = float((got * ref).sum() / np.sqrt((got.astype(np.float64) ** 2).sum() * (ref ** 2).sum()))
     err = float(np.abs(got - ref).max())
-    print(f"{name}: plan Np={pl.Np} Kk={pl.Kk} Kp={pl.Kp} mc={pl.mc} launches={pl.launches} cos={cos:.9f} maxabs={err:.2e}")
+    print(f"{name}: plan split={pl.split} Np={pl.Np} Kk={pl.Kk} Kp={pl.Kp} mc={pl.mc} launches={pl.launches} "
+          f"cos={cos:.9f} maxabs={err:.2e}")
     assert np.isfinite(got).all()
-    assert cos >= 0.99999 and err < 1e-3 * max(1.0, float(np.abs(ref).max())), (cos, err)
+    tol = 1e-3 if pl.split == 1 else 2e-5
+    assert cos >= 0.99999 and err < tol * max(1.0, float(np.abs(ref).max())), (cos, err)
 
 
 def test_plan_refuses_unknown_epilogue():
@@ -214,6 +220,13 @@ def test_ch_equal_px_takes_another_chunk():
     assert pl.Np == 256 and pl.mc == 512 and pl.launches == 1
     with pytest.raises(AiegraphError):
         cnn.kacc_geom(256, 128, 256)
+
+
+def test_split3_plan():
+    pl = cnn.plan_conv(_info(64, 20, 20, 16, 3, 1, 1, 0, 1, 0, 0)[0], split=3)       # K = 576 -> 3 x 576
+    assert (pl.split, pl.ks, pl.Kk, pl.Np) == (3, 576, 1728, cnn.NP_MIN_BIGK)
+    with pytest.raises(AiegraphError):
+        cnn.plan_conv(_info(64, 20, 20, 16, 3, 1, 1, 0, 1, 0, 0)[0], split=2)
 
 
 def test_square_w_gets_zero_chunk():

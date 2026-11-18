@@ -31,7 +31,7 @@ _STAGE = "cnn"
 MC = 256            # output pixels per launch (4 mesh columns x 64; board-proven non-transposed walk)
 # palmyra213 self-check (UC_SELFCHECK, 2026-11-18): gemm_kacc instances with a K walk of <= 64 words
 # (64x64x256, 128x64x256, 128x128x256, 256x128x512) and 64x2304x256 run but return wrong sums (rel err
-# 0.2-0.5) while their x86 model is exact; K is padded to >= KK_MIN and a K > KK_BIG gets >= NP_MIN_BIGK rows
+# 0.2-0.5) while their x86 model is exact; the kernel K is >= KK_MIN and a K > KK_BIG gets >= NP_MIN_BIGK rows
 KK_MIN = 192
 KK_BIG = 1152
 NP_MIN_BIGK = 128
@@ -93,20 +93,26 @@ class ConvPlan:
     ph: int
     pw: int
     Np: int
-    Kk: int
+    Kk: int         # the kernel's K = split * ks
     Kp: int
     kch: int
     mc: int
     launches: int
     macs: int       # the conv's own MACs (ONNX)
+    split: int = 1  # 3: fp32-accurate (W' = [Wh|Wh|Wl], X' = [Xh|Xl|Xh]), 1: plain bf16
+    ks: int = 0     # K segment (>= K, multiple of 64)
 
     @property
     def shape(self) -> tuple:
         return (self.Np, self.Kk, self.mc)
 
 
-def plan_conv(info: dict, mc: int = MC) -> ConvPlan:
-    """One matched conv group's ``g.info`` -> its launch plan (raises on a fused epilogue it cannot run)."""
+def plan_conv(info: dict, mc: int = MC, split: int = 1) -> ConvPlan:
+    """One matched conv group's ``g.info`` -> its launch plan (raises on a fused epilogue it cannot run).
+    *split* 3: the GEMM runs on bf16 hi/lo parts of the fp32 weight and activation (3x K, ~fp32 accuracy;
+    weights.bin must hold fp32, ``AIEGRAPH_WDTYPE=fp32``); 1: bf16 weight and activation."""
+    if split not in (1, 3):
+        raise AiegraphError(_STAGE, f"split={split}", hint="1 (bf16) or 3 (bf16 hi/lo, ~fp32)")
     sym = info["symbol"]
     m = _SYM.fullmatch(sym)
     if not m:
@@ -120,18 +126,20 @@ def plan_conv(info: dict, mc: int = MC) -> ConvPlan:
         raise AiegraphError(_STAGE, f"conv {info['onnx']}: {sym} has {info['nargs']} args, expected {3 + nadd}")
     N, M = int(info["N"]), int(info["M"])
     K = int(info["K"]) * (int(info["groups"]) if dw else 1)
-    Np, Kk = max(_c64(N), NP_MIN_BIGK if _c64(K) > KK_BIG else 64), max(_c64(K), KK_MIN)
+    ks = max(_c64(K), -(-KK_MIN // split // 64) * 64)
+    Kk = split * ks
+    Np = max(_c64(N), NP_MIN_BIGK if Kk > KK_BIG else 64)
     if Np == mc:    # ch == px: aiehlc cannot place the instance's ping-pong windows in data memory
         mc = 2 * mc if 2 * mc <= 512 else mc // 2
     g = kacc_geom(Np, Kk, mc)
     return ConvPlan(cid=int(info["cid"]), call=int(info["call"]), onnx=info["onnx"], symbol=sym, M=M, N=N, K=K,
                     dw=dw, act=int(bool(m.group(3))), sh=int(info["sh"]), sw=int(info["sw"]), ph=int(info["ph"]),
                     pw=int(info["pw"]), Np=Np, Kk=Kk, Kp=g["kp"], kch=g["kch"], mc=mc, launches=-(-M // mc),
-                    macs=int(info.get("macs", 0)))
+                    macs=int(info.get("macs", 0)), split=split, ks=ks)
 
 
-def plan_convs(groups, mc: int = MC) -> list:
-    return [plan_conv(g.info, mc) for g in groups]
+def plan_convs(groups, mc: int = MC, split: int = 1) -> list:
+    return [plan_conv(g.info, mc, split) for g in groups]
 
 
 def _spec_exports(spec: str, kprefix: str) -> str:
@@ -195,9 +203,10 @@ def offload_convs(emod, groups, plans, kcc, *, kprefix: str, log=print) -> int:
     planned = 0
     for g, p in zip(groups, plans):
         consts = dict(cid=p.cid, sh=p.sh, sw=p.sw, ph=p.ph, pw=p.pw, act=p.act, dw=p.dw, np=p.Np, kk=p.Kk, kp=p.Kp,
-                      mc=p.mc, kch=p.kch)
+                      mc=p.mc, kch=p.kch, split=p.split, ks=p.ks)
         st = ag.step(name, reads=g.x, writes=g.y, consts=consts,
-                     call=("cid", "args", "nargs", "sh", "sw", "ph", "pw", "act", "dw", "np", "kk", "kp", "mc", "kch"),
+                     call=("cid", "args", "nargs", "sh", "sw", "ph", "pw", "act", "dw", "np", "kk", "kp", "mc", "kch",
+                           "split", "ks"),
                      wrap=("UP_AIE_BEGIN", "UP_AIE_END"), tag=f"aie {name} {p.cid}")
         emod.offload_group(g, str(kcc), steps=[st], launch=dict(aie=p.launches))
         planned += p.launches
