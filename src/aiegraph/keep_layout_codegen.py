@@ -25,8 +25,9 @@ already exists (no call moves, so TVM's storage plan still holds):
   (planar NCHW / NHWC label) into the layout op's output buffer.
 
 Every decision is checked on ``<stem>_graph.json`` (``group.CallGraph``; Relay is not reachable after
-convert, relay.txt): purity = the fused op names only reshape / transpose / layout_transform (+ the scale
-multiply / residual add / SiLU of the temb fold) and conserves elements, the shapes match the group, the
+convert, relay.txt): purity = ``pure_perm.check`` on the Relay op semantics saved at convert
+(``<stem>_opsem.json``): only reshape / transpose / layout_transform (+ the scale multiply / residual add / SiLU
+of the temb fold), elements conserved, one output, the shapes match the group, the
 removed intermediate has no other reader ("组外有读者"), the buffer written early is untouched in between
 ("被覆盖的 buffer"), and every planned ``keep_layout`` edge is realized. The TVM module C (when given) is
 cross-checked as well. Anything else -> AiegraphError (the build fails, nothing is silently skipped).
@@ -39,10 +40,11 @@ from pathlib import Path
 
 import numpy as np
 
+from . import pure_perm
 from .errors import AiegraphError
 from .group import CallGraph
 
-__all__ = ["apply", "keep_layout_driver", "register", "fused_ops", "KeepLayoutPass"]
+__all__ = ["apply", "keep_layout_driver", "register", "KeepLayoutPass"]
 
 _STAGE = "keep_layout"
 
@@ -55,39 +57,16 @@ def _req(cond, *what):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  graph.json: purity of a fused op
+#  purity of a fused op: saved Relay op semantics (pure_perm, <stem>_opsem.json)
 # ═══════════════════════════════════════════════════════════════════════════
 
-_OPS = ("layout_transform", "expand_dims", "reshape", "transpose", "squeeze", "multiply", "sigmoid", "add")
-
-
-def fused_ops(symbol: str):
-    """``tvmgen_default_fused_reshape_transpose_multiply_reshape_3`` -> ['reshape', 'transpose', 'multiply',
-    'reshape']; None if a part is not one of the known element-wise / label ops."""
-    s = re.sub(r"_\d+$", "", symbol.replace("tvmgen_default_fused_", ""))
-    out = []
-    while s:
-        for op in _OPS:
-            if s == op or s.startswith(op + "_"):
-                out.append(op)
-                s = s[len(op) + 1:]
-                break
-        else:
-            return None
-    return out
-
-
-LABEL = {"reshape", "transpose", "layout_transform", "squeeze", "expand_dims"}
+LABEL = pure_perm.LABEL
 
 
 def _pure(cg: CallGraph, call: int, extra=(), need=()) -> list:
-    """The call only permutes data (+ the ops in ``extra``), checked on graph.json: op names and element count."""
-    c = cg.calls[call]
-    ops = fused_ops(c.symbol)
-    _req(ops is not None and set(ops) <= LABEL | set(extra) and set(need) <= set(ops),
-         f"call [{call}] {c.fn}: not a pure permutation (ops {ops}, allowed {sorted(LABEL | set(extra))})")
-    _req(len(c.outs) == 1, f"call [{call}] {c.fn}: {len(c.outs)} outputs")
-    return ops
+    """The call only permutes data (+ the ops in ``extra``): decided by ``pure_perm.check`` on the Relay op
+    semantics recorded at convert (op sequence, shapes, transpose axes, element count, one output)."""
+    return pure_perm.check(cg, call, extra=extra, need=need, stage=_STAGE)
 
 
 def _elems(cg: CallGraph, t: int) -> int:
