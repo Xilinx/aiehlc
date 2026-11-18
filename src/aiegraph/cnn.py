@@ -43,8 +43,13 @@ def _c64(v: int) -> int:
 
 
 def instance(N: int, K: int, M: int) -> tuple:
-    """(Ng, Kg, PX) of the gemm_kacc instance a layer GEMM N x K x M runs on."""
-    return _c64(N), _c64(K), PX_SMALL if M <= PX_SMALL else PX_WIDE
+    """(Ng, Kg, PX) of the gemm_kacc instance a layer GEMM N x K x M runs on. Square ports (Ng == PX: the a and
+    b blocks walk the same rows) are avoided -- aiehlc cannot place their buffers (gemm_kacc_256x1152x256: no
+    4096 B area in DMb at 0x78000) -- by taking the other launch width."""
+    ng, px = _c64(N), PX_SMALL if M <= PX_SMALL else PX_WIDE
+    if ng == px:
+        px = PX_WIDE if px == PX_SMALL else PX_SMALL
+    return ng, _c64(K), px
 
 
 def kacc_geom(ch: int, k: int, px: int) -> dict:
