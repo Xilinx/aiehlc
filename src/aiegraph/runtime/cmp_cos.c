@@ -1,6 +1,8 @@
-/* p1_cos.c — board-side compare for sprint unet-board-apu-aie (Shuhua, zoo/p1_apu).
- * Reference arrays are EMBEDDED from p1_ref.h, generated on x86 by export_real_io.py
- * (p00/step0/cond, x86 ORT unet_sim.onnx / part_01_stem_in).  Build with -I<real_io dir>.
+/* cmp_cos.c — aiegraph board-side compare tool (was example/aiegraph/unet_bk_sdm_tiny/p1_cos.c, Shuhua zoo/p1_apu).
+ * Prints exactly one "CMP <model> board=... cos=... PASS|FAIL" line: <model> is the tag the caller passes (the
+ * model's name, e.g. "unet-kincore"); the board checkers (check_smoke.py) parse that line.
+ * Reference arrays are EMBEDDED from p1_ref.h, generated on x86 by the model's export script (text from
+ * src/aiegraph/runtime/cmp_ref_head.h + cmp_ref_array.h).  Build with -I<real_io dir>.
  *
  * Library use (link into the board elf, compile with -DP1_COS_NO_MAIN):
  *   int p1_cmp(const char *tag, const float *got, const char *dtype,
@@ -8,7 +10,7 @@
  *   tag "part01-apu" / "part01-*" -> ref_part01_out (in_crc32 = sample.crc32)
  *   any other tag                 -> ref_unet_out   (in_crc32 = unet_in.crc32)
  *   returns 0 on PASS, 1 on FAIL; prints exactly one CMP line.
- * Standalone: p1_cos <tag> <got.bin> <dtype> <aie_launches> <coreen_calls> <run_rc> <aie_flop_frac>
+ * Standalone: cmp_cos <tag> <got.bin> <dtype> <aie_launches> <coreen_calls> <run_rc> <aie_flop_frac>
  * PASS: cos >= 0.999; and unless tag == "part01-apu" or tag starts with "apu-": N >= 1, N == M, run_rc == 0.
  */
 #include <math.h>
@@ -65,7 +67,7 @@ int main(int argc, char **argv) {
     float *got = malloc(n * sizeof(float));
     FILE *f = fopen(argv[2], "rb");
     if (!got || !f || fread(got, sizeof(float), n, f) != (size_t)n) {
-        fprintf(stderr, "p1_cos: cannot read %ld floats from %s\n", n, argv[2]);
+        fprintf(stderr, "cmp_cos: cannot read %ld floats from %s\n", n, argv[2]);
         return 2;
     }
     fclose(f);

@@ -326,8 +326,8 @@ REF=$WORK/host_seed2.png ./run_orange.sh $WORK/build/main.elf $WORK/img 2 25
 | 想做什么 | 改哪里 |
 |---|---|
 | 换一组层上 AIE | `partition_p4a.json`，或者用 `src/aiegraph/autopart.py` 重新生成 |
-| 改 gemm_kacc kernel 的写法或切法 | `unet_aie.py` 的 `KACC_KERNEL`（kernel 模板）和 `kacc_geom()`（切法） |
-| 改 flash-attention | `fa_attn.py` 的 `FA_KERNEL` 和 `FA_HOST` |
+| 改 gemm_kacc kernel 的写法或切法 | [`src/aiednn/gemm/gemm_kacc_kernel.cc`](../../src/aiednn/gemm/gemm_kacc_kernel.cc)（kernel 模板，`unet_aie.KACC_KERNEL`）和 `unet_aie.py` 的 `kacc_geom()`（切法） |
+| 改 flash-attention | [`src/aiednn/attention/fa_kernel.cc`](../../src/aiednn/attention/fa_kernel.cc) 和 [`fa_host.cc`](../../src/aiednn/attention/fa_host.cc)（`fa_attn.FA_KERNEL` / `FA_HOST`） |
 | 单独测一个 kernel | `kacc_bench.sh --gemm` / `--bmm` |
 | 看时间花在哪 | 板上日志里的 `LAUNCH split` 和 `PROF` 行 |
 
