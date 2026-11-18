@@ -2702,3 +2702,25 @@ def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, c
                    .replace("@E@", ENTRY).replace("@SPEC@", spec))
     (kdst / f"{ENTRY}_ref.c").write_text(REF_C.replace("@E@", ENTRY))
     return kcc
+
+
+# S6 (unet-m3): the driver template -- the C glue aiegraph places in graph_driver.c (emod.driver_template).
+# Same text, same anchors as the old patch_driver residue: declarations + PROF glue before kernel_ws,
+# graph_bf16_expand timed into the following site, graph_run resets the pending expand time.
+EXPAND_ENTER = "    XTime e0_, e1_;\n    XTime_GetTime(&e0_);\n"
+EXPAND_EXIT = "    XTime_GetTime(&e1_);\n    up_pending_exp += e1_ - e0_;\n    up_exp_calls++;\n"
+RUN_ENTER = "    up_pending_exp = 0; /* P1 PROF: expands before graph_run are not graph_run time */\n"
+
+
+def driver_template(att: list) -> dict:
+    """``emod.driver_template(**driver_template(att))``: conv / linear / FA steps are aiegraph group
+    steps (their own declarations come from aiegraph); only the FA kernel declarations and the PROF
+    glue are template text. *att* must be the GFA (``fa``) attention layers, or empty."""
+    if att and not all(c.get("fa") is not None and c.get("fa_steps") for c in att):
+        raise ValueError("driver_template: attention layers must be aiegraph FA group steps (--attn-fa)")
+    if att:
+        import fa_attn
+        decls = fa_attn.DECL_FA + fa_attn.DECL_KL + prof_c_attn() + "\n"
+    else:
+        decls = PROF_C + "\n"
+    return dict(decls=decls, expand_enter=EXPAND_ENTER, expand_exit=EXPAND_EXIT, run_enter=RUN_ENTER)

@@ -402,7 +402,7 @@ def aie_conv(a, emod, out: Path, hdr: Path):
         # tile launches) does not apply on this path
         import kplan
         if a.kincore_layers != "all":
-            # P4bp: probe subset -- unselected layers keep their TVM C call site (patch_driver skips them)
+            # P4bp: probe subset -- unselected layers keep their TVM C call site (no aiegraph group for them)
             want = sorted({int(x) for x in a.kincore_layers.split(",") if x.strip()})
             bad = [i for i in want if not 0 <= i < len(sel)]
             if not want or bad:
@@ -488,19 +488,14 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     log(f"aiegraph offload_group: {len(sel)} one-call groups ({len(sel) - len(lin)} unet_aie_conv + "
         f"{len(lin)} unet_aie_linear), WPRE bf16 kacc-layout weights {nw} B (layers/partition.json groups)")
 
-    orig = getattr(ab.generate_driver, "_p35w_orig", ab.generate_driver)
-
-    def generate_driver(graph_path, params_path, out_dir, *args, **kw):
-        r = orig(graph_path, params_path, out_dir, *args, **kw)
-        f = Path(out_dir) / "graph_driver.c"
-        t, n = ua.patch_driver(f.read_text(), att)   # conv / linear sites: aiegraph group steps
-        n += len(sel)
-        f.write_text(t)
-        log(f"graph_driver.c: {n} partition call sites -> unet_aie_conv ({n - len(lin) - len(att)}) + "
-            f"unet_aie_linear ({len(lin)})" + (f" + unet_aie_attn ({len(att)})" if att else ""))
-        return r
-    generate_driver._p35w_orig = orig
-    ab.generate_driver = generate_driver
+    # S6: the C glue (FA kernel declarations, PROF macros, expand timing) is the driver template that
+    # aiegraph places at checked anchors of every generated driver -- registered before keep_layout so
+    # it runs first; the build_unet.py side only declares groups + this template
+    emod.driver_template(**ua.driver_template(att))
+    n = len(sel) + len(att)
+    log(f"graph_driver.c: {n} partition call sites -> unet_aie_conv ({n - len(lin) - len(att)}) + "
+        f"unet_aie_linear ({len(lin)})" + (f" + unet_aie_attn ({len(att)})" if att else "") +
+        " (aiegraph group steps + driver template)")
 
     if a.keep_layout:
         # P4a/S5: keep the AIE layout between layers -- aiegraph codegen (keep_layout_codegen) runs on every

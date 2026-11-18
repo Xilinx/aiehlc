@@ -1,0 +1,4995 @@
+{
+ "sprint": "unet-m2-s6",
+ "phase": "GPA",
+ "generator": "aiegraph.autopart",
+ "mode": "attn",
+ "onnx": "/scratch/staff/huaj/modelzoo/artifacts/bk-sdm-tiny/unet_sim.onnx",
+ "wdtype": "bf16",
+ "rule": {
+  "classes": [
+   "conv",
+   "linear",
+   "attn"
+  ],
+  "legality": "plan.kincore_geom legal and K%64==N%64==0; M padded to 64",
+  "pad_kn": false,
+  "l37_convs": null,
+  "budget_ms": null,
+  "ms_per_launch": 8.008,
+  "attn": "AIE: partition.match_attention bmm->softmax->bmm, per-head, M/K/N padded to 64",
+  "gemv": "M==1, not a GEMM"
+ },
+ "N": 216200,
+ "kincore_launches": 447,
+ "aie_ms_est": 3579.576,
+ "aie_macs": 54369320960,
+ "total_gemm_macs": 54392913920,
+ "aie_flop_frac": 0.9995662493825078,
+ "machine": "x86_64",
+ "layers": [
+  {
+   "part": 2,
+   "file": "part_02_down_blocks_0_resnets_0.onnx",
+   "node": "/u/down_blocks.0/resnets.0/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.0.resnets.0.conv1.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     1024,
+     2880,
+     320
+    ]
+   ],
+   "idx": 0
+  },
+  {
+   "part": 2,
+   "file": "part_02_down_blocks_0_resnets_0.onnx",
+   "node": "/u/down_blocks.0/resnets.0/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.0.resnets.0.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     1024,
+     2880,
+     320
+    ]
+   ],
+   "idx": 1
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "/u/down_blocks.0/attentions.0/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.0.attentions.0.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 2
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "MatMul_0",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "_v_2610",
+   "macs": 314572800,
+   "launches": 1200,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ],
+    [
+     1024,
+     320,
+     320
+    ],
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 3,
+   "pad": {
+    "nsplit": 3,
+    "orig": [
+     1024,
+     320,
+     960
+    ]
+   }
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn1/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 335544320,
+   "launches": 2048,
+   "mkn": [
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ]
+   ],
+   "idx": 4,
+   "pad": {
+    "K": 64,
+    "nsplit": 2,
+    "batch": 8,
+    "orig": [
+     1024,
+     40,
+     1024
+    ]
+   },
+   "attn_group": 0,
+   "attn_role": "qk",
+   "softmax": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn1/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 335544320,
+   "launches": 2048,
+   "mkn": [
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ]
+   ],
+   "idx": 5,
+   "pad": {
+    "N": 64,
+    "batch": 8,
+    "orig": [
+     1024,
+     1024,
+     40
+    ]
+   },
+   "attn_group": 0,
+   "attn_role": "pv",
+   "softmax": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "Gemm_3",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2862",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 6
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn2/to_q/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2863",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 7
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn2/to_k/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2864",
+   "macs": 18923520,
+   "launches": 120,
+   "mkn": [
+    [
+     128,
+     768,
+     320
+    ]
+   ],
+   "idx": 8,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     320
+    ]
+   }
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn2/to_v/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2865",
+   "macs": 18923520,
+   "launches": 120,
+   "mkn": [
+    [
+     128,
+     768,
+     320
+    ]
+   ],
+   "idx": 9,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     320
+    ]
+   }
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn2/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 25231360,
+   "launches": 256,
+   "mkn": [
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ]
+   ],
+   "idx": 10,
+   "pad": {
+    "K": 64,
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     1024,
+     40,
+     77
+    ]
+   },
+   "attn_group": 1,
+   "attn_role": "qk",
+   "softmax": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn2/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 25231360,
+   "launches": 256,
+   "mkn": [
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ]
+   ],
+   "idx": 11,
+   "pad": {
+    "K": 128,
+    "N": 64,
+    "batch": 8,
+    "orig": [
+     1024,
+     77,
+     40
+    ]
+   },
+   "attn_group": 1,
+   "attn_role": "pv",
+   "softmax": "/u/down_blocks.0/attentions.0/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "Gemm_6",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2885",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 12
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "Gemm_9",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2886",
+   "macs": 838860800,
+   "launches": 3200,
+   "mkn": [
+    [
+     1024,
+     320,
+     640
+    ],
+    [
+     1024,
+     320,
+     640
+    ],
+    [
+     1024,
+     320,
+     640
+    ],
+    [
+     1024,
+     320,
+     640
+    ]
+   ],
+   "idx": 13,
+   "pad": {
+    "nsplit": 4,
+    "orig": [
+     1024,
+     320,
+     2560
+    ]
+   }
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "Gemm_12",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2887",
+   "macs": 419430400,
+   "launches": 1600,
+   "mkn": [
+    [
+     1024,
+     1280,
+     320
+    ]
+   ],
+   "idx": 14
+  },
+  {
+   "part": 3,
+   "file": "part_03_down_blocks_0_attentions_0.onnx",
+   "node": "/u/down_blocks.0/attentions.0/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.0.attentions.0.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 15
+  },
+  {
+   "part": 4,
+   "file": "part_04_down_blocks_0_downsamplers_0.onnx",
+   "node": "/u/down_blocks.0/downsamplers.0/conv/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.0.downsamplers.0.conv.weight",
+   "macs": 235929600,
+   "launches": 900,
+   "mkn": [
+    [
+     256,
+     2880,
+     320
+    ]
+   ],
+   "idx": 16
+  },
+  {
+   "part": 5,
+   "file": "part_05_down_blocks_1_resnets_0.onnx",
+   "node": "/u/down_blocks.1/resnets.0/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.1.resnets.0.conv1.weight",
+   "macs": 471859200,
+   "launches": 1800,
+   "mkn": [
+    [
+     256,
+     2880,
+     640
+    ]
+   ],
+   "idx": 17
+  },
+  {
+   "part": 5,
+   "file": "part_05_down_blocks_1_resnets_0.onnx",
+   "node": "/u/down_blocks.1/resnets.0/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.1.resnets.0.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     256,
+     5760,
+     640
+    ]
+   ],
+   "idx": 18
+  },
+  {
+   "part": 5,
+   "file": "part_05_down_blocks_1_resnets_0.onnx",
+   "node": "/u/down_blocks.1/resnets.0/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.1.resnets.0.conv_shortcut.weight",
+   "macs": 52428800,
+   "launches": 200,
+   "mkn": [
+    [
+     256,
+     320,
+     640
+    ]
+   ],
+   "idx": 19
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "/u/down_blocks.1/attentions.0/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.1.attentions.0.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 20
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "MatMul_14",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "_v_2617",
+   "macs": 314572800,
+   "launches": 1200,
+   "mkn": [
+    [
+     256,
+     640,
+     1920
+    ]
+   ],
+   "idx": 21
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn1/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 41943040,
+   "launches": 256,
+   "mkn": [
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ]
+   ],
+   "idx": 22,
+   "pad": {
+    "K": 128,
+    "batch": 8,
+    "orig": [
+     256,
+     80,
+     256
+    ]
+   },
+   "attn_group": 2,
+   "attn_role": "qk",
+   "softmax": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn1/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 41943040,
+   "launches": 256,
+   "mkn": [
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ]
+   ],
+   "idx": 23,
+   "pad": {
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     256,
+     256,
+     80
+    ]
+   },
+   "attn_group": 2,
+   "attn_role": "pv",
+   "softmax": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "Gemm_17",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2925",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 24
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn2/to_q/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2926",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 25
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn2/to_k/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2927",
+   "macs": 37847040,
+   "launches": 240,
+   "mkn": [
+    [
+     128,
+     768,
+     640
+    ]
+   ],
+   "idx": 26,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     640
+    ]
+   }
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn2/to_v/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2928",
+   "macs": 37847040,
+   "launches": 240,
+   "mkn": [
+    [
+     128,
+     768,
+     640
+    ]
+   ],
+   "idx": 27,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     640
+    ]
+   }
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn2/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 12615680,
+   "launches": 128,
+   "mkn": [
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ]
+   ],
+   "idx": 28,
+   "pad": {
+    "K": 128,
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     256,
+     80,
+     77
+    ]
+   },
+   "attn_group": 3,
+   "attn_role": "qk",
+   "softmax": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn2/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 12615680,
+   "launches": 128,
+   "mkn": [
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ]
+   ],
+   "idx": 29,
+   "pad": {
+    "K": 128,
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     256,
+     77,
+     80
+    ]
+   },
+   "attn_group": 3,
+   "attn_role": "pv",
+   "softmax": "/u/down_blocks.1/attentions.0/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "Gemm_20",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2948",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 30
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "Gemm_23",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2949",
+   "macs": 838860800,
+   "launches": 3200,
+   "mkn": [
+    [
+     256,
+     640,
+     5120
+    ]
+   ],
+   "idx": 31
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "Gemm_26",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2950",
+   "macs": 419430400,
+   "launches": 1600,
+   "mkn": [
+    [
+     256,
+     2560,
+     640
+    ]
+   ],
+   "idx": 32
+  },
+  {
+   "part": 6,
+   "file": "part_06_down_blocks_1_attentions_0.onnx",
+   "node": "/u/down_blocks.1/attentions.0/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.1.attentions.0.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 33
+  },
+  {
+   "part": 7,
+   "file": "part_07_down_blocks_1_downsamplers_0.onnx",
+   "node": "/u/down_blocks.1/downsamplers.0/conv/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.1.downsamplers.0.conv.weight",
+   "macs": 235929600,
+   "launches": 900,
+   "mkn": [
+    [
+     64,
+     5760,
+     640
+    ]
+   ],
+   "idx": 34
+  },
+  {
+   "part": 8,
+   "file": "part_08_down_blocks_2_resnets_0.onnx",
+   "node": "/u/down_blocks.2/resnets.0/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.2.resnets.0.conv1.weight",
+   "macs": 471859200,
+   "launches": 1800,
+   "mkn": [
+    [
+     64,
+     5760,
+     1280
+    ]
+   ],
+   "idx": 35
+  },
+  {
+   "part": 8,
+   "file": "part_08_down_blocks_2_resnets_0.onnx",
+   "node": "/u/down_blocks.2/resnets.0/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.2.resnets.0.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     64,
+     11520,
+     1280
+    ]
+   ],
+   "idx": 36
+  },
+  {
+   "part": 8,
+   "file": "part_08_down_blocks_2_resnets_0.onnx",
+   "node": "/u/down_blocks.2/resnets.0/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.2.resnets.0.conv_shortcut.weight",
+   "macs": 52428800,
+   "launches": 200,
+   "mkn": [
+    [
+     64,
+     640,
+     1280
+    ]
+   ],
+   "idx": 37
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "/u/down_blocks.2/attentions.0/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.2.attentions.0.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 38
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "MatMul_28",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "_v_2624",
+   "macs": 314572800,
+   "launches": 1200,
+   "mkn": [
+    [
+     64,
+     1280,
+     3840
+    ]
+   ],
+   "idx": 39
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn1/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 5242880,
+   "launches": 24,
+   "mkn": [
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ]
+   ],
+   "idx": 40,
+   "pad": {
+    "K": 192,
+    "batch": 8,
+    "orig": [
+     64,
+     160,
+     64
+    ]
+   },
+   "attn_group": 4,
+   "attn_role": "qk",
+   "softmax": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn1/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 5242880,
+   "launches": 24,
+   "mkn": [
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ]
+   ],
+   "idx": 41,
+   "pad": {
+    "N": 192,
+    "batch": 8,
+    "orig": [
+     64,
+     64,
+     160
+    ]
+   },
+   "attn_group": 4,
+   "attn_role": "pv",
+   "softmax": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "Gemm_31",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2988",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 42
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn2/to_q/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2989",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 43
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn2/to_k/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2990",
+   "macs": 75694080,
+   "launches": 480,
+   "mkn": [
+    [
+     128,
+     768,
+     1280
+    ]
+   ],
+   "idx": 44,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     1280
+    ]
+   }
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn2/to_v/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_2991",
+   "macs": 75694080,
+   "launches": 480,
+   "mkn": [
+    [
+     128,
+     768,
+     1280
+    ]
+   ],
+   "idx": 45,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     1280
+    ]
+   }
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn2/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 6307840,
+   "launches": 48,
+   "mkn": [
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ]
+   ],
+   "idx": 46,
+   "pad": {
+    "K": 192,
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     64,
+     160,
+     77
+    ]
+   },
+   "attn_group": 5,
+   "attn_role": "qk",
+   "softmax": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn2/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 6307840,
+   "launches": 48,
+   "mkn": [
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ]
+   ],
+   "idx": 47,
+   "pad": {
+    "K": 128,
+    "N": 192,
+    "batch": 8,
+    "orig": [
+     64,
+     77,
+     160
+    ]
+   },
+   "attn_group": 5,
+   "attn_role": "pv",
+   "softmax": "/u/down_blocks.2/attentions.0/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "Gemm_34",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3011",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 48
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "Gemm_37",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3012",
+   "macs": 838860800,
+   "launches": 3200,
+   "mkn": [
+    [
+     64,
+     1280,
+     10240
+    ]
+   ],
+   "idx": 49
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "Gemm_40",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3013",
+   "macs": 419430400,
+   "launches": 1600,
+   "mkn": [
+    [
+     64,
+     5120,
+     1280
+    ]
+   ],
+   "idx": 50
+  },
+  {
+   "part": 9,
+   "file": "part_09_down_blocks_2_attentions_0.onnx",
+   "node": "/u/down_blocks.2/attentions.0/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.down_blocks.2.attentions.0.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 51
+  },
+  {
+   "part": 10,
+   "file": "part_10_up_blocks_0_resnets_0.onnx",
+   "node": "/u/up_blocks.0/resnets.0/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.resnets.0.conv1.weight",
+   "macs": 1887436800,
+   "launches": 7200,
+   "mkn": [
+    [
+     64,
+     23040,
+     1280
+    ]
+   ],
+   "idx": 52
+  },
+  {
+   "part": 10,
+   "file": "part_10_up_blocks_0_resnets_0.onnx",
+   "node": "/u/up_blocks.0/resnets.0/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.resnets.0.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     64,
+     11520,
+     1280
+    ]
+   ],
+   "idx": 53
+  },
+  {
+   "part": 10,
+   "file": "part_10_up_blocks_0_resnets_0.onnx",
+   "node": "/u/up_blocks.0/resnets.0/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.resnets.0.conv_shortcut.weight",
+   "macs": 209715200,
+   "launches": 800,
+   "mkn": [
+    [
+     64,
+     2560,
+     1280
+    ]
+   ],
+   "idx": 54
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "/u/up_blocks.0/attentions.0/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.attentions.0.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 55
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "MatMul_42",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "_v_2631",
+   "macs": 314572800,
+   "launches": 1200,
+   "mkn": [
+    [
+     64,
+     1280,
+     3840
+    ]
+   ],
+   "idx": 56
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn1/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 5242880,
+   "launches": 24,
+   "mkn": [
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ]
+   ],
+   "idx": 57,
+   "pad": {
+    "K": 192,
+    "batch": 8,
+    "orig": [
+     64,
+     160,
+     64
+    ]
+   },
+   "attn_group": 6,
+   "attn_role": "qk",
+   "softmax": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn1/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 5242880,
+   "launches": 24,
+   "mkn": [
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ]
+   ],
+   "idx": 58,
+   "pad": {
+    "N": 192,
+    "batch": 8,
+    "orig": [
+     64,
+     64,
+     160
+    ]
+   },
+   "attn_group": 6,
+   "attn_role": "pv",
+   "softmax": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "Gemm_45",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3051",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 59
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn2/to_q/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3052",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 60
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn2/to_k/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3053",
+   "macs": 75694080,
+   "launches": 480,
+   "mkn": [
+    [
+     128,
+     768,
+     1280
+    ]
+   ],
+   "idx": 61,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     1280
+    ]
+   }
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn2/to_v/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3054",
+   "macs": 75694080,
+   "launches": 480,
+   "mkn": [
+    [
+     128,
+     768,
+     1280
+    ]
+   ],
+   "idx": 62,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     1280
+    ]
+   }
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn2/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 6307840,
+   "launches": 48,
+   "mkn": [
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ]
+   ],
+   "idx": 63,
+   "pad": {
+    "K": 192,
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     64,
+     160,
+     77
+    ]
+   },
+   "attn_group": 7,
+   "attn_role": "qk",
+   "softmax": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn2/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 6307840,
+   "launches": 48,
+   "mkn": [
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ]
+   ],
+   "idx": 64,
+   "pad": {
+    "K": 128,
+    "N": 192,
+    "batch": 8,
+    "orig": [
+     64,
+     77,
+     160
+    ]
+   },
+   "attn_group": 7,
+   "attn_role": "pv",
+   "softmax": "/u/up_blocks.0/attentions.0/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "Gemm_48",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3074",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 65
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "Gemm_51",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3075",
+   "macs": 838860800,
+   "launches": 3200,
+   "mkn": [
+    [
+     64,
+     1280,
+     10240
+    ]
+   ],
+   "idx": 66
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "Gemm_54",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3076",
+   "macs": 419430400,
+   "launches": 1600,
+   "mkn": [
+    [
+     64,
+     5120,
+     1280
+    ]
+   ],
+   "idx": 67
+  },
+  {
+   "part": 11,
+   "file": "part_11_up_blocks_0_attentions_0.onnx",
+   "node": "/u/up_blocks.0/attentions.0/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.attentions.0.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 68
+  },
+  {
+   "part": 12,
+   "file": "part_12_up_blocks_0_resnets_1.onnx",
+   "node": "/u/up_blocks.0/resnets.1/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.resnets.1.conv1.weight",
+   "macs": 1415577600,
+   "launches": 5400,
+   "mkn": [
+    [
+     64,
+     17280,
+     1280
+    ]
+   ],
+   "idx": 69
+  },
+  {
+   "part": 12,
+   "file": "part_12_up_blocks_0_resnets_1.onnx",
+   "node": "/u/up_blocks.0/resnets.1/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.resnets.1.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     64,
+     11520,
+     1280
+    ]
+   ],
+   "idx": 70
+  },
+  {
+   "part": 12,
+   "file": "part_12_up_blocks_0_resnets_1.onnx",
+   "node": "/u/up_blocks.0/resnets.1/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.resnets.1.conv_shortcut.weight",
+   "macs": 157286400,
+   "launches": 600,
+   "mkn": [
+    [
+     64,
+     1920,
+     1280
+    ]
+   ],
+   "idx": 71
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "/u/up_blocks.0/attentions.1/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.attentions.1.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 72
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "MatMul_56",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "_v_2638",
+   "macs": 314572800,
+   "launches": 1200,
+   "mkn": [
+    [
+     64,
+     1280,
+     3840
+    ]
+   ],
+   "idx": 73
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn1/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 5242880,
+   "launches": 24,
+   "mkn": [
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ],
+    [
+     64,
+     192,
+     64
+    ]
+   ],
+   "idx": 74,
+   "pad": {
+    "K": 192,
+    "batch": 8,
+    "orig": [
+     64,
+     160,
+     64
+    ]
+   },
+   "attn_group": 8,
+   "attn_role": "qk",
+   "softmax": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn1/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 5242880,
+   "launches": 24,
+   "mkn": [
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ],
+    [
+     64,
+     64,
+     192
+    ]
+   ],
+   "idx": 75,
+   "pad": {
+    "N": 192,
+    "batch": 8,
+    "orig": [
+     64,
+     64,
+     160
+    ]
+   },
+   "attn_group": 8,
+   "attn_role": "pv",
+   "softmax": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "Gemm_59",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3114",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 76
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn2/to_q/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3115",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 77
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn2/to_k/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3116",
+   "macs": 75694080,
+   "launches": 480,
+   "mkn": [
+    [
+     128,
+     768,
+     1280
+    ]
+   ],
+   "idx": 78,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     1280
+    ]
+   }
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn2/to_v/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3117",
+   "macs": 75694080,
+   "launches": 480,
+   "mkn": [
+    [
+     128,
+     768,
+     1280
+    ]
+   ],
+   "idx": 79,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     1280
+    ]
+   }
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn2/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 6307840,
+   "launches": 48,
+   "mkn": [
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ],
+    [
+     64,
+     192,
+     128
+    ]
+   ],
+   "idx": 80,
+   "pad": {
+    "K": 192,
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     64,
+     160,
+     77
+    ]
+   },
+   "attn_group": 9,
+   "attn_role": "qk",
+   "softmax": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn2/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 6307840,
+   "launches": 48,
+   "mkn": [
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ],
+    [
+     64,
+     128,
+     192
+    ]
+   ],
+   "idx": 81,
+   "pad": {
+    "K": 128,
+    "N": 192,
+    "batch": 8,
+    "orig": [
+     64,
+     77,
+     160
+    ]
+   },
+   "attn_group": 9,
+   "attn_role": "pv",
+   "softmax": "/u/up_blocks.0/attentions.1/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "Gemm_62",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3137",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 82
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "Gemm_65",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3138",
+   "macs": 838860800,
+   "launches": 3200,
+   "mkn": [
+    [
+     64,
+     1280,
+     10240
+    ]
+   ],
+   "idx": 83
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "Gemm_68",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3139",
+   "macs": 419430400,
+   "launches": 1600,
+   "mkn": [
+    [
+     64,
+     5120,
+     1280
+    ]
+   ],
+   "idx": 84
+  },
+  {
+   "part": 13,
+   "file": "part_13_up_blocks_0_attentions_1.onnx",
+   "node": "/u/up_blocks.0/attentions.1/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.attentions.1.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     64,
+     1280,
+     1280
+    ]
+   ],
+   "idx": 85
+  },
+  {
+   "part": 14,
+   "file": "part_14_up_blocks_0_upsamplers_0.onnx",
+   "node": "/u/up_blocks.0/upsamplers.0/conv/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.0.upsamplers.0.conv.weight",
+   "macs": 3774873600,
+   "launches": 14400,
+   "mkn": [
+    [
+     256,
+     11520,
+     1280
+    ]
+   ],
+   "idx": 86
+  },
+  {
+   "part": 15,
+   "file": "part_15_up_blocks_1_resnets_0.onnx",
+   "node": "/u/up_blocks.1/resnets.0/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.resnets.0.conv1.weight",
+   "macs": 2831155200,
+   "launches": 10800,
+   "mkn": [
+    [
+     256,
+     17280,
+     640
+    ]
+   ],
+   "idx": 87
+  },
+  {
+   "part": 15,
+   "file": "part_15_up_blocks_1_resnets_0.onnx",
+   "node": "/u/up_blocks.1/resnets.0/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.resnets.0.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     256,
+     5760,
+     640
+    ]
+   ],
+   "idx": 88
+  },
+  {
+   "part": 15,
+   "file": "part_15_up_blocks_1_resnets_0.onnx",
+   "node": "/u/up_blocks.1/resnets.0/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.resnets.0.conv_shortcut.weight",
+   "macs": 314572800,
+   "launches": 1200,
+   "mkn": [
+    [
+     256,
+     1920,
+     640
+    ]
+   ],
+   "idx": 89
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "/u/up_blocks.1/attentions.0/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.attentions.0.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 90
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "MatMul_70",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "_v_2645",
+   "macs": 314572800,
+   "launches": 1200,
+   "mkn": [
+    [
+     256,
+     640,
+     1920
+    ]
+   ],
+   "idx": 91
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn1/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 41943040,
+   "launches": 256,
+   "mkn": [
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ]
+   ],
+   "idx": 92,
+   "pad": {
+    "K": 128,
+    "batch": 8,
+    "orig": [
+     256,
+     80,
+     256
+    ]
+   },
+   "attn_group": 10,
+   "attn_role": "qk",
+   "softmax": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn1/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 41943040,
+   "launches": 256,
+   "mkn": [
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ]
+   ],
+   "idx": 93,
+   "pad": {
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     256,
+     256,
+     80
+    ]
+   },
+   "attn_group": 10,
+   "attn_role": "pv",
+   "softmax": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "Gemm_73",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3178",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 94
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn2/to_q/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3179",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 95
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn2/to_k/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3180",
+   "macs": 37847040,
+   "launches": 240,
+   "mkn": [
+    [
+     128,
+     768,
+     640
+    ]
+   ],
+   "idx": 96,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     640
+    ]
+   }
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn2/to_v/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3181",
+   "macs": 37847040,
+   "launches": 240,
+   "mkn": [
+    [
+     128,
+     768,
+     640
+    ]
+   ],
+   "idx": 97,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     640
+    ]
+   }
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn2/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 12615680,
+   "launches": 128,
+   "mkn": [
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ]
+   ],
+   "idx": 98,
+   "pad": {
+    "K": 128,
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     256,
+     80,
+     77
+    ]
+   },
+   "attn_group": 11,
+   "attn_role": "qk",
+   "softmax": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn2/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 12615680,
+   "launches": 128,
+   "mkn": [
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ]
+   ],
+   "idx": 99,
+   "pad": {
+    "K": 128,
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     256,
+     77,
+     80
+    ]
+   },
+   "attn_group": 11,
+   "attn_role": "pv",
+   "softmax": "/u/up_blocks.1/attentions.0/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "Gemm_76",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3201",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 100
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "Gemm_79",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3202",
+   "macs": 838860800,
+   "launches": 3200,
+   "mkn": [
+    [
+     256,
+     640,
+     5120
+    ]
+   ],
+   "idx": 101
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "Gemm_82",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3203",
+   "macs": 419430400,
+   "launches": 1600,
+   "mkn": [
+    [
+     256,
+     2560,
+     640
+    ]
+   ],
+   "idx": 102
+  },
+  {
+   "part": 16,
+   "file": "part_16_up_blocks_1_attentions_0.onnx",
+   "node": "/u/up_blocks.1/attentions.0/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.attentions.0.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 103
+  },
+  {
+   "part": 17,
+   "file": "part_17_up_blocks_1_resnets_1.onnx",
+   "node": "/u/up_blocks.1/resnets.1/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.resnets.1.conv1.weight",
+   "macs": 1415577600,
+   "launches": 5400,
+   "mkn": [
+    [
+     256,
+     8640,
+     640
+    ]
+   ],
+   "idx": 104
+  },
+  {
+   "part": 17,
+   "file": "part_17_up_blocks_1_resnets_1.onnx",
+   "node": "/u/up_blocks.1/resnets.1/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.resnets.1.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     256,
+     5760,
+     640
+    ]
+   ],
+   "idx": 105
+  },
+  {
+   "part": 17,
+   "file": "part_17_up_blocks_1_resnets_1.onnx",
+   "node": "/u/up_blocks.1/resnets.1/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.resnets.1.conv_shortcut.weight",
+   "macs": 157286400,
+   "launches": 600,
+   "mkn": [
+    [
+     256,
+     960,
+     640
+    ]
+   ],
+   "idx": 106
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "/u/up_blocks.1/attentions.1/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.attentions.1.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 107
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "MatMul_84",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "_v_2652",
+   "macs": 314572800,
+   "launches": 1200,
+   "mkn": [
+    [
+     256,
+     640,
+     1920
+    ]
+   ],
+   "idx": 108
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn1/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 41943040,
+   "launches": 256,
+   "mkn": [
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ],
+    [
+     256,
+     128,
+     256
+    ]
+   ],
+   "idx": 109,
+   "pad": {
+    "K": 128,
+    "batch": 8,
+    "orig": [
+     256,
+     80,
+     256
+    ]
+   },
+   "attn_group": 12,
+   "attn_role": "qk",
+   "softmax": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn1/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 41943040,
+   "launches": 256,
+   "mkn": [
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ],
+    [
+     256,
+     256,
+     128
+    ]
+   ],
+   "idx": 110,
+   "pad": {
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     256,
+     256,
+     80
+    ]
+   },
+   "attn_group": 12,
+   "attn_role": "pv",
+   "softmax": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "Gemm_87",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3241",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 111
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn2/to_q/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3242",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 112
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn2/to_k/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3243",
+   "macs": 37847040,
+   "launches": 240,
+   "mkn": [
+    [
+     128,
+     768,
+     640
+    ]
+   ],
+   "idx": 113,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     640
+    ]
+   }
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn2/to_v/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3244",
+   "macs": 37847040,
+   "launches": 240,
+   "mkn": [
+    [
+     128,
+     768,
+     640
+    ]
+   ],
+   "idx": 114,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     640
+    ]
+   }
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn2/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 12615680,
+   "launches": 128,
+   "mkn": [
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ]
+   ],
+   "idx": 115,
+   "pad": {
+    "K": 128,
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     256,
+     80,
+     77
+    ]
+   },
+   "attn_group": 13,
+   "attn_role": "qk",
+   "softmax": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn2/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 12615680,
+   "launches": 128,
+   "mkn": [
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ],
+    [
+     256,
+     128,
+     128
+    ]
+   ],
+   "idx": 116,
+   "pad": {
+    "K": 128,
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     256,
+     77,
+     80
+    ]
+   },
+   "attn_group": 13,
+   "attn_role": "pv",
+   "softmax": "/u/up_blocks.1/attentions.1/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "Gemm_90",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3264",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 117
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "Gemm_93",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3265",
+   "macs": 838860800,
+   "launches": 3200,
+   "mkn": [
+    [
+     256,
+     640,
+     5120
+    ]
+   ],
+   "idx": 118
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "Gemm_96",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3266",
+   "macs": 419430400,
+   "launches": 1600,
+   "mkn": [
+    [
+     256,
+     2560,
+     640
+    ]
+   ],
+   "idx": 119
+  },
+  {
+   "part": 18,
+   "file": "part_18_up_blocks_1_attentions_1.onnx",
+   "node": "/u/up_blocks.1/attentions.1/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.attentions.1.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     256,
+     640,
+     640
+    ]
+   ],
+   "idx": 120
+  },
+  {
+   "part": 19,
+   "file": "part_19_up_blocks_1_upsamplers_0.onnx",
+   "node": "/u/up_blocks.1/upsamplers.0/conv/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.1.upsamplers.0.conv.weight",
+   "macs": 3774873600,
+   "launches": 14400,
+   "mkn": [
+    [
+     1024,
+     5760,
+     640
+    ]
+   ],
+   "idx": 121
+  },
+  {
+   "part": 20,
+   "file": "part_20_up_blocks_2_resnets_0.onnx",
+   "node": "/u/up_blocks.2/resnets.0/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.2.resnets.0.conv1.weight",
+   "macs": 2831155200,
+   "launches": 10800,
+   "mkn": [
+    [
+     1024,
+     8640,
+     320
+    ]
+   ],
+   "idx": 122
+  },
+  {
+   "part": 20,
+   "file": "part_20_up_blocks_2_resnets_0.onnx",
+   "node": "/u/up_blocks.2/resnets.0/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.2.resnets.0.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     1024,
+     2880,
+     320
+    ]
+   ],
+   "idx": 123
+  },
+  {
+   "part": 20,
+   "file": "part_20_up_blocks_2_resnets_0.onnx",
+   "node": "/u/up_blocks.2/resnets.0/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.2.resnets.0.conv_shortcut.weight",
+   "macs": 314572800,
+   "launches": 1200,
+   "mkn": [
+    [
+     1024,
+     960,
+     320
+    ]
+   ],
+   "idx": 124
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "/u/up_blocks.2/attentions.0/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.2.attentions.0.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 125
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "MatMul_98",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "_v_2659",
+   "macs": 314572800,
+   "launches": 1200,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ],
+    [
+     1024,
+     320,
+     320
+    ],
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 126,
+   "pad": {
+    "nsplit": 3,
+    "orig": [
+     1024,
+     320,
+     960
+    ]
+   }
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn1/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 335544320,
+   "launches": 2048,
+   "mkn": [
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ]
+   ],
+   "idx": 127,
+   "pad": {
+    "K": 64,
+    "nsplit": 2,
+    "batch": 8,
+    "orig": [
+     1024,
+     40,
+     1024
+    ]
+   },
+   "attn_group": 14,
+   "attn_role": "qk",
+   "softmax": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn1/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 335544320,
+   "launches": 2048,
+   "mkn": [
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ]
+   ],
+   "idx": 128,
+   "pad": {
+    "N": 64,
+    "batch": 8,
+    "orig": [
+     1024,
+     1024,
+     40
+    ]
+   },
+   "attn_group": 14,
+   "attn_role": "pv",
+   "softmax": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "Gemm_101",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3305",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 129
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn2/to_q/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3306",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 130
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn2/to_k/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3307",
+   "macs": 18923520,
+   "launches": 120,
+   "mkn": [
+    [
+     128,
+     768,
+     320
+    ]
+   ],
+   "idx": 131,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     320
+    ]
+   }
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn2/to_v/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3308",
+   "macs": 18923520,
+   "launches": 120,
+   "mkn": [
+    [
+     128,
+     768,
+     320
+    ]
+   ],
+   "idx": 132,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     320
+    ]
+   }
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn2/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 25231360,
+   "launches": 256,
+   "mkn": [
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ]
+   ],
+   "idx": 133,
+   "pad": {
+    "K": 64,
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     1024,
+     40,
+     77
+    ]
+   },
+   "attn_group": 15,
+   "attn_role": "qk",
+   "softmax": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn2/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 25231360,
+   "launches": 256,
+   "mkn": [
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ]
+   ],
+   "idx": 134,
+   "pad": {
+    "K": 128,
+    "N": 64,
+    "batch": 8,
+    "orig": [
+     1024,
+     77,
+     40
+    ]
+   },
+   "attn_group": 15,
+   "attn_role": "pv",
+   "softmax": "/u/up_blocks.2/attentions.0/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "Gemm_104",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3328",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 135
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "Gemm_107",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3329",
+   "macs": 838860800,
+   "launches": 3200,
+   "mkn": [
+    [
+     1024,
+     320,
+     640
+    ],
+    [
+     1024,
+     320,
+     640
+    ],
+    [
+     1024,
+     320,
+     640
+    ],
+    [
+     1024,
+     320,
+     640
+    ]
+   ],
+   "idx": 136,
+   "pad": {
+    "nsplit": 4,
+    "orig": [
+     1024,
+     320,
+     2560
+    ]
+   }
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "Gemm_110",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3330",
+   "macs": 419430400,
+   "launches": 1600,
+   "mkn": [
+    [
+     1024,
+     1280,
+     320
+    ]
+   ],
+   "idx": 137
+  },
+  {
+   "part": 21,
+   "file": "part_21_up_blocks_2_attentions_0.onnx",
+   "node": "/u/up_blocks.2/attentions.0/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.2.attentions.0.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 138
+  },
+  {
+   "part": 22,
+   "file": "part_22_up_blocks_2_resnets_1.onnx",
+   "node": "/u/up_blocks.2/resnets.1/conv1/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.2.resnets.1.conv1.weight",
+   "macs": 1887436800,
+   "launches": 7200,
+   "mkn": [
+    [
+     1024,
+     5760,
+     320
+    ]
+   ],
+   "idx": 139
+  },
+  {
+   "part": 22,
+   "file": "part_22_up_blocks_2_resnets_1.onnx",
+   "node": "/u/up_blocks.2/resnets.1/conv2/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.2.resnets.1.conv2.weight",
+   "macs": 943718400,
+   "launches": 3600,
+   "mkn": [
+    [
+     1024,
+     2880,
+     320
+    ]
+   ],
+   "idx": 140
+  },
+  {
+   "part": 22,
+   "file": "part_22_up_blocks_2_resnets_1.onnx",
+   "node": "/u/up_blocks.2/resnets.1/conv_shortcut/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.2.resnets.1.conv_shortcut.weight",
+   "macs": 209715200,
+   "launches": 800,
+   "mkn": [
+    [
+     1024,
+     640,
+     320
+    ]
+   ],
+   "idx": 141
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "/u/up_blocks.2/attentions.1/proj_in/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.2.attentions.1.proj_in.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 142
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "MatMul_112",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "_v_2666",
+   "macs": 314572800,
+   "launches": 1200,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ],
+    [
+     1024,
+     320,
+     320
+    ],
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 143,
+   "pad": {
+    "nsplit": 3,
+    "orig": [
+     1024,
+     320,
+     960
+    ]
+   }
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn1/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 335544320,
+   "launches": 2048,
+   "mkn": [
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ],
+    [
+     1024,
+     64,
+     512
+    ]
+   ],
+   "idx": 144,
+   "pad": {
+    "K": 64,
+    "nsplit": 2,
+    "batch": 8,
+    "orig": [
+     1024,
+     40,
+     1024
+    ]
+   },
+   "attn_group": 16,
+   "attn_role": "qk",
+   "softmax": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn1/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 335544320,
+   "launches": 2048,
+   "mkn": [
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ],
+    [
+     1024,
+     1024,
+     64
+    ]
+   ],
+   "idx": 145,
+   "pad": {
+    "N": 64,
+    "batch": 8,
+    "orig": [
+     1024,
+     1024,
+     40
+    ]
+   },
+   "attn_group": 16,
+   "attn_role": "pv",
+   "softmax": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn1/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "Gemm_115",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3368",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 146
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn2/to_q/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3369",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 147
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn2/to_k/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3370",
+   "macs": 18923520,
+   "launches": 120,
+   "mkn": [
+    [
+     128,
+     768,
+     320
+    ]
+   ],
+   "idx": 148,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     320
+    ]
+   }
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn2/to_v/MatMul",
+   "op": "MatMul",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3371",
+   "macs": 18923520,
+   "launches": 120,
+   "mkn": [
+    [
+     128,
+     768,
+     320
+    ]
+   ],
+   "idx": 149,
+   "pad": {
+    "M": 128,
+    "orig": [
+     77,
+     768,
+     320
+    ]
+   }
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn2/MatMul",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 25231360,
+   "launches": 256,
+   "mkn": [
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ],
+    [
+     1024,
+     64,
+     128
+    ]
+   ],
+   "idx": 150,
+   "pad": {
+    "K": 64,
+    "N": 128,
+    "batch": 8,
+    "orig": [
+     1024,
+     40,
+     77
+    ]
+   },
+   "attn_group": 17,
+   "attn_role": "qk",
+   "softmax": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn2/MatMul_1",
+   "op": "MatMul",
+   "cls": "attn",
+   "weight": null,
+   "macs": 25231360,
+   "launches": 256,
+   "mkn": [
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ],
+    [
+     1024,
+     128,
+     64
+    ]
+   ],
+   "idx": 151,
+   "pad": {
+    "K": 128,
+    "N": 64,
+    "batch": 8,
+    "orig": [
+     1024,
+     77,
+     40
+    ]
+   },
+   "attn_group": 17,
+   "attn_role": "pv",
+   "softmax": "/u/up_blocks.2/attentions.1/transformer_blocks.0/attn2/Softmax",
+   "batch": 8
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "Gemm_118",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3391",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 152
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "Gemm_121",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3392",
+   "macs": 838860800,
+   "launches": 3200,
+   "mkn": [
+    [
+     1024,
+     320,
+     640
+    ],
+    [
+     1024,
+     320,
+     640
+    ],
+    [
+     1024,
+     320,
+     640
+    ],
+    [
+     1024,
+     320,
+     640
+    ]
+   ],
+   "idx": 153,
+   "pad": {
+    "nsplit": 4,
+    "orig": [
+     1024,
+     320,
+     2560
+    ]
+   }
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "Gemm_124",
+   "op": "Gemm",
+   "cls": "linear",
+   "weight": "onnx::MatMul_3393",
+   "macs": 419430400,
+   "launches": 1600,
+   "mkn": [
+    [
+     1024,
+     1280,
+     320
+    ]
+   ],
+   "idx": 154
+  },
+  {
+   "part": 23,
+   "file": "part_23_up_blocks_2_attentions_1.onnx",
+   "node": "/u/up_blocks.2/attentions.1/proj_out/Conv",
+   "op": "Conv",
+   "cls": "conv",
+   "weight": "u.up_blocks.2.attentions.1.proj_out.weight",
+   "macs": 104857600,
+   "launches": 400,
+   "mkn": [
+    [
+     1024,
+     320,
+     320
+    ]
+   ],
+   "idx": 155
+  }
+ ],
+ "cpu_gemm_layers": [
+  {
+   "part": 1,
+   "node": "/u/conv_in/Conv",
+   "cls": "conv",
+   "macs": 11796480,
+   "why": [
+    "K%64"
+   ]
+  },
+  {
+   "part": 24,
+   "node": "/u/conv_out/Conv",
+   "cls": "conv",
+   "macs": 11796480,
+   "why": [
+    "N%64"
+   ]
+  }
+ ]
+}

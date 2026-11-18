@@ -168,12 +168,28 @@ env -u AIEHLC_ROOT AIEHLC_BIN=$T/build/aiehlc $PY build_unet.py \
 | `--arm-layer-cflags-file` | A78 上 TVM C 代码的 NEON 编译选项 |
 | `--runtime-io --dump-out` | 输入放进 `.aiehlc_io` 段，输出转储到控制台，出图时要用 |
 
+`partition_p4a.json` 就在这个目录里（随代码提交），build.sh / 冒烟 / 橘子用的都是它。
+
+### 5.1 build_unet.py 里只有"声明组 + 生成模板"
+
+所有 offload 都由 aiegraph 完成，`build_unet.py` 不再改写任何 C 代码（没有 `patch_driver`，也不替换
+`generate_driver`，`emod.offload` 不用 `force=True`）。它对 aiegraph 只做这几件事：
+
+| 步骤 | aiegraph 调用 | 作用 |
+|---|---|---|
+| 匹配 | `emod.match("conv"/"linear", partition=...)`、attention 匹配器 | 把 partition 的每一行对应到 TVM 调用，得到组（输入、输出、权重） |
+| 声明组 | `emod.offload_group(g, kcc, steps=[ag.step(...)])` | conv / linear 是一调用一组；flash-attention 是多调用组（pack Q/K/V + run O，softmax 等调用由 aiegraph 删除）。放置、删除、提前写的检查都在 graph.json 上做，结果记在 `layers/partition.json` |
+| 权重 | `weights=g.w.as_bf16(layout=...)` | 权重在 weights.bin 里直接是 kernel 要的 bf16 布局，原地读 |
+| 驱动模板 | `emod.driver_template(**unet_aie.driver_template(att))` | FA kernel 的声明、PROF 计时宏、`graph_bf16_expand` 计时；aiegraph 把它们放在固定锚点上（锚点必须唯一，重复应用报错） |
+| keep-layout | `emod.keep_layout(plan)` | AIE 输出直接写成下一层的布局 |
+| 校验 + 构建 | `emod.offload(..., check="group")`、`emod.build(target="a78")` | 组级 x86 校验（TVM C 链 vs 步骤，cos≥0.999），一个库、一个 `routing()` |
+
 约 26 分钟。日志里应该能看到：
 
 ```
 [build_unet] KINCORE layers=156 launches_planned=258 kernel=bf16_gemm_kacc; shapes=38
 [build_unet] ctrlpkt=aot pragmas=6
-[build_unet] graph_driver.c: 156 partition call sites -> unet_aie_conv (48) + unet_aie_linear (72) + unet_aie_attn (36)
+[build_unet] graph_driver.c: 156 partition call sites -> unet_aie_conv (48) + unet_aie_linear (72) + unet_aie_attn (36) (aiegraph group steps + driver template)
 [build_unet] AIO section ... bytes=253248 n_in=3 crc32=a5b911e2 dump_out=1
 [build_unet] built .../main.elf -> $WORK/build/main.elf (657,579,872 B; weights.bin 646,757,376 B)
 GATE_RC=0

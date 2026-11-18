@@ -373,6 +373,17 @@ class EmbeddedModel:
             plan = plan_keep_layout(model, partition)
         return register(self.workdir, plan, log)
 
+    def driver_template(self, decls: str = "", expand_enter: str = "", expand_exit: str = "",
+                        run_enter: str = ""):
+        """The application's C glue in every driver ``arm_build`` generates for this workdir (S6):
+        ``decls`` before ``kernel_ws`` (step/kernel declarations, profiling macros), ``expand_enter`` /
+        ``expand_exit`` around ``graph_bf16_expand``'s loop, ``run_enter`` at the top of ``graph_run``.
+        Every anchor is checked (exactly once); applying twice is an error. Runs before passes
+        registered after it (call it before ``keep_layout``). Returns the registered pass."""
+        from .driver_template import register
+        return register(self.workdir, decls=decls, expand_enter=expand_enter, expand_exit=expand_exit,
+                        run_enter=run_enter)
+
     def offload_group(self, group, source=None, steps=(), record: bool = True, emit=None):
         """Place *steps* on *group*'s calls, run the placement / deletion / early-write
         checks on the graph and record the group in ``layers/partition.json``.
