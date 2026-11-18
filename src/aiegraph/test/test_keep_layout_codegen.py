@@ -367,7 +367,7 @@ int main(int argc, char **argv) {
 
 
 def _fa_src() -> str:
-    src = (UNET / "fa_attn.py").read_text()
+    src = (SRC / "aiednn" / "attention" / "fa_host.cc").read_text()  # fa_attn.FA_HOST
     a = src.index("static inline uint16_t fa_f2bf(float f)")
     helpers = src[a:src.index("#if UC_NEON", a)]
     packs = src[src.index("static void fa_pack_k("):src.index("static int fa_run_o(")]
@@ -377,7 +377,7 @@ def _fa_src() -> str:
     return HARNESS.replace("@SRC@", helpers + packs + runo)
 
 
-@pytest.mark.skipif(shutil.which("g++") is None or not (UNET / "fa_attn.py").is_file(),
+@pytest.mark.skipif(shutil.which("g++") is None or not (SRC / "aiednn" / "attention" / "fa_host.cc").is_file(),
                     reason="needs g++ and the UNet example")
 @pytest.mark.parametrize("N,M,D", [(1024, 1024, 40), (1024, 77, 40), (256, 256, 80), (256, 77, 80), (64, 64, 160),
                                    (64, 77, 160)])

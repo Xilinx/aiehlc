@@ -30,6 +30,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "src"))
+import aiednn  # noqa: E402
 import kacc_gemm as kg  # noqa: E402
 import unet_aie as ua  # noqa: E402
 
@@ -39,46 +40,7 @@ PALL = Path(os.environ.get("GATT_PART_ALL", "/scratch/staff/huaj/tmp/unet_m2/s6/
 ONNX = Path(os.environ.get("GATT_ONNX", "/scratch/staff/huaj/modelzoo/artifacts/bk-sdm-tiny/unet_sim.onnx"))
 BASE = os.environ.get("GATT_BASE", "85ec4ff")
 
-HARNESS = r"""
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-@DLT@
-typedef unsigned long long XTime;
-static void XTime_GetTime(XTime *t) { *t = 0; }
-#define UC_CTRLPKT 0
-#define UC_KW_ELEMS (1 << 22)
-#define UC_KX_ELEMS (1 << 22)
-#define UC_KY_ELEMS (1 << 21)
-static int32_t *g_kw = nullptr, *g_kx = nullptr, *g_ky = nullptr;
-static int uc_kalloc(void) {
-    if (g_ky)
-        return 0;
-    g_kw = (int32_t *)calloc(UC_KW_ELEMS / 2, 4);
-    g_kx = (int32_t *)calloc(UC_KX_ELEMS / 2, 4);
-    g_ky = (int32_t *)calloc(UC_KY_ELEMS, 4);
-    return (g_kw && g_kx && g_ky) ? 0 : -1;
-}
-static unsigned long long g_uc_aie_ticks = 0, g_uc_macs = 0;
-static int g_aie_launches = 0, g_uc_calls = 0, g_uc_rc = 0;
-static void uc_sync_pre(const void *, size_t, const void *, size_t, const void *, size_t) {}
-static void uc_sync_post(const void *, size_t) {}
-typedef void (*launch_cb)(int, int, int, long, long, long);
-static launch_cb g_cb = 0;
-extern "C" void set_cb(launch_cb c) { g_cb = c; }
-static int uc_kacc_launch(int N, int K, int M, int32_t *kw, int32_t *kx, int32_t *ky) {
-    g_cb(N, K, M, (long)(kw - g_kw), (long)(kx - g_kx), (long)(ky - g_ky));
-    return 0;
-}
-extern "C" void *bufs(int i) { uc_kalloc(); return i == 0 ? (void *)g_kw : i == 1 ? (void *)g_kx : (void *)g_ky; }
-extern "C" int launches(void) { return g_aie_launches; }
-@ATTN@
-extern "C" int site(int cid, void *args, int qk, int swap, int CHP, int PXP, int Kp, int kp, int kch, int splitpx,
-                    int S, int chs, int pxs, int tr) {
-    return unet_aie_attn(cid, args, 3, qk, swap, CHP, PXP, Kp, kp, kch, splitpx, S, chs, pxs, tr);
-}
-"""
+HARNESS = aiednn.template("attention/kacc_bmm_host_x86_harness.cc")  # x86 stubs around ATTN_HOST
 
 
 class DLT(ctypes.Structure):
@@ -228,7 +190,8 @@ def _base_module():
     return m
 
 
-KATTN, KPACK = 'extern "C" int unet_aie_attn(', '#include "aie_kacc_pack.h"'
+KATTN = 'extern "C" int unet_aie_attn('
+KPACK = next(ln for ln in aiednn.template("attention/kacc_bmm_host.cc").splitlines() if ln.endswith('"aie_kacc_pack.h"'))
 SPEC = '"out x"'   # stand-in for the carrier's offload prototype spec (same for both modules)
 
 
@@ -282,7 +245,7 @@ def test_driver():
           f"attn_instances={insts}/{len(ua.attn_shapes(att))} launches={sum(c['launches'] for c in att)}")
     assert natt == 36 and len(att) == 36 and groups == 18 and nsite == 36 and ntag == 36
     assert "op=aie_host_attn%s" in t and t.count("_nn_batch_matmul(args") == 0
-    assert 'extern "C" int unet_aie_attn(' in k and '#include "aie_kacc_pack.h"' in k and \
+    assert KATTN in k and KPACK in k and \
         'export    unet_aie_attn' in k and insts == len(ua.attn_shapes(att))
     # the conv / linear sites of the attn build are the same calls as without attn
     assert t.count("    unet_aie_conv(") == len(sel) and t.count("    unet_aie_linear(") == len(lin)
