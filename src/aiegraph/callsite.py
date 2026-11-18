@@ -186,8 +186,21 @@ def _onnx(onnx_path):
     return onnx.load(str(onnx_path))
 
 
-def conv_groups(cg, workdir, onnx_path, partition, model=None) -> list:
-    """One group per partition conv row (``cls`` not linear/attn), partition order."""
+def _groups_ok(groups, g: int, C: int, O: int) -> bool:
+    """ONNX conv ``group`` attribute *g* accepted by ``match("conv", groups=...)``"""
+    if groups == "any":
+        return True
+    if groups == "dw":
+        return g == C == O or g == 1
+    return g == int(groups)
+
+
+def conv_groups(cg, workdir, onnx_path, partition, model=None, groups=1) -> list:
+    """One group per partition conv row (``cls`` not linear/attn), partition order. ``groups``: the
+    ONNX ``group`` attribute accepted -- 1 (plain convs), ``"dw"`` (plain + depthwise, group == C ==
+    O) or ``"any"``; ``g.info["groups"]`` carries it, ``K`` is the per-group reduction ``C/g*KH*KW``."""
+    if groups not in ("dw", "any") and not (isinstance(groups, int) and groups >= 1):
+        raise AiegraphError(_STAGE, f"match('conv', groups={groups!r})", hint="1, 'dw' or 'any'")
     import numpy as np
     from onnx import helper, numpy_helper
     part = _partition(partition)
@@ -237,24 +250,27 @@ def conv_groups(cg, workdir, onnx_path, partition, model=None) -> list:
                                 f"with weight {L.get('weight')}")
         at = {a.name: helper.get_attribute_value(a) for a in n.attribute}
         pads = list(at.get("pads", [0, 0, 0, 0]))
-        if at.get("group", 1) != 1 or list(at.get("dilations", [1, 1])) != [1, 1] \
-                or pads[0] != pads[2] or pads[1] != pads[3]:
-            raise AiegraphError(_STAGE, f"{L['node']}: grouped / dilated / asymmetric-pad conv",
-                                hint="one-call conv groups take plain 2-D convs")
         c = by_name[L["node"]]
+        ng = int(at.get("group", 1))
+        ws = c["wshape"]
+        Cx = c["xshape"][1] * c["xshape"][4] if len(c["xshape"]) == 5 else -1
+        if not _groups_ok(groups, ng, Cx, ws[0] * ws[5]) or list(at.get("dilations", [1, 1])) != [1, 1] \
+                or pads[0] != pads[2] or pads[1] != pads[3]:
+            raise AiegraphError(_STAGE, f"{L['node']}: group={ng} / dilated / asymmetric-pad conv "
+                                f"(match groups={groups!r})",
+                                hint="one-call conv groups take 2-D convs; groups='dw' adds depthwise")
         if c["call"] in used:
             raise AiegraphError(_STAGE, f"{L['node']}: call [{c['call']}] matched twice")
         used.add(c["call"])
         gc = cg.calls[c["call"]]
-        ws = c["wshape"]
-        O, C, KH, KW = ws[0] * ws[5], ws[1] * ws[4], ws[2], ws[3]
+        O, C, KH, KW = ws[0] * ws[5], ws[1] * ws[4] * ng, ws[2], ws[3]
         M = c["yshape"][2] * c["yshape"][3]
         if c["xshape"][1] * c["xshape"][4] != C or c["yshape"][1] * c["yshape"][4] != O \
                 or [KH, KW] != list(at["kernel_shape"]):
             raise AiegraphError(_STAGE, f"{L['node']}: TVM call [{c['call']}] shapes x{c['xshape']} "
                                 f"y{c['yshape']} w{ws} disagree with the ONNX Conv")
-        if "mkn" in L and [M, C * KH * KW, O] != list(L["mkn"][0]):
-            raise AiegraphError(_STAGE, f"{L['node']}: M,K,N {[M, C * KH * KW, O]} != partition "
+        if "mkn" in L and [M, C // ng * KH * KW, O] != list(L["mkn"][0]):
+            raise AiegraphError(_STAGE, f"{L['node']}: M,K,N {[M, C // ng * KH * KW, O]} != partition "
                                 f"mkn {L['mkn'][0]}")
         if c["warg"] != 1:
             raise AiegraphError(_STAGE, f"{L['node']}: weight is arg {c['warg']} of call "
@@ -263,9 +279,9 @@ def conv_groups(cg, workdir, onnx_path, partition, model=None) -> list:
         info = dict(kind="conv", call=c["call"], node=c["node"], symbol=sym, func=gc.symbol,
                     wname=c["wname"], warg=c["warg"], nargs=len(gc.ins) + len(gc.outs),
                     wshape=ws, xshape=c["xshape"], yshape=c["yshape"], cid=L["idx"],
-                    onnx=L["node"], weight=L["weight"], macs=M * O * C * KH * KW,
+                    onnx=L["node"], weight=L["weight"], macs=M * O * C // ng * KH * KW,
                     sh=at["strides"][0], sw=at["strides"][1], ph=pads[0], pw=pads[1],
-                    M=M, N=O, K=C * KH * KW, folded=L["node"] in folded)
+                    M=M, N=O, K=C // ng * KH * KW, groups=ng, folded=L["node"] in folded)
         out.append(_one_call(cg, gc, f"conv{L['idx']}", c["wt"], info))
     return out
 

@@ -41,7 +41,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ._env import doctor, setup
-from .contract import Buf, BoundStep, KernelContract, Step, buf, check_steps, load_steps, step
+from .contract import Arg, Buf, BoundStep, KernelContract, Step, arg, buf, check_steps, load_steps, step
 from .group import CallGraph, Group, GroupPlan, group_step
 from .groupcheck import GroupCheckReport, group_check, tvm_chain
 from .board import PALMYRA, VEK385
@@ -68,7 +68,7 @@ __all__ = ["load", "from_onnx", "from_torch", "download_model", "ZOO", "Model",
            "compile", "guide", "doctor", "setup", "AiegraphError", "CheckReport",
            "DetectReport", "BuildReport", "AIProtoResult", "offload_prototype", "ai_offload_prototype",
            "OffloadPrototype", "Prototypes", "KernelFormat",
-           "step", "Step", "buf", "Buf", "BoundStep", "check_steps", "load_steps",
+           "step", "Step", "arg", "Arg", "buf", "Buf", "BoundStep", "check_steps", "load_steps",
            "CallGraph", "Group", "GroupPlan", "group_step",
            "GroupCheckReport", "group_check", "tvm_chain"]
 

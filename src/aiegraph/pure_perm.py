@@ -34,7 +34,7 @@ from pathlib import Path
 
 from .errors import AiegraphError
 
-__all__ = ["LABEL", "FusedFn", "OpSem", "opsem_path", "load", "check", "why_impure",
+__all__ = ["LABEL", "FusedFn", "OpSem", "opsem_path", "load", "check", "why_impure", "index_map", "permutation",
            "record_relay", "save_relay", "relay_capture"]
 
 _STAGE = "pure_perm"
@@ -175,6 +175,116 @@ def check(cg, call: int, extra=(), need=(), stage: str = _STAGE) -> list:
                             hint="the call does not match the keep-layout pattern: build without keep_layout "
                                  "or fix the partition")
     return f.op_names
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  the permutation itself: which input element lands where
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _axes(layout: str) -> list:
+    """``"NCHW4c"`` -> [("N", 0), ("C", 0), ("H", 0), ("W", 0), ("c", 4)] (sub-axis factor, 0 = primal)."""
+    out, num = [], ""
+    for ch in layout:
+        if ch.isdigit():
+            num += ch
+            continue
+        if ch.isupper() != (num == ""):
+            raise ValueError(f"layout {layout!r}")
+        out.append((ch, int(num) if num else 0))
+        num = ""
+    if num:
+        raise ValueError(f"layout {layout!r}")
+    return out
+
+
+def _to_primal(a, layout: str):
+    """array in *layout* -> (array in its primal axes, primal letters in src order)"""
+    import numpy as np
+    ax = _axes(layout)
+    prim = [c for c, f in ax if f == 0]
+    if sorted(c.upper() for c, f in ax if f) != sorted(set(c.upper() for c, f in ax if f)) or \
+            any(c.upper() not in prim for c, f in ax if f):
+        raise ValueError(f"layout {layout!r}")
+    if a.ndim != len(ax):
+        raise ValueError(f"layout {layout!r} vs rank {a.ndim}")
+    order, shape = [], []
+    for p in prim:
+        i = [k for k, (c, f) in enumerate(ax) if c == p][0]
+        sub = [k for k, (c, f) in enumerate(ax) if f and c == p.lower()]
+        order.append(i)
+        shape.append(a.shape[i])
+        if sub:
+            order.append(sub[0])
+            shape[-1] *= a.shape[sub[0]]
+    return np.ascontiguousarray(a.transpose(order)).reshape(shape), prim
+
+
+def _from_primal(a, prim: list, layout: str):
+    import numpy as np
+    ax = _axes(layout)
+    dprim = [c for c, f in ax if f == 0]
+    if sorted(dprim) != sorted(prim):
+        raise ValueError(f"layout {layout!r} vs primal {prim}")
+    a = a.transpose([prim.index(c) for c in dprim])
+    split, names = [], []
+    for k, p in enumerate(dprim):
+        sub = [f for c, f in ax if f and c == p.lower()]
+        if sub:
+            if a.shape[k] % sub[0]:
+                raise ValueError(f"layout {layout!r}: {p}={a.shape[k]} not a multiple of {sub[0]}")
+            split += [a.shape[k] // sub[0], sub[0]]
+            names += [p, p.lower()]
+        else:
+            split.append(a.shape[k])
+            names.append(p)
+    a = a.reshape(split)
+    return np.ascontiguousarray(a.transpose([names.index(c) for c, f in ax]))
+
+
+def index_map(fn: FusedFn, param: int = 0):
+    """Flat index map of a pure permutation: ``out.flat[i] == params[param].flat[m[i]]`` (int64 array), by
+    running the recorded ops on ``arange`` of that parameter. Element-wise ops (``multiply`` / ``add`` with
+    an operand of the same or a broadcast shape) leave the map as it is; ops on another operand (a scale chain
+    whose shapes differ from the tracked one) are skipped. ``None`` when the ops do not give a map of the
+    output (an op this simulator does not know, a shape that never reaches the output)."""
+    import numpy as np
+    if not 0 <= param < len(fn.params) or len(fn.outs) != 1:
+        return None
+    a = np.arange(_n(fn.params[param]), dtype=np.int64).reshape(fn.params[param] or [1])
+    try:
+        for o in fn.ops:
+            ins = [list(x) for x in o.get("ins", [])]
+            out = list(o.get("out", []))
+            if not ins or list(a.shape) != ins[0]:
+                if o["op"] in ELEMWISE and any(list(a.shape) == x for x in ins[1:]) and list(a.shape) == out:
+                    continue            # the tracked tensor is a later operand of a same-shape element-wise op
+                continue                # an op on another operand chain
+            op, at = o["op"], o.get("attrs") or {}
+            if op in ("reshape", "squeeze", "expand_dims"):
+                a = a.reshape(out or [1])
+            elif op == "transpose":
+                axes = at.get("axes")
+                a = np.ascontiguousarray(a.transpose(None if axes is None else [int(x) % a.ndim for x in axes]))
+            elif op == "layout_transform":
+                p, prim = _to_primal(a, at["src_layout"])
+                a = _from_primal(p, prim, at["dst_layout"])
+            elif op in ELEMWISE:
+                if out != ins[0]:
+                    return None         # broadcast growth of the tracked tensor
+            else:
+                return None
+            if list(a.shape) != out:
+                return None
+    except (KeyError, ValueError):
+        return None
+    if list(a.shape) != list(fn.outs[0]):
+        return None
+    return a.reshape(-1)
+
+
+def permutation(cg, call: int, param: int = 0):
+    """``index_map`` of call *call*'s saved op semantics for its *param*-th input."""
+    return index_map(OpSem.for_graph(cg).fn(cg, call), param)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

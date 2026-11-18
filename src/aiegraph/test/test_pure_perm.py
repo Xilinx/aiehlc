@@ -4,7 +4,7 @@ x86 only. ``pos`` tests: calls that only permute data (+ the allowed element-wis
 FusedFn records and on the ``<stem>_opsem.json`` that ``deploy_flow.build_c`` records from a real (tiny) Relay
 build, aligned with its graph.json. ``neg`` tests (counter-examples): transpose+multiply without the multiply
 allowed, element count not conserved (padding layout_transform), multi-output, non-permutation axes, a stale
-sidecar, and the FA head split with an ``exp`` (moved from test_keep_layout_codegen.py).
+sidecar, and the FA head split with an ``exp`` (moved from the retired test_keep_layout_codegen.py).
 """
 import json
 import sys
@@ -130,21 +130,20 @@ def test_pos_temb_sigmoid_multiply_layout():
 
 
 def test_pos_keep_layout_pure_uses_opsem(tmp_path):
-    """keep_layout_codegen._pure goes through pure_perm (no symbol parsing): a record whose ops differ from
-    the symbol's words decides by the ops"""
-    from aiegraph import keep_layout_codegen as klc
-    from test_keep_layout_codegen import _fa_net, opsem
+    """the purity decision goes through the saved op semantics (no symbol parsing): a record whose ops differ
+    from the symbol's words decides by the ops"""
+    from _synth_net import _fa_net, opsem
     n, _, t = _fa_net()
     (tmp_path / "net_graph.json").write_text(json.dumps(n.graph()))
     doc = opsem(n)
     (tmp_path / "net_opsem.json").write_text(json.dumps(doc))
     cg = CallGraph.load(tmp_path)
     k = cg.producer[t["o2"]]
-    assert klc._pure(cg, k) == ["reshape", "transpose", "reshape"]
+    assert pure_perm.check(cg, k) == ["reshape", "transpose", "reshape"]
     doc["nodes"][str(cg.calls[k].node)]["ops"][1]["op"] = "nn.relu"     # same symbol, impure semantics
     (tmp_path / "net_opsem.json").write_text(json.dumps(doc))
     with pytest.raises(AiegraphError, match="not a pure permutation"):
-        klc._pure(CallGraph.load(tmp_path), k)
+        pure_perm.check(CallGraph.load(tmp_path), k)
 
 
 # ─────────────────────────────────────────────────────────── counter-examples
@@ -182,7 +181,7 @@ def test_neg_axes_not_a_permutation():
 
 
 def test_neg_stale_or_missing_opsem(tmp_path):
-    from test_keep_layout_codegen import _fa_net, opsem
+    from _synth_net import _fa_net, opsem
     n, _, t = _fa_net()
     (tmp_path / "net_graph.json").write_text(json.dumps(n.graph()))
     cg = CallGraph.load(tmp_path)
@@ -198,8 +197,13 @@ def test_neg_stale_or_missing_opsem(tmp_path):
 
 
 def test_neg_fa_not_a_permutation_fails(tmp_path):
-    """(moved from test_keep_layout_codegen.py) an ``exp`` in the Q head split: the FA rewrite must fail"""
-    from test_keep_layout_codegen import _fa_net, _run
-    n, w, _ = _fa_net(impure=True)
+    """(moved from the retired test_keep_layout_codegen.py) an ``exp`` in the Q head split: not a permutation
+    even with the scale ``multiply`` allowed"""
+    from _synth_net import _fa_net, opsem
+    n, _, t = _fa_net(impure=True)
+    (tmp_path / "net_graph.json").write_text(json.dumps(n.graph()))
+    (tmp_path / "net_opsem.json").write_text(json.dumps(opsem(n)))
+    cg = CallGraph.load(tmp_path)
+    k = [c.call for c in cg.calls if c.fn == "reshape_exp_transpose"][0]
     with pytest.raises(AiegraphError, match=r"not a pure permutation .*\['exp'\] not allowed"):
-        _run(tmp_path, n, w)
+        pure_perm.check(cg, k, extra=("multiply",))

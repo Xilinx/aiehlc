@@ -469,24 +469,70 @@ def aie_conv(a, emod, out: Path, hdr: Path):
     # pre-laid out for gemm_kacc in weights.bin (aiegraph drops their graph_bf16_expand)
     if not a.kincore:
         raise SystemExit("aiegraph conv/linear groups need --kincore (kacc weight layout)")
-    nw = 0
-    for c in sel:
-        g = c["group"]
-        if c["kind"] == "linear":
-            st = ag.step("unet_aie_linear", reads=g.x, writes=g.y,
-                         weights=g.w.as_bf16(layout=lambda w, c=c: ua.kacc_dense_wlayout(w, c["N"], c["K"], c["pxs"])),
-                         consts=dict(cid=c["cid"], S=c["S"]), call=("cid", "args", "nargs", "wbf", "S"),
-                         wrap=("UP_AIE_BEGIN", "UP_AIE_END"), tag=f"aie unet_aie_lin {c['cid']}")
-        else:
-            st = ag.step("unet_aie_conv", reads=g.x, writes=g.y,
-                         weights=g.w.as_bf16(layout=lambda w, c=c: ua.kacc_wlayout(w, c["N"], c["K"], c["M"])),
-                         consts=dict(cid=c["cid"], sh=c["sh"], sw=c["sw"], ph=c["ph"], pw=c["pw"]),
-                         call=("cid", "args", "nargs", "wbf", "sh", "sw", "ph", "pw"),
-                         wrap=("UP_AIE_BEGIN", "UP_AIE_END"), tag=f"aie unet_aie_conv {c['cid']}")
-        plan = emod.offload_group(g, kcc, steps=[st])
-        nw += plan.steps[0]["weights"]["nbytes"]
-    log(f"aiegraph offload_group: {len(sel)} one-call groups ({len(sel) - len(lin)} unet_aie_conv + "
+    # P3 (unet-m4): --keep-layout = fold declarations -- match("conv+layout") (the conv scatter writes the
+    # NCHW / NHWC its reader wants), match("linear+layout") (residual into the linear scatter, the next conv
+    # reads [M][C] as NHWC), match("dense+silu") (SiLU scale on the dense input, weight pre-packed); every
+    # fold is checked on graph.json + opsem and offloaded as an aiegraph group (no driver text pass)
+    from aiegraph.fold import step_io
+    by_call = {c["group"].calls[0]: c for c in sel}
+    groups = [c["group"] for c in sel]
+    if a.keep_layout:
+        convg = [c["group"] for c in sel if c["kind"] != "linear"]
+        f1 = emod.match("conv+layout", base=convg, log=log)
+        f2 = emod.match("linear+layout", base=[c["group"] for c in lin], convs=convg, log=log)
+        groups += f1 + f2
+        log(f"aiegraph match: conv+layout={len(f1)} linear+layout={len(f2)} (folds, removed calls "
+            f"{sum(len(g.info['fold'].removed) for g in f1 + f2)})")
+        if keep is not None:   # partition keep_layout edges: each producer must be folded
+            folded = {k for g in f1 + f2 for k in g.calls}
+            miss = [e["node"] for e in keep["edges"] if next(c for c in sel + lin + att
+                                                              if c.get("onnx") == e["node"])["call"] not in folded]
+            if miss:
+                raise SystemExit(f"planned keep_layout edges not realized by a fold: {miss}")
+    cg = emod.call_graph()
+    nw = ng = 0
+    for g in emod.merge_groups(groups):
+        steps = []
+        for k in g.calls:
+            if k not in by_call:
+                continue        # a folded layout call: removed
+            c = by_call[k]
+            rd, wr, args = step_io(cg, g, k) if g.info.get("fold") else (c["group"].x, c["group"].y, None)
+            if c["kind"] == "linear":
+                steps.append(ag.step("unet_aie_linear", reads=rd, writes=wr, args=args, at=k if args else None,
+                                     weights=c["group"].w.as_bf16(layout=lambda w, c=c: ua.kacc_dense_wlayout(
+                                         w, c["N"], c["K"], c["pxs"])),
+                                     consts=dict(cid=c["cid"], S=c["S"]), call=("cid", "args", "nargs", "wbf", "S"),
+                                     wrap=("UP_AIE_BEGIN", "UP_AIE_END"), tag=f"aie unet_aie_lin {c['cid']}"))
+            else:
+                steps.append(ag.step("unet_aie_conv", reads=rd, writes=wr, args=args, at=k if args else None,
+                                     weights=c["group"].w.as_bf16(layout=lambda w, c=c: ua.kacc_wlayout(
+                                         w, c["N"], c["K"], c["M"])),
+                                     consts=dict(cid=c["cid"], sh=c["sh"], sw=c["sw"], ph=c["ph"], pw=c["pw"]),
+                                     call=("cid", "args", "nargs", "wbf", "sh", "sw", "ph", "pw"),
+                                     wrap=("UP_AIE_BEGIN", "UP_AIE_END"), tag=f"aie unet_aie_conv {c['cid']}"))
+        plan = emod.offload_group(g, kcc, steps=steps,
+                                  launch=dict(aie=sum(by_call[k]["launches"] for k in g.calls if k in by_call)))
+        nw += sum(s["weights"]["nbytes"] for s in plan.steps)
+        ng += 1
+    log(f"aiegraph offload_group: {len(sel)} call steps in {ng} groups ({len(sel) - len(lin)} unet_aie_conv + "
         f"{len(lin)} unet_aie_linear), WPRE bf16 kacc-layout weights {nw} B (layers/partition.json groups)")
+    if a.keep_layout:
+        nf = 0
+        for g in emod.match("dense+silu"):
+            i = g.info
+            pack = lambda w, i=i: w.reshape(i["N"] // i["block"], i["block"], i["K"]).transpose(0, 2, 1)
+            steps = [ag.step("silu_scale_x", reads=g.inputs, weights=g.w.as_bf16(layout=pack), at=g.calls[0]),
+                     ag.step("silu_scale_dense", writes=g.outputs, at=i["dense"])]
+            emit = {"silu_scale_x": {"template": "aiednn/elementwise/silu_scale_x.cc", "tag": "cpu silu_scale_x",
+                                     "params": dict(WPACK=i["packed"], NK=i["N"] * i["K"], X=i["x"], KLEN=i["K"],
+                                                    S="0" if i["scale"] is None else f"&tensors[{i['scale']}]")},
+                    "silu_scale_dense": {"template": "aiednn/elementwise/silu_scale_dense.cc",
+                                         "tag": "cpu " + i["symbol"].replace("tvmgen_default_fused_", ""),
+                                         "params": dict(FN=i["symbol"], NARGS=i["nargs"])}}
+            emod.offload_group(g, steps=steps, emit=emit)
+            nf += 1
+        log(f"aiegraph match('dense+silu'): {nf} groups (weight pre-packed in weights.bin, dense reads x*s)")
 
     # S6: the C glue (FA kernel declarations, PROF macros, expand timing) is the driver template that
     # aiegraph places at checked anchors of every generated driver -- registered before keep_layout so
@@ -497,15 +543,6 @@ def aie_conv(a, emod, out: Path, hdr: Path):
         f"unet_aie_linear ({len(lin)})" + (f" + unet_aie_attn ({len(att)})" if att else "") +
         " (aiegraph group steps + driver template)")
 
-    if a.keep_layout:
-        # P4a/S5: keep the AIE layout between layers -- aiegraph codegen (keep_layout_codegen) runs on every
-        # generated driver: the A78 head split/merge, transformer-out and conv-out layout ops + the temb weight
-        # re-pack go; partition keep_layout edges (plan_keep_layout) carry the producer's graph.json node
-        plan = None
-        if keep is not None:
-            by = {c.get("onnx"): c for c in sel + lin + att}
-            plan = dict(keep, edges=[dict(e, node_id=by[e["node"]]["node"]) for e in keep["edges"]])
-        emod.keep_layout(plan, log=log)
     # gates 3-4 = aiegraph's group-level x86 check (TVM's C vs the step's x86 model, cos >= 0.999,
     # nonfinite == 0), binding: a failing carrier is rejected and the build stops below
     rep = emod.offload(f"layer{lidx}", str(kcc), check="group", verbose=a.verbose)
@@ -550,8 +587,9 @@ def main(argv=None) -> int:
                          "ONE flash-attention (online softmax, fa_attn.py) on the AIE -- an aiegraph group offload "
                          "(S3): pack Q/K/V + run O steps, the other group calls (softmax included) removed by aiegraph")
     ap.add_argument("--keep-layout", action="store_true",
-                    help="P4a (needs --attn-fa): keep the AIE layout between layers (aiegraph keep_layout_codegen) -- FA packs read "
-                         "the linear outputs by stride (TVM head split/merge ops removed), temb dense weights pre-packed "
+                    help="P4a (needs --attn-fa): keep the AIE layout between layers -- aiegraph folds "
+                         "match('conv+layout' / 'linear+layout' / 'dense+silu') offloaded as groups: AIE convs write "
+                         "their reader's layout, residual into the linear scatter, temb dense weights pre-packed "
                          "in weights.bin (TVM per-call W*s re-pack removed)")
     ap.add_argument("--aie", choices=("none", "conv", "conv,linear", "conv,linear,attn"), default="none",
                     help="conv,linear (PDN): also the partition's linear layers (dense) on the AIE (needs --kincore); "

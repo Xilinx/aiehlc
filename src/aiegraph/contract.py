@@ -26,7 +26,7 @@ from . import _env
 from .errors import AiegraphError
 
 __all__ = ["KernelContract", "make_contract", "check_region", "CONSTRAINTS",
-           "Buf", "Step", "buf", "step", "BoundStep", "check_step", "check_steps", "load_steps"]
+           "Buf", "Step", "buf", "step", "Arg", "arg", "BoundStep", "check_step", "check_steps", "load_steps"]
 
 #: constraint key -> allowed values (and the Region attribute it is checked on)
 CONSTRAINTS = {
@@ -225,6 +225,8 @@ class Step:
     call: tuple = None              # "args" ABI: the C argument names, in order (S1)
     wrap: tuple = None              # (BEGIN, END) macros put around the call, given the call index
     tag: str = None                 # GRAPH_PROF tag of the call
+    at: int = None                  # the group call the step is pinned to (None: placed by data order)
+    args: tuple = None              # "args" ABI: the packed arguments (Arg) instead of the call's own
 
     def __repr__(self) -> str:
         c = ", ".join(f"{k}={v!r}" for k, v in self.consts.items())
@@ -232,16 +234,47 @@ class Step:
                 f"writes [{', '.join(map(str, self.writes))}] consts {{{c}}}")
 
 
+@dataclass(frozen=True)
+class Arg:
+    """One packed argument of an "args" ABI step: ``tensors[tensor]``, optionally seen through a
+    *label* -- the same buffer with another shape (``shape``, same element count), e.g. a
+    ``[M][C]`` buffer read as NHWC ``(1, 1, H, W, C)``: a layout change that is only a relabel.
+    ``early``: the kernel reads this argument completely before it writes any output (e.g. a conv
+    that packs its activation for the AIE first), so an output may share its buffer."""
+    tensor: int
+    shape: tuple = None
+    early: bool = False
+
+    def record(self) -> dict:
+        return {"tensor": int(self.tensor), **({} if self.shape is None else {"shape": list(self.shape)}),
+                **({"early": True} if self.early else {})}
+
+
+def arg(tensor, shape=None, early: bool = False) -> Arg:
+    """``ag.arg(g.y)`` / ``ag.arg(t, shape=(1, 1, H, W, C))`` -- a packed argument of a step."""
+    t = getattr(tensor, "tensor", tensor)
+    if isinstance(t, bool) or not isinstance(t, int):
+        raise AiegraphError("step", f"arg {tensor!r} names no graph tensor", hint="a tensor id or g.x / g.y")
+    if shape is not None:
+        shape = tuple(int(d) for d in shape)
+        if not shape or any(d <= 0 for d in shape):
+            raise AiegraphError("step", f"arg tensors[{t}]: label shape {shape}")
+    return Arg(int(t), shape, bool(early))
+
+
 #: names the "args" ABI fills in itself (everything else in ``call=`` is a const)
 CALL_SPECIALS = {"args": "void *args", "nargs": "int nargs", "wbf": "const uint16_t *wbf"}
 
 
 def step(name: str, reads=None, writes=None, consts=None, weights=None, call=None,
-         wrap=None, tag=None) -> Step:
+         wrap=None, tag=None, at=None, args=None) -> Step:
     """``call=`` selects the "args" ABI of a one-call group (S1): the step entry is
     called in place of the TVM call as ``name(<call>)``, where ``args`` / ``nargs`` are
     the TVM call's packed arguments, ``wbf`` the step's bf16 weight read in place from
-    ``weights.bin`` (``weights=g.w.as_bf16(...)``) and every other name a const."""
+    ``weights.bin`` (``weights=g.w.as_bf16(...)``) and every other name a const.
+    ``args=`` (with ``call=``): the packed arguments the step gets instead of the call's own
+    (``ag.arg`` items: another tensor of the group's boundary, or a relabel of a buffer).
+    ``at=``: pin the step to that call of the group (default: placed by data order)."""
     if not isinstance(name, str) or not name.isidentifier():
         raise AiegraphError("step", f"step name {name!r}", hint="the C entry name of the step")
     r = tuple(_as_buf(x, f"{name} reads") for x in _as_list(reads))
@@ -271,10 +304,16 @@ def step(name: str, reads=None, writes=None, consts=None, weights=None, call=Non
         unused = [k for k in c if k not in call]
         if unused:
             raise AiegraphError("step", f"{name}: consts {unused} are not in call={call}")
+    if args is not None:
+        if call is None:
+            raise AiegraphError("step", f"{name}: args= needs call= (the \"args\" ABI)")
+        args = tuple(a if isinstance(a, Arg) else arg(a) for a in args)
+    if at is not None and (isinstance(at, bool) or not isinstance(at, int)):
+        raise AiegraphError("step", f"{name}: at={at!r}", hint="a call index of the group")
     if wrap is not None and (len(tuple(wrap)) != 2 or not all(
             isinstance(m, str) and m.isidentifier() for m in wrap)):
         raise AiegraphError("step", f"{name}: wrap={wrap!r}", hint="(BEGIN_MACRO, END_MACRO)")
-    return Step(name, r, w, c, weights, call, None if wrap is None else tuple(wrap), tag)
+    return Step(name, r, w, c, weights, call, None if wrap is None else tuple(wrap), tag, at, args)
 
 
 @dataclass

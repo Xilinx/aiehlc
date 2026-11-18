@@ -26,9 +26,18 @@ deletion    every tensor the group produces that a call outside the group (or th
 early write a step writing T before T's original producer requires that no kept call in
             between touches T's buffer and no later step reads that buffer; writing it
             after an outside reader of T is an error as well.
+in place    an "args" ABI step writing T away from T's producer must not read another tensor
+            that lives in T's buffer (TVM reused the buffer once that tensor was dead -- the moved write
+            would clobber its own input).
+labels      an "args" ABI step may get other packed arguments (``ag.arg``): a tensor of the
+            group seen through another shape (a layout that is only a relabel). A label of a
+            group-internal tensor needs its producer to be a step and the buffer untouched by
+            any kept call in between.
 
 ``partition.json`` records each group (``groups[]``: members with their action, steps
-with slot, tensors and constants); ``reset_groups`` takes a whole group back out.
+with slot, tensors and constants, ``io`` = boundary name / shape / dtype per input and
+output, ``launch`` = what the main program launches for it); ``reset_groups`` takes a
+whole group back out.
 """
 
 from __future__ import annotations
@@ -211,6 +220,7 @@ class GroupPlan:
     group: Group
     steps: list                 # [{name, at, reads, writes, consts}]
     actions: dict               # call -> step name | "removed"
+    launch: dict = None         # what the main program launches for the group (record only)
 
     @property
     def removed(self) -> list:
@@ -225,9 +235,18 @@ class GroupPlan:
         return {c: (f"/* [{c}] */" if a != "removed" else f"/* [{c}] removed: group {self.group.name} */")
                 for c, a in self.actions.items()}
 
+    def io(self) -> dict:
+        """Boundary tensors by name / shape / dtype (every output: a group may have several)."""
+        f = lambda ts: [{"name": t.name, "tensor": t.tensor, "shape": list(t.shape),   # noqa: E731
+                         "dtype": t.dtype} for t in ts]
+        return {"inputs": f(self.group.inputs), "consts": f(self.group.consts),
+                "outputs": f(self.group.outputs)}
+
     def record(self) -> dict:
         g = self.group
-        return {"name": g.name, "calls": list(g.calls),
+        launch = dict(self.launch or {})
+        launch.setdefault("steps", len(self.steps))
+        return {"name": g.name, "calls": list(g.calls), "io": self.io(), "launch": launch,
                 "members": [{"call": c, "symbol": g.symbols.get(c, ""),
                              "action": "removed" if a == "removed" else "step",
                              **({} if a == "removed" else {"step": a})}
@@ -243,19 +262,75 @@ class GroupPlan:
         return "\n".join(lines)
 
 
+#: tokens the driver generator fills in (not template parameters): the call index, the
+#: step's bf16 weight in weights.bin as ``(const uint16_t *)(g_params + off)``
+GEN_TOKENS = ("K", "WBF")
+#: a template line that splits file-scope declarations (above) from the step's statements
+STEP_MARK = "//@@ step"
+
+
+def render_step(template: str, params: dict) -> tuple:
+    """``(decl, [statement, ...])`` of an aiednn step template rendered with *params*
+    (``@NAME@``; ``@K@`` / ``@WBF@`` are left for the driver generator). The text above a
+    ``//@@ step`` line is file-scope C (emitted once per driver), the rest the step's
+    statements, one per line."""
+    import sys
+    src = str(Path(__file__).resolve().parents[1])     # src/: aiednn sits beside aiegraph
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    import aiednn
+    want = set(aiednn.params(template)) - set(GEN_TOKENS)
+    kv = {k: v for k, v in dict(params or {}).items()}
+    if set(kv) != want:
+        raise AiegraphError(_STAGE, f"template {template}: missing params {sorted(want - set(kv))}, "
+                            f"unknown {sorted(set(kv) - want)}")
+    text = aiednn.render(template, **kv, **{k: f"@{k}@" for k in GEN_TOKENS
+                                             if f"@{k}@" in aiednn.template(template)})
+    lines = text.splitlines()
+    marks = [i for i, ln in enumerate(lines) if ln.strip() == STEP_MARK]
+    if len(marks) != 1:
+        raise AiegraphError(_STAGE, f"template {template}: {len(marks)} '{STEP_MARK}' lines",
+                            hint="exactly one: file-scope C above it, the step's statements below")
+    raw = aiednn.template(template).splitlines()
+    head = [ln for ln in raw[:[i for i, ln in enumerate(raw) if ln.strip() == STEP_MARK][0]] if "@" in ln
+            and any(f"@{k}@" in ln for k in aiednn.params(template))]
+    if head:
+        raise AiegraphError(_STAGE, f"template {template}: parameter in the file-scope part: {head[0].strip()!r}",
+                            hint="file-scope C is shared by every step of the driver: no @PARAM@ above the "
+                                 f"'{STEP_MARK}' line")
+    decl = "\n".join(lines[:marks[0]]).strip()
+    body = [ln.strip() for ln in lines[marks[0] + 1:] if ln.strip()]
+    return decl, body
+
+
 def emit_steps(plan: GroupPlan, emit) -> GroupPlan:
     """Attach the driver code of every step (S3): ``emit`` maps a step name -- or is a callable
-    taking the step record -- to ``{"c": [statement, ...], "tag": "..."}``. The statements are
-    emitted verbatim at the step's call (``@K@`` -> the call index) between
-    ``GRAPH_PROF_BEGIN/END``; ``arm_build.generate_driver`` refuses a group with a step that has none."""
+    taking the step record -- to ``{"c": [statement, ...], "tag": "..."}`` or to an aiednn
+    template ``{"template": "aiednn/<category>/<file>", "params": {...}, "tag": "..."}``
+    (``render_step``: file-scope declarations + statements). The statements are emitted
+    verbatim at the step's call (``@K@`` -> the call index, ``@WBF@`` -> the step's bf16
+    weight) between ``GRAPH_PROF_BEGIN/END`` (tag ``"cpu ..."`` for a step that runs on
+    the A78, else ``"aie <tag>"``); ``arm_build.generate_driver`` refuses a group with a
+    step that has none."""
     for s in plan.steps:
         e = emit(s) if callable(emit) else emit.get(s["name"])
+        if isinstance(e, dict) and e.get("template"):
+            decl, body = render_step(e["template"], e.get("params"))
+            e = dict(e, c=body)
+            s["template"] = e["template"]
+            s["params"] = dict(e.get("params") or {})
+            if decl:
+                s["decl"] = decl
         if not isinstance(e, dict) or not e.get("c"):
             raise AiegraphError(_STAGE, f"group {plan.group.name}: no driver code for step {s['name']}",
-                                hint='emit={step: {"c": [...], "tag": ...}}')
+                                hint='emit={step: {"template": "aiednn/<cat>/<file>", "params": {...}}} '
+                                     'or {step: {"c": [...], "tag": ...}}')
         c = [e["c"]] if isinstance(e["c"], str) else list(e["c"])
         if not all(isinstance(x, str) and x.strip() for x in c):
             raise AiegraphError(_STAGE, f"group {plan.group.name}: step {s['name']}: c must be statements")
+        if any("@WBF@" in x for x in c) and not s.get("weights"):
+            raise AiegraphError(_STAGE, f"group {plan.group.name}: step {s['name']} uses @WBF@ "
+                                f"but has no weights=", hint="ag.step(..., weights=g.w.as_bf16(...))")
         s["c"] = c
         s["tag"] = str(e.get("tag") or s["name"])
     return plan
@@ -327,19 +402,29 @@ def plan_group(cg: CallGraph, group: Group, steps) -> GroupPlan:
                 raise AiegraphError(_STAGE, f"group {group.name}: step {nm} writes tensors[{t}], "
                                     f"which the group does not produce",
                                     hint="steps write group outputs only (g.outputs)")
-        norm.append((nm, rd, wr, dict(getattr(s, "consts", {}) or {})))
+        norm.append((nm, rd, wr, dict(getattr(s, "consts", {}) or {}), s))
     names = [n for n, *_ in norm]
     if len(set(names)) != len(names):
         raise AiegraphError(_STAGE, f"group {group.name}: step names repeat {names}")
 
     # ---- placement -----------------------------------------------------------------
     taken, placed, prev = set(), [], -1
-    for nm, rd, wr, consts in norm:
+    for nm, rd, wr, consts, st in norm:
         acts = [t for t in rd if t not in cg.const]
         after = max([prev] + [cg.producer[t] for t in acts])
-        cand = [c for c in group.calls if c > after and c not in taken]
-        if acts:
-            cand = [c for c in cand if any(t in cg.calls[c].ins for t in acts)]
+        pin = getattr(st, "at", None)
+        if pin is not None:
+            if pin not in inside or pin in taken or pin <= after:
+                raise AiegraphError(_STAGE, f"group {group.name}: step {nm} pinned at [{pin}]: "
+                                    + ("not a call of the group" if pin not in inside else
+                                       "already taken" if pin in taken else
+                                       f"not after call [{after}] (previous step / input producer)"),
+                                    hint="at= is a free group call in data order")
+            cand = [pin]
+        else:
+            cand = [c for c in group.calls if c > after and c not in taken]
+            if acts:
+                cand = [c for c in cand if any(t in cg.calls[c].ins for t in acts)]
         if not cand:
             raise AiegraphError(_STAGE, f"group {group.name}: no free call for step {nm} "
                                 f"after call [{after}]",
@@ -347,7 +432,10 @@ def plan_group(cg: CallGraph, group: Group, steps) -> GroupPlan:
                                      "that reads its input")
         at = cand[0]
         taken.add(at)
-        placed.append({"name": nm, "at": at, "reads": rd, "writes": wr, "consts": consts})
+        rec = {"name": nm, "at": at, "reads": rd, "writes": wr, "consts": consts}
+        if getattr(st, "args", None) is not None:
+            rec["args"] = [a.record() for a in st.args]
+        placed.append(rec)
         prev = at
 
     kept = [c for c in range(len(cg.calls)) if c not in inside]
@@ -408,9 +496,90 @@ def plan_group(cg: CallGraph, group: Group, steps) -> GroupPlan:
         # a later step must not read a buffer this step has already overwritten
         # (checked above from the reader's side)
 
+    # ---- in place: a moved write must not clobber what the step itself reads -------------
+    by_step = {nm: st for nm, *_, st in norm}
+    for s in placed:
+        st = by_step[s["name"]]
+        if not getattr(st, "call", None):
+            continue                        # an emit= step reads its inputs before it writes
+        # "args" ABI: a kernel that streams its output while still reading its operands
+        own_in, own_out = set(cg.calls[s["at"]].ins), set(cg.calls[s["at"]].outs)
+        if s.get("args"):
+            packed = [cg.canon(a["tensor"]) for a in s["args"]]
+            written = [t for t in packed if t in s["writes"] or t in own_out]
+            early = {cg.canon(a["tensor"]) for a in s["args"] if a.get("early")}
+            reads = (set(packed) - set(written) - early) | (set(s["reads"]) - early)
+        else:
+            written, reads = list(s["writes"]) + sorted(own_out), own_in | set(s["reads"])
+        for t in written:
+            # TVM never puts a call's input in its own output buffer: only moved writes and
+            # arguments the call did not have can clash
+            cand = reads if cg.producer.get(t) != s["at"] else reads - own_in
+            sid = cg.storage(t)
+            clash = sorted(r for r in cand - {t} if r not in cg.const and cg.storage(r) == sid)
+            if clash:
+                raise AiegraphError(
+                    _STAGE, f"group {group.name}: in-place hazard -- step {s['name']} at "
+                    f"[{s['at']}] writes tensors[{t}] (storage {sid}, produced by call "
+                    f"[{cg.producer.get(t)}]) and reads tensors[{clash[0]}] from the same buffer",
+                    hint="TVM reused the buffer of a dead input; keep the call that writes it")
+
     actions = {c: "removed" for c in group.calls}
     for s in placed:
         actions[s["at"]] = s["name"]
+
+    # ---- labels: packed arguments the "args" ABI step gets instead of the call's own -------
+    for s in placed:
+        st = by_step[s["name"]]
+        if not s.get("args"):
+            continue
+        own = set(cg.calls[s["at"]].ins) | set(cg.calls[s["at"]].outs)
+        for a in s["args"]:
+            t = cg.canon(a["tensor"])
+            if not 0 <= t < len(cg.shape):
+                raise AiegraphError(_STAGE, f"group {group.name}: step {s['name']}: no tensors[{t}]")
+            n = 1
+            for d in cg.shape[t]:
+                n *= int(d)
+            if "shape" in a:
+                m = 1
+                for d in a["shape"]:
+                    m *= int(d)
+                if m != n:
+                    raise AiegraphError(_STAGE, f"group {group.name}: step {s['name']}: label "
+                                        f"{a['shape']} of tensors[{t}] {list(cg.shape[t])} changes the "
+                                        f"element count ({m} != {n})")
+            if t in own or t in cg.const:
+                continue
+            if t in s["writes"]:
+                continue                    # an output written here (checked as an early write)
+            p = cg.producer.get(t)
+            if p is None:
+                raise AiegraphError(_STAGE, f"group {group.name}: step {s['name']}: tensors[{t}] "
+                                    f"has no producer")
+            if p not in inside:
+                if not any(t in cg.calls[c].ins for c in group.calls):
+                    raise AiegraphError(_STAGE, f"group {group.name}: step {s['name']} gets "
+                                        f"tensors[{t}], which no call of the group reads")
+                ok_from = p
+            else:
+                if actions[p] == "removed":
+                    raise AiegraphError(_STAGE, f"group {group.name}: step {s['name']} gets "
+                                        f"tensors[{t}] of removed call [{p}] (never computed)")
+                ok_from = p
+            if not ok_from < s["at"]:
+                raise AiegraphError(_STAGE, f"group {group.name}: step {s['name']} at [{s['at']}] "
+                                    f"gets tensors[{t}] produced later, at [{p}]")
+            sid = cg.storage(t)
+            for c in range(ok_from + 1, s["at"]):
+                if c in inside:
+                    continue
+                hit = [o for o in cg.calls[c].outs if o != t and cg.storage(o) == sid]
+                if hit:
+                    raise AiegraphError(_STAGE, f"group {group.name}: overwritten buffer -- step "
+                                        f"{s['name']} at [{s['at']}] gets tensors[{t}] (storage {sid}), "
+                                        f"but call [{c}] {cg.calls[c].fn} writes tensors[{hit[0]}] "
+                                        f"into the same buffer first")
     return GroupPlan(group, placed, actions)
 
 

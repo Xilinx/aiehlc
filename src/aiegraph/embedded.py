@@ -37,6 +37,10 @@ _STATE = "aiegraph.json"
 _STATE_VERSION = 1
 
 
+#: match() kinds that fold a layout / scale call into the group of an offloaded call
+FOLDS = ("conv+layout", "linear+layout", "dense+silu")
+
+
 @dataclass
 class Layer:
     index: int
@@ -327,7 +331,7 @@ class EmbeddedModel:
         return make_group(self.call_graph(), calls, name)
 
     def match(self, kind: str = "attention", onnx=None, nodes=None, wdtype: str = None, *,
-              partition=None, model=None) -> list:
+              partition=None, model=None, base=None, convs=None, groups=1, log=None) -> list:
         """Groups by pattern. ``"attention"`` (S3): every bmm -> softmax -> bmm core with its
         Q/K/V layout calls and the O merge (data flow on graph.json), as
         ``attention.AttentionGroup`` (q/k/v/o, H/N/M/D, cls, scale, ONNX node names).
@@ -336,16 +340,35 @@ class EmbeddedModel:
         ``AIEGRAPH_WDTYPE`` (bf16 rounds the scale as the deployed call reads it).
         ``"conv"`` / ``"linear"`` (S1): one group of ONE call per partition row
         (``partition=`` partition.json path or dict, ``onnx=`` / ``model=`` the model it was
-        planned on), with ``g.x`` / ``g.y`` / ``g.w`` / ``g.info`` -- see ``aiegraph.callsite``."""
+        planned on), with ``g.x`` / ``g.y`` / ``g.w`` / ``g.info`` -- see ``aiegraph.callsite``.
+        ``groups`` (conv): the ONNX ``group`` attribute accepted -- 1, ``"dw"`` (depthwise,
+        group == C == O) or ``"any"``.
+        Folds (``aiegraph.fold``): ``"conv+layout"`` (``base=`` the conv groups),
+        ``"linear+layout"`` (``base=`` the linear groups, ``convs=`` the conv groups),
+        ``"dense+silu"``; join overlapping ones with ``merge_groups``."""
         import os
         if kind in ("conv", "linear"):
             from .callsite import conv_groups, linear_groups
             if partition is None or (onnx is None and model is None):
                 raise AiegraphError("group", f"match({kind!r}) needs partition= and onnx=")
-            fn = conv_groups if kind == "conv" else linear_groups
-            return fn(self.call_graph(), self.workdir, onnx, partition, model=model)
+            if kind == "conv":
+                return conv_groups(self.call_graph(), self.workdir, onnx, partition, model=model, groups=groups)
+            return linear_groups(self.call_graph(), self.workdir, onnx, partition, model=model)
+        if kind in FOLDS:
+            from . import fold
+            cg = self.call_graph()
+            if kind == "dense+silu":
+                return fold.dense_silu(cg)
+            if base is None:
+                raise AiegraphError("group", f"match({kind!r}) needs base= (the one-call groups it extends)")
+            if kind == "conv+layout":
+                return fold.conv_layout(cg, base, log=log)
+            if convs is None:
+                raise AiegraphError("group", "match('linear+layout') needs convs= (the conv groups)")
+            return fold.linear_layout(cg, base, convs, log=log)
         if kind != "attention":
-            raise AiegraphError("group", f"match({kind!r})", hint="'attention', 'conv', 'linear'")
+            raise AiegraphError("group", f"match({kind!r})",
+                                hint="'attention', 'conv', 'linear', " + ", ".join(repr(k) for k in FOLDS))
         from .attention import match_attention
         if onnx is None and self.model is not None and getattr(self.model, "onnx_path", None):
             onnx = self.model.onnx_path
@@ -354,24 +377,17 @@ class EmbeddedModel:
         return match_attention(self.call_graph(), onnx=onnx, nodes=nodes, wdtype=wdtype,
                                workdir=self.workdir)
 
+    def merge_groups(self, groups) -> list:
+        """One group per connected set of calls over one-call groups and the folds extending them
+        (``aiegraph.fold.merge``); ``fold.step_io(cg, g, call)`` gives each kept call's step io."""
+        from .fold import merge
+        return merge(self.call_graph(), groups)
+
     @property
     def groups(self) -> list:
         """The groups ``layers/partition.json`` records."""
         from .group import recorded_groups
         return recorded_groups(self.workdir)
-
-    def keep_layout(self, plan=None, *, model=None, partition=None, log=print):
-        """Keep the AIE layout between layers in the generated driver (S5, GAP 6a9d38): from now on every
-        driver ``arm_build`` generates for this workdir goes through ``keep_layout_codegen`` (temb SiLU fold
-        into the pre-packed weight, FA packs at the head split ops, residual into the linear scatter, AIE conv
-        writes the consumer layout), all checked on graph.json. ``plan`` = ``partition.plan_keep_layout``
-        result (or give ``model`` + ``partition`` to compute it); its edges, tagged with the producer's
-        graph.json ``node_id``, must all be realized. Returns the registered pass (``.last`` = its report)."""
-        from .keep_layout_codegen import register
-        if plan is None and partition is not None:
-            from .partition import plan_keep_layout
-            plan = plan_keep_layout(model, partition)
-        return register(self.workdir, plan, log)
 
     def driver_template(self, decls: str = "", expand_enter: str = "", expand_exit: str = "",
                         run_enter: str = ""):
@@ -379,12 +395,12 @@ class EmbeddedModel:
         ``decls`` before ``kernel_ws`` (step/kernel declarations, profiling macros), ``expand_enter`` /
         ``expand_exit`` around ``graph_bf16_expand``'s loop, ``run_enter`` at the top of ``graph_run``.
         Every anchor is checked (exactly once); applying twice is an error. Runs before passes
-        registered after it (call it before ``keep_layout``). Returns the registered pass."""
+        registered after it. Returns the registered pass."""
         from .driver_template import register
         return register(self.workdir, decls=decls, expand_enter=expand_enter, expand_exit=expand_exit,
                         run_enter=run_enter)
 
-    def offload_group(self, group, source=None, steps=(), record: bool = True, emit=None):
+    def offload_group(self, group, source=None, steps=(), record: bool = True, emit=None, launch=None):
         """Place *steps* on *group*'s calls, run the placement / deletion / early-write
         checks on the graph and record the group in ``layers/partition.json``.
         Undo with ``offload_reset("group:<name>")`` (the whole group).
@@ -392,12 +408,16 @@ class EmbeddedModel:
         *emit* (S3): ``{step name: {"c": [C statements], "tag": str}}`` or a callable
         ``(step record) -> that dict`` -- what the generated ``graph_driver.c`` runs at the
         step's slot (``@K@`` = the call index). With it the driver generator places the
-        steps and drops the removed calls (``arm_build.group_sites``)."""
+        steps and drops the removed calls (``arm_build.group_sites``). An emit entry may name an
+        aiednn template instead of C: ``{"template": "aiednn/<cat>/<file>", "params": {...}}``.
+        *launch*: what the main program launches for the group (recorded with the group's
+        ``io``: boundary name / shape / dtype, every output)."""
         from .group import Group, emit_steps, make_group, plan_group, record_group
         cg = self.call_graph()
         if not isinstance(group, Group):
             group = make_group(cg, group)
         plan = plan_group(cg, group, steps)
+        plan.launch = dict(launch or {})
         _emit_steps(self.workdir, cg, plan, steps)
         if emit is not None:
             emit_steps(plan, emit)
@@ -772,25 +792,31 @@ def _emit_steps(workdir: Path, cg, plan, steps) -> None:
     from .contract import CALL_SPECIALS
     by_name = {getattr(s, "name", None): s for s in steps}
     emit = [by_name[p["name"]] for p in plan.steps if getattr(by_name[p["name"]], "call", None)]
-    if not emit:
-        return
-    if len(emit) != len(plan.steps) or plan.removed:
-        raise AiegraphError("group", f"group {plan.group.name}: the args ABI (call=) is for "
-                            f"one-call groups; this group has {len(plan.steps)} steps, "
-                            f"{len(plan.removed)} removed calls",
-                            hint="multi-call groups use the AIEK_STEP ABI (S3)")
-    params = params_file(workdir)
+    if emit and len(emit) != len(plan.steps):
+        raise AiegraphError("group", f"group {plan.group.name}: {len(emit)} of {len(plan.steps)} steps "
+                            f"use the args ABI (call=)",
+                            hint="one ABI per group: all steps call= (args), or all emit= (AIEK_STEP, S3)")
+    params = None
     for rec in plan.steps:
         st = by_name[rec["name"]]
         call = cg.calls[rec["at"]]
-        types = {k: ("float" if isinstance(v, float) else "int") for k, v in st.consts.items()}
-        rec["call"] = list(st.call)
-        rec["decl"] = "int %s(%s);" % (st.name, ", ".join(
-            CALL_SPECIALS.get(a) or f"{types[a]} {a}" for a in st.call))
-        rec["nargs"] = len(call.ins) + len(call.outs)
-        rec["wrap"] = list(st.wrap) if st.wrap else None
-        rec["tag"] = st.tag or f"aie {st.name}"
-        w = st.weights
+        if getattr(st, "call", None):
+            types = {k: ("float" if isinstance(v, float) else "int") for k, v in st.consts.items()}
+            rec["call"] = list(st.call)
+            rec["decl"] = "int %s(%s);" % (st.name, ", ".join(
+                CALL_SPECIALS.get(a) or f"{types[a]} {a}" for a in st.call))
+            rec["nargs"] = len(rec["args"]) if rec.get("args") else len(call.ins) + len(call.outs)
+            rec["wrap"] = list(st.wrap) if st.wrap else None
+            rec["tag"] = st.tag or f"aie {st.name}"
+            packed = ({cg.canon(x["tensor"]) for x in rec["args"]} if rec.get("args")
+                      else set(call.ins) | set(call.outs))
+            lost = [t for t in rec["writes"] if t not in packed]
+            if lost:
+                raise AiegraphError("group", f"group {plan.group.name}: step {st.name} writes tensors[{lost[0]}], "
+                                    f"which its packed arguments do not carry (an args ABI step without "
+                                    f"args= is for one-call groups)",
+                                    hint="args=[ag.arg(...), ...] naming the tensor it writes")
+        w = getattr(st, "weights", None)
         if w is None:
             continue
         if not isinstance(w, WeightSpec):
@@ -799,6 +825,11 @@ def _emit_steps(workdir: Path, cg, plan, steps) -> None:
         if w.ref.tensor not in call.ins:
             raise AiegraphError("group", f"step {st.name}: weight {w.ref} is not read by call "
                                 f"[{call.call}] {call.fn}")
+        others = [r for r in cg.readers.get(w.ref.tensor, []) if r != call.call]
+        if others:
+            raise AiegraphError("group", f"step {st.name}: weight {w.ref} is also read by call(s) "
+                                f"{others}; its weights.bin bytes would change under them")
+        params = params or params_file(workdir)
         data = weight_bytes(w, params)
         d = workdir / "layers" / "groups"
         d.mkdir(parents=True, exist_ok=True)

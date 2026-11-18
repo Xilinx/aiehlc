@@ -712,7 +712,15 @@ def group_sites(layers_dir) -> dict:
     out = {}
     for g in doc.get("groups", []):
         if g.get("steps") and all(s.get("call") for s in g["steps"]):
-            continue    # S1 one-call "args" ABI groups: group_steps() emits them
+            # "args" ABI groups: group_steps() emits the steps; their other calls are removed
+            for m in g.get("members", []):
+                if m.get("action") == "removed":
+                    k = int(m["call"])
+                    if k in out:
+                        raise ValueError(f"partition.json: call [{k}] in groups {out[k][1]['name']} "
+                                         f"and {g['name']}")
+                    out[k] = ("removed", g, None)
+            continue
         if not any(s.get("c") for s in g.get("steps", [])) and \
                 not any(m.get("action") == "removed" for m in g.get("members", [])):
             continue    # record-only (no driver code, no call removed): the driver keeps the TVM calls
@@ -806,6 +814,27 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         if verbose and wsteps:
             print(f"  [arm] group steps: {len(steps)} calls, {len(wsteps)} bf16 weights "
                   f"in the kernel layout in weights.bin")
+    # S3 (emit=) group steps with a bf16 weight: same contract, the statements name it @WBF@
+    gsites = group_sites(graph_path.parent / "layers")
+    s3w = {k: v[2] for k, v in gsites.items() if v[0] == "step" and v[2].get("weights")}
+    if s3w:
+        if not bf16_eids:
+            raise ValueError("group steps with bf16 weights need AIEGRAPH_PARAMS_INPLACE=1 "
+                             "AIEGRAPH_WDTYPE=bf16")
+        with open(out_dir / "weights.bin", "r+b") as wf:
+            for k, st in sorted(s3w.items()):
+                w = st["weights"]
+                off, nb = offsets[w["param"]]
+                data = (graph_path.parent / w["file"]).read_bytes()
+                if w["tensor"] not in bf16_eids or len(data) != nb or nb != w["nbytes"]:
+                    raise ValueError(f"group step {st['name']} at [{k}]: weight {w['param']} is "
+                                     f"{len(data)} B, weights.bin holds {nb} B "
+                                     f"(bf16={w['tensor'] in bf16_eids})")
+                wf.seek(off)
+                wf.write(data)
+                inplace_w[k] = w["tensor"]
+        if verbose:
+            print(f"  [arm] group steps (emit): {len(s3w)} bf16 weights in the step layout in weights.bin")
     act_sids = {sid for e, sid in enumerate(sids) if e not in param_eids}
 
     # One buffer per storage id, sized by the largest tensor assigned to it.
@@ -892,6 +921,23 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         if steps[k]["name"] not in seen_steps:
             seen_steps.append(steps[k]["name"])
             lines.append(steps[k]["decl"] + "   /* aiegraph group step */")
+    # "args" ABI labels: a packed argument seen through another shape (same buffer)
+    for k in sorted(steps):
+        for i, a in enumerate(steps[k].get("args") or ()):
+            if "shape" in a:
+                nm = f"g_lbl_{k}_{i}"
+                lines.append(f"static DLTensor {nm};   /* group {steps[k]['group']}: tensors[{a['tensor']}] "
+                             f"as {a['shape']} */")
+                lines.append(f"static int64_t {nm}_shape[{len(a['shape'])}] = "
+                             f"{{{', '.join(str(int(d)) for d in a['shape'])}}};")
+    # file-scope C of emit= (template) steps, once per distinct text
+    seen_decl = []
+    for k in sorted(gsites):
+        d = gsites[k][2].get("decl") if gsites[k][0] == "step" else None
+        if d and d not in seen_decl:
+            seen_decl.append(d)
+            lines += [f"/* aiegraph group step {gsites[k][2]['name']} ({gsites[k][2].get('template', 'emit')}) */",
+                      d]
     lines += [
         f"static uint8_t kernel_ws[{_KERNEL_WS}] __attribute__((aligned(64)));",
         "static const uint8_t *g_params;",
@@ -978,7 +1024,6 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
     ]
 
     n_calls = 0
-    gsites = group_sites(graph_path.parent / "layers")
     both = sorted(set(gsites) & set(steps))
     if both:
         raise ValueError(f"calls {both} are both S1 group steps and S3 group members")
@@ -998,18 +1043,34 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         exp = _bf16_expand_lines(in_eids, bf16_eids)
         st = steps.get(n_calls)
         wbf_off = None
-        if st is not None and n_calls in inplace_w:
+        if n_calls in inplace_w:
             e = inplace_w[n_calls]
             wbf_off = bf16_eids[e][0]
+            who = st if st is not None else dict(gsites[n_calls][2], group=gsites[n_calls][1]["name"])
             hit = [j for j, ln in enumerate(exp) if ln.startswith("    graph_bf16_expand(")
                    and f"(g_params + {wbf_off}), " in ln]
             if len(hit) != 1:
                 raise ValueError(f"call [{n_calls}]: weight tensors[{e}] has no bf16 expand")
-            exp[hit[0]:hit[0] + 2] = [f"    tensors[{e}].data = 0;   /* group {st['group']}: "
-                                      f"bf16 weight read in place by {st['name']} */"]
+            exp[hit[0]:hit[0] + 2] = [f"    tensors[{e}].data = 0;   /* group {who['group']}: "
+                                      f"bf16 weight read in place by {who['name']} */"]
         lines += exp
-        for slot, tensor_idx in enumerate(arg_eids):
-            lines.append(f"    args[{slot}].v_handle = &tensors[{tensor_idx}];")
+        if st is not None and st.get("args"):
+            # the step's own packed arguments (ag.arg): a tensor, or a label of its buffer
+            for slot, a in enumerate(st["args"]):
+                t = int(a["tensor"])
+                if t in param_eids and t not in in_eids:
+                    raise ValueError(f"call [{n_calls}]: step {st['name']} arg {slot} is weight "
+                                     f"tensors[{t}], which this call does not expand")
+                if "shape" in a:
+                    nm = f"g_lbl_{n_calls}_{slot}"
+                    lines.append(f"    {nm} = tensors[{t}]; {nm}.ndim = {len(a['shape'])}; "
+                                 f"{nm}.shape = {nm}_shape;   /* label {a['shape']} */")
+                    lines.append(f"    args[{slot}].v_handle = &{nm};")
+                else:
+                    lines.append(f"    args[{slot}].v_handle = &tensors[{t}];")
+        else:
+            for slot, tensor_idx in enumerate(arg_eids):
+                lines.append(f"    args[{slot}].v_handle = &tensors[{tensor_idx}];")
         tl = dict(param_of=param_of, roles=roles.get(fn, {}), nodes=nodes,
                   flow=flow)
         lines += _trace_lines(n_calls, fn, in_eids, out_eids, "in", **tl)
@@ -1027,8 +1088,12 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                 st = gs[2]
                 lines.append(f"    /* [{n_calls}] group {gs[1]['name']} step {st['name']} */")
                 lines.append(f"    GRAPH_PROF_BEGIN({n_calls});")
-                lines += ["    " + c.replace("@K@", str(n_calls)) for c in st["c"]]
-                lines.append(f'    GRAPH_PROF_END({n_calls}, "aie {st["tag"]}");')
+                if any("@WBF@" in c for c in st["c"]) and wbf_off is None:
+                    raise ValueError(f"call [{n_calls}]: step {st['name']} uses @WBF@, no weight")
+                wbf = f"(const uint16_t *)(g_params + {wbf_off})"
+                lines += ["    " + c.replace("@K@", str(n_calls)).replace("@WBF@", wbf) for c in st["c"]]
+                tag = st["tag"] if st["tag"].startswith(("cpu ", "aie ")) else f"aie {st['tag']}"
+                lines.append(f'    GRAPH_PROF_END({n_calls}, "{tag}");')
             lines += _trace_lines(n_calls, fn, in_eids, out_eids, "out", **tl)
             lines.append("")
             n_calls += 1
@@ -1041,7 +1106,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         if st is not None:
             if "wbf" in st["call"] and wbf_off is None:
                 raise ValueError(f"call [{n_calls}]: step {st['name']} passes wbf, no weight")
-            if st["nargs"] != len(arg_eids):
+            if st["nargs"] != (len(st["args"]) if st.get("args") else len(arg_eids)):
                 raise ValueError(f"call [{n_calls}]: step {st['name']} recorded for "
                                  f"{st['nargs']} args, the call has {len(arg_eids)}")
             lines += _step_call_lines(st, n_calls, wbf_off,
