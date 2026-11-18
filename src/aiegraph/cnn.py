@@ -29,6 +29,12 @@ __all__ = ["MC", "ConvPlan", "kacc_geom", "kacc_name", "kernel_text", "plan_conv
 
 _STAGE = "cnn"
 MC = 256            # output pixels per launch (4 mesh columns x 64; board-proven non-transposed walk)
+# palmyra213 self-check (UC_SELFCHECK, 2026-11-18): gemm_kacc instances with a K walk of <= 64 words
+# (64x64x256, 128x64x256, 128x128x256, 256x128x512) and 64x2304x256 run but return wrong sums (rel err
+# 0.2-0.5) while their x86 model is exact; K is padded to >= KK_MIN and a K > KK_BIG gets >= NP_MIN_BIGK rows
+KK_MIN = 192
+KK_BIG = 1152
+NP_MIN_BIGK = 128
 L1_PORTS = 29696    # aiehlc's port-buffer region (trace_routing kPortBufferBytes); windows are ping-pong
 # fused TVM conv functions this glue reproduces: conv [+ per-channel add] [+ SiLU] [+ same-shape add]
 _SYM = re.compile(r"(?:tvmgen_default_)?fused_nn_contrib_(depthwise_)?conv2d_NCHWc(_add)?(_sigmoid_multiply)?"
@@ -114,7 +120,7 @@ def plan_conv(info: dict, mc: int = MC) -> ConvPlan:
         raise AiegraphError(_STAGE, f"conv {info['onnx']}: {sym} has {info['nargs']} args, expected {3 + nadd}")
     N, M = int(info["N"]), int(info["M"])
     K = int(info["K"]) * (int(info["groups"]) if dw else 1)
-    Np, Kk = _c64(N), _c64(K)
+    Np, Kk = max(_c64(N), NP_MIN_BIGK if _c64(K) > KK_BIG else 64), max(_c64(K), KK_MIN)
     if Np == mc:    # ch == px: aiehlc cannot place the instance's ping-pong windows in data memory
         mc = 2 * mc if 2 * mc <= 512 else mc // 2
     g = kacc_geom(Np, Kk, mc)
@@ -138,7 +144,7 @@ def _spec_exports(spec: str, kprefix: str) -> str:
 
 
 def write_kernel(kdst, spec: str, plans: list, *, kprefix: str, entry: str, warm: bool = True,
-                 ctrlpkt: str = "off") -> Path:
+                 ctrlpkt: str = "off", selfcheck: bool = False) -> Path:
     """``<kdst>/<entry>.cc``: one gemm_kacc instance per distinct (Np, Kk, MC) of *plans* + the host glue
     (``<kprefix>_aie_conv`` and the stats ABI the generated board main reads) + the carrier entry
     (*spec* = ``emod.offload_prototype(layer).spec()``); ``<entry>_ref.c`` = the carrier's x86 model."""
@@ -160,7 +166,7 @@ def write_kernel(kdst, spec: str, plans: list, *, kprefix: str, entry: str, warm
                           PART_C0=2 if ctrlpkt == "aot" else 3,
                           MAXW=max(n * geo[(n, k, px)]["kp"] for n, k, px in shapes),
                           MAXX=max(px * geo[(n, k, px)]["kp"] for n, k, px in shapes),
-                          MAXY=max(n * px for n, k, px in shapes), DISPATCH=disp)
+                          MAXY=max(n * px for n, k, px in shapes), DISPATCH=disp, SELFCHECK=int(selfcheck))
     tail = aiednn.render("conv2d/kacc_chunk_entry.cc", K=kprefix, E=entry, SPEC=_spec_exports(spec, kprefix))
     kcc = kdst / f"{entry}.cc"
     kcc.write_text(head + kernels + "\n" + board + aiednn.template("conv2d/kacc_chunk_conv.cc") + tail)

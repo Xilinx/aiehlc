@@ -20,8 +20,7 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parents[2] / "src")]   # this checkout's aiegraph (gate: plain $PY)
-MODEL, KPREFIX, ENTRY = "yolo26n", "cnn", "aiek_cnnconv"
-TAIL_OP = "TopK"
+MODEL, KPREFIX, ENTRY, TAIL_OP = "yolo26n", "cnn", "aiek_cnnconv", "TopK"
 
 
 def main(argv=None) -> int:
@@ -30,6 +29,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--input", type=Path, help="fp32 [1,3,640,640] build input (default: a fixed synthetic image)")
     ap.add_argument("--mc", type=int, default=256, help="output pixels per AIE launch")
+    ap.add_argument("--selfcheck", action="store_true", help="debug: every AIE launch checked on the A78")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
     log = lambda msg: print(f"[build_yolov26] {msg}", flush=True)
@@ -94,7 +94,8 @@ def main(argv=None) -> int:
     # 3. kernel source on a carrier layer, one group step per conv, the PROF driver glue, AIE archive
     lidx, car = cnn.pick_carrier(plans, Path(emod.workdir) / "layers")
     proto = emod.offload_prototype(lidx, entry=ENTRY)
-    kcc = cnn.write_kernel(out / "aiek_src", proto.spec(), plans, kprefix=KPREFIX, entry=ENTRY, warm=True)
+    kcc = cnn.write_kernel(out / "aiek_src", proto.spec(), plans, kprefix=KPREFIX, entry=ENTRY, warm=True,
+                           selfcheck=a.selfcheck)
     log(f"carrier layer {lidx} ({car.symbol}); kernel source {kcc}")
     planned = cnn.offload_convs(emod, groups, plans, kcc, kprefix=KPREFIX, log=log)
     emod.driver_template(**bm.driver_glue(kprefix=KPREFIX))

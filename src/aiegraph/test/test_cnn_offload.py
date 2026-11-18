@@ -85,8 +85,8 @@ CASES = [
     ("conv1x1_head4", 16, 20, 20, 4, 1, 1, 0, 0, 0, 0),
     ("dw3x3s1_silu", 64, 20, 20, 64, 3, 1, 1, 1, 1, 0),
     ("dw3x3s2", 32, 16, 16, 32, 3, 2, 1, 1, 0, 0),
-    ("square_w_128x256", 32, 8, 8, 128, 3, 1, 1, 0, 0, 1),  # K = 288 -> Kk 320; Np=128 -> no; see below
-    ("square_w_64x128", 128, 16, 16, 64, 1, 1, 0, 0, 1, 0),  # Np=64, Kk=128: W square -> zero chunk
+    ("conv3x3_128_res", 32, 8, 8, 128, 3, 1, 1, 0, 0, 1),  # K = 288 -> Kk 320, residual, no act
+    ("square_w_128x256", 256, 8, 8, 128, 1, 1, 0, 0, 1, 0),  # Np=128, Kk=256: W square -> zero chunk
     ("ch256_mc512_res", 128, 24, 24, 256, 1, 1, 0, 0, 0, 1),  # Np == 256 == MC -> chunk 512, partial
 ]
 
@@ -107,7 +107,8 @@ def harness(tmp_path_factory):
     plans = []
     for i, (_, C, H, W, O, KH, s, p, dw, act, res) in enumerate(CASES):
         plans.append(cnn.plan_conv(_info(C, H, W, O, KH, s, p, dw, act, res, i)[0], mc=64 if i == 1 else cnn.MC))
-    kcc = cnn.write_kernel(t / "src", SPEC, plans, kprefix="cnn", entry="aiek_cnntest", warm=False)
+    kcc = cnn.write_kernel(t / "src", SPEC, plans, kprefix="cnn", entry="aiek_cnntest", warm=False,
+                           selfcheck=True)
     text = _LAUNCH.sub(r"kemu::launch(\2, \1, ", kcc.read_text())
     (t / "kemu_prelude.h").write_text(_PRELUDE)
     for n, s in STUBS.items():
@@ -185,6 +186,8 @@ def test_chunk_conv_vs_numpy(harness, i):
                         env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
     assert rr.returncode == 0, (rr.stdout + rr.stderr)[-3000:]
     assert f"LAUNCHES {pl.launches}" in rr.stdout, rr.stdout
+    assert " BAD" not in rr.stdout, [l for l in rr.stdout.splitlines() if "[CHK]" in l]
+    print("".join(l + "\n" for l in rr.stdout.splitlines() if "[CHK]" in l), end="")
     got = np.fromfile(d / "y.bin", np.float32).reshape(O // ob, OH, OH, ob).transpose(0, 3, 1, 2).reshape(O, OH, OH)
     ref = _conv_ref(bf16(x).astype(np.float64), w, b.astype(np.float64), s, p, dw, act, r)
     cos = float((got * ref).sum() / np.sqrt((got.astype(np.float64) ** 2).sum() * (ref ** 2).sum()))
@@ -214,6 +217,13 @@ def test_ch_equal_px_takes_another_chunk():
 
 
 def test_square_w_gets_zero_chunk():
-    info, _ = _info(128, 16, 16, 64, 1, 1, 0, 0, 1, 0, 0)
+    info, _ = _info(256, 16, 16, 128, 1, 1, 0, 0, 1, 0, 0)
     pl = cnn.plan_conv(info)
-    assert (pl.Np, pl.Kk) == (64, 128) and pl.Kp == 128 + pl.kch
+    assert (pl.Np, pl.Kk) == (128, 256) and pl.Kp == 256 + pl.kch
+
+
+def test_small_k_padded_big_k_gets_rows():
+    pl = cnn.plan_conv(_info(3, 32, 32, 16, 3, 2, 1, 0, 1, 0, 0)[0])        # K = 27
+    assert (pl.Np, pl.Kk) == (64, cnn.KK_MIN)
+    pl = cnn.plan_conv(_info(256, 20, 20, 16, 3, 1, 1, 0, 1, 0, 0)[0])      # K = 2304
+    assert (pl.Np, pl.Kk) == (cnn.NP_MIN_BIGK, 2304)

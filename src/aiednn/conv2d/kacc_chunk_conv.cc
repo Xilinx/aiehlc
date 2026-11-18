@@ -97,6 +97,40 @@ static int uc_chunk_conv(void *const *argv, int nargs, int sh, int sw, int ph, i
         if (lrc != 0)
             return lrc;
         const float *Y = (const float *)g_ky;
+#if UC_SELFCHECK
+        { /* board self-check: sampled outputs of this launch vs an A78 dot product of the same bf16 ports */
+            double worst = 0.0;
+            const int so = N > 8 ? N / 8 : 1, sq = mv > 8 ? mv / 8 : 1;
+            for (int o = 0; o < N; o += so)
+                for (int q = 0; q < mv; q += sq) {
+                    double ref = 0.0, mag = 0.0;
+                    for (int k = 0; k < Kp; k++) {
+                        const int j = k / kch, kr = k % kch, r = o & 15, rq = q & 15;
+                        const int fw = (r >> 3) * 8 * kch + (kr >> 3) * 64 + (r & 7) * 8 + (kr & 7);
+                        const int fx = (rq >> 3) * 8 * kch + (kr >> 3) * 64 + (kr & 7) * 8 + (rq & 7);
+                        const uint16_t wb = Wd[(size_t)(o & ~15) * Kp + (size_t)(fw / kch) * Kp + j * kch + fw % kch];
+                        const uint16_t xb = Xd[(size_t)(q & ~15) * Kp + (size_t)(fx / kch) * Kp + j * kch + fx % kch];
+                        uint32_t uw = (uint32_t)wb << 16, ux = (uint32_t)xb << 16;
+                        float fwv, fxv;
+                        memcpy(&fwv, &uw, 4);
+                        memcpy(&fxv, &ux, 4);
+                        ref += (double)fwv * fxv;
+                        mag += fabs((double)fwv * fxv);
+                    }
+                    const int m = o & 15, pn = q / q4, qq = q % q4, s = qq >> 4, n = qq & 15;
+                    const int f = s * 256 + ((m >> 3) * 2 + (n >> 3)) * 64 + (m & 7) * 8 + (n & 7);
+                    const double got = Y[(size_t)(o & ~15) * MC + (size_t)(f / q4) * MC + pn * q4 + f % q4];
+                    const double e = fabs(got - ref) / (mag + 1e-20);
+                    if (e > worst)
+                        worst = e;
+                }
+            if (worst > g_chk_worst)
+                g_chk_worst = worst;
+            if (m0 == 0 || worst > 1e-3)
+                printf("[CHK] N=%d K=%d inst=%dx%dx%d m0=%d worst_rel=%.3g%s\n", N, K, Np, Kk, MC, m0, worst,
+                       worst > 1e-3 ? " BAD" : "");
+        }
+#endif
         for (int o = 0; o < N; o++) {
             const int m = o & 15;
             const float *yr = Y + (size_t)(o & ~15) * MC;

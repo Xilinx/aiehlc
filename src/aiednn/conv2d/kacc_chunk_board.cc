@@ -2,7 +2,8 @@
  * cache sync, the gemm_kacc dispatch of every (Np, Kk, MC) instance, and the host ABI the generated board
  * main / driver read (<K>_aie_stats, <K>_aie_launch_stats, <K>_aie_split_stats, <K>_aie_host_split_*).
  * Parameters (aiegraph.cnn.write_kernel): K host ABI prefix, WARM warm launch, CTRLPKT control-packet aot,
- * PART_C0 first mesh column, MAXW / MAXX / MAXY port sizes (elements), DISPATCH the instance switch. */
+ * PART_C0 first mesh column, MAXW / MAXX / MAXY port sizes (elements), DISPATCH the instance switch,
+ * SELFCHECK sampled A78 check of every launch. */
 #include <math.h>
 #include "aie_user_kernel.h"
 #include "xil_cache.h"
@@ -16,6 +17,10 @@ extern "C" void __Runtime_pm_warm_stats(unsigned *skipped_segs, unsigned *cold_t
 #if UC_CTRLPKT
 void __Runtime_ctrl_high_throughput_enable(int on); /* C++ linkage, as aie_runtime.h */
 static int g_uc_ht = 0;
+#endif
+#define UC_SELFCHECK @SELFCHECK@ /* 1: every launch checks sampled outputs on the A78 ([CHK] lines; debug) */
+#if UC_SELFCHECK
+static double g_chk_worst = 0.0;
 #endif
 #define UC_KW_ELEMS @MAXW@ /* largest Np*Kp (bf16) */
 #define UC_KX_ELEMS @MAXX@ /* largest MC*Kp (bf16) */
