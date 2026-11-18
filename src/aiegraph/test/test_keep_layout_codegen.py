@@ -86,8 +86,40 @@ class Net:
         return "".join(out)
 
 
+# Relay op sequence of each synthetic fused function (what deploy_flow.build_c records in <stem>_opsem.json)
+FN_OPS = {
+    "reshape_transpose_multiply_reshape": ["reshape", "transpose", "multiply", "reshape"],
+    "reshape_transpose_multiply_reshape_transpose": ["reshape", "transpose", "multiply", "reshape", "transpose"],
+    "reshape_transpose_reshape_transpose": ["reshape", "transpose", "reshape", "transpose"],
+    "reshape_transpose_reshape": ["reshape", "transpose", "reshape"],
+    "reshape_exp_transpose": ["reshape", "exp", "transpose"],
+    "sigmoid_squeeze_multiply_layout_transform": ["sigmoid", "squeeze", "multiply", "layout_transform"],
+    "layout_transform_transpose_reshape": ["layout_transform", "transpose", "reshape"],
+    "layout_transform_reshape": ["layout_transform", "reshape"],
+    "reshape_add_reshape_transpose_layout_transform": ["reshape", "add", "reshape", "transpose", "layout_transform"],
+}
+
+
+def opsem(net) -> dict:
+    """<stem>_opsem.json for a synthetic Net: element-conserving shapes (n = output elements), no axes attr."""
+    nodes = {}
+    for t, nd in enumerate(net.nodes):
+        if nd["op"] != "tvm_op":
+            continue
+        fn = nd["attrs"]["func_name"].replace("tvmgen_default_fused_", "")
+        n = int(np.prod(net.shape[t])) if net.shape[t] else 1
+        ops = []
+        for o in FN_OPS.get(fn, ["nn." + fn]):
+            two = o in ("multiply", "add") or o.startswith("nn.")
+            ops.append({"op": o, "ins": [[n], [1]] if two else [[n]], "out": [n], "attrs": {}})
+        nodes[str(t)] = {"func_name": nd["attrs"]["func_name"], "name_ok": True, "ops": ops,
+                         "params": [net.shape[i] for i, _, _ in nd["inputs"]], "outs": [net.shape[t]]}
+    return {"version": 1, "nodes": nodes}
+
+
 def _run(tmp_path, net, wbin=None, plan=None):
     (tmp_path / "net_graph.json").write_text(json.dumps(net.graph()))
+    (tmp_path / "net_opsem.json").write_text(json.dumps(opsem(net)))
     drv = tmp_path / "graph_driver.c"
     drv.write_text(net.driver())
     wb = tmp_path / "weights.bin"
@@ -136,14 +168,19 @@ def _fa_net(H=2, N=4, M=4, D=2, clobber=False, outside_reader=False, impure=Fals
 # ─────────────────────────────────────────────────────────── purity on graph.json
 
 def test_fused_ops_names():
-    assert klc.fused_ops("tvmgen_default_fused_reshape_transpose_multiply_reshape_3") == \
-        ["reshape", "transpose", "multiply", "reshape"]
-    assert klc.fused_ops("tvmgen_default_fused_layout_transform_transpose_reshape_2") == \
-        ["layout_transform", "transpose", "reshape"]
-    assert klc.fused_ops("tvmgen_default_fused_sigmoid_squeeze_multiply_layout_transform") == \
-        ["sigmoid", "squeeze", "multiply", "layout_transform"]
-    assert klc.fused_ops("tvmgen_default_fused_reshape_exp_transpose") is None
-    assert klc.fused_ops("tvmgen_default_fused_nn_contrib_conv2d_NCHWc_add") is None
+    """(id kept from the unet-m3 base) fused_ops symbol parsing is gone: the op list of a fused call comes from
+    the saved Relay op semantics (<stem>_opsem.json, aiegraph.pure_perm) -- see test_pure_perm.py."""
+    assert not hasattr(klc, "fused_ops")
+    n, w, t = _fa_net()
+    from aiegraph import pure_perm
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "net_graph.json").write_text(json.dumps(n.graph()))
+        (Path(d) / "net_opsem.json").write_text(json.dumps(opsem(n)))
+        cg = CallGraph.load(Path(d) / "net_graph.json")
+        k = cg.producer[t["o2"]]
+        assert klc._pure(cg, k) == ["reshape", "transpose", "reshape"]
+        assert pure_perm.load(cg).fn(cg, k).func_name == "tvmgen_default_fused_reshape_transpose_reshape"
 
 
 # ─────────────────────────────────────────────────────────── FA group
