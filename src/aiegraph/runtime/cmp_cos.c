@@ -19,16 +19,30 @@
 #include <string.h>
 #include "p1_ref.h"
 
+/* a generic p1_ref.h (aiegraph.boardmain.ref_header) names its one reference P1_REF_OUT; the UNet
+ * export's p1_ref.h has the part01 + unet pair */
+#ifndef P1_REF_OUT
+#define P1_REF_OUT ref_unet_out
+#define P1_REF_OUT_N REF_UNET_OUT_N
+#define P1_REF_IN_CRC32 P1_UNET_IN_CRC32
+#define P1_HAVE_PART01 1
+#else
+#define P1_HAVE_PART01 0
+#define ref_part01_out P1_REF_OUT
+#define REF_PART01_OUT_N P1_REF_OUT_N
+#define P1_SAMPLE_CRC32 P1_REF_IN_CRC32
+#endif
+
 #ifndef P1_BOARD
 #define P1_BOARD "palmyra213"
 #endif
 
 int p1_cmp(const char *tag, const float *got, const char *dtype, int n_launch, int n_coreen, int run_rc,
            double aie_flop_frac) {
-    int is_part01 = strncmp(tag, "part01", 6) == 0;
-    const float *ref = is_part01 ? ref_part01_out : ref_unet_out;
-    long n = is_part01 ? REF_PART01_OUT_N : REF_UNET_OUT_N;
-    const char *crc = is_part01 ? P1_SAMPLE_CRC32 : P1_UNET_IN_CRC32;
+    int is_part01 = P1_HAVE_PART01 && strncmp(tag, "part01", 6) == 0;
+    const float *ref = is_part01 ? ref_part01_out : P1_REF_OUT;
+    long n = is_part01 ? REF_PART01_OUT_N : P1_REF_OUT_N;
+    const char *crc = is_part01 ? P1_SAMPLE_CRC32 : P1_REF_IN_CRC32;
     double dot = 0, ng = 0, nr = 0, mx = 0;
     int finite = 1;
     for (long i = 0; i < n; i++) {
@@ -63,7 +77,7 @@ int main(int argc, char **argv) {
                 argv[0]);
         return 2;
     }
-    long n = strncmp(argv[1], "part01", 6) == 0 ? REF_PART01_OUT_N : REF_UNET_OUT_N;
+    long n = P1_HAVE_PART01 && strncmp(argv[1], "part01", 6) == 0 ? REF_PART01_OUT_N : P1_REF_OUT_N;
     float *got = malloc(n * sizeof(float));
     FILE *f = fopen(argv[2], "rb");
     if (!got || !f || fread(got, sizeof(float), n, f) != (size_t)n) {

@@ -38,13 +38,38 @@ HEAP_LDFLAG = "-Wl,--defsym,_HEAP_SIZE=0x8000000"
 CMP_CFLAGS = "-DP1_COS_NO_MAIN"
 
 __all__ = ["MARKER", "WARM_DEFS", "LAUNCH_OPTS_WARM", "HEAP_LDFLAG", "CMP_CFLAGS", "launch_env", "profiling_env",
-           "launch_applied", "kt_select", "main_c", "inputs_header", "ref_header", "append_defines", "prof_c", "driver_glue",
-           "input_int32", "cross_toolchain", "read_cflags_file", "cmp_source"]
+           "launch_applied", "kt_select", "main_c", "inputs_header", "append_defines", "prof_c", "driver_glue",
+           "input_int32", "cross_toolchain", "read_cflags_file", "cmp_source", "ref_header"]
 
 
 def _rt(name: str) -> str:
     with open(RUNTIME / name, encoding="utf-8", newline="") as f:
         return f.read()
+
+
+# The runtime templates name the kernel archive's host ABI (``<k>_aie_stats``, ``<k>_aie_launch_stats``,
+# ``<k>_prof_print``, ...), the header defines (``<MODEL>_LAUNCH_WARM``) and the CMP tag after ONE
+# default prefix (kernel_prefix.txt); :func:`_retarget` renames them for another model / kernel prefix.
+DEFAULT_K = (RUNTIME / "kernel_prefix.txt").read_text().strip()
+
+
+def _retarget(text: str, model: str = None, kprefix: str = None) -> str:
+    """*text* (a runtime template) for *model*'s header defines / CMP tag / PMU helpers and the kernel
+    archive prefix *kprefix* (default: *model*; both default to :data:`DEFAULT_K`: text unchanged)."""
+    d = DEFAULT_K
+    m = model or d
+    k = kprefix or m
+    if m == d and k == d:
+        return text
+    # site tags compared by prefix length: '"aie <k>_aie_lin ", 17' -> the new literal and its length
+    text = re.sub(r'"aie %s_aie_(\w+) ", \d+' % d,
+                  lambda g: '"aie %s_aie_%s ", %d' % (k, g.group(1), len("aie %s_aie_%s " % (k, g.group(1)))), text)
+    text = re.sub(r"up_tag\[i\] \+ (\d+)",
+                  lambda g: "up_tag[i] + %d" % (int(g.group(1)) + (len(k) - len(d)) *
+                                                (int(g.group(1)) >= len(f"aie {d}_aie_"))), text)
+    text = text.replace(f"{d}_aie_", f"{k}_aie_").replace(f"{d}_prof_print", f"{k}_prof_print")
+    text = text.replace(f"{d}_pmc", f"{m}_pmc").replace(f"{d.upper()}_", f"{m.upper()}_")
+    return text.replace(f'p1_cmp("{d}"', f'p1_cmp("{m}"').replace(f'"AIE {d}: ', f'"AIE {m}: ')
 
 
 def _fill(text: str, **kv) -> str:
@@ -108,7 +133,7 @@ def kt_select(text: str, ktimer: bool) -> str:
 
 
 def main_c(model: str, io_names, *, aie: bool = False, ktimer: bool = False, runtime_io: bool = False,
-           note=None) -> str:
+           note=None, kprefix: str = None) -> str:
     """The board ``main.c`` of *model* (C identifier prefix, e.g. ``"net"`` -> ``net_inputs.h``,
     ``NET_N_INPUTS``, ``P1_NET_IN_CRC32``, ``REF_NET_OUT_N``).
 
@@ -118,7 +143,8 @@ def main_c(model: str, io_names, *, aie: bool = False, ktimer: bool = False, run
     ``.aiehlc_io`` section (``emod.build(runtime_io=...)``), the expected crc computed on the board;
     the reference compare runs only for the build's own input, the output is dumped when the
     section's dump_out flag is set. *note*: ``(k, label)`` -- input k is an int32 scalar printed as
-    ``(label=%d)`` on the INPUT line."""
+    ``(label=%d)`` on the INPUT line. *kprefix*: the kernel archive's host ABI prefix
+    (``<kprefix>_aie_stats`` ...; default: kernel_prefix.txt, the archive's own)."""
     if not re.fullmatch(r"[a-z][a-z0-9_]*", model):
         raise ValueError(f"main_c: model {model!r} must be a lower-case C identifier")
     m, mu = model, model.upper()
@@ -137,10 +163,11 @@ def main_c(model: str, io_names, *, aie: bool = False, ktimer: bool = False, run
     else:
         inb = _fill(_rt("board_main_in_embed.c"), M=m, MU=mu, IN_DESC=desc, NOTE_FMT=nf, NOTE_EARG=ne)
     if aie:
-        decl = _fill(kt_select(_rt("main_extra_decl.h"), ktimer), M=m)
-        cmp_ = _fill(kt_select(_rt("main_cmp.c"), ktimer), M=m, MU=mu)
+        k = kprefix or DEFAULT_K   # kernel archive prefix: unchanged unless the caller names one
+        decl = _retarget(_fill(kt_select(_rt("main_extra_decl.h"), ktimer), M=m), m, k)
+        cmp_ = _retarget(_fill(kt_select(_rt("main_cmp.c"), ktimer), M=m, MU=mu), m, k)
         pre, post = _fill(_rt("board_main_pmc.c"), M=m), _fill(_rt("board_main_pmc1.c"), M=m)
-        after = _fill(_rt("main_launch_line.c"), MU=mu) + _rt("main_prof_line.c")
+        after = _retarget(_fill(_rt("main_launch_line.c"), MU=mu) + _rt("main_prof_line.c"), m, k)
         init = "aiegraph C on A78 + conv on AIE gemm_bf16"
     else:
         decl = pre = post = after = ""
@@ -194,23 +221,6 @@ def inputs_header(path, model: str, inputs, defines=None, origin: str = "") -> s
     return "%08x" % crc
 
 
-def ref_header(path, model: str, ref_out, in_crc: str, data: str) -> Path:
-    """``p1_ref.h`` for a model whose reference output comes from the example (e.g. onnxruntime on the build's
-    own input): ``REF_<MODEL>_OUT_N`` / ``P1_<MODEL>_IN_CRC32`` for the board main and the names the board
-    compare tool (``cmp_cos.c``) reads, aliased to them. *ref_out*: float32 array; *in_crc*: the inputs crc32
-    :func:`inputs_header` returned; *data*: what the reference is (printed on the ``CMP`` line)."""
-    import numpy as np
-    if not re.fullmatch(r"[a-z][a-z0-9_]*", model):
-        raise ValueError(f"ref_header: model {model!r} must be a lower-case C identifier")
-    if not re.fullmatch(r"[0-9a-f]{8}", in_crc):
-        raise ValueError(f"ref_header: in_crc {in_crc!r} is not a crc32 hex string")
-    ref = np.ascontiguousarray(ref_out, dtype=np.float32).reshape(-1)
-    m, mu = model, model.upper()
-    t = _fill(_rt("cmp_ref_model.h"), M=m, MU=mu, DATA=data.replace('"', "'"), CRC=in_crc, N=ref.size)
-    Path(path).write_text(t + _c_array("float", f"ref_{m}_out", ref, lambda v: "%.9ef" % float(v)))
-    return Path(path)
-
-
 def _define_lines(mu: str, defines: dict) -> list:
     out = []
     for k, v in defines.items():
@@ -231,6 +241,28 @@ def append_defines(path, model: str, defines: dict):
         f.write("\n".join(lines) + "\n")
 
 
+def ref_header(path, model: str, ref, in_crc: str, data: str) -> Path:
+    """``p1_ref.h`` for :func:`cmp_source` (``p1_cmp``) and the generated main: the reference output
+    *ref* (float32, the board's whole output) of the build's own input (crc32 *in_crc*), *data* the label
+    the CMP line prints. Defines ``REF_<MODEL>_OUT_N``, ``P1_<MODEL>_IN_CRC32`` and the generic
+    ``P1_REF_OUT`` / ``P1_REF_OUT_N`` / ``P1_REF_IN_CRC32`` cmp_cos.c compares with."""
+    import numpy as np
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", model):
+        raise ValueError(f"ref_header: model {model!r} must be a lower-case C identifier")
+    if not re.fullmatch(r"[0-9a-f]{8}", in_crc):
+        raise ValueError(f"ref_header: in_crc {in_crc!r} is not a crc32 hex string")
+    data = data.replace('"', "'")
+    m, mu = model, model.upper()
+    a = np.ascontiguousarray(ref, dtype=np.float32).reshape(-1)
+    txt = [f"/* generated by aiegraph.boardmain.ref_header -- do not edit */", "#pragma once",
+           f'#define P1_DATA "{data}"', f'#define P1_{mu}_IN_CRC32 "{in_crc}"', f"#define REF_{mu}_OUT_N {a.size}",
+           f"#define P1_REF_OUT ref_{m}_out", f"#define P1_REF_OUT_N REF_{mu}_OUT_N",
+           f"#define P1_REF_IN_CRC32 P1_{mu}_IN_CRC32",
+           _c_array("float", f"ref_{m}_out", a, lambda v: "%.9ef" % float(v))]
+    Path(path).write_text("\n".join(txt))
+    return Path(path)
+
+
 # ── graph_driver.c glue (emod.driver_template) ───────────────────────────────────────────────────────
 
 EXPAND_ENTER = "    XTime e0_, e1_;\n    XTime_GetTime(&e0_);\n"
@@ -239,21 +271,24 @@ RUN_ENTER = "    up_pending_exp = 0; /* P1 PROF: expands before graph_run are no
 _PROF_BRANCH_AT = "        if (is_aie && strncmp("
 
 
-def prof_c(attn: bool = False) -> str:
+def prof_c(attn: bool = False, kprefix: str = None) -> str:
     """Per-call-site A78 time (PROF lines) placed in graph_driver.c; *attn*: attention sites print
-    ``op=aie_host_attn<cid>``."""
-    t = _rt("site_prof.c")
+    ``op=aie_host_attn<cid>``; *kprefix*: the kernel archive's host ABI prefix (see :func:`main_c`)."""
+    t = _retarget(_rt("site_prof.c"), kprefix, kprefix)
     if not attn:
         return t
     if t.count(_PROF_BRANCH_AT) != 1:
         raise ValueError("prof_c: site_prof.c branch anchor not found once")
-    return t.replace(_PROF_BRANCH_AT, _rt("site_prof_attn_branch.c") + _PROF_BRANCH_AT.lstrip(), 1)
+    return t.replace(_PROF_BRANCH_AT, _retarget(_rt("site_prof_attn_branch.c"), kprefix, kprefix) +
+                     _PROF_BRANCH_AT.lstrip(), 1)
 
 
-def driver_glue(decls: str = "", attn: bool = False) -> dict:
+def driver_glue(decls: str = "", attn: bool = False, kprefix: str = None, bf16_expand: bool = True) -> dict:
     """``emod.driver_template(**driver_glue(...))``: *decls* (kernel declarations of the group steps
-    that are not aiegraph-generated, e.g. fused attention) + the PROF glue + expand timing."""
-    return dict(decls=decls + prof_c(attn) + "\n", expand_enter=EXPAND_ENTER, expand_exit=EXPAND_EXIT,
+    that are not aiegraph-generated, e.g. fused attention) + the PROF glue + expand timing
+    (*bf16_expand*: the driver has ``graph_bf16_expand``, i.e. ``AIEGRAPH_WDTYPE=bf16``)."""
+    ee, ex = (EXPAND_ENTER, EXPAND_EXIT) if bf16_expand else ("", "")
+    return dict(decls=decls + prof_c(attn, kprefix) + "\n", expand_enter=ee, expand_exit=ex,
                 run_enter=RUN_ENTER)
 
 
