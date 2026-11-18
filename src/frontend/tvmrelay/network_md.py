@@ -5,7 +5,7 @@
 ###############################################################################
 """Describe the compiled graph as markdown: shapes, dtypes, and who feeds whom.
 
-``resnet18_graph.json`` holds everything about the network that survives
+``<stem>_graph.json`` holds everything about the network that survives
 compilation -- every tensor's shape and dtype, every kernel's arguments, and
 the storage plan TVM's liveness analysis produced. It is also 400 KB of
 flat JSON with the connectivity expressed as ``node_row_ptr`` arithmetic, so
@@ -408,7 +408,7 @@ def _mermaid(net: dict) -> list:
         f"{net['n_params']} parameter tensors are left out, or the topology "
         "would disappear under a fan of constant edges. Each edge carries the "
         "dtype and shape actually passed; **dotted edges are skips** (the "
-        "producer is not the preceding call), which is where ResNet's residual "
+        "producer is not the preceding call), which is where a residual network's skip "
         "structure shows up. Node labels give the primary op and `+N` for how "
         "many further ops were fused into that kernel -- the full name is in "
         "[Layers](#layers).",
@@ -714,7 +714,7 @@ def render(net: dict, graph_path, c_name: str) -> str:
                      + _buffer_reuse(net))
 
 
-def write_network_md(out_dir, c_name: str = "resnet18.c",
+def write_network_md(out_dir, c_name: str = "model.c",
                      verbose: bool = True):
     """Write ``<out_dir>/network.md``. Returns its path, or ``None``.
 
@@ -751,7 +751,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("out_dir", nargs="?", default="worklocal/tvmrelay_deploy",
                     help="directory holding the generated graph + params")
-    ap.add_argument("--c-name", default="resnet18.c",
+    ap.add_argument("--c-name", default="model.c",
                     help="kernel source name, used to find <stem>_graph.json")
     args = ap.parse_args(argv)
     return 0 if write_network_md(args.out_dir, args.c_name) else 1

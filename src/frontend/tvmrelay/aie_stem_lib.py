@@ -6,7 +6,7 @@
 
 The generic aiegraph backend (``run_aie_pipeline`` + ``kernels.conv_bn_body``)
 emits a placeholder Q7 conv: int16 accumulator, dummy quant params, NCHW
-indexing. For ResNet-18's stem -- layer 01,
+indexing. For a 7x7/s2 int8 classifier stem -- layer 01,
 ``contrib_conv2d_NCHWc_subtract_add_subtract_fixed_point_multiply_per_axi`` --
 the repo already has the real thing: ``src/aietensorop/conv2dstem/conv2dstem.cc``
 (int32 accumulator, TVM's per-channel ``fixed_point_multiply`` requant, the

@@ -40,10 +40,10 @@ silently dropped.
 
 The opset dance is load-bearing
 -------------------------------
-``quantize_static`` needs opset >= 11; the pretrained ResNet-18 v1 is opset 8.
+``quantize_static`` needs opset >= 11; a pretrained ONNX-zoo v1 CNN is opset 8.
 Letting onnxruntime auto-upgrade the **already-BN-folded** model fails::
 
-    IndexError: Input ConvBnFusion_W_resnetv15_conv0_weight is undefined!
+    IndexError: Input ConvBnFusion_W_<conv0>_weight is undefined!
 
 because ONNX's version converter cannot resolve the synthetic initializer names
 that ORT's fusion introduced. So the order here is **upgrade first, fold
@@ -79,13 +79,20 @@ from __future__ import annotations
 from pathlib import Path
 
 __all__ = ["quantize_onnx_int8", "compare_topk", "to_integer_ops",
-           "QDQ_NAME", "OPSET_NAME"]
+           "qdq_name", "opset_name"]
 
 #: Opset the model is converted to before quantizing (>= 11 required).
 TARGET_OPSET = 13
 
-OPSET_NAME = "resnet18-v1-7.op13.folded.onnx"
-QDQ_NAME = "resnet18-v1-7.int8.qdq.onnx"
+
+def opset_name(raw_onnx) -> str:
+    """``<stem>.op13.folded.onnx`` -- the upgraded + BN-folded model's file name."""
+    return f"{Path(raw_onnx).stem}.op{TARGET_OPSET}.folded.onnx"
+
+
+def qdq_name(raw_onnx) -> str:
+    """``<stem>.int8.qdq.onnx`` -- the quantized model's file name."""
+    return f"{Path(raw_onnx).stem}.int8.qdq.onnx"
 
 
 def _upgrade_and_fold(raw_onnx: Path, out_dir: Path, verbose: bool = True) -> Path:
@@ -99,7 +106,7 @@ def _upgrade_and_fold(raw_onnx: Path, out_dir: Path, verbose: bool = True) -> Pa
     from onnx import version_converter
     import onnxruntime as ort
 
-    folded = out_dir / OPSET_NAME
+    folded = out_dir / opset_name(raw_onnx)
     if folded.is_file() and folded.stat().st_size > 0:
         if verbose:
             print(f"[3/7] ptq    : cached {folded.name}")
@@ -162,7 +169,7 @@ def quantize_onnx_int8(raw_onnx, out_dir, images=None, *,
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    qdq = out_dir / QDQ_NAME
+    qdq = out_dir / qdq_name(raw_onnx)
     folded = _upgrade_and_fold(Path(raw_onnx), out_dir, verbose=verbose)
     if qdq.is_file() and qdq.stat().st_size > 0:
         if verbose:
@@ -232,7 +239,7 @@ def to_integer_ops(mod, *, hard_fail: bool = False, verbose: bool = True):
 
     ``FakeQuantizationToInteger`` matches those ``dq -> op -> q`` regions and
     replaces them with ``qnn.conv2d``/``qnn.add``/``qnn.requantize``, which
-    lower to genuine int8 arithmetic. On ResNet-18 this turns 20 ``nn.conv2d``
+    lower to genuine int8 arithmetic. On a 20-conv int8 CNN this turns 20 ``nn.conv2d``
     into 20 ``qnn.conv2d`` and leaves exactly **one** ``qnn.quantize`` -- the
     input image -- with its asymmetric zero-point intact.
 

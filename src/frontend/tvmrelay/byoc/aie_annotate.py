@@ -27,12 +27,12 @@ and the inline-back path below was unreachable code.
 A conv is identified by its WEIGHTS, not its position
 -----------------------------------------------------
 Relay's post-order and the graph executor's order are NOT the same: in every
-ResNet downsampling block TVM fuses the 1x1 shortcut conv with the residual
+residual downsampling block TVM fuses the 1x1 shortcut conv with the residual
 add, so it runs after the main branch, while Relay's post-order visits it
 first (convs 5-7, 10-12, 15-17 swap -- measured). Any "n-th conv" numbering is
 therefore wrong on one side. ``weight_fingerprint`` -- a hash of the SORTED
 weight values -- is layout-independent (the CPU build stores the same weights
-as NCHWc-blocked int16) and unique for all 20 ResNet-18 convs, so
+as NCHWc-blocked int16) and unique for all 20 convs of the int8 CNN, so
 ``aie_offload.resolve_conv_targets`` selects by it.
 
 The boundary goes on the composite function, not on individual operators
