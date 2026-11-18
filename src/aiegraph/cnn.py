@@ -35,6 +35,7 @@ from .errors import AiegraphError
 ENTRY = "aiek_cnn"
 STEP_CONV, STEP_DENSE = "aiednn_conv", "aiednn_dense"
 PX_SMALL, PX_WIDE = 64, 256          # launch pixel widths (the gemm_kacc walks proven on the board)
+K_MIN = 128                          # smallest instance K (zero-padded; see instance())
 __all__ = ["ENTRY", "instance", "kacc_geom", "kernel_source", "plan_layers", "offload_all"]
 
 
@@ -45,11 +46,13 @@ def _c64(v: int) -> int:
 def instance(N: int, K: int, M: int) -> tuple:
     """(Ng, Kg, PX) of the gemm_kacc instance a layer GEMM N x K x M runs on. Square ports (Ng == PX: the a and
     b blocks walk the same rows) are avoided -- aiehlc cannot place their buffers (gemm_kacc_256x1152x256: no
-    4096 B area in DMb at 0x78000) -- by taking the other launch width."""
+    4096 B area in DMb at 0x78000) -- by taking the other launch width. K is padded to at least K_MIN: a
+    two-chunk K walk (gemm_kacc_128x64x256, K=64) ran on the board but its raw GEMM had cos 0.56-0.84 against
+    the A78 GEMM of the same operands (AIEDNN_SELFCHECK build), every K >= 128 instance cos 1.000000."""
     ng, px = _c64(N), PX_SMALL if M <= PX_SMALL else PX_WIDE
     if ng == px:
         px = PX_WIDE if px == PX_SMALL else PX_SMALL
-    return ng, _c64(K), px
+    return ng, max(_c64(K), K_MIN), px
 
 
 def kacc_geom(ch: int, k: int, px: int) -> dict:

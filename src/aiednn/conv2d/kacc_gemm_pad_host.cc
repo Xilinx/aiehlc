@@ -2,7 +2,7 @@
  *
  * The layer GEMM is Y[n][m] = sum_k W[n][k] X[m][k] (n = output channel, m = output pixel, k = c*KH*KW + kh*KW + kw).
  * One gemm_kacc instance (Ng, Kg, PX) per distinct padded shape: Ng = ceil64(N), Kg = ceil64(K), PX = the pixel
- * width of one launch (aiegraph.cnn.instance). The pixels are walked in ceil(M / PX) launches; every padded row /
+ * width of one launch (aiegraph.cnn.instance; K >= 128: a 2-chunk K walk computed wrong on the board). The pixels are walked in ceil(M / PX) launches; every padded row /
  * column is zero. Host side per call: W natural [N][K] bf16 (pre-laid by aiegraph at build time) -> the kacc
  * chunk layout; per launch im2col of PX pixels (fp32 -> bf16 RNE) -> launch -> scatter of the valid [N][px]
  * block into the NCHWc output with the fused adds (per-channel [N] or the output's own shape, argument order)
@@ -12,6 +12,9 @@
  *   aiednn_conv(cid, args, nargs, wbf, sh, sw, ph, pw, act, px)   x [1,C/cb,H,W,cb], w [O/ob,C/ib,KH,KW,ib,ob]
  *   aiednn_dense(cid, args, nargs, wbf, act, px)                  x [M][K], w [N/nb][K][nb], y [M][N]
  */
+#if AIEDNN_SELFCHECK
+#include <math.h>
+#endif
 /* kacc_geom of aiegraph.cnn: K chunk, transposed walk, padded K of instance (N, K, M) */
 static int ap_geom(int N, int K, int M, int *kch_o, int *tr_o, int *kp_o) {
     int tkw = 4096 / M < 32 ? 4096 / M : 32;
@@ -60,7 +63,7 @@ static int ap_gemm(const float *xin, int C, int H, int W, int cb, int KH, int KW
     XTime ut0;
     XTime_GetTime(&ut0);
     const int M = OH * OW, K = C * KH * KW, KK = KH * KW;
-    const int Ng = (N + 63) & ~63, Kg = (K + 63) & ~63;
+    const int Ng = (N + 63) & ~63, Kg = K > 128 ? (K + 63) & ~63 : 128; /* = aiegraph.cnn.instance (K_MIN 128) */
     int kch = 0, tr = 0, Kp = 0;
     if (PX <= 0 || PX % 64 || ap_geom(Ng, Kg, PX, &kch, &tr, &Kp) != 0)
         return -3;
@@ -150,6 +153,33 @@ static int ap_gemm(const float *xin, int C, int H, int W, int cb, int KH, int KW
         g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
         g_aie_launches++;
         g_uc_macs += (unsigned long long)mv * N * K;
+#if AIEDNN_SELFCHECK
+        { /* debug build only: the launch's raw GEMM vs an A78 GEMM of the same bf16 operands */
+            double dot = 0, ng = 0, nr = 0, mx = 0;
+            for (int n = 0; n < N; n++)
+                for (int r = 0; r < mv; r++) {
+                    const int m = m0 + r, oh = m / OW, ow = m % OW, ih0 = oh * sh - ph, iw0 = ow * sw - pw;
+                    float acc = 0.0f;
+                    for (int c = 0; c < C; c++) {
+                        const float *xc = xin + (size_t)(c / cb) * HWc + c % cb;
+                        for (int t = 0; t < KK; t++) {
+                            const int ih = ih0 + t / KW, iw = iw0 + t % KW;
+                            if (ih >= 0 && ih < H && iw >= 0 && iw < W)
+                                acc += uc_bf2f(uc_f2bf(xc[((size_t)ih * W + iw) * cb])) *
+                                       uc_bf2f(wbf[(size_t)n * K + c * KK + t]);
+                        }
+                    }
+                    const double g = ap_y8(Y, n, r & ~7, Ng, PX, tr)[r & 7], d = g - acc;
+                    dot += g * acc;
+                    ng += g * g;
+                    nr += (double)acc * acc;
+                    if (d > mx || -d > mx)
+                        mx = d > 0 ? d : -d;
+                }
+            printf("[aiednn-check] N=%d K=%d M=%d m0=%d inst=%dx%dx%d cos=%.6f maxabs=%g\n", N, K, M, m0, Ng, Kg, PX,
+                   (ng > 0 && nr > 0) ? dot / sqrt(ng * nr) : 0.0, mx);
+        }
+#endif
         for (int n = 0; n < N; n++) {
             float *on = yout + (size_t)(n / yb) * M * yb + n % yb;
             for (int r8 = 0; r8 < mv; r8 += 8) {
