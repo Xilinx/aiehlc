@@ -609,8 +609,12 @@ def build_c(mod, params, out_dir: Path, *, opt_level: int = 3, fuse: bool = True
             mod = relay.transform.InferType()(mod)
             mod = relay.transform.FuseOps(fuse_opt_level=0)(mod)
         disabled.append("FuseOps")
+    # The Relay op semantics of every fused function (ops, shapes, axes), recorded right before LowerTE and
+    # saved beside the graph: aiegraph.pure_perm decides "pure permutation" on them, not on symbol names.
+    from aiegraph import pure_perm
+    cap = pure_perm.relay_capture()
     with tvm.transform.PassContext(opt_level=opt_level, disabled_pass=disabled,
-                                   config={"tir.disable_vectorize": True}):
+                                   config={"tir.disable_vectorize": True}, instruments=[cap]):
         lib = relay.build(mod, target=target, params=params)
 
     source = _collect_c_source(lib.lib)
@@ -619,6 +623,7 @@ def build_c(mod, params, out_dir: Path, *, opt_level: int = 3, fuse: bool = True
 
     graph_path = out_dir / "resnet18_graph.json"
     graph_path.write_text(lib.get_graph_json())
+    sem = pure_perm.save_relay(cap.module, lib.get_graph_json(), pure_perm.opsem_path(graph_path))
 
     params_path = out_dir / "resnet18_params.bin"
     params_path.write_bytes(relay.save_param_dict(lib.get_params()))
@@ -632,6 +637,8 @@ def build_c(mod, params, out_dir: Path, *, opt_level: int = 3, fuse: bool = True
         print(f"[4/7] codegen: {c_path} ({len(source):,} chars, {n_fns} kernels)")
         print(f"[4/7]          {graph_path.name}, {params_path.name} "
               f"({params_path.stat().st_size:,} B)")
+        print(f"[4/7]          {pure_perm.opsem_path(graph_path).name}: {sem['n_tvm_op']} fused functions "
+              f"(Relay op semantics, {sem['name_mismatch']} name mismatches)")
     return c_path
 
 
