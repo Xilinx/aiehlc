@@ -9,7 +9,7 @@
   of the P5n FLAGS file reach the LAYER_CFLAGS line in order; missing/empty
   file is an error.
 
-Run from the repo root:  python -m pytest -q src/frontend/tvmrelay/test_arm_build_layer_cflags.py
+Run from the repo root:  python -m pytest -q src/frontend/tvmrelay/test/test_arm_build_layer_cflags.py
 """
 import importlib.util
 import shutil
@@ -26,6 +26,13 @@ if str(ROOT / "src") not in sys.path:
 from frontend.tvmrelay import arm_build as ab  # noqa: E402
 
 BASE = "3d5404c"
+# unet-m4 P4 (08f880b) reworded the generated Makefile's comments / error text without model names;
+# the base output with exactly these rewordings applied is the expected empty-knob Makefile.
+P4_REWORDS = (("make KERNELS=/path/to/resnet18.c", "make KERNELS=/path/to/<stem>.c"),
+              ("on int8 ResNet-18 with the stem on the AIE", "on an int8 18-layer CNN with the stem on the AIE"),
+              ("arrive as resnet18.o inside OBJS", "arrive as <stem>.o inside OBJS"),
+              ("he single resnet18.c, used when", "he single <stem>.c, used when"),
+              ("# resnet18.o here, and a `clean`", "# <stem>.o here, and a `clean`"))
 P5N_FLAGS = ("-mcpu=cortex-a78 -ffp-contract=fast -fassociative-math "
              "-fno-signed-zeros -fno-trapping-math -ftree-vectorize")
 
@@ -67,6 +74,9 @@ def test_empty_knob_identical_to_base(tmp_path):
     old = _load(tmp_path / "old_arm_build.py", "old_arm_build")
     build, kernel, layers = _tree(tmp_path)
     want = old.write_makefile(build, ROOT, kernel, layers_dir=layers, verbose=False).read_text()
+    for a, b in P4_REWORDS:
+        assert a in want, a
+        want = want.replace(a, b)
     assert _mk(build, kernel, layers) == want
     assert _mk(build, kernel, layers, layer_cflags="") == want
     assert _mk(build, kernel, layers, layer_cflags="  \n ") == want
@@ -112,10 +122,16 @@ def _build_unet():
     return _load(ROOT / "example/aiegraph/unet_bk_sdm_tiny/build_unet.py", "build_unet_t")
 
 
+def _read_flags(path):
+    # unet-m4 P4: build_unet.read_layer_cflags_file moved to aiegraph.boardmain.read_cflags_file
+    from aiegraph.boardmain import read_cflags_file
+    return read_cflags_file(path)
+
+
 def test_flags_file_six_words_in_order(tmp_path):
     f = tmp_path / "FLAGS"
     f.write_text(" ".join(P5N_FLAGS.split()[:3]) + "\n" + " ".join(P5N_FLAGS.split()[3:]) + "\n")
-    flags = _build_unet().read_layer_cflags_file(f)
+    flags = _read_flags(f)
     assert flags == P5N_FLAGS
     build, kernel, layers = _tree(tmp_path)
     text = _mk(build, kernel, layers, layer_cflags=flags)
@@ -128,10 +144,10 @@ def test_flags_file_six_words_in_order(tmp_path):
 def test_flags_file_missing_or_empty_is_error(tmp_path):
     bu = _build_unet()
     with pytest.raises(ValueError):
-        bu.read_layer_cflags_file(tmp_path / "nope")
+        _read_flags(tmp_path / "nope")
     (tmp_path / "empty").write_text(" \n\n")
     with pytest.raises(ValueError):
-        bu.read_layer_cflags_file(tmp_path / "empty")
+        _read_flags(tmp_path / "empty")
     # the CLI refuses (rc 2) before doing any work
     assert bu.main(["--onnx", "x", "--real-io", str(tmp_path), "--out", str(tmp_path / "o"),
                     "--arm-layer-cflags-file", str(tmp_path / "empty")]) == 2
