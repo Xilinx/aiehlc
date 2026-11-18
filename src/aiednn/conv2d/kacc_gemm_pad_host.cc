@@ -2,15 +2,15 @@
  *
  * The layer GEMM is Y[n][m] = sum_k W[n][k] X[m][k] (n = output channel, m = output pixel, k = c*KH*KW + kh*KW + kw).
  * One gemm_kacc instance (Ng, Kg, PX) per distinct padded shape: Ng = ceil64(N), Kg = ceil64(K), PX = the pixel
- * width of one launch (aiegraph.cnn.instance; K >= 128: a 2-chunk K walk computed wrong on the board). The pixels are walked in ceil(M / PX) launches; every padded row /
+ * width of one launch (aiegraph.cnn.instance; a small K runs on a larger-K instance, cnn.merge_small_k). The pixels are walked in ceil(M / PX) launches; every padded row /
  * column is zero. Host side per call: W natural [N][K] bf16 (pre-laid by aiegraph at build time) -> the kacc
  * chunk layout; per launch im2col of PX pixels (fp32 -> bf16 RNE) -> launch -> scatter of the valid [N][px]
  * block into the NCHWc output with the fused adds (per-channel [N] or the output's own shape, argument order)
  * and an optional ReLU (act = 1). Needs kacc_conv_host.cc before it (uc_kalloc, uc_kacc_launch, uc_sync_*).
  *
- * Entries (C linkage, the "args" ABI of an aiegraph one-call group):
- *   aiednn_conv(cid, args, nargs, wbf, sh, sw, ph, pw, act, px)   x [1,C/cb,H,W,cb], w [O/ob,C/ib,KH,KW,ib,ob]
- *   aiednn_dense(cid, args, nargs, wbf, act, px)                  x [M][K], w [N/nb][K][nb], y [M][N]
+ * Entries (C linkage, the "args" ABI of an aiegraph one-call group; px / kg = the instance's PX / Kg):
+ *   aiednn_conv(cid, args, nargs, wbf, sh, sw, ph, pw, act, px, kg)   x [1,C/cb,H,W,cb], w [O/ob,C/ib,KH,KW,ib,ob]
+ *   aiednn_dense(cid, args, nargs, wbf, act, px, kg)                  x [M][K], w [N/nb][K][nb], y [M][N]
  */
 #if AIEDNN_SELFCHECK
 #include <math.h>
@@ -59,13 +59,13 @@ static inline const float *ap_y8(const float *Y, int n, int m8, int Ng, int P, i
  * yout[(n / yb) * M * yb + p * yb + n % yb] (M = OH * OW). */
 static int ap_gemm(const float *xin, int C, int H, int W, int cb, int KH, int KW, int sh, int sw, int ph, int pw,
                    int OH, int OW, const uint16_t *wbf, int N, void *const *argv, int nargs, float *yout, int yb,
-                   int act, int PX) {
+                   int act, int PX, int Kg) {
     XTime ut0;
     XTime_GetTime(&ut0);
     const int M = OH * OW, K = C * KH * KW, KK = KH * KW;
-    const int Ng = (N + 63) & ~63, Kg = K > 128 ? (K + 63) & ~63 : 128; /* = aiegraph.cnn.instance (K_MIN 128) */
+    const int Ng = (N + 63) & ~63;
     int kch = 0, tr = 0, Kp = 0;
-    if (PX <= 0 || PX % 64 || ap_geom(Ng, Kg, PX, &kch, &tr, &Kp) != 0)
+    if (PX <= 0 || PX % 64 || Kg < K || Kg % 64 || ap_geom(Ng, Kg, PX, &kch, &tr, &Kp) != 0)
         return -3;
     if ((long)Ng * Kp > UC_KW_ELEMS || (long)PX * Kp > UC_KX_ELEMS || (long)Ng * PX > UC_KY_ELEMS)
         return -3;
@@ -203,6 +203,17 @@ static int ap_gemm(const float *xin, int C, int H, int W, int cb, int KH, int KW
         printf("[aiednn] %d nonfinite AIE outputs (N=%d K=%d M=%d)\n", bad, N, K, M);
         return -4;
     }
+#if AIEDNN_SELFCHECK
+    /* debug build only: per-channel sums of the final output (compare with the x86 reference's layer outputs) */
+    printf("[aiednn-stat] N=%d M=%d K=%d", N, M, K);
+    for (int n = 0; n < N; n++) {
+        double s = 0;
+        for (int m = 0; m < M; m++)
+            s += yout[(size_t)(n / yb) * M * yb + (size_t)m * yb + n % yb];
+        printf(" %.6g", s);
+    }
+    printf("\n");
+#endif
     return 0;
 }
 
@@ -217,7 +228,7 @@ static int ap_done(const char *who, int cid, int rc) {
 }
 
 extern "C" int aiednn_conv(int cid, void *args, int nargs, const uint16_t *wbf, int sh, int sw, int ph, int pw,
-                           int act, int px) {
+                           int act, int px, int kg) {
     void *const *argv = (void *const *)args;
     if (nargs < 3)
         return ap_done("aiednn_conv", cid, -2);
@@ -232,10 +243,10 @@ extern "C" int aiednn_conv(int cid, void *args, int nargs, const uint16_t *wbf, 
         return ap_done("aiednn_conv", cid, -3);
     return ap_done("aiednn_conv", cid,
                    ap_gemm((const float *)x->data, C, H, W, cb, KH, KW, sh, sw, ph, pw, OH, OW, wbf, N, argv, nargs,
-                           (float *)y->data, yb, act, px));
+                           (float *)y->data, yb, act, px, kg));
 }
 
-extern "C" int aiednn_dense(int cid, void *args, int nargs, const uint16_t *wbf, int act, int px) {
+extern "C" int aiednn_dense(int cid, void *args, int nargs, const uint16_t *wbf, int act, int px, int kg) {
     void *const *argv = (void *const *)args;
     if (nargs < 3)
         return ap_done("aiednn_dense", cid, -2);
@@ -248,5 +259,5 @@ extern "C" int aiednn_dense(int cid, void *args, int nargs, const uint16_t *wbf,
     /* x [M][K] = NCHWc (C = K, H = 1, W = M, cb = K); y [M][N] = NCHWc (OH = 1, OW = M, yb = N) */
     return ap_done("aiednn_dense", cid,
                    ap_gemm((const float *)x->data, K, 1, M, K, 1, 1, 1, 1, 0, 0, 1, M, wbf, N, argv, nargs,
-                           (float *)y->data, N, act, px));
+                           (float *)y->data, N, act, px, kg));
 }

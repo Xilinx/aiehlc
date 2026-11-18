@@ -35,8 +35,8 @@ from .errors import AiegraphError
 ENTRY = "aiek_cnn"
 STEP_CONV, STEP_DENSE = "aiednn_conv", "aiednn_dense"
 PX_SMALL, PX_WIDE = 64, 256          # launch pixel widths (the gemm_kacc walks proven on the board)
-K_MIN = 128                          # smallest instance K (zero-padded; see instance())
-__all__ = ["ENTRY", "instance", "kacc_geom", "kernel_source", "plan_layers", "offload_all"]
+K_SMALL = 128                        # instances with K <= this are merged into a larger-K one (see merge_small_k)
+__all__ = ["ENTRY", "instance", "merge_small_k", "kacc_geom", "kernel_source", "plan_layers", "offload_all"]
 
 
 def _c64(v: int) -> int:
@@ -46,13 +46,23 @@ def _c64(v: int) -> int:
 def instance(N: int, K: int, M: int) -> tuple:
     """(Ng, Kg, PX) of the gemm_kacc instance a layer GEMM N x K x M runs on. Square ports (Ng == PX: the a and
     b blocks walk the same rows) are avoided -- aiehlc cannot place their buffers (gemm_kacc_256x1152x256: no
-    4096 B area in DMb at 0x78000) -- by taking the other launch width. K is padded to at least K_MIN: a
-    two-chunk K walk (gemm_kacc_128x64x256, K=64) ran on the board but its raw GEMM had cos 0.56-0.84 against
-    the A78 GEMM of the same operands (AIEDNN_SELFCHECK build), every K >= 128 instance cos 1.000000."""
+    4096 B area in DMb at 0x78000) -- by taking the other launch width."""
     ng, px = _c64(N), PX_SMALL if M <= PX_SMALL else PX_WIDE
     if ng == px:
         px = PX_WIDE if px == PX_SMALL else PX_SMALL
-    return ng, max(_c64(K), K_MIN), px
+    return ng, _c64(K), px
+
+
+def merge_small_k(insts: list) -> dict:
+    """{instance: instance used}: an instance with K <= K_SMALL runs on the smallest larger-K instance of the same
+    (Ng, PX) when the plan has one (K zero-padded). Small-K walks ran on the board but computed wrong:
+    gemm_kacc_128x64x256 / 128x128x256 raw GEMM cos 0.56-0.84 against the A78 GEMM of the same bf16 operands
+    (AIEDNN_SELFCHECK debug build), while every instance with K >= 192 had cos 1.000000."""
+    out = {}
+    for ng, kg, px in insts:
+        big = sorted(k for n, k, p in insts if (n, p) == (ng, px) and k > kg)
+        out[(ng, kg, px)] = (ng, big[0], px) if kg <= K_SMALL and big else (ng, kg, px)
+    return out
 
 
 def kacc_geom(ch: int, k: int, px: int) -> dict:
@@ -182,12 +192,19 @@ def plan_layers(emod, model) -> dict:
         for g in gs:
             c = dict(g.info, group=g)
             c["inst"] = instance(c["N"], c["K"], c["M"])
-            c["launches"] = -(-c["M"] // c["inst"][2])
             c["act"] = 1 if re.search(r"(^|_)relu(_|$|\d)", c["func"]) else 0
             if re.search(r"(sigmoid|tanh|clip|silu|gelu|leaky)", c["func"]):
                 raise AiegraphError("cnn", f"{c['onnx']}: TVM function {c['func']} fuses an activation the "
                                     "padded host does not apply", hint="only bias / residual adds and ReLU")
             out[kind].append(c)
+    merged = merge_small_k(sorted({c["inst"] for c in out["conv"] + out["linear"]}))
+    for c in out["conv"] + out["linear"]:
+        c["inst"] = merged[c["inst"]]
+        c["launches"] = -(-c["M"] // c["inst"][2])
+    small = sorted({i for i, j in merged.items() if i == j and i[1] <= K_SMALL})
+    if small:
+        raise AiegraphError("cnn", f"gemm_kacc instances {small} have K <= {K_SMALL} and no larger-K instance of the "
+                            "same (N, PX) to run on", hint="small-K walks compute wrong on the board")
     out["shapes"] = sorted({c["inst"] for c in out["conv"] + out["linear"]})
     out["total_macs"] = sum(r["macs"] for r in inventory(model))
     out["n_conv"] = sum(1 for n in model.graph.node if n.op_type == "Conv")
@@ -249,9 +266,10 @@ def offload_all(emod, model, out, *, warm: bool = True, ctrlpkt: str = "off", ve
     for c in layers:
         conv = c["kind"] == "conv"
         name = STEP_CONV if conv else STEP_DENSE
-        consts = dict(cid=c["cid"], sh=c["sh"], sw=c["sw"], ph=c["ph"], pw=c["pw"], act=c["act"], px=c["inst"][2])
+        consts = dict(cid=c["cid"], sh=c["sh"], sw=c["sw"], ph=c["ph"], pw=c["pw"], act=c["act"], px=c["inst"][2],
+                      kg=c["inst"][1])
         if not conv:
-            consts = dict(cid=c["cid"], act=c["act"], px=c["inst"][2])
+            consts = dict(cid=c["cid"], act=c["act"], px=c["inst"][2], kg=c["inst"][1])
         g = c["group"]
         st = ag.step(name, reads=g.x, writes=g.y, weights=g.w.as_bf16(layout=_natural(c["kind"])), consts=consts,
                      call=("cid", "args", "nargs", "wbf") + tuple(k for k in consts if k != "cid"),
