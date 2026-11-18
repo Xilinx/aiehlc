@@ -282,3 +282,21 @@ def test_driver_refuses_stale_or_codeless_group(tmp_path):
     with pytest.raises(ValueError, match="stale group record"):
         _driver(tmp_path)
     assert rec["name"] == "g0"
+
+
+def test_partition_doc_keeps_groups_and_makes_rows(tmp_path):
+    """A partition.json that holds only groups (offload_group before the first per-layer offload, i.e. a
+    fresh convert) still gets its layer rows when aiekernel writes the offload verdicts (S3 build fix)."""
+    from types import SimpleNamespace
+    try:
+        from frontend.tvmrelay.aiekernel.flow import _partition_doc
+    except Exception:
+        pytest.skip("frontend.tvmrelay.aiekernel not importable")
+    (tmp_path / "layers").mkdir()
+    (tmp_path / "layers" / "partition.json").write_text(json.dumps({"layers": [], "groups": [{"name": "g0"}]}))
+    net = SimpleNamespace(out_dir=tmp_path, calls=[SimpleNamespace(layer=0, dir="00_conv", symbol="s0", node=3)])
+    doc = _partition_doc(net)
+    assert [r["symbol"] for r in doc["layers"]] == ["s0"] and doc["groups"] == [{"name": "g0"}]
+    full = {"layers": [{"index": 0, "symbol": "s0", "target": "aie"}], "groups": []}
+    (tmp_path / "layers" / "partition.json").write_text(json.dumps(full))
+    assert _partition_doc(net) == full
