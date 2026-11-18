@@ -54,6 +54,8 @@ def _body(c: str) -> str:
 def test_main_byte_identical(old, aie, ktimer, rtio):
     bu, ua = old
     ref = ua.main_c(bu.MAIN_C, ktimer=ktimer) if aie else bu.MAIN_C
+    # P5: the AIE templates the old module reads carry @M@ / @MU@ (model prefix) where they had unet / UNET
+    ref = ref.replace("@MU@", "UNET").replace("@M@", "unet")
     if rtio:
         ref = bu.runtime_io_main(ref)
     got = bm.main_c("unet", IO, aie=aie, ktimer=ktimer, runtime_io=rtio, note=(1, "timestep"))

@@ -12,12 +12,12 @@ unsigned long long __Runtime_ctrl_aot_fallbacks(void) __asm__("_Z28__Runtime_ctr
 void __Runtime_ctrl_shim_bd_ctrl_stats_print(void) __asm__("_Z39__Runtime_ctrl_shim_bd_ctrl_stats_printv");
 /* A78 PMU cycle counter (the runtime's RT_PROF_* clock): enabled here without the C reset, read
  * around graph_run with XTime so the PMU rate is measured, not assumed */
-static inline unsigned long long unet_pmc(void) {
+static inline unsigned long long @M@_pmc(void) {
     unsigned long long v;
     __asm__ volatile("isb; mrs %0, pmccntr_el0" : "=r"(v));
     return v;
 }
-static inline void unet_pmc_enable(void) {
+static inline void @M@_pmc_enable(void) {
     unsigned long long v;
     __asm__ volatile("mrs %0, pmcr_el0" : "=r"(v));
     v |= 1ULL;
