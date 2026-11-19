@@ -34,6 +34,17 @@ done
 case "$BOARD" in 10.23.224.213) NAME="${NAME:-palmyra213}"; BKIND=palmyra ;; *) NAME="${NAME:-$BOARD}"; BKIND="${BOARD_KIND:-palmyra}" ;; esac
 read -r M K N RECIPE < <(awk -F'\t' -v k="$KERNEL" 'NR>1 && $1==k {print $3, $4, $5, $2}' "$KTSV")
 [ -n "${M:-}" ] || { echo "p0_one_kernel: kernel $KERNEL not in $KTSV" >&2; exit 2; }
+if [ "$RECIPE" = kacc_chunk_conv_bf16 ]; then
+    # yolo chunked conv: one launch = the gemm_kacc instance of src/aiegraph/cnn_chunk.plan_conv (split 1):
+    # ks = max(c64(K), 192), Np = max(c64(N), 128 if ks > 1152 else 64), px chunk MC = 256 (x2 / /2 when Np == MC);
+    # the layer is ceil(M / mc) launches of (M=mc, K=ks, N=Np). Board-time per launch is what the cost model fits.
+    c64() { echo $(( ($1 + 63) / 64 * 64 )); }
+    KS=$(c64 "$K"); [ "$KS" -ge 192 ] || KS=192
+    NP=$(c64 "$N"); if [ "$KS" -gt 1152 ]; then [ "$NP" -ge 128 ] || NP=128; fi
+    MC=256; if [ "$NP" -eq "$MC" ]; then MC=512; fi
+    echo "[p0] $RECIPE layer M=$M K=$K N=$N -> per-launch gemm_kacc instance M=$MC K=$KS N=$NP (launches_per_layer=$(( (M + MC - 1) / MC )), cnn_chunk.plan_conv)"
+    M=$MC K=$KS N=$NP
+fi
 OUT="${OUT:-/scratch/staff/huaj/tmp/costmodel_p0/$KERNEL}"
 mkdir -p "$OUT/golden"
 OUT="$(cd "$OUT" && pwd)"
