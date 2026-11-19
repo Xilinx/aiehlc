@@ -113,6 +113,26 @@ def main(argv=None) -> int:
     p.add_argument("--workdir", default=None)
     p.add_argument("--no-build", action="store_true")
     p.add_argument("-v", "--verbose", action="store_true")
+    p = sub.add_parser("dnn-build", help="build (and run) an aiednn app with kernels from the library")
+    p.add_argument("app")
+    p.add_argument("--target", default="vek280", choices=["vek280", "vek385", "x86"])
+    p.add_argument("--root", default=None, help="kernel library root (default src/aietensorop)")
+    p.add_argument("--kernel", action="append", default=None, help="restrict to this kernel (repeatable)")
+    p.add_argument("--out", default=None)
+    p.add_argument("--vitis-settings", default=None, help=".../Vitis/settings64.sh")
+    p.add_argument("--headers", action="append", default=[], help="dir of generated headers the app includes")
+    p.add_argument("--run", action="store_true")
+    p.add_argument("--board", default=None, help="e.g. galerina13 (vek280), portobello13 (vek385)")
+    p.add_argument("--timeout", type=int, default=120)
+    p.add_argument("--modes", default="auto", choices=["auto", "all", "library"],
+                   help="megakernel modes: the app's (auto), every mode, or the library's fixed ELF set")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p = sub.add_parser("dnn-lib", help="build the prebuilt aiednn library (runtime + kernel ELF set) to link apps against")
+    p.add_argument("--target", default="vek280", choices=["vek280"])
+    p.add_argument("--dist", default=None, help="output dir (default worklocal/aiednn/lib_<target>)")
+    p.add_argument("--mesh", default=None, help="ROWSxCOLS AIE cores (default 4x4)")
+    p.add_argument("--vitis-settings", default=None, help=".../Vitis/settings64.sh")
+    p.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
     try:
@@ -139,6 +159,22 @@ def main(argv=None) -> int:
         if args.cmd == "prototype" and args.layer is None and args.region is None:
             print(ag.offload_prototype())
             return 0
+        if args.cmd == "dnn-build":
+            rep = ag.dnn_build(args.app, target=args.target, out=args.out, root=args.root,
+                               kernels=args.kernel, vitis_settings=args.vitis_settings, run=args.run,
+                               board=args.board, timeout=args.timeout, verbose=args.verbose,
+                               headers=args.headers, modes=args.modes)
+            print(rep)
+            return 0 if rep.ok and rep.run_ok is not False else 1
+        if args.cmd == "dnn-lib":
+            from .dnn_lib import build_library
+            mesh = tuple(int(v) for v in args.mesh.split("x")) if args.mesh else None
+            lb = build_library(args.target, dist=args.dist, mesh=mesh, vitis_settings=args.vitis_settings,
+                               verbose=args.verbose)
+            print(f"dnn-lib {args.target}: {'OK' if lb.ok else 'FAILED: ' + lb.reason} -> {lb.dist}")
+            for f in lb.files:
+                print(f"  {f}")
+            return 0 if lb.ok else 1
         emod = _emod(args)
         if args.cmd == "aiprototype":
             return 0 if emod.ai_offload_prototype(args.layer, entry=args.entry, rounds=args.rounds,

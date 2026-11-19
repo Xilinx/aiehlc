@@ -4,6 +4,7 @@
  ******************************************************************************/
 
 #include "routing/routingtopology.h"
+#include <iostream>
 
 RoutingTopology::RoutingTopology(std::string gen, std::string name, int startCol, int endCol, int startRow, int endRow)
     : gen_(gen), name_(name), rm_(std::make_shared<ResourceMgr>(makeResource(gen, name))) {
@@ -74,14 +75,25 @@ bool RoutingTopology::occupyPointDirection(Point a,int& portNum, PortDirection& 
     return rm_->occupyPointDirection(a, portNum, pd, slave);
 }
 // ── createPath ──────────────────────────────────────────────────────────
-std::optional<std::shared_ptr<const RoutingPath>> 
-RoutingTopology::createPath(int dioID, std::vector<Point> dsttiles) {
+std::optional<std::shared_ptr<const RoutingPath>> RoutingTopology::createPath(int dioID, std::vector<Point> dsttiles,
+                                                                              std::optional<Point> noFirstHop) {
     std::vector<Point> wall ={};
     if (dataios_.find(dioID) == dataios_.end()) {
         return std::nullopt;
     }
     auto dio = dataios_[dioID];
     std::shared_ptr<RoutingPath> rpath = std::make_shared<RoutingPath>(rm_, dio, wall);
+    if (noFirstHop) {
+        rpath->setNoFirstHop(*noFirstHop);
+        if (!rpath->addIOTree({dsttiles})) {
+            std::cerr << "[TilingLinalg] WARNING: DataIO " << dioID << ": no route that avoids a U-turn at the "
+                      << "packet chain's last tile; routing as before (RoutingHWVerifyPass will reject it)\n";
+            rpath = std::make_shared<RoutingPath>(rm_, dio, wall);
+            (void)rpath->addIOTree({dsttiles});
+        }
+        paths_.push_back(rpath);
+        return rpath;
+    }
     bool ok = rpath->addIOTree({dsttiles});
     paths_.push_back(rpath);
     return rpath;

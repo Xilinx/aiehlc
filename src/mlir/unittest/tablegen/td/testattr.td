@@ -24,7 +24,6 @@ def testdialect : Dialect {
 	let hasOperationAttrVerify = 0;
 	let useDefaultTypePrinterParser = 1;
 	let useDefaultAttributePrinterParser = 1;
-	let usePropertiesForAttributes = 0;
 }
 
 class testop<string mnemonic, list<Trait> traits = []> : Op<testdialect, mnemonic, traits>;

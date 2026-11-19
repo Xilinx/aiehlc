@@ -77,6 +77,7 @@ AIEK_SPEC(conv2dstem_uk,
     "op        conv2d_requant_relu_u8\n"
     "match     contrib_conv2d_NCHWc\n"
     "reference conv2dstem_uk_ref.c\n"
+    "target    vek385\n"
     "in    int8  [1,1,230,230,3]   ifm_pad\n"
     "param int8  [16,1,7,7,3,4]    weight\n"
     "param int32 [1,16,1,1,4]      zero_point_a\n"

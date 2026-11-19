@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  ******************************************************************************/
 
+#include "aiehlcsymbol.h"
 #include "passdmaphoptoroutinghw.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -55,17 +56,17 @@ struct DmaPortInfo {
 // Otherwise assumes it's a direct port symbol.
 static dmaphop::port resolvePortFromPathSymbol(Operation *contextOp, FlatSymbolRefAttr symRef) {
     // Try direct port lookup first (shim/mem ports)
-    if (auto portOp = SymbolTable::lookupNearestSymbolFrom<dmaphop::port>(contextOp, symRef))
+    if (auto portOp = aiehlc::lookupNamed<dmaphop::port>(contextOp, symRef))
         return portOp;
     // Try consumer indirection
-    if (auto consumerOp = SymbolTable::lookupNearestSymbolFrom<dmaphop::consumer>(contextOp, symRef)) {
+    if (auto consumerOp = aiehlc::lookupNamed<dmaphop::consumer>(contextOp, symRef)) {
         auto fromRef = consumerOp.getFromAttr();
-        return SymbolTable::lookupNearestSymbolFrom<dmaphop::port>(contextOp, fromRef);
+        return aiehlc::lookupNamed<dmaphop::port>(contextOp, fromRef);
     }
     // Try producer indirection
-    if (auto producerOp = SymbolTable::lookupNearestSymbolFrom<dmaphop::producer>(contextOp, symRef)) {
+    if (auto producerOp = aiehlc::lookupNamed<dmaphop::producer>(contextOp, symRef)) {
         auto tpRef = producerOp.getTpAttr();
-        return SymbolTable::lookupNearestSymbolFrom<dmaphop::port>(contextOp, tpRef);
+        return aiehlc::lookupNamed<dmaphop::port>(contextOp, tpRef);
     }
     return nullptr;
 }
@@ -418,6 +419,12 @@ GetSeqPath(std::optional<std::shared_ptr<const RoutingPath>> rpath, std::shared_
             }
         }
         tree_round++;
+    }
+
+    if (orderedPathPoints.empty()) {
+        llvm::errs() << "[TilingLinalg] ERROR: no route for DataIO " << dioid << " (shim col " << dio->colpos()
+                     << ", channel " << dio->channel() << "): the router found no free path\n";
+        llvm::report_fatal_error("no route for a DataIO (stream switch ports exhausted?)");
     }
 
     //Process output dataio, when the last tile is be the shim tile of dataio
@@ -1003,7 +1010,7 @@ struct DmaphopPathConversionPattern : public OpConversionPattern<dmaphop::create
                 } else {
                     // Try resolving through producer indirection (sym_name -> tp -> port)
                     auto symRef = FlatSymbolRefAttr::get(op->getContext(), symName);
-                    if (auto producerOp = SymbolTable::lookupNearestSymbolFrom<dmaphop::producer>(op, symRef)) {
+                    if (auto producerOp = aiehlc::lookupNamed<dmaphop::producer>(op, symRef)) {
                         auto recvPortName = producerOp.getTp();
                         auto it2 = routingCtx.portSymToTilePoint.find(recvPortName.str());
                         if (it2 != routingCtx.portSymToTilePoint.end()) {
@@ -1028,7 +1035,7 @@ struct DmaphopPathConversionPattern : public OpConversionPattern<dmaphop::create
                 } else {
                     // Try resolving through consumer indirection (sym_name -> from -> port)
                     auto symRef = FlatSymbolRefAttr::get(op->getContext(), symName);
-                    if (auto consumerOp = SymbolTable::lookupNearestSymbolFrom<dmaphop::consumer>(op, symRef)) {
+                    if (auto consumerOp = aiehlc::lookupNamed<dmaphop::consumer>(op, symRef)) {
                         auto sendPortName = consumerOp.getFrom();
                         auto it2 = routingCtx.portSymToTilePoint.find(sendPortName.str());
                         if (it2 != routingCtx.portSymToTilePoint.end()) {
@@ -1115,10 +1122,21 @@ struct DmaphopPathConversionPattern : public OpConversionPattern<dmaphop::create
             static_cast<int>(dmadir),  // dmadirection
             shimchannel  // channelused
         );
-        
+
         // Create routing path (like line 1030 or 1058)
-        auto rpath = router_.createPath(dioid, coreTileList);
-        
+        // An S2MM gather is a packet chain over the producers in this same order,
+        // and the path starts at its last tile. Leaving that tile towards the chain's
+        // predecessor would put the packet master on the side its packets arrive
+        // on -- a U-turn, and those packets never reach the shim (skill
+        // kernelblockgather). Route around it where a route exists.
+        std::optional<Point> noFirstHop;
+        if (!isShimToCore && coreTileList.size() >= 2) {
+            const Point &last = coreTileList.back(), &prev = coreTileList[coreTileList.size() - 2];
+            if (std::abs(last.r - prev.r) + std::abs(last.c - prev.c) == 1)
+                noFirstHop = prev;
+        }
+        auto rpath = router_.createPath(dioid, coreTileList, noFirstHop);
+
         if (!rpath || !(*rpath)) {
             rewriter.eraseOp(op);
             return success();

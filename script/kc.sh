@@ -321,6 +321,12 @@ if [ -n "$commons_dir" ]; then
     INCLUDE_PATH="$INCLUDE_PATH -I$commons_dir"
 fi
 
+# mlir-aie's AIE kernels (the mlir-aie submodule): a kernel may #include "linalg/mm_aie2.h" etc.;
+# found in place, so their own relative includes ("../aie_kernel_utils.h") resolve
+if [ -d "${AIEHLC_ROOT_DIR}/mlir-aie/aie_kernels" ]; then
+    INCLUDE_PATH="$INCLUDE_PATH -I${AIEHLC_ROOT_DIR}/mlir-aie/aie_kernels"
+fi
+
 # --- Set up tool prefix ---
 
 if [[ "$platform" == "linux" ]]; then

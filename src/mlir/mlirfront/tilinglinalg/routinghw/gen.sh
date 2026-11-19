@@ -31,14 +31,14 @@ fi
 echo "Script is located in: $GEN_SCRIPT_DIR"
 pushd ${GEN_SCRIPT_DIR}
 
-#mlir-tblgen --gen-attrdef-defs $TD/routingattr.td -attrdefs-dialect=routing -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include >  $INC/routingattr.cc.inc
-${LLVM_BIN}/mlir-tblgen -gen-attrdef-defs $TD/routinghwattr.td -attrdefs-dialect=routinghw -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} -o $INC/routinghwattr.cc.inc
-${LLVM_BIN}/mlir-tblgen -gen-typedef-defs $TD/routinghwtype.td -typedefs-dialect=routinghw -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} -o $INC/routinghwtype.cc.inc
-${LLVM_BIN}/mlir-tblgen -gen-op-defs $TD/routinghwop.td -dialect=routinghw -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} -o $INC/routinghwop.cc.inc
-${LLVM_BIN}/mlir-tblgen -gen-dialect-defs $TD/routinghwattr.td -dialect=routinghw -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} -o $INC/routinghwdialect.cc.inc
+#mlir-tblgen --gen-attrdef-defs $TD/routingattr.td -attrdefs-dialect=routing -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include >  $INC/routingattr.cc.inc
+${LLVM_BIN}/mlir-tblgen -gen-attrdef-defs $TD/routinghwattr.td -attrdefs-dialect=routinghw -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -o $INC/routinghwattr.cc.inc
+${LLVM_BIN}/mlir-tblgen -gen-typedef-defs $TD/routinghwtype.td -typedefs-dialect=routinghw -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -o $INC/routinghwtype.cc.inc
+${LLVM_BIN}/mlir-tblgen -gen-op-defs $TD/routinghwop.td -dialect=routinghw -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -o $INC/routinghwop.cc.inc
+${LLVM_BIN}/mlir-tblgen -gen-dialect-defs $TD/routinghwattr.td -dialect=routinghw -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -o $INC/routinghwdialect.cc.inc
 #defines
-${LLVM_BIN}/mlir-tblgen -gen-attrdef-decls $TD/routinghwattr.td -attrdefs-dialect=routinghw -I$TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} -o $INC/routinghwattr.h.inc
-${LLVM_BIN}/mlir-tblgen -gen-typedef-decls $TD/routinghwtype.td -typedefs-dialect=routinghw -I$TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} -o $INC/routinghwtype.h.inc
-${LLVM_BIN}/mlir-tblgen -gen-op-decls $TD/routinghwop.td -dialect=routinghw -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} -o $INC/routinghwop.h.inc
-${LLVM_BIN}/mlir-tblgen -gen-dialect-decls $TD/routinghwattr.td -dialect=routinghw -I $TD -I $GEN_SCRIPT_DIR -I /usr/local/include/ ${MLIR_INCLUDES} -o $INC/routinghwdialect.h.inc
+${LLVM_BIN}/mlir-tblgen -gen-attrdef-decls $TD/routinghwattr.td -attrdefs-dialect=routinghw -I$TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -o $INC/routinghwattr.h.inc
+${LLVM_BIN}/mlir-tblgen -gen-typedef-decls $TD/routinghwtype.td -typedefs-dialect=routinghw -I$TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -o $INC/routinghwtype.h.inc
+${LLVM_BIN}/mlir-tblgen -gen-op-decls $TD/routinghwop.td -dialect=routinghw -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -o $INC/routinghwop.h.inc
+${LLVM_BIN}/mlir-tblgen -gen-dialect-decls $TD/routinghwattr.td -dialect=routinghw -I $TD -I $GEN_SCRIPT_DIR ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -o $INC/routinghwdialect.h.inc
 

@@ -65,6 +65,7 @@ using namespace dfschedule;
 
 #define GET_OP_CLASSES
 #define GET_OP_DECLS
+#include "aiehlcsymbol.h"
 #include "dfscheduleop.h.inc"
 #undef GET_OP_DECLS
 #undef GET_OP_CLASSES

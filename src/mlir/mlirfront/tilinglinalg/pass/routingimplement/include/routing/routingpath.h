@@ -54,6 +54,12 @@ public:
     bool addIOTree(const std::vector<Point>& sinks,
                  MultiPath& out);
     bool addIOTree(const std::vector<Point>& sinks);
+    // S2MM packet gather: never leave the source tile towards `p` on the first hop
+    // (the chain's predecessor) -- that is a same-side U-turn in its stream switch.
+    void setNoFirstHop(const Point &p) {
+        noFirstHop_ = p;
+        hasNoFirstHop_ = true;
+    }
 
     // return path
     const std::vector<std::vector<Point>>& paths() const { return paths_; }
@@ -77,6 +83,8 @@ private:
     // data
     int R_, C_;
     std::vector<std::vector<bool>> wall_;   // wall
+    Point noFirstHop_{-1, -1};
+    bool hasNoFirstHop_ = false;
     std::vector<std::vector<bool>> tree_;   // built path
     std::vector<std::vector<Point>> paths_; // each branch
     std::vector<std::vector<Point>> parent_;// BFS backtrace

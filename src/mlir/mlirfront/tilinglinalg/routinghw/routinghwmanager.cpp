@@ -42,8 +42,11 @@ ModuleOp routinghwmanager::ops_test(MLIRContext* ctx) {
     OpBuilder builder(ctx);
     ModuleOp m = ModuleOp::create(builder.getUnknownLoc());
     m.push_back(func);
-    m.dump();
- 
+    {
+        m->print(llvm::errs());
+        llvm::errs() << "\n";
+    }
+
     return m;
 }
 mlir::func::FuncOp routinghwmanager::createroutingfunc(MLIRContext* ctx) {

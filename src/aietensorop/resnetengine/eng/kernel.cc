@@ -75,8 +75,27 @@ static const int k_ooo[EF_MESH_ROWS][EF_MESH_COLS] = EF_OOO_BD_TABLE;
 #define ENG_KH 3
 #endif
 
-typedef aie::mmul<8, 8, 8, int8_t, int8_t> MM;
 typedef aie::accum<acc32, 64> Acc;
+#if __AIE_ARCH__ == 20
+// AIE-ML (VEK280) has no 8x8x8 int8 mmul: rows 0-3 and 4-7 of A as two 4x8x8 against the same B,
+// so the 8-pixel x 8-channel layout and every caller stay as they are.
+struct MM {
+    aie::mmul<4, 8, 8, int8_t, int8_t> lo, hi;
+    explicit MM(const Acc &a) : lo(a.template extract<32>(0)), hi(a.template extract<32>(1)) {}
+    void mac(const aie::vector<int8_t, 64> &a, const aie::vector<int8_t, 64> &b) {
+        lo.mac(a.template extract<32>(0), b);
+        hi.mac(a.template extract<32>(1), b);
+    }
+    Acc to_accum() const {
+        Acc r;
+        r.insert(0, lo.to_accum());
+        r.insert(1, hi.to_accum());
+        return r;
+    }
+};
+#else
+typedef aie::mmul<8, 8, 8, int8_t, int8_t> MM;
+#endif
 
 // Per-lane requant constants of one 16-channel pass (two N-blocks of 8).
 struct EpSet {
@@ -439,7 +458,8 @@ __attribute__((noinline)) static void epilogue_down_row(int oh, int p) {
 }
 
 // Stride 1: two M-blocks (16 px) at ow0 share every B load.
-static void s1_pair(const int8_t *const *rows, const int8_t *bp, int ow0, int oh, int p, int q, const Acc *bz) {
+[[maybe_unused]] static void s1_pair(const int8_t *const *rows, const int8_t *bp, int ow0, int oh, int p, int q,
+                                     const Acc *bz) {
     const int j = ow0 / 8;
     MM cA0(acc_init(g_acc, bz[0], oh, j, 0, q)), cA1(acc_init(g_acc, bz[1], oh, j, 1, q));
     MM cB0(acc_init(g_acc, bz[0], oh, j + 1, 0, q)), cB1(acc_init(g_acc, bz[1], oh, j + 1, 1, q));
@@ -573,9 +593,13 @@ static int run_chunk(int p, int q, int g, int mc, const int8_t *wb) {
             LK_ACQ(EF_LK_OUT_EMPTY, 1);
         if (g_s == 1) {
             int ow0 = 0;
+#if !(__AIE_ARCH__ == 20 && ENG_HAS_STEM && ENG_HAS_CONV)
+            /* (AIE-ML's full kernel: no pair loop -- its two 4x8x8 halves per MM push program memory past
+             * 16 KB; s1_single computes the same pixels 8 at a time) */
             for (; ow0 + 16 <= g_wr; ow0 += 16)
                 s1_pair(rows, bp, ow0, oh, p, q, bz);
-            if (ow0 < g_wr)
+#endif
+            for (; ow0 < g_wr; ow0 += 8)
                 s1_single(rows, bp, ow0, oh, p, q, bz);
         } else {
             for (int ow0 = 0; ow0 < g_wr; ow0 += 8)

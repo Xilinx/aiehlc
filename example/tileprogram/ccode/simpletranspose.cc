@@ -28,15 +28,14 @@ __global__ void transpose(aie::port<input_window_int8 *, aie::shape<OPS_T, OPS_T
 int main() {
     aieSetDevice(0);
     aieArray device;
-    aieMesh mesh = device.partition({3, 6, 0, 6}, 4, 4);
+    aieMesh mesh = device.partition(OPS_PARTITION, 4, 4);
     const long n = (long)OPS_T * OPS_T;
     int8_t *x = (int8_t *)__Runtime_Alloc(n), *y = (int8_t *)__Runtime_Alloc(n), *ref = (int8_t *)malloc(n);
     ops_fill(x, n, 44);
     memset(y, 0, n);
-    XTime t0, t1;
-    XTime_GetTime(&t0);
+    uint64_t t0 = ops_now(), t1;
     transpose<<<mesh>>>(x, y);
-    XTime_GetTime(&t1);
+    t1 = ops_now();
     printf("[BENCH] aie_wall_ms=%.3f\n", ops_ms(t0, t1));
     for (int r = 0; r < OPS_T; r++)
         for (int c = 0; c < OPS_T; c++)

@@ -104,6 +104,8 @@ class EmbeddedModel:
         self._kernels = {}          # register_kernel: name -> KernelContract
         self._assign = {}           # assign: region name -> "cpu" | "aie:<kernel>"
         self._regions = None
+        self._lib = None            # use_kernels: KernelLib behind match_kernel
+        self.last_match = None      # match_kernel: the last Dispatch (every verdict)
 
     # ── structure ────────────────────────────────────────────────────────
 
@@ -385,6 +387,39 @@ class EmbeddedModel:
         print(f"[aiegraph] registered {k.backend} ({k.source.name}, AIEK_SPEC {k.spec.name})")
         return k
 
+    def use_kernels(self, lib) -> list:
+        """Register every kernel of *lib* (``ag.kernel_lib(root)``) and dispatch
+        ``match_kernel`` through it. A name already registered from another
+        source is refused. Returns the registered names."""
+        for e in lib:
+            old = self._kernels.get(e.name)
+            if old is not None and old.source != e.contract.source:
+                raise AiegraphError("use_kernels", f"{e.name!r} is already registered from "
+                                    f"{old.source}, the library has {e.contract.source}",
+                                    hint="rename one; a backend name means one source")
+        for e in lib:
+            self._kernels[e.name] = e.contract
+        self._lib = lib
+        print(f"[aiegraph] use_kernels: {len(lib)} kernel(s) from "
+              f"{lib.root or 'the library'}: {', '.join(e.name for e in lib) or 'none'}")
+        return [e.name for e in lib]
+
+    def match_kernel(self, region, verbose: bool = False, reference_only: bool = False):
+        """The library kernel for these regions (one TVM layer's group), or None.
+
+        Most specific accepting ``AIEK_SPEC`` wins; regions that disagree on
+        (op, KH), no acceptor, or a tie -> None. A preselection only:
+        ``check_offload`` is still the proof. ``verbose`` prints every
+        kernel's verdict (the last one is ``module.last_match``)."""
+        if self._lib is None:
+            raise AiegraphError("match_kernel", "no kernel library in use",
+                                hint="module.use_kernels(ag.kernel_lib('src/aietensorop'))")
+        d = self._lib.match(self.regions.find(region), reference_only=reference_only)
+        self.last_match = d
+        if verbose:
+            print(d)
+        return d.kernel
+
     def _contract(self, kernel) -> KernelContract:
         if isinstance(kernel, KernelContract):
             return kernel
@@ -404,7 +439,11 @@ class EmbeddedModel:
         bad = {r.name: check_region(k, r) for r in regs}
         layers = sorted({r.layer for r in regs if not bad[r.name]})
         gates = self.offload_check(layers, str(k.source), verbose=verbose) if layers else None
-        return RegionCheck(k.name, regs, bad, gates)
+        rc = RegionCheck(k.name, regs, bad, gates)
+        if self._lib is not None and k.name in self._lib:
+            self._lib.record_numerics(k.name, rc.bit_exact,
+                                      f"calibrate BIT-EXACT on {', '.join(f'layer{l}' for l in layers)}")
+        return rc
 
     def assign(self, region, backend: str) -> None:
         """Record where *region* should run: ``"cpu"`` or ``"aie:<kernel>"``.

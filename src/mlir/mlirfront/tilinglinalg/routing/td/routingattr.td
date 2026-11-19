@@ -18,13 +18,14 @@ include "mlir/Interfaces/LoopLikeInterface.td"
 include "mlir/IR/AttrTypeBase.td"
 
 def routingdialect : Dialect {
+    // keep the pre-LLVM-24 textual form (inherent attrs in attr-dict)
+    let useStrictPropertiesInAssemblyFormat = 0;
 	let name = "routing";
 	let cppNamespace = "routing";
 	dag discardableAttrs = (ins);
 	let hasOperationAttrVerify = 0;
 	let useDefaultTypePrinterParser = 1;
 	let useDefaultAttributePrinterParser = 1;
-	let usePropertiesForAttributes = 0;
 }
 
 class routingop<string mnemonic, list<Trait> traits = []> : Op<routingdialect, mnemonic, traits>;

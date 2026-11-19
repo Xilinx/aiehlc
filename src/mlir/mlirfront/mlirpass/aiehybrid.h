@@ -225,9 +225,9 @@ public:
         ostr << indent_str
              << "_sp_start_value_DM_stack = .; /* top of stack: crt0 loads directly into SP, stack grows down */\n";
         ostr << indent_str << ". = 0x71000;\n";
-		ostr << "\n";
+        ostr << "\n";
 
-		ostr << indent_str << ".bss : {\n";
+        ostr << indent_str << ".bss : {\n";
 		std::sort(symbols.begin(), symbols.end(), [](const auto& a, const auto& b) {
 			return a.second < b.second;
 		});

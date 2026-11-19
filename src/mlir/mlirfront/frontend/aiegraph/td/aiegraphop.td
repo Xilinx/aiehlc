@@ -7,6 +7,12 @@
 include "aiegraphtype.td"
 include "aiegraphattr.td"
 
+
+#ifndef AIEHLC_PUBLIC_SYMBOL_TD
+#define AIEHLC_PUBLIC_SYMBOL_TD
+// every aiehlc symbol is public (tilinglinalg/aiehlcsymbol.h)
+def AiehlcPublicSymbol : NativeOpTrait<"PublicSymbol"> { let cppNamespace = "::aiehlc"; }
+#endif
 /*
   A whole fused+quantized network is one aiegraph.func whose body is a straight
   line of per-op ops. Dataflow is SSA def-use over builtin tensor<...xi8> values
@@ -31,7 +37,7 @@ def AIEGraph_I8Tensor : TensorOf<[I8]>;
 
 def aiegraph_FuncOp : aiegraphop<"func",[
     SymbolTable,
-    Symbol,
+    Symbol, SymbolName, AiehlcPublicSymbol,
     SingleBlock,
     NoTerminator
   ]>

@@ -86,8 +86,8 @@ void RoutingUnrollingLowerPass::runOnOperation() {
         }
 
             // Apply the patterns greedily. This will simplify and clean up the IR.
-        if (mlir::failed(mlir::applyPatternsAndFoldGreedily(moduleOp, std::move(patterns)))) {
-                // Handle error
+        if (mlir::failed(mlir::applyPatternsGreedily(moduleOp, std::move(patterns)))) {
+            // Handle error
             signalPassFailure();
         }
             ///

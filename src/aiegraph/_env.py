@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import sys
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -117,6 +118,24 @@ def frontend(module: str, auto_install: bool = True):
                 os.environ.pop("AIEHLC_TVM_AUTO_INSTALL", None)
             else:
                 os.environ["AIEHLC_TVM_AUTO_INSTALL"] = old
+
+
+def aiekernel_pure(name: str):
+    """``frontend.tvmrelay.aiekernel.<spec|lint>`` WITHOUT the package
+    ``__init__`` chain, which provisions TVM and needs onnx. Both modules are
+    pure Python (re, dataclasses, pathlib); reading an ``AIEK_SPEC`` must work
+    on a host that has neither. Reuses the real module once it is imported."""
+    if name not in ("spec", "lint"):
+        raise ValueError(f"aiekernel.{name} is not TVM-free")
+    real = sys.modules.get(f"frontend.tvmrelay.aiekernel.{name}")
+    if real is not None:
+        return real
+    pkg = "aiegraph._aiekernel"
+    if pkg not in sys.modules:
+        mod = types.ModuleType(pkg)
+        mod.__path__ = [str(repo_root() / "src" / "frontend" / "tvmrelay" / "aiekernel")]
+        sys.modules[pkg] = mod
+    return importlib.import_module(f"{pkg}.{name}")
 
 
 def aiehlc_binary():

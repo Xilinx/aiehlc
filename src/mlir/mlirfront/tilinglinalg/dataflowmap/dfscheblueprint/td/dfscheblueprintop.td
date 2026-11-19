@@ -18,6 +18,12 @@ include "mlir/Interfaces/FunctionInterfaces.td"
 
 include "mlir/IR/BuiltinTypes.td"
 include "dfscheblueprinttype.td"
+
+#ifndef AIEHLC_PUBLIC_SYMBOL_TD
+#define AIEHLC_PUBLIC_SYMBOL_TD
+// every aiehlc symbol is public (tilinglinalg/aiehlcsymbol.h)
+def AiehlcPublicSymbol : NativeOpTrait<"PublicSymbol"> { let cppNamespace = "::aiehlc"; }
+#endif
 //-- no SymbolTable will cause the generic print when block have Symbol
 //-- no NoTerminator will cause the generic print when block is empty or there is no terminate op like yeld
 //-- let hasCustomAssemblyFormat = 1; will fix the generic print issue after the said fix in
@@ -27,7 +33,7 @@ include "dfscheblueprinttype.td"
 def dfscheblueprint_ConfigOp : dfscheblueprintop<"config", [
     IsolatedFromAbove,  
     SymbolTable,
-    Symbol,
+    Symbol, SymbolName, AiehlcPublicSymbol,
     SingleBlock,
     NoTerminator
   ]> {
@@ -56,7 +62,7 @@ def dfscheblueprint_ConfigOp : dfscheblueprintop<"config", [
 // Symbol will cause generic print once the partent have no Symboltalbe
 // dfscheblueprint.transfer_manifest - Individual data transfer specification
 def dfscheblueprint_TransferManifestOp : dfscheblueprintop<"transfer_manifest", [
-    Symbol,
+    Symbol, SymbolName, AiehlcPublicSymbol,
     HasParent<"ConfigOp">
   ]> {
   let summary = "Data transfer manifest with tiling and routing information";
@@ -104,7 +110,7 @@ def dfscheblueprint_TransferManifestOp : dfscheblueprintop<"transfer_manifest", 
 
 // dfscheblueprint.tile_group
 def dfscheblueprint_TileGroupOp : dfscheblueprintop<"tile_group", [
-    Symbol
+    Symbol, SymbolName, AiehlcPublicSymbol
   ]> {
   let summary = "Defines a group of physical tiles";
   let arguments = (ins
@@ -164,9 +170,7 @@ def dfscheblueprint_ExtractOp : dfscheblueprintop<"extract", [
 }
 
 // dfscheblueprint.data_slice - wraps a tensor slice with a symbol name
-def dfscheblueprint_DataSliceOp : dfscheblueprintop<"data_slice", [
-    Symbol
-  ]> {
+def dfscheblueprint_DataSliceOp : dfscheblueprintop<"data_slice", []> {
   let summary = "Wraps a tensor slice with a symbol name for scheduling";
   let description = [{
     Wraps a tensor (typically from tensor.extract_slice) with a symbol name
@@ -188,7 +192,7 @@ def dfscheblueprint_DataSliceOp : dfscheblueprintop<"data_slice", [
 
 // dfscheblueprint.flowconfig
 def dfscheblueprint_FlowConfigOp : dfscheblueprintop<"flowconfig", [
-    Symbol
+    Symbol, SymbolName, AiehlcPublicSymbol
   ]> {
   let summary = "Binds a resource or resource group to a data view";
   let arguments = (ins
@@ -210,7 +214,7 @@ def dfscheblueprint_FlowConfigOp : dfscheblueprintop<"flowconfig", [
 
 // dfscheblueprint.flow_transfer
 def dfscheblueprint_FlowTransferOp : dfscheblueprintop<"flow_transfer", [
-    Symbol
+    Symbol, SymbolName, AiehlcPublicSymbol
   ]> {
   let summary = "Defines a collective transfer between bindings";
   let arguments = (ins

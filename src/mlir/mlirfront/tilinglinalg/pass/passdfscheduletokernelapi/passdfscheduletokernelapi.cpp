@@ -34,6 +34,7 @@ struct WindowInfo {
     int32_t bufferSize = 0;    // Per-window buffer size from window_def attribute
     int32_t numRounds = 0;     // Number of ping-pong rounds (0 = use bufferSize as fallback)
     std::string direction;     // "in" or "out"
+    std::string elemType;      // C element suffix of its ping buffer (int8 / int16 / int32 / float); "" = kernel default
     int32_t channel = 0;       // Core-tile DMA channel (S2MM in / MM2S out)
     bool singleBuffer = false; // Single-buffer (no pong) mode
     // KERNELCONFIGOFFLOAD resources resolved by BlueprintToScheduleKernelPass.
@@ -119,6 +120,25 @@ static void collectAggregatedOutTiles(KernelModuleOp kernelModuleOp, SmallVector
     }
 }
 
+/// The window element suffix (int8 / int16 / int32 / float) of a buffer_def's memref<..xvector<..>>; "" if
+/// the type says nothing. A kernel may mix them (int8 inputs, an int32 output).
+static std::string bufferElemType(BufferDefOp bufferOp) {
+    auto memref = dyn_cast<MemRefType>(bufferOp.getBufferTypeAttr().getValue());
+    if (!memref)
+        return "";
+    auto vec = dyn_cast<VectorType>(memref.getElementType());
+    Type e = vec ? vec.getElementType() : memref.getElementType();
+    if (e.isInteger(32))
+        return "int32";
+    if (e.isInteger(16))
+        return "int16";
+    if (e.isInteger(8))
+        return "int8";
+    if (e.isF32())
+        return "float";
+    return "";
+}
+
 /// dfschedule.module -> convert entire body line-by-line then erase module.
 /// Always matches and does full conversion so we do not depend on nested patterns
 /// firing first (conversion may try the parent before descending into regions).
@@ -144,6 +164,10 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
 
         // Build map: window symbol name -> (ping_buffer, pong_buffer, acquire_lock, release_lock)
         llvm::StringMap<WindowInfo> windowInfoMap;
+        llvm::StringMap<std::string> bufferElem; // buffer symbol -> window element suffix
+        for (Operation &inner : body)
+            if (auto bufferOp = dyn_cast<BufferDefOp>(&inner))
+                bufferElem[bufferOp.getSymName()] = bufferElemType(bufferOp);
         for (Operation &inner : body) {
             if (auto windowDefOp = dyn_cast<WindowDefOp>(&inner)) {
                 DictionaryAttr winAttrs = windowDefOp.getWindowAttrs();
@@ -174,6 +198,8 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                     info.acquireLockHwId = a.getInt();
                 if (auto a = winAttrs.getAs<IntegerAttr>("release_lock_hw_id"))
                     info.releaseLockHwId = a.getInt();
+                if (auto b = bufferElem.find(info.pingBuffer); b != bufferElem.end())
+                    info.elemType = b->second;
                 windowInfoMap[windowDefOp.getSymName().str()] = info;
             }
         }
@@ -294,9 +320,16 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                 // Output window: Kernel writes data then releases lockids[1].
                 //   Kernel acquire: acquire_greater_equal(lockids[0], 1)  -- wait for "buffer free"
                 //   Kernel release: release(lockids[1], 1)               -- signal "data ready"
-                std::string cType = elementType + "_t"; // e.g. "int32_t", "int8_t"
-                std::string winInType = "input_window_" + elementType;   // e.g. "input_window_int32"
-                std::string winOutType = "output_window_" + elementType; // e.g. "output_window_int32"
+                // one set of helpers per element type in use: the kernel's default and each window's own
+                // (overloads, so int8 inputs and an int32 output coexist)
+                llvm::SmallVector<std::string, 4> elemTypes{elementType};
+                for (const auto &w : windowInfoMap)
+                    if (!w.second.elemType.empty() && !llvm::is_contained(elemTypes, w.second.elemType))
+                        elemTypes.push_back(w.second.elemType);
+                for (const std::string &et : elemTypes) {
+                std::string cType = et + "_t"; // e.g. "int32_t", "int8_t"
+                std::string winInType = "input_window_" + et;   // e.g. "input_window_int32"
+                std::string winOutType = "output_window_" + et; // e.g. "output_window_int32"
                 rewriter.create<emitc::VerbatimOp>(
                     loc, "inline " + cType + "* acquire_output_window(" + winOutType + "* win) {\n"
                          "  window_internal* w = (window_internal*)win;\n"
@@ -329,6 +362,7 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                          "  w->heads[w->current_bufid] = w->head;\n"
                          "  w->current_bufid = select((w->heads[1] == 0), w->current_bufid, 1 - w->current_bufid);\n"
                          "}");
+                }
 
                 continue;
             }
@@ -469,11 +503,11 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
     // aie_kc_encode_bd: constant "0, 0, 0, -1" for S2MM (circuit-switched), and
     // per-tile literals for MM2S. `indent` keeps the emitted C readable when this
     // sits inside a get_coreid() dispatch arm.
-    // lenBytes > 0 overrides sizeof(buffer): the host's BD length (CoreOffloadTileConfig::bdLenBytes)
+    // lenExpr (non-empty) overrides sizeof(buffer): the host's BD length (CoreOffloadTileConfig::bdLenBytes)
     // is authoritative, and an output buffer's C declaration can under-state it (conv2dstem
     // declares v4int8[196] = 784 B for a 3136 B BCF slot), which deadlocks the shim S2MM.
     static std::string emitWindowBdAndLocks(const WindowInfo &w, StringRef pktArgs, StringRef indent,
-                                            int32_t lenBytes = 0) {
+                                            StringRef lenExpr = "") {
         const std::string in = indent.str();
         // Register writes go through core_reg_write (aie_kernel_runtime.h), which
         // issues the TILE-LOCAL offset into the core's TM space via TM_W.
@@ -507,8 +541,8 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
         const std::string ping = w.pingBuffer;
         const std::string pong = w.pongBuffer.empty() ? w.pingBuffer : w.pongBuffer;
         const std::string pkt = pktArgs.str();
-        const std::string pingLen = lenBytes > 0 ? std::to_string(lenBytes) : "sizeof(" + ping + ")";
-        const std::string pongLen = lenBytes > 0 ? std::to_string(lenBytes) : "sizeof(" + pong + ")";
+        const std::string pingLen = !lenExpr.empty() ? lenExpr.str() : "sizeof(" + ping + ")";
+        const std::string pongLen = !lenExpr.empty() ? lenExpr.str() : "sizeof(" + pong + ")";
 
         // The BD's acquire/release lock ids are SWAPPED for output, mirroring the
         // host (helper/flowtransfer_kernel.cpp: `bdAcquireLockId = isOutputFlow ?
@@ -564,6 +598,54 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
              std::to_string(w.channel) + ");\n" + in +
              "  klog(\"STOF\", (int32_t)_kc[0].off); klog(\"STVL\", (int32_t)_kc[0].val);\n" + in + "#endif\n";
         s += one;
+        return s;
+    }
+
+    // The MM2S arm(s) of the per-tile dispatch. Only (col,row) -> packet enable, packet
+    // id, ooo bd id and BD length vary between tiles; one straight-line arm per tile
+    // grew .text by ~310 B per core and overflowed the 16 KB program memory at 8x8, so
+    // more than one tile becomes a const table in data memory + ONE arm in a lookup loop.
+    static std::string emitOutTileDispatch(const WindowInfo &w, ArrayRef<const CoreOffloadEntry *> outTiles) {
+        bool fitsTable = true;
+        for (const CoreOffloadEntry *e : outTiles)
+            fitsTable &= e->col < 128 && e->row < 128 && e->packetId < 128 && e->oooBdId < 128 && e->bdLenBytes < 32768;
+        if (outTiles.size() == 1 || !fitsTable) {
+            std::string s;
+            for (size_t i = 0; i < outTiles.size(); ++i) {
+                const CoreOffloadEntry &e = *outTiles[i];
+                const std::string pkt = std::string(e.enablePacket ? "1" : "0") + ", " + std::to_string(e.packetId) +
+                                        ", 0, " + std::to_string(e.oooBdId);
+                s += std::string("  ") + (i == 0 ? "if" : "else if") + " (_col == " + std::to_string(e.col) +
+                     " && _row == " + std::to_string(e.row) + ") {\n" +
+                     emitWindowBdAndLocks(w, pkt, "  ", e.bdLenBytes > 0 ? std::to_string(e.bdLenBytes) : "") + "  }\n";
+            }
+            return s;
+        }
+        // {col, row, en_packet, pkt_id, ooo_bd_id} as int8 (col < 38, row < 11, ids < 32) plus,
+        // only when the host overrides sizeof(buffer), an int16 BD length: ~7 B per tile in
+        // the 1 KB of core DM CoreMemAllocator reserves for linker globals.
+        const std::string n = std::to_string(outTiles.size());
+        std::string s = "  static const int8_t _kco_out[" + n + "][5] = {\n";
+        bool anyLen = false;
+        for (const CoreOffloadEntry *e : outTiles) {
+            s += "    {" + std::to_string(e->col) + ", " + std::to_string(e->row) + ", " +
+                 (e->enablePacket ? "1" : "0") + ", " + std::to_string(e->packetId) + ", " +
+                 std::to_string(e->oooBdId) + "},\n";
+            anyLen |= e->bdLenBytes > 0;
+        }
+        s += "  };\n";
+        std::string len;
+        if (anyLen) {
+            s += "  static const int16_t _kco_out_len[" + n + "] = {";
+            for (size_t i = 0; i < outTiles.size(); ++i)
+                s += (i ? ", " : "") + std::to_string(outTiles[i]->bdLenBytes > 0 ? outTiles[i]->bdLenBytes : 0);
+            s += "};\n";
+            len = "(_kco_out_len[_t] ? (int)_kco_out_len[_t] : (int)sizeof(" + w.pingBuffer + "))";
+        }
+        s += "  for (int _t = 0; _t < " + n + "; _t++) {\n";
+        s += "    if (_kco_out[_t][0] != _col || _kco_out[_t][1] != _row)\n      continue;\n";
+        s += emitWindowBdAndLocks(w, "_kco_out[_t][2], _kco_out[_t][3], 0, _kco_out[_t][4]", "    ", len);
+        s += "    break;\n  }\n";
         return s;
     }
 
@@ -663,15 +745,7 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                 block +=
                     "  int _col = (int)(_cid >> 16) - " + std::to_string(partStartCol) + "; // partition start col\n";
                 block += "  int _row = (int)(_cid & 0x1F);\n";
-                for (size_t i = 0; i < outTiles.size(); ++i) {
-                    const CoreOffloadEntry &e = *outTiles[i];
-                    std::string pkt = std::string(e.enablePacket ? "1" : "0") + ", " + std::to_string(e.packetId) +
-                                      ", 0, " + std::to_string(e.oooBdId);
-                    block += std::string("  ") + (i == 0 ? "if" : "else if") + " (_col == " + std::to_string(e.col) +
-                             " && _row == " + std::to_string(e.row) + ") {\n";
-                    block += emitWindowBdAndLocks(w, pkt, "  ", e.bdLenBytes);
-                    block += "  }\n";
-                }
+                block += emitOutTileDispatch(w, outTiles);
                 // No else: a core tile outside the plan has no host-programmed MM2S
                 // either, so arming nothing is the correct and safe outcome.
                 block += "}";
@@ -772,10 +846,15 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                     std::string cArg = (it != valueToCName.end()) ? it->second : "/*unknown*/";
                     if (!argList.empty())
                         argList += ", ";
+                    std::string et = elementType; // the window's own element type when its buffer says so
+                    if (StringRef(cArg).starts_with("window_"))
+                        if (auto w = windowInfoMap.find(StringRef(cArg).drop_front(7)); w != windowInfoMap.end() &&
+                                                                                         !w->second.elemType.empty())
+                            et = w->second.elemType;
                     if (isa<InputWindowType>(arg.getType())) {
-                        argList += "get_input_async_window_" + elementType + "(" + cArg + ")";
+                        argList += "get_input_async_window_" + et + "(" + cArg + ")";
                     } else {
-                        argList += "get_output_async_window_" + elementType + "(" + cArg + ")";
+                        argList += "get_output_async_window_" + et + "(" + cArg + ")";
                     }
                 }
                 rewriter.create<emitc::VerbatimOp>(loc, "// kernel_invoke " + callee);
