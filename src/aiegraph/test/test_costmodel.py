@@ -137,3 +137,21 @@ def test_des_unet_c16_fixture():
     assert 0.0 < d["compute_ms"] < d["aie_ms"] and d["wait_ms"] > 0.0 and d["bound"] in ("compute", "ddr")
     # 16 rounds x 20 chunks x 2 acquires + 16 commits
     assert d["lock_ms"] == pytest.approx(16 * 41 * 17.0 / (999.98 * 1e3))
+
+
+def test_des_import():
+    # public entry + roofline + the K-stage fit script import offline (no board, no ISS)
+    import importlib.util
+
+    from aiegraph.costmodel import roofline as rl
+    from aiegraph.costmodel.des import predict_launch
+
+    assert callable(predict_launch) and callable(rl.roofline)
+    fit = SRC.parent / "script" / "perf" / "costmodel_fit.py"
+    spec = importlib.util.spec_from_file_location("costmodel_fit", fit)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert callable(mod.main) and mod.des is des
+    op = {"instance": _inst(), "host": {"bd_us": 5.0}}
+    r = rl.roofline(op, dict(_HAND_PARAMS), {"core_cyc": 1000})
+    assert isinstance(r, dict)
