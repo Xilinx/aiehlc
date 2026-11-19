@@ -988,9 +988,12 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
     // Keep memref func args intact — routing lowering passes need the tensor
     // operands connected through bufferization.to_tensor. RoutingDeadArgPass
     // will strip unused args after lowering.
+    // Several kernels in one source (template instances): routing_<kernel>() in routing_<kernel>.cc,
+    // one per kernel -- the launch selects it (aiehlc.cc's __aie_launch dispatch).
+    const std::string routingName = hostFuncSuffix.empty() ? "routing" : "routing_" + hostFuncSuffix;
     for (auto func : routingDmaphopModule.getOps<mlir::func::FuncOp>()) {
         if (func.getName() == "main") {
-            func.setName("routing");
+            func.setName(routingName);
             // Insert XAie_DevInst* as arg 0
             auto devInstType = emitc::OpaqueType::get(&ctx, "XAie_DevInst");
             auto devInstPtrType = emitc::PointerType::get(devInstType);
@@ -2208,7 +2211,7 @@ after_host_emit:
             func.setFunctionType(FunctionType::get(func.getContext(), argTypes, func.getFunctionType().getResults()));
         }
 
-        std::string routingPath = outputDir + "/routing.cc";
+        std::string routingPath = outputDir + "/" + routingName + ".cc";
         std::error_code ec;
         llvm::raw_fd_ostream stream(routingPath, ec, llvm::sys::fs::OF_None);
         if (ec) {

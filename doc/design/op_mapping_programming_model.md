@@ -282,7 +282,11 @@ humans and debugging, but not a second source of truth.
 
 `example/tileprogram/ccode/simpleconv2dkernel_port.cc` is the conv2d with **no**
 `aie::Conv2d` / `aie::Mapping`. The ports declare only their tensors and the
-kernel states its own tiling:
+kernel states its own tiling (`simpleconv2dkernel_port_less.cc` is the same kernel
+with scalar MACs instead of `aie::mmul`, 59 lines incl. a golden-checking host (test data from `init_conv2d_test_data()` in `simpleconv2d_new_load.h`);
+identical derived DMA, x86 emulation 802,816/802,816; the role tag is optional:
+`aie::port<T, aie::shape<...>>` infers IFM / WEIGHTS / OFM from the trace --
+`trace_to_routing.md`):
 
 ```cpp
 __global__ void conv2d_spatial(
@@ -626,3 +630,12 @@ The same header drives `simpleconv2ddebug/emu_conv2d_spatial.sh` (the
 generated kernel on x86, windows 32-byte aligned): the vector build passes
 802,816/802,816 with 0 block errors. `kernel_trace_cases.py` adds two vector
 cases (unshifted last K-block, aligned 64-byte load on a window).
+
+**On the board the dense output races (2026-11-14).** With a golden-checking
+host, `simpleconv2dkernel_port.cc` FAILS on palmyra (483,593 / 802,816) although
+the x86 emulation above passes: the vector kernel is fast enough to send an
+output block while the host re-programs the shim S2MM BDs between height slabs
+(skill **outputtilemajorrace**). `simpleconv2dkernel_port_vec_opts.cc` adds
+`#pragma output_tile_major` (host de-tiles) plus `{.resident}` / `{.depth = 2}`:
+PASS 3/3, 56.4 ms (scalar `_less` 93.8 ms). Walkthrough:
+`tutorial/aieprogram/06_gemm_optimization/conv_vector_scheduling.md`.

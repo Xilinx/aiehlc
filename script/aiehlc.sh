@@ -205,6 +205,7 @@ USE_LOCAL_AIERT_BSP=0
 PRETTY_DEBUG=0
 SIM_TILES=""
 GDB_MODE=0
+GEN_ONLY=0   # --gen-only: stop after code generation (host.cc / kernel*.cc / routing*.cc under aout/)
 # Reset every run: this script is sourced, so a flag from a previous invocation
 # in the same shell would otherwise persist.
 PROFILING=0
@@ -216,6 +217,10 @@ while [[ $# -gt 0 ]]; do
         -help)
             usage
             return 0
+            ;;
+        --gen-only)
+            GEN_ONLY=1
+            shift
             ;;
         --runtime-source-file)
             runtime_source_file="$2"
@@ -539,6 +544,10 @@ if [ "$GDB_MODE" -eq 1 ]; then
     echo "gdb session finished (-gdb): skipping kernel/host build. Generated IR is under aout/."
     return 0
 fi
+if [ "$GEN_ONLY" -eq 1 ]; then
+    echo "[aiehlc] --gen-only: code generated under $(pwd)/aout/ (kernel / host builds skipped)."
+    return 0
+fi
 
 HOST_BUILD_DIR=$(pwd)/aout/
 mkdir -p $HOST_BUILD_DIR
@@ -632,6 +641,18 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
             echo "    ${WORKLOCAL_DIR}/host_schedule.html"
         else
             echo "    warning: schedule_view.py failed (non-fatal); skipping view."
+        fi
+    fi
+
+    # Dataflow consistency (script/test/flowcheck.py): does routing.cc deliver every
+    # dmaphop flow to exactly its consumers, with host.cc's shim IOs in place?
+    # RoutingHWVerify cannot see a flow re-paired onto another's consumers (an edited
+    # AIEHLC_DMAPHOP_IR_IN built clean that way and computed wrong data on the board).
+    # Non-fatal: reported loudly, the ELF is kept.
+    if [ -f "${WORKLOCAL_DIR}/dmaphopprovenacemap.json" ] && [ -f "${WORKLOCAL_DIR}/routing.cc" ]; then
+        if ! python3 "${AIEHLC_DIR}/script/test/flowcheck.py" "${WORKLOCAL_DIR}"; then
+            echo "    WARNING: flowcheck FAILED -- routing.cc does not deliver the dataflows above as the"
+            echo "    dmaphop IR intends; expect a hang or wrong data on the board."
         fi
     fi
 

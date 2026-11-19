@@ -1,0 +1,119 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='940' height='720' viewBox='0 0 940 720'>
+<defs><marker id='arr' markerUnits='userSpaceOnUse' markerWidth='12' markerHeight='10' refX='11' refY='5' orient='auto'><path d='M0,0 L12,5 L0,10 z' fill='#444'/></marker></defs>
+<rect width='100%' height='100%' fill='white'/>
+<text x='470.0' y='24.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='15' text-anchor='middle' fill='#222' font-weight='bold'>The 4x4 mesh: program_id = position in the mesh, the DMA follows the blocks</text>
+<line x1='200.0' y1='488.0' x2='750.0' y2='488.0' stroke='#f4a261' stroke-width='5'/>
+<text x='194.0' y='484.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#a0522d' font-weight='bold'>A rows 0..15</text>
+<text x='194.0' y='499.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='end' fill='#a0522d' font-weight='normal'>from shim (0,0), MM2S ch1</text>
+<line x1='200.0' y1='362.0' x2='750.0' y2='362.0' stroke='#f4a261' stroke-width='5'/>
+<text x='194.0' y='358.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#a0522d' font-weight='bold'>A rows 16..31</text>
+<text x='194.0' y='373.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='end' fill='#a0522d' font-weight='normal'>from shim (1,0), MM2S ch1</text>
+<line x1='200.0' y1='236.0' x2='750.0' y2='236.0' stroke='#f4a261' stroke-width='5'/>
+<text x='194.0' y='232.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#a0522d' font-weight='bold'>A rows 32..47</text>
+<text x='194.0' y='247.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='end' fill='#a0522d' font-weight='normal'>from shim (2,0), MM2S ch1</text>
+<line x1='200.0' y1='110.0' x2='750.0' y2='110.0' stroke='#f4a261' stroke-width='5'/>
+<text x='194.0' y='106.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#a0522d' font-weight='bold'>A rows 48..63</text>
+<text x='194.0' y='121.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='end' fill='#a0522d' font-weight='normal'>from shim (3,0), MM2S ch1</text>
+<line x1='310.0' y1='574.0' x2='310.0' y2='54.0' stroke='#6fa8dc' stroke-width='5'/>
+<line x1='436.0' y1='574.0' x2='436.0' y2='54.0' stroke='#6fa8dc' stroke-width='5'/>
+<line x1='562.0' y1='574.0' x2='562.0' y2='54.0' stroke='#6fa8dc' stroke-width='5'/>
+<line x1='688.0' y1='574.0' x2='688.0' y2='54.0' stroke='#6fa8dc' stroke-width='5'/>
+<rect x='260.0' y='438.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='310.0' y='460.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (0,0)</text>
+<text x='310.0' y='478.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (3,3)</text>
+<text x='310.0' y='504.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 0..15</text>
+<text x='310.0' y='520.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 0..15</text>
+<rect x='386.0' y='438.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='436.0' y='460.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (0,1)</text>
+<text x='436.0' y='478.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (4,3)</text>
+<text x='436.0' y='504.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 0..15</text>
+<text x='436.0' y='520.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 16..31</text>
+<rect x='512.0' y='438.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='562.0' y='460.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (0,2)</text>
+<text x='562.0' y='478.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (5,3)</text>
+<text x='562.0' y='504.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 0..15</text>
+<text x='562.0' y='520.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 32..47</text>
+<rect x='638.0' y='438.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='688.0' y='460.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (0,3)</text>
+<text x='688.0' y='478.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (6,3)</text>
+<text x='688.0' y='504.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 0..15</text>
+<text x='688.0' y='520.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 48..63</text>
+<rect x='260.0' y='312.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='310.0' y='334.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (1,0)</text>
+<text x='310.0' y='352.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (3,4)</text>
+<text x='310.0' y='378.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 16..31</text>
+<text x='310.0' y='394.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 0..15</text>
+<rect x='386.0' y='312.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='436.0' y='334.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (1,1)</text>
+<text x='436.0' y='352.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (4,4)</text>
+<text x='436.0' y='378.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 16..31</text>
+<text x='436.0' y='394.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 16..31</text>
+<rect x='512.0' y='312.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='562.0' y='334.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (1,2)</text>
+<text x='562.0' y='352.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (5,4)</text>
+<text x='562.0' y='378.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 16..31</text>
+<text x='562.0' y='394.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 32..47</text>
+<rect x='638.0' y='312.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='688.0' y='334.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (1,3)</text>
+<text x='688.0' y='352.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (6,4)</text>
+<text x='688.0' y='378.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 16..31</text>
+<text x='688.0' y='394.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 48..63</text>
+<rect x='260.0' y='186.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='310.0' y='208.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (2,0)</text>
+<text x='310.0' y='226.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (3,5)</text>
+<text x='310.0' y='252.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 32..47</text>
+<text x='310.0' y='268.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 0..15</text>
+<rect x='386.0' y='186.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='436.0' y='208.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (2,1)</text>
+<text x='436.0' y='226.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (4,5)</text>
+<text x='436.0' y='252.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 32..47</text>
+<text x='436.0' y='268.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 16..31</text>
+<rect x='512.0' y='186.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='562.0' y='208.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (2,2)</text>
+<text x='562.0' y='226.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (5,5)</text>
+<text x='562.0' y='252.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 32..47</text>
+<text x='562.0' y='268.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 32..47</text>
+<rect x='638.0' y='186.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='688.0' y='208.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (2,3)</text>
+<text x='688.0' y='226.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (6,5)</text>
+<text x='688.0' y='252.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 32..47</text>
+<text x='688.0' y='268.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 48..63</text>
+<rect x='260.0' y='60.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='310.0' y='82.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (3,0)</text>
+<text x='310.0' y='100.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (3,6)</text>
+<text x='310.0' y='126.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 48..63</text>
+<text x='310.0' y='142.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 0..15</text>
+<rect x='386.0' y='60.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='436.0' y='82.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (3,1)</text>
+<text x='436.0' y='100.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (4,6)</text>
+<text x='436.0' y='126.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 48..63</text>
+<text x='436.0' y='142.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 16..31</text>
+<rect x='512.0' y='60.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='562.0' y='82.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (3,2)</text>
+<text x='562.0' y='100.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (5,6)</text>
+<text x='562.0' y='126.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 48..63</text>
+<text x='562.0' y='142.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 32..47</text>
+<rect x='638.0' y='60.0' width='100.0' height='100.0' rx='6' fill='#ffffff' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='688.0' y='82.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='13' text-anchor='middle' fill='#222' font-weight='bold'>pid (3,3)</text>
+<text x='688.0' y='100.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#666' font-weight='normal'>tile (6,6)</text>
+<text x='688.0' y='126.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C rows 48..63</text>
+<text x='688.0' y='142.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#38761d' font-weight='normal'>C cols 48..63</text>
+<rect x='260.0' y='574.0' width='100.0' height='46.0' rx='4' fill='#eeeeee' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='310.0' y='592.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='bold'>shim (0,0)</text>
+<text x='310.0' y='608.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#1f4e79' font-weight='normal'>ch0: B rows 0..</text>
+<rect x='386.0' y='574.0' width='100.0' height='46.0' rx='4' fill='#eeeeee' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='436.0' y='592.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='bold'>shim (1,0)</text>
+<text x='436.0' y='608.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#1f4e79' font-weight='normal'>ch0: B rows 16..</text>
+<rect x='512.0' y='574.0' width='100.0' height='46.0' rx='4' fill='#eeeeee' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='562.0' y='592.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='bold'>shim (2,0)</text>
+<text x='562.0' y='608.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#1f4e79' font-weight='normal'>ch0: B rows 32..</text>
+<rect x='638.0' y='574.0' width='100.0' height='46.0' rx='4' fill='#eeeeee' fill-opacity='1.0' stroke='#555555' stroke-width='1.5'/>
+<text x='688.0' y='592.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='middle' fill='#222' font-weight='bold'>shim (3,0)</text>
+<text x='688.0' y='608.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='middle' fill='#1f4e79' font-weight='normal'>ch0: B rows 48..</text>
+<text x='194.0' y='592.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='11' text-anchor='end' fill='#333' font-weight='bold'>shim row (DDR side)</text>
+<text x='194.0' y='608.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='end' fill='#666' font-weight='normal'>tile (col, row): array column</text>
+<text x='194.0' y='621.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='10' text-anchor='end' fill='#666' font-weight='normal'>3..6 = partition {3, 6, ...}</text>
+<text x='470.0' y='654.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#a0522d' font-weight='normal'>orange = A: one stream per mesh ROW, broadcast to its 4 cores (the block depends only on pm)</text>
+<text x='470.0' y='672.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#1f4e79' font-weight='normal'>blue = B: one stream per mesh COLUMN, broadcast up it (the block depends only on pn)</text>
+<text x='470.0' y='690.0' font-family='DejaVu Sans, Arial, sans-serif' font-size='12' text-anchor='middle' fill='#38761d' font-weight='normal'>C: each core stores its own 16x16 block; the 4 cores of a mesh row are gathered back through one shim S2MM channel</text>
+</svg>

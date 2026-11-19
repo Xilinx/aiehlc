@@ -253,6 +253,7 @@ static void testGemmStripsOptions() {
     RoutingHints hb = routingHints(bare);
     CHECK_EQ(hb.pp_depth, 1);
     CHECK_EQ(routingSpaces(bare, hb)[1].pp_depth, 1);
+    CHECK_EQ(routingSpaces(bare, hb)[2].pp_depth, 2); // an output stays ping-pong (its kernel window is)
     CHECK_EQ(portBufferBytes(bare, 1), 4096 + 16384 + 2 * 1024);
     // .depth = 2 on that B as well: nothing fits any more.
     std::map<std::string, BlockOpts> o2;

@@ -215,7 +215,7 @@ bool isFullConnectAuto(ModuleOp moduleOp);
 // (passblueprinttoschedulekernel) lowerings, from the attribute alone, so the
 // two always make the same decision.
 //   check:  a GEMM-schedule (fullconnect_auto = 1, no halo) port of a
-//           kernel-only kernel: its final core window and round count must be
+//           kernel-only kernel, or a {.resident} input on any path: its final core window and round count must be
 //           the kernel's block and block count, else the build fails (the core
 //           and shim DMA would otherwise disagree -- a silent wait_io hang).
 //   follow: an INPUT among those whose blocks are row-contiguous (cover every
@@ -227,6 +227,11 @@ struct KernelBlockUse {
     routing::KernelBlockAttr attr; // null: not a traced kernel-only port
     bool check = false;
     bool follow = false;
+    bool rowContiguous = false; // the block covers every trailing dim
+    // An input {tr, tc} block of an [R, C] tensor that does not span its rows (no
+    // .tile): tileStrides / tileWraps hold its 2-D shim dims. The host follows it
+    // where the GEMM model would ship a linear run (applyKernelBlockShim).
+    bool block2D = false;
     int64_t blockElems = 0;           // core window, elements
     int64_t rounds = 1;               // blocks per core per launch
     int64_t roundsJ = 1;              // inner-loop rounds (offset decode)
@@ -501,7 +506,10 @@ struct FlowTransferConversion : public OpConversionPattern<dfscheblueprint::Flow
     void emitShimTileAndParams(FlowLoweringCtx &c) const;
     LogicalResult computeShimBdParams(FlowLoweringCtx &c) const;
     // Kernel-only input: shim BD length / addressing from the kernel's blocks.
-    void applyKernelBlockShim(FlowLoweringCtx &c) const;
+    LogicalResult applyKernelBlockShim(FlowLoweringCtx &c) const;
+    // Kernel-only output whose blocks stack down dim 0: the gather's per-round size
+    // and round count from the kernel's blocks.
+    LogicalResult applyKernelBlockGather(FlowLoweringCtx &c) const;
     void emitShimBdOoo(FlowLoweringCtx &c) const;
     void emitShimBdNonOoo(FlowLoweringCtx &c) const;
     void classifyScheduleMode(FlowLoweringCtx &c) const;

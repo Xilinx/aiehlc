@@ -12,6 +12,7 @@
 
 #include "aiednn_impl.h"
 
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +74,8 @@ typedef struct {
     int32_t dq_zp[4];
     int npo;
     aiednn_post_op_t po[AIEDNN_MAX_POST_OPS];
+    aiednn_custom_fn_t custom_fn; /* aiednn_custom: the user's function and its context (aiednn_rt_custom.h) */
+    void *custom_ctx;
 } rt_prob;
 
 typedef struct {

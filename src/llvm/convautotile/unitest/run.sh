@@ -7,7 +7,7 @@ OUT="${TMPDIR:-/tmp}/convautotile_unitest_$$"
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 LIB=("$HERE/../conv_autotile.cpp" "$HERE/../conv_desugar.cpp" "$HERE/../kernel_trace.cpp" "$HERE/../kernel_static.cpp" "$HERE/../kernel_front.cpp"
-     "$HERE/../trace_routing.cpp")
+     "$HERE/../trace_routing.cpp" "$HERE/../kernel_template.cpp")
 FLAGS=(-std=c++17 -O1 -Wall -Wextra -pthread -DAIEHLC_SOURCE_DIR="\"$REPO\"")
 rc=0
 for t in test_conv_autotile test_trace_routing; do

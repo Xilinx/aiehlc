@@ -124,6 +124,50 @@ static unsigned outputsLast(Block &block) {
     return moved;
 }
 
+// A kernel-block input loop (a loop with waits inside) holds the host until every
+// input round is through while the cores already produce output, so a shim S2MM
+// channel programmed after it is armed only once the cores have sent: small
+// output packets then reach a channel that is not running, and one task never
+// retires (rowsum: wait_io TIMEOUT x4, data correct). Arm every output channel
+// that follows the loop in front of it. Needs every operand from before the loop.
+static unsigned outputsBeforeRoundLoop(Block &block) {
+    Operation *loop = nullptr;
+    for (Operation &op : block) {
+        if (op.getNumRegions() == 0)
+            continue;
+        bool waits = false;
+        op.walk([&](emitc::CallOpaqueOp c) { waits |= c.getCallee() == "__Runtime_wait"; });
+        if (waits) {
+            loop = &op;
+            break;
+        }
+    }
+    if (!loop)
+        return 0;
+    SmallVector<SmallVector<Operation *>> groups;
+    for (Operation *op = loop->getNextNode(); op; op = op->getNextNode()) {
+        auto c = dyn_cast<emitc::CallOpaqueOp>(op);
+        if (c && isShimS2mmCreateio(c))
+            groups.push_back(outputGroup(c));
+    }
+    unsigned moved = 0;
+    for (auto &g : groups) {
+        bool ok = true;
+        for (Operation *op : g)
+            for (Value v : op->getOperands()) {
+                Operation *def = v.getDefiningOp();
+                if (def && !llvm::is_contained(g, def) && def->getBlock() == &block && !def->isBeforeInBlock(loop))
+                    ok = false;
+            }
+        if (!ok)
+            continue;
+        for (Operation *op : g)
+            op->moveBefore(loop);
+        moved++;
+    }
+    return moved;
+}
+
 static IntegerAttr argInt(emitc::CallOpaqueOp c, unsigned i) {
     ArrayAttr a = c.getArgsAttr();
     return a && i < a.size() ? dyn_cast<IntegerAttr>(a[i]) : IntegerAttr();
@@ -562,6 +606,13 @@ void StartioInterleavePass::runOnOperation() {
         groups += outputsLast(*b);
     llvm::errs() << "[TilingLinalg] StartioInterleavePass: " << groups
                  << " shim output channel(s) programmed after the inputs\n";
+    if (mod->hasAttr("routing.kernel_block_round_loop")) {
+        unsigned armed = 0;
+        for (Block *b : blocks)
+            armed += outputsBeforeRoundLoop(*b);
+        llvm::errs() << "[TilingLinalg] StartioInterleavePass: " << armed
+                     << " shim output channel(s) armed before the kernel-block input loop\n";
+    }
     if (!std::getenv("AIEHLC_NO_BDT_PREPARE")) {
         unsigned shapes = 0;
         for (Block *b : blocks)

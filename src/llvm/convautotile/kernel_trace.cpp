@@ -59,10 +59,14 @@ std::vector<std::string> splitTop(const std::string &s) {
 }
 
 int elemBytesOf(const std::string &windowType) {
-    if (windowType.find("int16") != std::string::npos)
+    // most specific first: "cint16" contains "int16", "bfloat16" contains "float"
+    if (windowType.find("cint32") != std::string::npos || windowType.find("cfloat") != std::string::npos)
+        return 8;
+    if (windowType.find("cint16") != std::string::npos)
+        return 4;
+    if (windowType.find("int16") != std::string::npos || windowType.find("bfloat16") != std::string::npos)
         return 2;
-    if (windowType.find("int32") != std::string::npos || windowType.find("float") != std::string::npos ||
-        windowType.find("cint16") != std::string::npos)
+    if (windowType.find("int32") != std::string::npos || windowType.find("float") != std::string::npos)
         return 4;
     return 1;
 }
@@ -869,8 +873,23 @@ void checkBlockOpts(const TracePort &p, const PortFit &f, const std::vector<Even
         r.errors.push_back(who + m);
         ok = false;
     };
+    // The lowering applies .tile and .resident to an input whose blocks it follows
+    // (resolveKernelBlock): blocks that are whole rows of the tensor. On any other
+    // block they would be accepted here and ignored by the DMA -- the kernel would
+    // read a row-major block (.tile) or two buffers instead of one (.resident).
+    bool rowContiguous = f.rank == (int)p.shape.size();
+    for (int d = 1; d < f.rank && rowContiguous; d++)
+        rowContiguous = f.shape[d] == p.shape[d];
+    if (!p.output && !rowContiguous && (o.tile[0] || o.tile[1] || o.resident))
+        err("{.tile / .resident} need blocks that are whole rows of the tensor (every dim after the first "
+            "complete); this port's blocks are " +
+            vecStr(f.shape) + " of " + vecStr(p.shape) +
+            " -- the DMA would not apply the option. Load whole rows, or drop it (e.g. pre-tile on the host)");
     if (o.depth < 0 || o.depth > 2)
         err("{.depth = " + std::to_string(o.depth) + "}: a core buffer is single (1) or ping-pong (2)");
+    if (p.output && o.depth == 1)
+        err("{.depth = 1} on aie::store_buffer: an output window is always ping-pong on the core (the next block "
+            "is written while the last one drains); drop the option or use {.depth = 2}");
     if (o.resident && o.depth > 1)
         err("{.resident = true} holds its block in ONE buffer; {.depth = " + std::to_string(o.depth) +
             "} contradicts it (drop .depth)");
@@ -1154,7 +1173,9 @@ Derived convCrossCheck(const TraceKernel &k, KernelTraceResult &tr, const std::v
         !recognizeConv(*ifm, *wgt, *ofm, tr.fits[ifm->var], tr.fits[wgt->var], tr.fits[ofm->var], rows, cols, c, m,
                        err))
         return none;
-    Derived d = derive(c, m);
+    Target tgt; // the conv derivation's byte sizes in the ports' element size (bfloat16 = 2)
+    tgt.elem_bytes = ifm->elem_bytes;
+    Derived d = derive(c, m, tgt);
     if (!d.ok)
         return none;
     std::vector<std::string> diff;
@@ -1164,7 +1185,8 @@ Derived convCrossCheck(const TraceKernel &k, KernelTraceResult &tr, const std::v
         return none; // a conv-like kernel the conv derivation would tile differently: routing alone decides
     const PortSpace *want[3] = {&d.ifm, &d.weights, &d.ofm};
     for (size_t i = 0; i < k.ports.size() && i < spaces.size(); i++) {
-        const PortSpace &w = k.ports[i].role == "IFM" ? *want[0] : k.ports[i].role == "WEIGHTS" ? *want[1] : *want[2];
+        PortSpace w = k.ports[i].role == "IFM" ? *want[0] : k.ports[i].role == "WEIGHTS" ? *want[1] : *want[2];
+        w.pp_depth = spaces[i].pp_depth; // the port's {.depth / .resident}: a scheduling choice, not the tiling
         if (emitGemmSpace(spaces[i], "x") != emitGemmSpace(w, "x"))
             errs.push_back(k.ports[i].var + ": the routed carrier differs from the spatial-halo conv derivation of " +
                            "the same blocks (internal error):\n" + emitGemmSpace(spaces[i], "routed") +
@@ -1251,6 +1273,11 @@ KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, co
         RoutingHints hints;
         if (errs.empty()) {
             hints = routingHints(plan);
+            for (auto &rp : plan.ports)
+                if (plan.halo && rp.opts.depth == 1)
+                    errs.push_back(rp.var + " (" + rp.role + "): {.depth = 1} is not supported on a spatial-halo " +
+                                   "(conv) kernel yet -- its window lowering is ping-pong; use {.depth = 2}, or " +
+                                   "{.resident = true} for a block taken once");
             const std::string mem = checkPortBuffers(plan, hints);
             if (!mem.empty())
                 errs.push_back(mem);

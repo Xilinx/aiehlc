@@ -20,6 +20,7 @@ int8 calibration on the example input, the MLIR pipeline, the C app, the aiehlc 
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import operator
 from pathlib import Path
 
@@ -107,6 +108,70 @@ class _Normalized:
                 else:
                     break
         self.args, self.kwargs = tuple(args), kwargs
+
+
+#: namespaces of PyTorch's own operators; any other OpOverload is a user / library custom op
+CORE_NAMESPACES = ("aten", "prims", "quantized_decomposed", "_quantized", "quantized")
+
+
+def is_custom_op(t) -> bool:
+    """a framework custom op (torch.library) the exported graph keeps opaque: a call of torch.ops.<ns>.<op>
+    outside PyTorch's own namespaces"""
+    import torch
+    return isinstance(t, torch._ops.OpOverload) and t.namespace not in CORE_NAMESPACES
+
+
+def _op_body(op):
+    """the Python body of a torch.library.custom_op (newer torch keeps it), else None"""
+    try:
+        from torch._library.custom_ops import OPDEFS
+    except ImportError:
+        return None
+    d = OPDEFS.get(op.name() if hasattr(op, "name") else str(op))
+    return getattr(d, "_init_fn", None) if d is not None else None
+
+
+@contextmanager
+def inline_python_ops(bodies=None):
+    """while exporting, run Python-implemented custom ops as their body so torch.export inlines its ATen IR: the op
+    then lowers like any other layer (to the AIE where it can) instead of staying one opaque node on the host.
+    *bodies*: {op or "ns::op": python function written in torch ops}; ops made with torch.library.custom_op are
+    found by themselves. Each body is registered as the op's CompositeImplicitAutograd kernel for the duration
+    only. A body registered for a backend key ("CPU") cannot be read back from the dispatcher: pass it here.
+
+        with dnn_export.inline_python_ops({"mylib::softclip": lambda x: torch.tanh(x) * 3}):
+            ep = torch.export.export(model, (x,))"""
+    import torch
+    libs = []
+    try:
+        for op, fn in (bodies or {}).items():
+            name = op if isinstance(op, str) else op.name()
+            ns, opname = name.split("::")
+            lib = torch.library.Library(ns, "IMPL")
+            lib.impl(opname.split(".")[0], fn, "CompositeImplicitAutograd")
+            libs.append(lib)
+        yield
+    finally:
+        for lib in libs:                       # deregister: the op is opaque again after export
+            lib._destroy()
+
+
+def export_inlined(model, args, bodies=None):
+    """torch.export.export with every Python-implemented custom op inlined (inline_python_ops): the bodies given
+    in *bodies* ({op or "ns::op": fn}) and those of torch.library.custom_op ops. Ops with no Python body stay
+    one opaque node and run on the host (aiednn_custom: a C implementation, compile_exported(custom_sources=))."""
+    import torch
+    ep = torch.export.export(model, tuple(args))
+    found = dict(bodies or {})
+    for n in ep.graph.nodes:
+        if n.op == "call_function" and is_custom_op(n.target):
+            name = n.target.name().split(".")[0]
+            if name not in found and (fn := _op_body(n.target)) is not None:
+                found[name] = fn
+    if not found:
+        return ep
+    with inline_python_ops(found):
+        return torch.export.export(model, tuple(args))
 
 
 class _Translator:
@@ -304,6 +369,8 @@ class _Translator:
             # such as add's alpha=1 are not arguments of operator.add & co)
             kw = {k: v for k, v in n.node.kwargs.items() if k in n.kwargs}
             return g.call_function(self.same[t], self.val(tuple(n.args)), self.val(kw))
+        if is_custom_op(t):   # a framework custom op: kept as itself; the model compiler runs it on the host
+            return g.call_function(t, self.val(tuple(n.args)), self.val({k: v for k, v in n.node.kwargs.items()}))
         raise AiegraphError("dnn_export", f"{n.name}: {t} has no torch-level counterpart in dnn_export yet",
                             hint="add it to dnn_export._Translator.call / _fn_table")
 
@@ -410,20 +477,33 @@ def to_fx(ep, example_inputs=None):
 
 def compile_exported(ep, x, *, mode: str = "int8", name: str = "model", target: str = "x86", out=None,
                      vitis_settings: str = None, mlir: bool = True, prefer: str = "fastest", mesh=None,
-                     top1_range=None):
+                     top1_range=None, eager=None, custom_sources=()):
     """An exported program -> the program for *target* (x86 | vek280 | vek385): flow 4 on to_fx(ep), built, not
     run. Returns (DnnBuild, AGraph, reference); run it with run(). *mode* f32 | int8 (calibrated on *x*);
-    *top1_range*: a detector's class-score window (zoo's model.top1_range)."""
+    *top1_range*: a detector's class-score window (zoo's model.top1_range). *eager*: None builds the
+    fixed-megakernel program; ``"plan"`` eager mode on instances generated for this model's layer shapes
+    (dnn_eager.plan); ``"library"`` eager mode on the premade template library (dnn_eager.LIBRARY), no
+    per-model kernels. *custom_sources*: C files implementing the program's framework custom ops
+    (dnn_torch.custom_c_symbol), run on the host CPU."""
     from . import dnn_torch as dt
     from ._env import repo_root
     from .dnn import dnn_build
     gm = to_fx(ep, [x])
     if top1_range is not None:
         gm.top1_range = top1_range
-    out = Path(out or repo_root() / "worklocal" / "aiednn" / "export" / f"{name}_{mode}")
+    out = Path(out or repo_root() / "worklocal" / "aiednn" / "export" / (f"{name}_{mode}" + (f"_eager_{eager}" if eager else "")))
     g, ref, yf = dt.references(gm, x, mode, name, mlir=mlir)
-    app = dt.emit_app(g, out, ref, dt.TOL[mode], dt._top1(yf, g.top1_range)[0], prefer=prefer)
-    rep = dnn_build(app, target=target, out=out / target, run=False, vitis_settings=vitis_settings, mesh=mesh)
+    app = dt.emit_app(g, out, ref, dt.TOL[mode], dt._top1(yf, g.top1_range)[0], prefer=prefer,
+                      custom_sources=custom_sources)
+    kw = {}
+    if eager:                          # every layer on a template instance, its kernel loaded right before it runs
+        from . import dnn_eager
+        if eager not in ("plan", "library"):
+            raise AiegraphError("dnn_export", f"eager={eager!r}", hint="'plan' or 'library'")
+        plan = dnn_eager.library_plan(name) if eager == "library" else dnn_eager.plan(g, name)
+        print(plan.summary(), flush=True)
+        kw = dict(mode="eager", eager=plan)
+    rep = dnn_build(app, target=target, out=out / target, run=False, vitis_settings=vitis_settings, mesh=mesh, **kw)
     return rep, g, ref
 
 

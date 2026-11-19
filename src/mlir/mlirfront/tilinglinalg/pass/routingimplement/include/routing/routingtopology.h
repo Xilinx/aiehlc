@@ -21,7 +21,10 @@ public:
   // Used for gather paths that share the output flow's shim tile.
   std::shared_ptr<DataIO> createDataIOAtPoint(std::string dioName, Point shimPoint, DMADIRECTION direction,
                                               int channel);
-  std::optional<std::shared_ptr<const RoutingPath>> createPath(int dioID, std::vector<Point> dsttiles);
+  // noFirstHop: an S2MM path must not leave its source tile towards this tile
+  // (RoutingPath::setNoFirstHop); without such a route it routes as before.
+  std::optional<std::shared_ptr<const RoutingPath>> createPath(int dioID, std::vector<Point> dsttiles,
+                                                               std::optional<Point> noFirstHop = std::nullopt);
   const std::vector<std::shared_ptr<RoutingPath>> &paths() const { return paths_; }
   std::vector<Point> ReserveTiles(int nums, int dioID = -1);
   bool occupyLink(Point a, Point b, const int ioId, int &portNum, PortDirection &pda, PortDirection &pdb);

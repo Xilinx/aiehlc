@@ -18,10 +18,12 @@ The routing **module** carries only control switches (`routing.fullconnect_auto`
 | ping-pong depth | `pp_depth` (I64Attr), same op |
 | fca=0 / halo kernel rounds, `out_rounds` | `#routing.kernel_tiling<...>` on the routing `func.func` |
 | GEMM fca=1 tiling | `#routing.tiling` on `routing.partitiontensor` |
+| kernel-only port's traced blocks + `.resident`/`.tile` | `#routing.kernel_block` (`kernel_block`) on the tensor op; `resolveKernelBlock` (skill gemmdataflowoptions) |
 
 `DmaphopTodfscheblueprintPass` copies the per-tensor attrs onto
 `dfscheblueprint.declare_data` as `routing.halo` / `routing.shim_dma` /
-`routing.layout_transform` / `routing.pp_depth` (`copyTensorRoutingInfo`).
+`routing.layout_transform` / `routing.pp_depth` / `routing.kernel_block`
+(`copyTensorRoutingInfo`).
 Design: `doc/design/routing_ir_tiling_carriers.md`.
 
 ## Reading
@@ -39,7 +41,7 @@ find nothing and silently read 0.
   `collectTensorRoutingInfo`, or it vanishes at the blueprint stage.
 - `DenseMap` order is unstable — iterate `sortedTensorIndices` when "first halo
   tensor" matters (`detectConvHalo`, `spatialHaloBufSize`).
-- The generated `createscheduletensor` builder takes the four optional attrs
+- The generated `createscheduletensor` builder takes the five optional attrs
   explicitly: pass `nullptr` for each.
 - `aiehlc.cc` includes `routingmanager.h`; the top-level `CMakeLists.txt` adds
   `tilinglinalg/routing/` and `routing/inc/` to its include path.

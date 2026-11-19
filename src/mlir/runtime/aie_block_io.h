@@ -26,6 +26,14 @@
 
 #include <stdint.h>
 
+// bfloat16 ports: on the core a bfloat16 tensor travels in a 16-bit window
+// (the pipeline carries it as i16; the kernel works on its blocks through
+// `bfloat16` pointers, chess's native type). ADF has no bfloat16 window type.
+#ifdef __chess__
+typedef input_window_int16 input_window_bfloat16;
+typedef output_window_int16 output_window_bfloat16;
+#endif
+
 // The kernel-side declarations (op, block sizes, one descriptor + cursor per
 // port) are emitted by convautotile::kernelTUDecls from the same Derived
 // numbers the ports' GemmSpace / DMA are built from.
@@ -82,17 +90,23 @@ static inline int aiehlc_blk_check(const aiehlc_blk_desc &d, aiehlc_blk_cursor &
     return ok;
 }
 
+// A block's address, converting to the pointer type the kernel assigns it to
+// (`const int8_t *`, `const bfloat16 *`, ...) -- as in the kernel analysis and kemu.
+struct aiehlc_block_ptr {
+    int8_t *p;
+    template <typename T> operator T *() const { return (T *)p; }
+};
 template <typename W>
-static inline int8_t *aiehlc_load_buffer(W *win, const aiehlc_blk_desc &d, aiehlc_blk_cursor &cur, int p0, int p1,
-                                         aiehlc_blk off, aiehlc_blk shape) {
+static inline aiehlc_block_ptr aiehlc_load_buffer(W *win, const aiehlc_blk_desc &d, aiehlc_blk_cursor &cur, int p0,
+                                                  int p1, aiehlc_blk off, aiehlc_blk shape) {
     aiehlc_blk_check(d, cur, p0, p1, off, shape);
-    return (int8_t *)acquire_input_window(win);
+    return {(int8_t *)acquire_input_window(win)};
 }
 template <typename W>
-static inline int8_t *aiehlc_store_buffer(W *win, const aiehlc_blk_desc &d, aiehlc_blk_cursor &cur, int p0, int p1,
-                                          aiehlc_blk off, aiehlc_blk shape) {
+static inline aiehlc_block_ptr aiehlc_store_buffer(W *win, const aiehlc_blk_desc &d, aiehlc_blk_cursor &cur, int p0,
+                                                   int p1, aiehlc_blk off, aiehlc_blk shape) {
     aiehlc_blk_check(d, cur, p0, p1, off, shape);
-    return (int8_t *)acquire_output_window(win);
+    return {(int8_t *)acquire_output_window(win)};
 }
 template <typename W> static inline void aiehlc_release(W *win) { release_input_window(win); }
 template <typename W> static inline void aiehlc_commit(W *win) { release_output_window(win); }

@@ -47,7 +47,7 @@ _OP = {"aiednn_convolution_forward_create": "conv", "aiednn_deconvolution_forwar
        "aiednn_layer_normalization_forward_inference_create": "layer_norm",
        "aiednn_group_normalization_forward_inference_create": "group_norm",
        "aiednn_concat_create": "concat", "aiednn_sdpa_forward_create": "sdpa", "aiednn_slice_create": "slice",
-       "aiednn_rope_create": "rope"}
+       "aiednn_rope_create": "rope", "aiednn_custom_create": "custom"}
 _FN = {v: k for k, v in _OP.items()}
 _GEMM = ("conv", "deconv", "matmul", "inner_product")
 
@@ -232,6 +232,11 @@ class _Emitter:
         ops, a, seg = self._norm_common(o, ex, [ex["SRC"]])
         a["groups"] = f"{_by(o.create, 'i64')[0][1]} : i64"
         return ops, a, seg
+
+    def _custom(self, o, ex):
+        """a framework custom op run on the host: its sources in order, the op's qualified name"""
+        srcs = [t for k, t in sorted((int(k[5:]), t) for k, t in ex.items() if k.startswith("multi"))]
+        return srcs, {"name": json.dumps(next(i[1] for i in o.create if i[0] == "custom"))}, None
 
     def _concat(self, o, ex):
         srcs = [t for k, t in sorted((int(k[5:]), t) for k, t in ex.items() if k.startswith("multi"))]
@@ -456,6 +461,9 @@ def _rebuild(kind, a, opnds, seg, y, g):  # noqa: C901 -- one branch per op, mir
         if kind == "group_norm":
             create = [("i64", a["groups"])] + create
         return create, ex
+    if kind == "custom":
+        return ([("int", len(opnds)), ("mds", list(opnds)), md(y), ("custom", a["name"])],
+                [(("multi", i), t) for i, t in enumerate(opnds)] + [("DST", y)])
     if kind == "concat":
         return ([("int", len(opnds)), ("mds", list(opnds)), ("int", a["axis"]), md(y)],
                 [(("multi", i), t) for i, t in enumerate(opnds)] + [("DST", y)])

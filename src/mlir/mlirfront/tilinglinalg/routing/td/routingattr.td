@@ -125,11 +125,23 @@ def KernelBlockAttr : routingattr<"KernelBlock"> {
     "int64_t":$rounds_j,                    // inner loop rounds
     ArrayRefParameter<"int64_t">:$step_i,  // offset per outer round, per dim
     ArrayRefParameter<"int64_t">:$step_j,  // offset per inner round, per dim
-    DefaultValuedParameter<"bool", "false">:$resident,
-    DefaultValuedParameter<"int64_t", "0">:$tile_r,
-    DefaultValuedParameter<"int64_t", "0">:$tile_c
+    "bool":$resident,
+    "int64_t":$tile_r,
+    "int64_t":$tile_c
   );
-  let assemblyFormat = "`<` struct(params) `>`";
+  // Arrays are bracketed: struct(params) prints an ArrayRefParameter as a bare
+  // `64, 256` that its own parser cannot read back (the next `, shape =` is
+  // taken as another element), which broke AIEHLC_ROUTING_IR_IN /
+  // AIEHLC_DMAPHOP_IR_IN for every kernel-only port. Every field is printed and
+  // none is DefaultValued: optional groups that all start with `,` are
+  // ambiguous to the parser, and a DefaultValuedParameter prints NOTHING when
+  // it holds its default (`resident =,`) even outside an optional group.
+  let assemblyFormat = [{
+    `<` `tensor_shape` `=` `[` $tensor_shape `]` `,` `shape` `=` `[` $shape `]` `,`
+    `rounds_i` `=` $rounds_i `,` `rounds_j` `=` $rounds_j `,`
+    `step_i` `=` `[` $step_i `]` `,` `step_j` `=` `[` $step_j `]`
+    `,` `resident` `=` $resident `,` `tile_r` `=` $tile_r `,` `tile_c` `=` $tile_c `>`
+  }];
 }
 
 // Kernel-level on-core round schedule that is not a property of any single

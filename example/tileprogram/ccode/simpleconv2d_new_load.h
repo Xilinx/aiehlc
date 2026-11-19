@@ -320,3 +320,24 @@ static inline uint32_t mix32(uint32_t x) {
     x ^= x >> 16;
     return x;
 }
+// ═══════════════════════════════════════════════════════════════════════════
+// Test data: the real [INPUT_H, INPUT_W, INPUT_C] pixels in [-4, 4] and the
+// [NUM_FILTERS, KH, KW, INPUT_C] weights in {-1, 0, 1}, written into the
+// pre-padded / channel-aligned buffers (border and pad channel stay 0). The hash
+// key is the UNPADDED index, so conv2d_debug.py reproduces the same values.
+// ═══════════════════════════════════════════════════════════════════════════
+static inline void init_conv2d_test_data(int8_t *input, int8_t *filter) {
+    memset(input, 0, INPUT_H_PAD * INPUT_W_PAD * INPUT_C_ALIGN);
+    memset(filter, 0, K * NUM_FILTERS);
+    for (int h = 0; h < INPUT_H; h++)
+        for (int w = 0; w < INPUT_W; w++)
+            for (int c = 0; c < INPUT_C; c++)
+                input[((h + PAD) * INPUT_W_PAD + w + PAD) * INPUT_C_ALIGN + c] =
+                    (int8_t)((int)(mix32((uint32_t)((h * INPUT_W + w) * INPUT_C + c) + INPUT_SEED) % 9u) - 4);
+    for (int f = 0; f < NUM_FILTERS; f++)
+        for (int t = 0; t < KERNEL_H * KERNEL_W; t++)
+            for (int c = 0; c < INPUT_C; c++)
+                filter[f * K + t * INPUT_C_ALIGN + c] =
+                    (int8_t)((int)(mix32((uint32_t)((f * KERNEL_H * KERNEL_W + t) * INPUT_C + c) + FILTER_SEED) % 3u) -
+                             1);
+}

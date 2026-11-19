@@ -609,6 +609,67 @@ reverted to the 2026-10-20 engine (~1.61 ms/image at B=32): the faster kernels
 `AIE_VERSION=2 build.sh eng`, **2.593 ms/image**, bit-exact (fabric280/, two `mmul<4,8,8>` per MM, MMIO
 shim BDs, persistent mode only); same board as aiednn's 69.7 ms. Skill **resnetenginevek280**.
 
+### Dataflow options on kernel-only kernels (`.depth` / `.resident` / `.tile`)
+
+`aie::load_buffer(p, off, shape, {.depth = 1|2, .resident = true, .tile = {tr, tc}})`
+(`store_buffer` takes `.depth`) steer the DMA the compiler derives from a
+kernel-only kernel; all optional, default = the derivation as before.
+`.resident`: one block per core, held all launch, one buffer, sent once.
+`.tile`: the shim delivers a 2-D block **panel-major** (tc-wide panels of all
+rows) so every tr x tc tile is contiguous -- 3 shim BD dims; an int8 transpose is
+not a DMA operation, so a GEMM B is host-packed. Example
+`example/tileprogram/ccode/simplegemm_dataflow.cc` (256^3 x 8 panels per launch,
+`aie::mmul<8,8,8>`, `PERF SUMMARY` + bit-exact check). The traced blocks travel
+as `#routing.kernel_block`; `blueprint_sched::resolveKernelBlock` makes host and
+kernel lowering **check** every GEMM-path port's window/rounds against it (a
+mismatch is a build error, it used to hang) and **follow** it for row-contiguous
+inputs (full-K strips, a once-loaded B -- the GEMM model can express neither).
+Old kernels stay byte-identical. Board: GOLDEN PASS (524,288), 79.55 ms per
+launch, of which `--profiling` puts 96.5 % in kload (per-call ELF + 26.6 KB
+buffer-BSS reload) and 1.2 % in wait_io -- the next lever is the launch, not
+the dataflow. Port buffers get **32 KB**, not 48
+(`checkPortBuffers`). Design: `doc/design/trace_to_routing.md` "Dataflow
+options"; skill **gemmdataflowoptions**.
+
+### bfloat16 ports (`input_window_bfloat16`)
+
+A kernel-only kernel can take / produce bf16 tensors
+(`example/tileprogram/ccode/simpleconv2dkernel_port_bf16.cc`, the bf16 twin of
+`_less.cc`). Carried as **16-bit storage** (pipeline `i16`, `v4int16` windows);
+only the kernel body sees `bfloat16` (chess native; RNE type in
+`aie_api_x86emu.h`), and `load_buffer` returns a pointer that converts to
+`const bfloat16 *`. Element size is decided in two front ends (`aiehlc.cc` bit
+width, `kernel_trace.cpp elemBytesOf`) plus the conv cross-check's
+`Target.elem_bytes`. Limits: one element type per kernel, scalar only (no bf16
+mmul in the x86 emulation yet), blocks twice the bytes (7x14 tile). palmyra:
+802,816 bit-exact, 12/12 runs. Design `doc/design/bf16_support.md`; skill
+**bf16kernel**.
+
+### AIEDNN template kernels (one launch per layer)
+
+AIEDNN is the library of fast AIE kernels for ML offload. How to develop a kernel
+for it (fast for a whole layer), integrate it, and add a custom op:
+**[tutorial/aiednn/howto/templatekernel.md](tutorial/aiednn/howto/templatekernel.md)**.
+Example `example/aiednn/gemm_kacc_bf16.cc`
+(bf16 GEMM, K accumulated in fp32 on the core, tile loop on the core, host
+pre-tiled chunks, fused ReLU) as a **real C++ template**,
+`template <int M, int N, int K, int TK = 64, bool RELU = true> __global__`,
++ `gen_variants.py` (layer shapes -> de-duplicated template arguments + dispatch
+table). aiehlc instantiates templates **on the source text** before the
+analysis / port parser / kernel extraction (they all read shapes as text):
+`convautotile/kernel_template.cpp`, called from `aiehlc.cc:applyKernelTemplates`
+(after `inlineSourceIncludes`, before `applyConvAutoTiling`) and from
+`aiehlc-convtile trace`. Each launch `k<args><<<mesh>>>` selects an instance
+(defaults filled, integers folded with the source's `#define`s); one instance
+keeps the name, several become `k__a_b_c` kernels in one host ELF (board:
+two instances, both bit-exact). Never-launched / argument-count / no-default
+are errors; a source without a template kernel is returned untouched.
+palmyra: 4 instances bit-exact; a cold launch is 98-99 % kload, so TK 64 (33 ms)
+beats TK 128 (53.6 ms) -- the buffers are BSS reloaded per launch. Needed two
+GEMM lowering fixes (B's window divided by m_rounds; the 3-D K BD started
+k_rounds times -- the latter only where its len is not already the walk, or
+`simplematmul2` breaks). Skill **aiednnkernel**.
+
 ### Declarative conv2d auto-tiling (`aie::Conv2d` + `aie::Mapping`)
 
 `__global__(conv, map) void k(aie::port<T, aie::IFM> a, aie::port<T, aie::WEIGHTS> b, aie::port<T, aie::OFM> c)`
@@ -753,7 +814,15 @@ so in the report). Skill **aiegraphregion**.
 the layer's ports, mesh split and DMA-legal block loop; host `<entry>_run` with
 every argument, buffers and launch; entry; spec) + `<entry>_ref.c`; compute,
 staging and parameters are `TODO`s for the user. It builds as generated
-(`libaiek_layer04.a`). CLI `aiegraph prototype`.
+(`libaiek_layer04.a`). `.write` also emits **`test_<entry>.cc`**: `main()` +
+`#include "<entry>.cc"` (aiehlc splices it → an ELF), every tensor bound in TVM
+call order, the entry called `AIEKT_ITERS` (5) times, each **timed** (first call
+apart, min/mean/max of the repeats, GOPS, `--profiling` PMU split, `PERF SUMMARY`
+line), one `TEST PASS/FAIL` line. With the deploy's
+`make TRACE=1` dumps it writes `<entry>_test_data.h` and copies the layer's
+`lNN_*_in/out.h` flat beside it → golden check against TVM's own output; without
+them a smoke test on seeded synthetic tensors. Build it with an **absolute**
+`--runtime-source-file`. `test=False` / `--no-test` skips it. CLI `aiegraph prototype`.
 
 `ag.convert` starts FRESH: a reused (cached) conversion gets every earlier
 offload reset to the CPU (`emod.offload_reset(layers=None)`, driver
@@ -953,6 +1022,18 @@ templates; CLI `aiegraph interface`.
 are variadic and swallow a trailing prompt); aiegraph's own `offload_check` is the
 verdict after every round, failures go back via `--resume`. Tests use a fake `claude`.
 
+`emod.ai_offload_prototype(layer, rounds=3, build=True)` (`src/aiegraph/aiprototype.py`):
+`offload_prototype(layer).write()` into `<workdir>/aiproto/layerNN_prototype/` (old dir moved
+aside), then `claude -p` fills the TODOs, judged after each round by
+`emod.prototype_check` / `aiegraph protocheck`: **todo** (no `TODO(`/`TODO:` marker),
+**kemu**, **trace** (`aiehlc-convtile trace`), **check** (`offload_check`), then **build**
+(aiehlc on `test_<entry>.cc`). **`offload_check` cannot judge the kernel**: its calibrate/emulate
+run `_ref.c`, so an unfilled backbone is READY. `kemu` (`src/aiegraph/kemu.py`) runs the
+kernel AND host code on x86 under ASan: ports are views of the launch's host buffers,
+`load_buffer` gathers the real block into an exact-size allocation, `commit` scatters it,
+`<<<mesh>>>` runs every core, and the outputs are byte-compared with TVM's `make TRACE=1` dump
+(else `<entry>_ref` on synthetic tensors). Skill **aioffloadprototype**.
+
 ### User kernels: `--aie-kernel` / `frontend.tvmrelay.aiekernel`
 
 Bring-your-own AIE kernel for one layer or every layer a spec fits. **C:**
@@ -1005,7 +1086,11 @@ file, so an edited IR continues through the whole pipeline; a round trip is
 byte-identical (`script/test/routing_ir_roundtrip.sh`, GEMM + conv). Python:
 `aiebackend.routing_ir.RoutingIR` (typed view, edits, `lint()`, in-process `check()`,
 `build()`). Gate on `lint()` too -- the pipeline accepts some illegal tilings
-silently -- and remember the kernel body is not in the IR. Design
+silently -- and remember the kernel body is not in the IR. `AIEHLC_DMAPHOP_IR_IN` re-enters at
+dmaphop (round trip byte-identical; edits not yet safe -- other flows' stream routes
+get re-paired). Every tiling build ends with `script/test/flowcheck.py`, which
+simulates routing.cc against the dmaphop dataflows and prints `flowcheck: OK` or
+the flows that miss / leak (RoutingHWVerify does not see those). Design
 **[doc/design/routing_ir_reentry.md](doc/design/routing_ir_reentry.md)**; skill
 **routingirreentry**.
 
@@ -1014,7 +1099,8 @@ silently -- and remember the kernel body is not in the IR. Design
 `routing.iter_policy`, `routing.memtile_staging`). Tiling/data-movement info is a typed attribute on its op:
 `#routing.halo` / `#routing.shim_dma` / `layout_transform` / `pp_depth` on each
 `routingcreatescheduletensor` (copied onto `dfscheblueprint.declare_data` as
-`routing.*`), `#routing.kernel_tiling` on the routing `func.func`, and GEMM
+`routing.*`; a kernel-only port also carries `#routing.kernel_block`, its traced
+blocks), `#routing.kernel_tiling` on the routing `func.func`, and GEMM
 `#routing.tiling` on `partitiontensor`. Passes read them **at pass entry** via
 `routing::collectTensorRoutingInfo` / `readKernelTiling` / `readGemmTilingScalars`
 into `BlueprintPassState` — never add a `tensor_N.*` or tiling module attr. See
@@ -1203,6 +1289,7 @@ Each dialect has its own `unitest/` directory with independent CMake build:
 - **[doc/resnetlaye1timeoutdebug.md](doc/resnetlaye1timeoutdebug.md)** — Step-by-step summary of the ResNet-18 layer-01 `--aie-offload` timeout debug: symptom, allconv review, source/pragma bisection, KCO absolute-column root cause + fix, `-O3` (2232 → 1282 ms), lessons
 - **[doc/debug/troubleshoot_aie_offload_timeout.md](doc/debug/troubleshoot_aie_offload_timeout.md)** — `--aie-offload` main.elf hangs (`ENTER` without `EXIT`, `wait_io TIMEOUT`): reading the deadlock, allconv review, HW bisection (committed stem passes, control-plane WIP hangs standalone too), `AIE_DEBUG_LOG`-gated timeout dump
 - **[doc/design/op_mapping_programming_model.md](doc/design/op_mapping_programming_model.md)** — Op + mapping model on top of convautotile: native-support plan (op/mapping in routing IR, `OpMappingToTilingPass`, more ops), evaluation, and §4 the Triton block-load kernel style (`aie::program_id`, `aie::load_buffer/store_buffer` in tensor coordinates, checked against the derived DMA by `aie_block_io.h`), its x86 emulator `simpleconv2ddebug/emu_conv2d_spatial.sh`, and why a load is an assertion, not a request, on a DMA-streamed array; §5 kernel analysis: kernel-only sources (`aie::shape` ports, no `conv`/`map`, `simpleconv2dkernel_port.cc`) whose DMA is inferred from the traced `load_buffer` calls and verified (too big/small, out of tensor, data used without load, use after release, never committed, loop order, data-dependent schedule, coverage), plus static bounds (`kernel_static.cpp`: names the constant behind an out-of-block access, e.g. `oc_t = 15` -> fits with 16); `aiehlc-convtile trace`; §6 tensor form (`simpleconv2dkernel.cc`: `aie::in<aie::tensor>`, `.pad` / `.reuse`, block views, `aie::autotune`; `kernel_front.cpp` lowers it via a logical trace + staged layout, `emu_conv2d_tensor.sh`); §7 vector kernels: `simpleconv2dkernel_port.cc` on `aie::mmul<8,8,8>`, traced via the AIE API x86 emulation `src/mlir/runtime/aie_api_x86emu.h` (ASan + vector alignment checks)
+- **[tutorial/aieprogram/README.md](tutorial/aieprogram/README.md)** — kernel-only programming tutorials by operator family, then GEMM optimization: `01_contraction/` (GEMM: every host/kernel line, pid -> tile figures, trace -> DMA -> routing / dmap / dmaphop / dfschedule / routinghw pipeline figure; conv2d), `02_elementwise/` .. `05_indexing/` (4x4 by redundant broadcast -- a mesh row's data broadcast, work split by `pn`; reduction in two levels; model + limits; their kernels pass the kernel analysis but the lowering still derives windows from the GEMM model -- pending), `06_gemm_optimization/` (step 0 baseline 90.6 ms -> `.depth`/`.resident` 101.1 ms (slower: compute-bound) -> `aie::mmul` + `.tile` 79.6 ms; conv scheduling + vector with `output_tile_major`); listings synced by `sync_code.py`, figures from `img/make_figures.py`
 - **[doc/design/tile_dim_structured_design.md](doc/design/tile_dim_structured_design.md)** — Structured `tile_dim` for `aie::SpatialPolicy`
 - **[doc/design/spatial_space_composition.md](doc/design/spatial_space_composition.md)** — Composition-based spatial op spaces (GemmSpace, Conv2dSpace)
 - **[doc/design/conv_autotiling.md](doc/design/conv_autotiling.md)** — Declarative `aie::Conv2d` + `aie::Mapping`: derived d1/d2/d3 + halo, legality rules (incl. measured pipeline limits), `AIEHLC_CONV_TUNE`, AutoTVM/XGBoost tuner (`src/frontend/convtune`)
@@ -1220,6 +1307,7 @@ Read the matching skill when the task fits:
 | Embedded LLM context loss on retarget | debugui-llm-reset |
 | Debug UI grid: every tile red border + ⚠ "supply/demand mismatch" on every launch | flowbalancebroadcast |
 | Debug UI grid: big blank column on the left of the AIE array (data plane starts at col 1, e.g. `{2,6}` control-plane partition) | debuguigridleftgap |
+| Dump a lab board's AIE registers / core PM+DM / memtile DM (`script/aiedump.py palmyra_local\|vek385-N`); a column reads all `0x00000002`; which registers must never be read (`lock_request` = acquire) | aiedump |
 | Static XAie API verify (routing.cc, host.cc) | xaieapiverify |
 | Routing debug (IR → generated code) | routinghwdebug |
 | DMA BD verify in host.cc | dmabdverify |
@@ -1247,7 +1335,16 @@ Read the matching skill when the task fits:
 | GEMM / non-conv block-load kernel (kernel-only `aie::shape` or hand-written 2-D GemmSpace) builds and traces OK but hangs in `wait_io TIMEOUT ... dir=0`, or only mesh column 0 is right; `Tensor param: a [16x16]`; B offset `subview[16, 0] [64, 64]` | gemmblockloadhang |
 | Spatial-halo conv hangs (`wait_io TIMEOUT`) though kernel analysis passed: `out_rounds` ≠ kernel rounds (e.g. 98 for a 14x16x16 tile), tiny core output window; or `[TilingLinalg] ERROR: ... the kernel's blocks give ..` | convoutroundsdoublecount |
 | Triton-style block-load kernel (`aie::program_id`, `aie::load_buffer` / `store_buffer` in tensor coordinates, `aie::release` / `commit`): `no member named 'program_id' in namespace 'aie'`, klog `BLKE`, wrong offsets but correct output, emulating the generated kernel on x86; hand-written `aie::GemmSpace` ports + `load_buffer` (`(GemmSpace X) .d1... = A, the kernel's blocks give B`) | blockloadkernel |
-| Edit the routing IR and feed it back (`AIEHLC_ROUTING_IR_IN`, `aiebackend.routing_ir`: view / set_level / lint / check / build), round-trip test, an IR edit that does nothing or is silently accepted although illegal | routingirreentry |
+| Kernel-only kernel whose second input block is bigger than the first (eager `lut<128,128,16>`): `buf_in_ping_1`/`pong_1` one A-block apart, window-1 core BDs too short, or "the host core window is N elements, but the kernel's blocks ... are M" | kernelblockhostwindow |
+| Kernel-only row / reduction kernel (rowsum, layer norm, RoPE rows): output "core window is N elements x 1 round(s) ... kernel's blocks are M x R", values right but misplaced (a 2-D input block sent as a linear run), "not a plain 2-D block, but the shim would send the partition as one linear run", output `wait_io TIMEOUT pending=1` after a kernel-block input loop, or "packet master WEST forwards packets that arrive on its WEST slave: a same-side U-turn" (whole output columns zero) | kernelblockgather |
+| Kernel-only `{.depth / .resident / .tile}` options; `the core window is N elements x R round(s) ... but the kernel's blocks (#routing.kernel_block) are`; `the port buffers take N B of core memory`; a GEMM with B loaded once / full-K A strips; kernel macro under `#ifndef` undeclared | gemmdataflowoptions |
+| Misspelled `#include` reported as `` `HW_ROWS` ... no #define `` instead of `file not found`; kernel-only kernel: `kernel analysis needs the launch mesh: no device.partition(...)` though the call exists (mesh macros behind `#include <x.h>`); xchesscc `no matching function for call to 'aiehlc_load_buffer'` (window port by value, missing `*`); adding an early source-level diagnostic | kernelanalysisdiagnostics |
+| bfloat16 ports: `input_window_bfloat16`, DMA lengths twice/half, `output block bytes per round` mismatch on a 16-bit conv, `bfloat16` does not compile for tracing, a few hundred outputs reading 0 on 1 run in 6 | bf16kernel |
+| AIEDNN template kernel (GEMM/conv, one launch per layer, fp32 K accumulation): window `N x R ... kernel's blocks are 4N` with M and K rounds, input-shim `wait_io TIMEOUT` ch 1, `.tile` on a K chunk refused, `[KernelTemplate]` / template kernel "never launched" or argument-count errors, bigger TK slower | aiednnkernel |
+| `data used without being loaded` and WHICH constant causes it (`oc_t = 15` vs loops walking 16); `cause (static analysis)` / `out-of-block access (static analysis)` lines; extending `kernel_static.cpp` | blockstaticbounds |
+| Edit the routing / dmaphop IR and feed it back (`AIEHLC_ROUTING_IR_IN`, `AIEHLC_DMAPHOP_IR_IN`, `aiebackend.routing_ir`: view / set_level / lint / check / build), round-trip test, an IR edit that does nothing or is silently accepted although illegal; `flowcheck FAILED` / `FLOWCHECK ERROR ... does not reach / also reaches` after a build | routingirreentry |
+| Kernel-only kernel without options hangs in `wait_io TIMEOUT ... dir=0` (output) but works with `{.depth = 2}`; output `pp_depth=1`, one output MM2S BD with `next_bd=-1` vs ping/pong `window_init`; `{.depth = 1} on aie::store_buffer` error | outputpingponghang |
+| A dialect attribute's dumped IR does not parse back (`expected integer value`, `failed to parse ...Attr parameter ... ArrayRef<int64_t>`, `AIEHLC_*_IR_IN ... does not parse / verify`, roundtrip FAIL at the re-entry build): `struct(params)` with an `ArrayRefParameter` | mlirattrarrayroundtrip |
 | Adding/reading tiling or per-tensor DMA info in routing IR (halo, shim_dma, pp_depth, kernel rounds); "where did `tensor_N.halo` / `routing.spatial_out_rounds` go"; value reads 0 inside a conversion pattern | routingirtilingcarriers |
 | A `#pragma` you added is never `Detected` in the aiehlc log and its feature silently does nothing (build still rc=0) — stale `aiehlc` binary | stalepragmabinary |
 | Gen2-only build break: missing `xpseudo_asm_armclang.h`, or `XPAR_CPU_TIMESTAMP_CLK_FREQ` undeclared | bspheadergen2 |
@@ -1269,11 +1366,10 @@ Read the matching skill when the task fits:
 | `Option '...' registered more than once` / `Option 'basic' already exists` when TVM flow loads `_aiebackend` (two LLVMs) | aiebackendtvmllvm |
 | `run_test.sh` check 3: no `aie/` under the offloaded layer; `--aiegraph` lifts 0 convs under int8 (`non-4D shapes`); may `--aie-offload` change `layers/` vs golden | aieoffloadaiegraph |
 | Frontend prints "OVER BUDGET" / gates offload on tile memory — don't; offload is blind, aiehlc tiles | aieoffloadblind |
-| Misspelled `#include` reported as `` `HW_ROWS` ... no #define `` instead of `file not found`; kernel-only kernel: `kernel analysis needs the launch mesh: no device.partition(...)` though the call exists (mesh macros behind `#include <x.h>`); xchesscc `no matching function for call to 'aiehlc_load_buffer'` (window port by value, missing `*`); adding an early source-level diagnostic | kernelanalysisdiagnostics |
-| `data used without being loaded` and WHICH constant causes it (`oc_t = 15` vs loops walking 16); `cause (static analysis)` / `out-of-block access (static analysis)` lines; extending `kernel_static.cpp` | blockstaticbounds |
 | `pip install -e .` / `import aiegraph`: TVM 0.16 not found or provisioning unexpectedly, `no aiehlc checkout`, `exists and was not written by aiegraph`, stale results after changing model/calib, packaging `frontend` namespace | aiegraphinstall |
 | `aiegraph` region API: `no region matches 'layer1.0.conv1'`, a region offloads its sibling too (`move together` / *dragged*), `region="layer1"` vs `offload_check("layer1")` mean different things, `partition` undid an earlier offload, `register_kernel` "contract contradicts" | aiegraphregion |
 | A kernel-file backbone for a layer: args in TVM call order, roles, AIEK_SPEC, kernel frame + host run + entry (`ag.offload_prototype`, `aiegraph prototype`) | aiekernelprototype |
+| Let Claude fill a backbone's TODOs (`ai_offload_prototype`, `aiegraph aiprototype`); `prototype_check` / `kemu` FAIL; an unfilled backbone that `offload_check` calls READY | aioffloadprototype |
 | Two user-kernel offloads and only the last stays on the AIE (`superseded ... one aiehlc library per ELF`), `routing` defined twice at link; several aiehlc libraries in one ELF | multiaiehlclibrary |
 | Kernel link fails `could not find free space for SpaceSymbol buf_in_ping_0 in memory DMb`; TilingLinalg `Memory budget exceeded! ... maxPingPongBytes` | dmbufferregion |
 | Plug a user-written kernel into a TVM layer (`AIEK_ENTRY`/`AIEK_SPEC`, `--aie-kernel`, `aiekernel check/offload`); an L0xx lint code, calibrate MISMATCH, emulate FAIL, or `rejected at link -- ... routing()` | aieuserkernel |
@@ -1351,6 +1447,7 @@ to reload the MCP server.
 | resnetengine (or any KCO kernel) on VEK280 / AIE-ML: `__aiehlc_tm_anchor` undefined at link, no `mmul<8,8,8>` for int8, program memory over 16 KB, "No free shim DMA slot", `-lxaienginea72` not found at the host link, build.sh timing out | resnetenginevek280 |
 
 - **[src/tool/debug/README.md](src/tool/debug/README.md)** — user guide and CLI for all debug tools
+- **`script/aiedump.py <palmyra_local|vek385-N> [--pm] [--dm] [--memtile-dm]`** — JTAG dump of every live column's named registers (+ core PM/DM) into `summary.txt` / `regs.txt` / `mem/*.bin`; starts hw_server through `hws.ensure` when 3121 is closed; one piped xsdb session + block `mrd`s on the `Versal*` DAP target (28 tiles / 20k registers in 2.3 s). Skill **aiedump**.
 - **Skill: debug-ui-framework** — implementation map for `schedule_debug_server.py`, `schedule_view.py`, `aiegdb.py`, `aiemcp.py`, `aiediag.py`, `xaiehost2provenance.py` (detail in [reference.md](.cursor/skills/debug-ui-framework/reference.md))
 
 ### Build notes

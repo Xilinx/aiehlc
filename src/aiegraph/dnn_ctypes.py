@@ -39,6 +39,36 @@ class MD(C.Structure):
 
 FMT = {"dense": 0, "nhwc": 1}   # aiednn_format_t
 
+#: aiednn_custom_fn_t: int fn(int nsrc, const md *srcs, const void *const *src_data, const md *dst, void *dst_data,
+#: void *ctx) -- a user operator aiednn runs on the host (aiednn_custom_create)
+CUSTOM_FN = C.CFUNCTYPE(C.c_int, C.c_int, C.POINTER(MD), C.POINTER(C.c_void_p), C.POINTER(MD), C.c_void_p,
+                        C.c_void_p)
+_NP_OF = {code: np_t for code, np_t in DT.values()}
+
+
+def _md_array(m: MD, ptr) -> np.ndarray:
+    shape = tuple(m.dims[i] for i in range(m.ndims))
+    np_t = _NP_OF[m.data_type]
+    n = int(np.prod(shape)) if shape else 1
+    return np.ctypeslib.as_array(C.cast(ptr, C.POINTER(np.ctypeslib.as_ctypes_type(np_t))), (n,)).reshape(shape)
+
+
+def custom_fn(f):
+    """a Python function f(list of source arrays) -> array as an aiednn_custom_fn_t: the workstation executor
+    runs a framework custom op through the framework itself. Keep the returned object alive while the
+    primitive exists."""
+    def call(nsrc, srcs, src_data, dst, dst_data, ctx):
+        try:
+            ins = [_md_array(srcs[i], src_data[i]) for i in range(nsrc)]
+            out = _md_array(dst[0], dst_data)
+            out[...] = np.asarray(f(ins)).reshape(out.shape).astype(out.dtype, copy=False)
+            return 0
+        except Exception:                       # an exception cannot cross the C frame: fail the execute
+            import traceback
+            traceback.print_exc()
+            return 1
+    return CUSTOM_FN(call)
+
 
 class ExecArg(C.Structure):
     _fields_ = [("arg", C.c_int), ("data", C.c_void_p)]

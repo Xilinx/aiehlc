@@ -61,7 +61,9 @@ def _stem(name, mode, args, prof=False) -> str:
     return (f"{name}_{mode}" + ("_mlir" if args.mlir else "") + (f"_{args.mesh}" if args.mesh else "")
             + ("_prof" if prof else "") + (f"_b{args.batch}" if args.batch > 1 else "")
             + ("_fastest" if getattr(args, "prefer", "aie") == "fastest" else "")
-            + (f"_{args.tag}" if getattr(args, "tag", None) else ""))
+            + (f"_{args.tag}" if getattr(args, "tag", None) else "")
+            + ("_eager" if getattr(args, "eager", False) else "")
+            + ("lib" if getattr(args, "eager_library", False) else ""))
 
 
 def run_app(name, mode, target, args) -> dict:
@@ -86,6 +88,11 @@ def run_app(name, mode, target, args) -> dict:
         kw = dict(target=target, out=d / target, run=True, board=args.board, timeout=args.timeout,
                   vitis_settings=args.vitis_settings, mesh=_mesh(args.mesh), modes="all" if args.all_modes else "auto",
                   aiehlc_args=("--profiling",) if args.profiling else ())
+        if getattr(args, "eager", False):   # one kernel instance per layer shape, loaded before its layer
+            from aiegraph import dnn_eager
+            plan = dnn_eager.library_plan(name) if args.eager_library else dnn_eager.plan(g, name)
+            print(plan.summary(), flush=True)
+            kw.update(mode="eager", eager=plan)
         try:
             rep = ag.dnn_build(app, **kw)
         except ag.AiegraphError as exc:   # a single-layer kernel (VEK385's conv2dstem) ties the GEMM library
@@ -167,6 +174,12 @@ def main(argv=None) -> int:
     ap.add_argument("--run-only", action="store_true", help="board: reuse an already built main.elf, only run it")
     ap.add_argument("--all-modes", action="store_true",
                     help="board: compile every megakernel mode (default: only those the model uses, dnn_build modes=auto)")
+    ap.add_argument("--eager", action="store_true",
+                    help="eager mode: a templated kernel instance per GEMM layer shape, loaded right before the "
+                         "layer runs (aiegraph.dnn_eager; default: the fixed-megakernel library)")
+    ap.add_argument("--eager-library", action="store_true",
+                    help="with --eager: the premade template library (aiegraph.dnn_eager.LIBRARY) instead of "
+                         "instances generated for the model's layer shapes")
     ap.add_argument("--html", action="store_true", help="x86: also write worklocal/aiednn/models/<model>_<mode>.html")
     ap.add_argument("--mlir", action="store_true",
                     help="lower unfused and optimize with the aiednn MLIR pipeline (aiegraph.dnn_mlir.PIPELINE)")

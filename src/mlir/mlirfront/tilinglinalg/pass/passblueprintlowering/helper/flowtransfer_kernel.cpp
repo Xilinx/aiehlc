@@ -163,7 +163,12 @@ LogicalResult emitCoreTileParams(FlowLoweringCtx &c, CoreTileCtx &t, const CoreT
             int64_t tileRows = d.passState->tileRows;
             if (tileM > 0 && tileM < tileRows) {
                 int64_t mRounds = tileRows / tileM;
-                t.perCorePerKRound = t.perCorePerKRound / mRounds;
+                // Only the M-side input (A, view [tileRows, K]) holds mRounds tile_m strips;
+                // B's view (tile_cols x K) is sent whole in every m-round (same rule as
+                // passblueprinttoschedulekernel.cpp, P4bk).
+                const int64_t effK = d.passState->effectiveK;
+                if (effK <= 0 || t.perCorePerKRound == tileRows * effK)
+                    t.perCorePerKRound = t.perCorePerKRound / mRounds;
             }
         }
     } else {
@@ -249,23 +254,34 @@ LogicalResult emitCoreTileParams(FlowLoweringCtx &c, CoreTileCtx &t, const CoreT
         }
     }
 
-    // Kernel-only input that follows its traced blocks: one window per kernel
+    // Kernel-only port that follows its traced blocks: one window per kernel
     // block, one DMA round per block (the shim side does the same, see
-    // applyKernelBlockShim). Must run after computeCoreIterations so the GEMM
-    // model's clamp / K-round scaling do not touch it.
-    if (c.kb.follow && c.isInput) {
+    // applyKernelBlockShim / applyKernelBlockGather). Must run after
+    // computeCoreIterations so the GEMM model's clamp / K-round scaling do not
+    // touch it.
+    if (c.kb.follow) {
         t.pingPongBufferSize = c.kb.blockElems;
         t.perCorePerKRound = c.kb.blockElems;
         // The port's own buffer count ({.resident} / {.depth}); the input
         // FlowConfig does not carry it.
         const routing::TensorRoutingInfo *ti = routing::lookupTensorRoutingInfo(d.passState->tensorInfo, c.funcArgIdx);
-        if (ti && ti->ppDepth && *ti->ppDepth >= 1)
+        if (c.isInput && ti && ti->ppDepth && *ti->ppDepth >= 1)
             t.ppDepth = static_cast<int>(*ti->ppDepth);
     }
     if (failed(computeCoreIterations(c, t, d)))
         return failure();
-    if (c.kb.follow && c.isInput)
+    if (c.kb.follow)
         t.numIterations = c.kb.rounds;
+    // A checked input that does not follow keeps the GEMM model's window. The
+    // kernel lowering checks only its own window, so check this one too: a block
+    // bigger than the model's strip (lut<128,128,16>: W {32,64} next to A {16,64})
+    // would get a half-size core BD and a BCF slot the kernel's array overruns.
+    if (c.isInput && c.kb.check && !c.kb.follow && t.pingPongBufferSize != c.kb.blockElems) {
+        c.op->emitError() << "input " << c.funcArgIdx << ": the host core window is " << t.pingPongBufferSize
+                          << " elements, but the kernel's blocks (#routing.kernel_block) are " << c.kb.blockElems
+                          << " -- the core DMA and the kernel's buffer would disagree";
+        return failure();
+    }
 
     // Compute lock IDs from dirIdx to match the kernel's window ordering.
     // The kernel allocates locks sequentially per sorted window:
@@ -295,7 +311,7 @@ LogicalResult computeCoreIterations(FlowLoweringCtx &c, CoreTileCtx &t, const Co
     // Clamp to d.maxPingPongBytes to prevent exceeding core tile memory.
     // Skip the clamp for the spatial-halo IFM slab (must stay contiguous) and
     // for the K-split per-round slab (must match the shim per-round len exactly).
-    if (!t.hostSpatialHaloPort && !t.kSplitSlabPort && !(c.kb.follow && c.isInput) && d.maxPingPongBytes > 0 &&
+    if (!t.hostSpatialHaloPort && !t.kSplitSlabPort && !c.kb.follow && d.maxPingPongBytes > 0 &&
         t.elementSizeBytes > 0) {
         int64_t maxElements = d.maxPingPongBytes / t.elementSizeBytes;
         if (maxElements > 0 && t.pingPongBufferSize > maxElements)
@@ -311,7 +327,7 @@ LogicalResult computeCoreIterations(FlowLoweringCtx &c, CoreTileCtx &t, const Co
     // the DMA fires exactly once. If the kernel needs multiple
     // rounds (numIterations > 1), the DMA cannot re-arm and the
     // kernel will deadlock on the second acquire_window call.
-    if (t.ppDepth == 1 && t.numIterations > 1 && !(c.kb.follow && c.isInput)) {
+    if (t.ppDepth == 1 && t.numIterations > 1 && !c.kb.follow) {
         op.emitError("pp_depth=1 (single buffer) incompatible with "
                      "numIterations=")
             << t.numIterations << " (buffer_size=" << t.pingPongBufferSize

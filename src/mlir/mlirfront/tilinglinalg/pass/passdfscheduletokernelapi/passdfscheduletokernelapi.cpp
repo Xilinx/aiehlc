@@ -34,6 +34,7 @@ struct WindowInfo {
     int32_t bufferSize = 0;    // Per-window buffer size from window_def attribute
     int32_t numRounds = 0;     // Number of ping-pong rounds (0 = use bufferSize as fallback)
     std::string direction;     // "in" or "out"
+    std::string elemType;      // C element suffix of its ping buffer (int8 / int16 / int32 / float); "" = kernel default
     int32_t channel = 0;       // Core-tile DMA channel (S2MM in / MM2S out)
     bool singleBuffer = false; // Single-buffer (no pong) mode
     // KERNELCONFIGOFFLOAD resources resolved by BlueprintToScheduleKernelPass.
@@ -119,6 +120,25 @@ static void collectAggregatedOutTiles(KernelModuleOp kernelModuleOp, SmallVector
     }
 }
 
+/// The window element suffix (int8 / int16 / int32 / float) of a buffer_def's memref<..xvector<..>>; "" if
+/// the type says nothing. A kernel may mix them (int8 inputs, an int32 output).
+static std::string bufferElemType(BufferDefOp bufferOp) {
+    auto memref = dyn_cast<MemRefType>(bufferOp.getBufferTypeAttr().getValue());
+    if (!memref)
+        return "";
+    auto vec = dyn_cast<VectorType>(memref.getElementType());
+    Type e = vec ? vec.getElementType() : memref.getElementType();
+    if (e.isInteger(32))
+        return "int32";
+    if (e.isInteger(16))
+        return "int16";
+    if (e.isInteger(8))
+        return "int8";
+    if (e.isF32())
+        return "float";
+    return "";
+}
+
 /// dfschedule.module -> convert entire body line-by-line then erase module.
 /// Always matches and does full conversion so we do not depend on nested patterns
 /// firing first (conversion may try the parent before descending into regions).
@@ -144,6 +164,10 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
 
         // Build map: window symbol name -> (ping_buffer, pong_buffer, acquire_lock, release_lock)
         llvm::StringMap<WindowInfo> windowInfoMap;
+        llvm::StringMap<std::string> bufferElem; // buffer symbol -> window element suffix
+        for (Operation &inner : body)
+            if (auto bufferOp = dyn_cast<BufferDefOp>(&inner))
+                bufferElem[bufferOp.getSymName()] = bufferElemType(bufferOp);
         for (Operation &inner : body) {
             if (auto windowDefOp = dyn_cast<WindowDefOp>(&inner)) {
                 DictionaryAttr winAttrs = windowDefOp.getWindowAttrs();
@@ -174,6 +198,8 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                     info.acquireLockHwId = a.getInt();
                 if (auto a = winAttrs.getAs<IntegerAttr>("release_lock_hw_id"))
                     info.releaseLockHwId = a.getInt();
+                if (auto b = bufferElem.find(info.pingBuffer); b != bufferElem.end())
+                    info.elemType = b->second;
                 windowInfoMap[windowDefOp.getSymName().str()] = info;
             }
         }
@@ -294,9 +320,16 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                 // Output window: Kernel writes data then releases lockids[1].
                 //   Kernel acquire: acquire_greater_equal(lockids[0], 1)  -- wait for "buffer free"
                 //   Kernel release: release(lockids[1], 1)               -- signal "data ready"
-                std::string cType = elementType + "_t"; // e.g. "int32_t", "int8_t"
-                std::string winInType = "input_window_" + elementType;   // e.g. "input_window_int32"
-                std::string winOutType = "output_window_" + elementType; // e.g. "output_window_int32"
+                // one set of helpers per element type in use: the kernel's default and each window's own
+                // (overloads, so int8 inputs and an int32 output coexist)
+                llvm::SmallVector<std::string, 4> elemTypes{elementType};
+                for (const auto &w : windowInfoMap)
+                    if (!w.second.elemType.empty() && !llvm::is_contained(elemTypes, w.second.elemType))
+                        elemTypes.push_back(w.second.elemType);
+                for (const std::string &et : elemTypes) {
+                std::string cType = et + "_t"; // e.g. "int32_t", "int8_t"
+                std::string winInType = "input_window_" + et;   // e.g. "input_window_int32"
+                std::string winOutType = "output_window_" + et; // e.g. "output_window_int32"
                 rewriter.create<emitc::VerbatimOp>(
                     loc, "inline " + cType + "* acquire_output_window(" + winOutType + "* win) {\n"
                          "  window_internal* w = (window_internal*)win;\n"
@@ -329,6 +362,7 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                          "  w->heads[w->current_bufid] = w->head;\n"
                          "  w->current_bufid = select((w->heads[1] == 0), w->current_bufid, 1 - w->current_bufid);\n"
                          "}");
+                }
 
                 continue;
             }
@@ -812,10 +846,15 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
                     std::string cArg = (it != valueToCName.end()) ? it->second : "/*unknown*/";
                     if (!argList.empty())
                         argList += ", ";
+                    std::string et = elementType; // the window's own element type when its buffer says so
+                    if (StringRef(cArg).starts_with("window_"))
+                        if (auto w = windowInfoMap.find(StringRef(cArg).drop_front(7)); w != windowInfoMap.end() &&
+                                                                                         !w->second.elemType.empty())
+                            et = w->second.elemType;
                     if (isa<InputWindowType>(arg.getType())) {
-                        argList += "get_input_async_window_" + elementType + "(" + cArg + ")";
+                        argList += "get_input_async_window_" + et + "(" + cArg + ")";
                     } else {
-                        argList += "get_output_async_window_" + elementType + "(" + cArg + ")";
+                        argList += "get_output_async_window_" + et + "(" + cArg + ")";
                     }
                 }
                 rewriter.create<emitc::VerbatimOp>(loc, "// kernel_invoke " + callee);

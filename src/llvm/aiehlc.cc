@@ -45,6 +45,7 @@
 #include "routingmanager.h"
 #include "convautotile/conv_desugar.h"
 #include "convautotile/kernel_trace.h"
+#include "convautotile/kernel_template.h"
 #include "convautotile/kernel_front.h"
 
 class AieFrontEnd;
@@ -240,6 +241,16 @@ static std::vector<std::string> userMacroDefines; // #define lines from user sou
 // per-port block descriptors: convautotile::kernelTUDecls). Appended to
 // userMacroDefines after the #define scan, which rebuilds that list.
 static std::vector<std::string> convKernelDecls;
+// The same declarations per kernel. Several kernels in one source (template instances) name their port
+// descriptors alike (aiehlc_desc_<port>), so each kernel TU gets only its own set, not the flat list.
+static std::map<std::string, std::vector<std::string>> convKernelDeclsByKernel;
+static void addKernelDecl(const std::string &kernel, const std::string &decl) {
+    if (std::find(convKernelDecls.begin(), convKernelDecls.end(), decl) == convKernelDecls.end())
+        convKernelDecls.push_back(decl);
+    auto &v = convKernelDeclsByKernel[kernel];
+    if (std::find(v.begin(), v.end(), decl) == v.end())
+        v.push_back(decl);
+}
 // Per kernel: the conv auto-tiling result (for a kernel-only source, the one the
 // kernel analysis proved against the traced load_buffer / store_buffer blocks).
 // The authority for per-core rounds and per-round block bytes: the tiling
@@ -1344,8 +1355,9 @@ public:
                                         innerTypeStr.find("char") != std::string::npos)
                                         bitWidth = 8;
                                     else if (innerTypeStr.find("int16") != std::string::npos ||
-                                             innerTypeStr.find("short") != std::string::npos)
-                                        bitWidth = 16;
+                                             innerTypeStr.find("short") != std::string::npos ||
+                                             innerTypeStr.find("bfloat16") != std::string::npos)
+                                        bitWidth = 16; // bfloat16: a 16-bit window (aie_block_io.h)
                                 } else if (ptype->isPointerType()) {
                                     // Plain pointer type (e.g. const int32_t*)
                                     clang::QualType pointee = ptype->getPointeeType();
@@ -2181,6 +2193,11 @@ public:
                                         pti.shape = {macroDimN, macroDimK};
                                     else // Gather/Scatter -> C
                                         pti.shape = {macroDimM, macroDimN};
+                                } else if (pti.policyResolved && pti.tdD1.base > 0 && pti.tdD2.base > 0 &&
+                                           pti.tdD3.base <= 0) {
+                                    // No GEMM M / N / K (a kernel-only reduction / eltwise whose space the kernel
+                                    // analysis wrote): the port's own 2-D extent, d1 x d2 fullsize.
+                                    pti.shape = {(int64_t)pti.tdD1.base, (int64_t)pti.tdD2.base};
                                 }
 
                                 // 3D conv OUTPUT shape: when the output port's GemmSpace
@@ -4075,6 +4092,22 @@ public:
             }
         }
 
+        // C++ templates on __global__ kernels (convautotile/kernel_template.h):
+        // every `kernel<args><<<mesh>>>` launch selects an instance, substituted
+        // into the text before anything reads the kernel's shapes or body.
+        void applyKernelTemplates(std::string &src) {
+            convautotile::KernelTemplateResult tr = convautotile::instantiateKernelTemplates(src, userSourceDir);
+            if (!tr.found)
+                return;
+            for (auto &n : tr.notes)
+                llvm::outs() << "[KernelTemplate] instance " << n << "\n";
+            if (!tr.ok) {
+                for (auto &e : tr.errors)
+                    llvm::errs() << "[KernelTemplate] ERROR: " << e << "\n";
+                std::exit(1);
+            }
+        }
+
         // Lower the declarative conv2d model (aie::Conv2d + aie::Mapping +
         // aie::port<T, aie::IFM|WEIGHTS|OFM>) into the explicit GemmSpace form
         // before any other rewrite sees the text (src/llvm/convautotile/). The
@@ -4099,6 +4132,7 @@ public:
                     llvm::errs() << "[ConvAutoTile] WARNING: " << err << "\n";
             }
             convKernelDecls.clear();
+            convKernelDeclsByKernel.clear();
             convDerivedByKernel.clear();
             kernelBlocksByKernel.clear();
             // Kernel-only sources (no aie::Conv2d / aie::Mapping; ports carry
@@ -4133,8 +4167,7 @@ public:
                     // (a recognized conv) the derivation the tiling must agree with.
                     for (auto &kd : ko.tu_decls)
                         for (auto &decl : kd.second)
-                            if (std::find(convKernelDecls.begin(), convKernelDecls.end(), decl) == convKernelDecls.end())
-                                convKernelDecls.push_back(decl);
+                            addKernelDecl(kd.first, decl);
                     for (auto &kd : ko.derived)
                         convDerivedByKernel[kd.first] = kd.second;
                     for (auto &kb : ko.blocks)
@@ -4159,9 +4192,7 @@ public:
                     }
                     for (auto &kd : hs.tu_decls)
                         for (auto &decl : kd.second)
-                            if (std::find(convKernelDecls.begin(), convKernelDecls.end(), decl) ==
-                                convKernelDecls.end())
-                                convKernelDecls.push_back(decl);
+                            addKernelDecl(kd.first, decl);
                     for (auto &kd : hs.derived)
                         convDerivedByKernel[kd.first] = kd.second;
                 }
@@ -4190,8 +4221,7 @@ public:
                     llvm::outs() << "[ConvAutoTile]   note: " << n << "\n";
                 convDerivedByKernel[k.kernel] = d;
                 for (auto &decl : convautotile::kernelTUDecls(k))
-                    if (std::find(convKernelDecls.begin(), convKernelDecls.end(), decl) == convKernelDecls.end())
-                        convKernelDecls.push_back(decl);
+                    addKernelDecl(k.kernel, decl);
             }
         }
 
@@ -4269,6 +4299,7 @@ public:
                 // Headers (`.h`) are left to Clang, as before.
                 checkSourceIncludes(SourceCodeString);
                 inlineSourceIncludes(SourceCodeString);
+                applyKernelTemplates(SourceCodeString);
                 applyConvAutoTiling(SourceCodeString);
 
                 // Collect user #define macros before any rewriting.
@@ -4352,8 +4383,10 @@ public:
                             }
                         }
                     }
-                    // After the user's #defines so the kernel TU sees them first.
-                    userMacroDefines.insert(userMacroDefines.end(), convKernelDecls.begin(), convKernelDecls.end());
+                    // After the user's #defines so the kernel TU sees them first. Several kernels with their
+                    // own declarations: each kernel TU gets its own set (the multi-kernel pipeline loop).
+                    if (convKernelDeclsByKernel.size() <= 1)
+                        userMacroDefines.insert(userMacroDefines.end(), convKernelDecls.begin(), convKernelDecls.end());
                 }
 
                 size_t KeywordPos = 0;
@@ -4522,6 +4555,12 @@ public:
                 ret += "typedef short int16;\n";
                 ret += "typedef input_window<int16> input_window_int16;\n";
                 ret += "typedef output_window<int16> output_window_int16;\n";
+                // bfloat16 windows are 16-bit (aie_block_io.h); only for sources that use
+                // them, so every other host.cc stays byte-identical.
+                if (SourceCodeString.find("_window_bfloat16") != std::string::npos) {
+                    ret += "typedef input_window<int16> input_window_bfloat16;\n";
+                    ret += "typedef output_window<int16> output_window_bfloat16;\n";
+                }
                 // Kernel intrinsic stubs (body is #ifdef KERNEL_COMPILE guarded)
                 ret += "typedef unsigned char uint8_t;\n";
                 ret += "typedef unsigned long uintptr_t;\n";
@@ -5368,9 +5407,15 @@ public:
 
                     // Prepend user macros to kernel body
                     std::string kernelBodyWithMacros = resolvedBody;
-                    if (!userMacroDefines.empty() && !resolvedBody.empty()) {
+                    std::vector<std::string> kernelDefines = userMacroDefines;
+                    if (convKernelDeclsByKernel.size() > 1) { // this kernel's own declarations only
+                        auto it = convKernelDeclsByKernel.find(mkd.kernelName);
+                        if (it != convKernelDeclsByKernel.end())
+                            kernelDefines.insert(kernelDefines.end(), it->second.begin(), it->second.end());
+                    }
+                    if (!kernelDefines.empty() && !resolvedBody.empty()) {
                         std::string macroBlock = "// User macro definitions from source file\n";
-                        for (const auto &macro : userMacroDefines) {
+                        for (const auto &macro : kernelDefines) {
                             macroBlock += macro + "\n";
                         }
                         macroBlock += "\n";
@@ -5651,18 +5696,24 @@ public:
                     // several aiehlc libraries can share one ELF. Weak: a host-only build has
                     // no routing.cc, and the runtime then falls back to the global routing().
                     stream << "void routing(XAie_DevInst* dev) __attribute__((weak));\n";
+                    // several kernels: no global routing(); a partition starts with the first kernel's routing
+                    // (its launch then needs no re-init) and each launch selects its own (__aie_launch below)
+                    const std::string firstRoute =
+                        parsedMeshKernels.size() > 1 ? "routing_" + parsedMeshKernels[0].kernelName : "routing";
+                    if (parsedMeshKernels.size() > 1)
+                        stream << "void " << firstRoute << "(XAie_DevInst* dev);\n";
                     stream << "struct aieArray {\n";
                     stream << "    int nextMeshId = 0;\n";
                     stream << "    XAie_DevInst* _dev = nullptr;\n";
                     stream << "    aieMesh partition(aiePartition p, int rows, int cols) {\n";
                     stream << "        int meshId = nextMeshId++;\n";
                     stream << "        _dev = __Runtime_init_mesh_partition_with(meshId, p.startCol, p.endCol - "
-                              "p.startCol + 1, routing);\n";
+                              "p.startCol + 1, " << firstRoute << ");\n";
                     stream << "        return aieMesh{rows, cols, p, meshId};\n";
                     stream << "    }\n";
                     stream << "    aieMesh partition(int rows, int cols) {\n";
                     stream << "        int meshId = nextMeshId++;\n";
-                    stream << "        _dev = __Runtime_init_mesh_partition_with(meshId, 0, cols, routing);\n";
+                    stream << "        _dev = __Runtime_init_mesh_partition_with(meshId, 0, cols, " << firstRoute << ");\n";
                     stream << "        return aieMesh{rows, cols, {0, cols - 1, 0, rows - 1}, meshId};\n";
                     stream << "    }\n";
                     stream << "    void* alloc(size_t size) { return __Runtime_alloc_buffer(_dev, size); }\n";
@@ -5686,6 +5737,8 @@ public:
                     // Emit extern declarations for per-kernel binary symbols
                     // (must appear before __aie_launch which references them)
                     for (auto &mkd : parsedMeshKernels) {
+                        // each kernel's own stream-switch setup (routing_<kernel>.cc, tilinglinalg_pipeline)
+                        stream << "void routing_" << mkd.kernelName << "(XAie_DevInst* dev);\n";
                         stream << "extern unsigned char _binary_kernel_" << mkd.kernelName << "_start[];\n";
                         stream << "extern unsigned char _binary_kernel_" << mkd.kernelName << "_end[];\n";
                         stream << "extern unsigned int _binary_kernel_" << mkd.kernelName << "_size;\n";
@@ -5715,12 +5768,16 @@ public:
                         for (unsigned i = 0; i < maxDdrArgs; ++i)
                             stream << ", void* _t" << i << ", size_t _s" << i;
                         stream << ", ...) {\n";
-                        stream << "    XAie_DevInst* dev = __Runtime_get_partition_dev(mesh.meshId);\n";
+                        // the partition runs this kernel's routing: a different kernel launched last on it means
+                        // a teardown + re-init with routing_<kernel> (__Runtime_init_mesh_partition_with)
                         for (size_t ki = 0; ki < parsedMeshKernels.size(); ++ki) {
                             auto &mkd = parsedMeshKernels[ki];
                             std::string hostFunc = "host_canonicalized_" + mkd.kernelName;
                             stream << "    " << (ki == 0 ? "if" : "} else if") << " (strcmp(kernel, \""
                                    << mkd.kernelName << "\") == 0) {\n";
+                        stream << "        XAie_DevInst* dev = __Runtime_init_mesh_partition_with(mesh.meshId, "
+                                  "mesh.partition.startCol, mesh.partition.endCol - mesh.partition.startCol + 1, routing_"
+                               << mkd.kernelName << ");\n";
                             stream << "        __Runtime_set_kernel_elf(_binary_kernel_" << mkd.kernelName
                                    << "_start);\n";
                             // Flush+invalidate ALL buffers (inputs AND outputs) before DMA
@@ -5768,12 +5825,16 @@ public:
                         // No DDR args variant (template)
                         stream << "template<typename... Args>\n";
                         stream << "inline void __aie_launch(const char* kernel, aieMesh mesh, Args... args) {\n";
-                        stream << "    XAie_DevInst* dev = __Runtime_get_partition_dev(mesh.meshId);\n";
+                        // the partition runs this kernel's routing: a different kernel launched last on it means
+                        // a teardown + re-init with routing_<kernel> (__Runtime_init_mesh_partition_with)
                         for (size_t ki = 0; ki < parsedMeshKernels.size(); ++ki) {
                             auto &mkd = parsedMeshKernels[ki];
                             std::string hostFunc = "host_canonicalized_" + mkd.kernelName;
                             stream << "    " << (ki == 0 ? "if" : "} else if") << " (strcmp(kernel, \""
                                    << mkd.kernelName << "\") == 0) {\n";
+                        stream << "        XAie_DevInst* dev = __Runtime_init_mesh_partition_with(mesh.meshId, "
+                                  "mesh.partition.startCol, mesh.partition.endCol - mesh.partition.startCol + 1, routing_"
+                               << mkd.kernelName << ");\n";
                             stream << "        __Runtime_set_kernel_elf(_binary_kernel_" << mkd.kernelName
                                    << "_start);\n";
                             stream << "        " << hostFunc << "(dev);\n";
