@@ -18,15 +18,24 @@ the c commit drain.  The host waits max(0, round - overlap) where overlap = over
 round's own issue that the AIE work hides.
 
 Terms:
-  compute   core_cyc (ISS, one core, one launch: K1b) + chunk_ovh_cyc * R*nkc + round_ovh_cyc * R/S
-            (window acquire/release + loop/commit overhead the ISS harness does not see)
-  dma_chunk max(tile stream (a+b)/nkc / dma_b_per_cyc, mesh-unique DDR bytes/nkc / ddr_eff) + bd_switch_cyc,
-            + dma_first_byte_cyc for the first chunk; ddr_eff = ddr_bw_scale * ddr_rd_gbps/clk * run/(run+ddr_run0_b),
+  compute   core_cyc (ISS, one core, one launch: K1b) + chunk_ovh_cyc * R*nkc + round_ovh_cyc * R
+            (window acquire/release + loop/commit overhead the ISS harness does not see; chunks/rounds as in
+            board_compute.json: chunks = NT*NKC, rounds = NT output windows)
+  dma_chunk max(tile stream (a+b)/nkc / dma_b_per_cyc, DDR round time / nkc) + bd_switch_cyc,
+            + dma_first_byte_cyc for the first chunk.  DDR round time:
+            * per burst (params carry ddr_burst_cyc0 + ddr_burst_b_per_cyc, run_microbench.sh --section ddr):
+              bursts = mesh-unique bytes / run spread over 4 shim columns, each burst ddr_burst_cyc0 + run /
+              ddr_burst_b_per_cyc AIE cycles (strided-burst microbenchmark), times ddr_bw_scale (calibrated:
+              achieved / independent-column burst time of the concurrent 4-column kacc traffic); no long-run cap.
+            * else bytes-only: bytes / ddr_eff, ddr_eff = ddr_bw_scale * ddr_rd_gbps/clk * run/(run+ddr_run0_b).
             run = kch*2 B = contiguous run of the multidim shim BD (d0_wrap = tkw words)
   lock      lock_acq_cyc per window acquire (2 per chunk + 1 per commit)
   stall     core idle inside the round (waiting for data) -- the board's lock_stall + stream_stall also counts the
             idle time while the host is still issuing (reported, not fitted)
-  wait      sum over rounds of max(0, round - overlap)
+  wait      WAIT WINDOW: the host enters __Runtime_wait_io only after its last BD of the round, while the b-port
+            stream (BDs issued first) and the cores already run.  Only the DES timeline after the wait start is
+            predicted: per round max(0, round + round_fixed_cyc - overlap - b_overlap_cyc * b/(a+b)), b/(a+b) = the
+            b-port share of the round's bytes (S/(S+1)); sum over rounds.
 Calibrated keys (script/perf/costmodel_fit.py, defaults = uncalibrated physics): CAL_DEFAULTS.
 """
 from __future__ import annotations
@@ -44,6 +53,8 @@ CAL_DEFAULTS = {
                              # still issuing the round (b BDs go first; shim/stream FIFO + window slack)
     "round_fixed_cyc": 0.0,  # fixed per-round latency (DMA start / event round trip)
     "wait_call_cyc": 0.0,    # host cost per __Runtime_wait_io call (structural count per round)
+    "b_overlap_cyc": 0.0,    # wait-window start offset: AIE cycles of the round that run before the host's wait
+                             # starts, per unit b-port byte share (b streams while the host still issues a/c BDs)
 }
 BDS_PER_ROUND = 24  # 4 b + 4 * (1 a + 4 c)
 
@@ -69,7 +80,7 @@ def compute_cycles(op: Dict[str, Any], params: Dict[str, Any], cycles: Dict[str,
     max-tile active_cyc - lock_stall - stream_stall."""
     g = geometry(op)
     return float(cycles["core_cyc"]) + _p(params, "chunk_ovh_cyc") * g["chunks"] + \
-        _p(params, "round_ovh_cyc") * g["R"] / g["S"]
+        _p(params, "round_ovh_cyc") * g["R"]
 
 
 def ddr_eff_bpc(op: Dict[str, Any], params: Dict[str, Any]) -> float:
@@ -78,6 +89,25 @@ def ddr_eff_bpc(op: Dict[str, Any], params: Dict[str, Any]) -> float:
     bpc = float(params["ddr_rd_gbps"]) * 1e3 / float(params["aie_clk_mhz"])  # GB/s -> B per AIE cycle
     run = g["run_b"]
     return _p(params, "ddr_bw_scale") * bpc * run / (run + _p(params, "ddr_run0_b"))
+
+
+def burst_model(params: Dict[str, Any]) -> bool:
+    return "ddr_burst_cyc0" in params and "ddr_burst_b_per_cyc" in params
+
+
+def ddr_burst_cyc(op: Dict[str, Any], params: Dict[str, Any]) -> float:
+    """AIE cycles of one shim burst of this instance's run length (strided-burst microbenchmark, one column)."""
+    run = geometry(op)["run_b"]
+    return float(params["ddr_burst_cyc0"]) + run / float(params["ddr_burst_b_per_cyc"])
+
+
+def ddr_read_cyc(op: Dict[str, Any], params: Dict[str, Any], nbytes: float) -> float:
+    """AIE cycles to read nbytes mesh-unique DDR bytes of this instance (per burst if the params carry the burst
+    microbenchmark, else bytes-only)."""
+    if burst_model(params):
+        run = geometry(op)["run_b"]
+        return nbytes / run / 4.0 * ddr_burst_cyc(op, params) * _p(params, "ddr_bw_scale")
+    return nbytes / ddr_eff_bpc(op, params)
 
 
 def predict_launch(op: Dict[str, Any], params: Dict[str, Any], cycles: Dict[str, Any]) -> Dict[str, Any]:
@@ -104,12 +134,13 @@ def predict_launch(op: Dict[str, Any], params: Dict[str, Any], cycles: Dict[str,
     pre = min(b_round, _p(params, "b_prefetch_b"), ddr_eff * (BDS_PER_ROUND - 4) * bd_cyc)
     rest_b = g["ddr_rd_round_b"] - pre
     tile_chunk = (g["a_b"] + g["b_b"]) / nkc / dma_bpc
-    ddr_chunk = rest_b / nkc / ddr_eff
+    ddr_chunk = ddr_read_cyc(op, params, rest_b) / nkc
     dma_chunk = max(tile_chunk, ddr_chunk) + float(params["bd_switch_cyc"])
     # c commit: the core hands its fp32 window to the tile S2MM->shim path; the DDR write of the 16 windows overlaps
     # the next round's issue (output events are waited, but the write queue drains at ddr_wr while the host issues)
     c_drain = g["c_b"] / dma_bpc + first + lock_acq
-    overlap = _p(params, "overlap_bd") * bd_cyc
+    overlap = _p(params, "overlap_bd") * bd_cyc + \
+        _p(params, "b_overlap_cyc") * g["b_b"] / (g["a_b"] + g["b_b"])
     wpr = float(host.get("waits_per_launch", 12 * R)) / R
     fixed = _p(params, "round_fixed_cyc") + _p(params, "wait_call_cyc") * wpr
 
@@ -139,7 +170,7 @@ def predict_launch(op: Dict[str, Any], params: Dict[str, Any], cycles: Dict[str,
         "stall_ms": R * (idle + c_drain) * to_ms,
         "wait_ms": R * wait_round * to_ms,
         "aie_ms": R * t_round * to_ms,
-        "ddr_ms": g["ddr_rd_round_b"] * R / ddr_eff * to_ms,
+        "ddr_ms": R * ddr_read_cyc(op, params, g["ddr_rd_round_b"]) * to_ms,
         "rounds": R,
         "bound": "ddr" if dma_limited * 2 > nkc else "compute",
     }
