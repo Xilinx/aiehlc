@@ -7,7 +7,7 @@
 // kco2.cc -- GAP-125ece regression fixture (KCO-BISECT): two gemm_kacc kernels whose core output windows differ
 // (gemm_kacc_320x320x1024: 5120 B, gemm_kacc_960x320x512: 8192 B) in one program under #pragma KERNELCONFIGOFFLOAD.
 // Kernel texts = unet_aie.kacc_kernel_text (as in the UNet KCO build); host main reduced to the launches (no data).
-#define UNET_KACC_KERNEL 1
+#define AIEDNN_KACC_KERNEL 1
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

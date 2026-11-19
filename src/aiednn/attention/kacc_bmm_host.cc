@@ -124,12 +124,12 @@ static int uc_attn(void *const *argv, int nargs, int qk, int swap, int CHP, int 
     return 0;
 }
 
-extern "C" int unet_aie_attn(int cid, void *args, int nargs, int qk, int swap, int CHP, int PXP, int Kp, int kp,
+extern "C" int aiednn_aie_attn(int cid, void *args, int nargs, int qk, int swap, int CHP, int PXP, int Kp, int kp,
                              int kch, int splitpx, int S, int chs, int pxs, int tr) {
     g_uc_calls++;
     const int rc = uc_attn((void *const *)args, nargs, qk, swap, CHP, PXP, Kp, kp, kch, splitpx, S, chs, pxs, tr);
     if (rc != 0) {
-        printf("[unet_aie_attn] layer %d rc=%d\n", cid, rc);
+        printf("[aiednn_aie_attn] layer %d rc=%d\n", cid, rc);
         if (!g_uc_rc)
             g_uc_rc = rc;
     }

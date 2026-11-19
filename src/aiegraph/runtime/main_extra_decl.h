@@ -1,8 +1,8 @@
-void unet_prof_print(double graph_run_ms, double aie_wall_ms); /* graph_driver.c (P1 PROF) */
-int unet_aie_stats(int *launches, int *run_rc, int *calls, unsigned long long *macs);
-int unet_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles);
-/*KT+*/int unet_aie_ktimer_stats(unsigned long long *max_sum, unsigned long long *all_sum, int *n, int *bad);
-/*KT-*/int unet_aie_split_stats(unsigned long long *pre, unsigned long long *call, unsigned long long *glue, unsigned long long *post);
+void aiednn_prof_print(double graph_run_ms, double aie_wall_ms); /* graph_driver.c (P1 PROF) */
+int aiednn_aie_stats(int *launches, int *run_rc, int *calls, unsigned long long *macs);
+int aiednn_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles);
+/*KT+*/int aiednn_aie_ktimer_stats(unsigned long long *max_sum, unsigned long long *all_sum, int *n, int *bad);
+/*KT-*/int aiednn_aie_split_stats(unsigned long long *pre, unsigned long long *call, unsigned long long *glue, unsigned long long *post);
 /* the runtime is C++ (aie_runtime.o in the kernel archive): bind its mangled symbol */
 void __Runtime_phase_cycles(unsigned long long *cyc, unsigned int *calls) __asm__("_Z22__Runtime_phase_cyclesPyPj");
 void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls) __asm__("_Z24__Runtime_wait_io_cyclesPyPj");

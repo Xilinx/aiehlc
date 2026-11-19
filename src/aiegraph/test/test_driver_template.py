@@ -8,14 +8,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from aiegraph import driver_template as dt  # noqa: E402
 
 DRV = (
-    "int unet_aie_conv(int cid, void *args, int nargs);   /* aiegraph group step */\n"
+    "int aiednn_aie_conv(int cid, void *args, int nargs);   /* aiegraph group step */\n"
     "static uint8_t g_wscratch[64];\n"
     + dt.EXPAND_HEAD +
     "    uint32_t *d = (uint32_t *)dst;\n"
     + dt.EXPAND_LOOP +
     "static uint8_t kernel_ws[1024];\n"
     + dt.RUN_HEAD +
-    "    unet_aie_conv(0, args, 3);\n"
+    "    aiednn_aie_conv(0, args, 3);\n"
     "    return 0;\n}\n"
 )
 PARTS = dict(decls="/*D*/\nint k(void);\n", expand_enter="    E0();\n", expand_exit="    E1();\n",
@@ -25,7 +25,7 @@ PARTS = dict(decls="/*D*/\nint k(void);\n", expand_enter="    E0();\n", expand_e
 def test_template_placed_at_anchors():
     t = dt.apply_text(DRV, **PARTS)
     assert t.index("int k(void);") < t.index("static uint8_t kernel_ws[")
-    assert t.index("int unet_aie_conv(") < t.index("int k(void);")
+    assert t.index("int aiednn_aie_conv(") < t.index("int k(void);")
     body = t.split(dt.EXPAND_HEAD)[1].split("}\n")[0]
     assert body.index("E0();") < body.index("for (uint64_t") < body.index("E1();")
     assert t.split(dt.RUN_HEAD)[1].startswith("    R();\n")

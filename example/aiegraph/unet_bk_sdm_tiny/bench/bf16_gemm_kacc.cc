@@ -21,7 +21,7 @@
  * aie::mmul only under __chess__; the x86 kernel-analysis trace gets the same
  * math in scalar (aie_api_x86emu.h has no bfloat16/accfloat, cfe529d).
  ******************************************************************************/
-#define UNET_KACC_KERNEL 1
+#define AIEDNN_KACC_KERNEL 1
 #include "kacc_data.h"
 
 __global__ void gemm_kacc(aie::port<input_window_int32 *, aie::IFM, aie::shape<1280, 11520>> a,

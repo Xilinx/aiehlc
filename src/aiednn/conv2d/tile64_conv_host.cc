@@ -58,7 +58,7 @@ static int32_t *g_uc_b = nullptr; // port b: bf16 [UC_BR][128]
 static int32_t *g_uc_c = nullptr; // port c: f32  [64][UC_CW]
 static int g_aie_launches = 0;    // every gemm_bf16 launch that ran
 static unsigned long long g_uc_macs = 0; // MACs of those launches (valid rows x cols x K)
-static int g_uc_calls = 0;        // unet_aie_conv calls
+static int g_uc_calls = 0;        // aiednn_aie_conv calls
 static int g_uc_rc = 0;           // first nonzero rc
 static unsigned long long g_uc_aie_ticks = 0; // A78 XTime ticks spent in flush + launch + invalidate
 static int g_uc_kloads = 0;       // launches that (re)wrote the kernel's program memory
@@ -93,7 +93,7 @@ typedef struct {
 } uc_ucl;
 static uc_ucl g_uc_ucl[UC_UCL_MAX];
 static int g_uc_nucl = 0, g_uc_ucl_done = 0;
-extern "C" int unet_aie_split_stats(unsigned long long *pre, unsigned long long *call, unsigned long long *glue,
+extern "C" int aiednn_aie_split_stats(unsigned long long *pre, unsigned long long *call, unsigned long long *glue,
                                     unsigned long long *post) {
     if (!g_uc_ucl_done) {
         g_uc_ucl_done = 1;
@@ -110,7 +110,7 @@ extern "C" int unet_aie_split_stats(unsigned long long *pre, unsigned long long 
 }
 static unsigned g_uc_cold_tiles = 0; // per-tile cold loads inside those launches
 
-extern "C" int unet_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles) {
+extern "C" int aiednn_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles) {
     if (aie_ms)
         *aie_ms = 1000.0 * (double)g_uc_aie_ticks / (double)COUNTS_PER_SECOND;
     if (kloads)
@@ -133,15 +133,15 @@ static inline unsigned long long uc_hs_wait(void) {
     return t;
 }
 #endif
-extern "C" void unet_aie_host_split_site(int site) { ahs_set_site(&g_ahs, site); }
-extern "C" int unet_aie_host_split_line(int site, char *buf, int n) {
+extern "C" void aiednn_aie_host_split_site(int site) { ahs_set_site(&g_ahs, site); }
+extern "C" int aiednn_aie_host_split_line(int site, char *buf, int n) {
     return ahs_format(&g_ahs, site, (double)COUNTS_PER_SECOND, buf, (size_t)n);
 }
 
 /*KT+*/static unsigned long long g_kt_max = 0, g_kt_all = 0; // KTIMER: sum over launches of max-core / all-core cycles
 static int g_kt_n = 0, g_kt_bad = 0;                    // launches read, core tails without the magic word
 
-extern "C" int unet_aie_ktimer_stats(unsigned long long *max_sum, unsigned long long *all_sum, int *n, int *bad) {
+extern "C" int aiednn_aie_ktimer_stats(unsigned long long *max_sum, unsigned long long *all_sum, int *n, int *bad) {
     if (max_sum)
         *max_sum = g_kt_max;
     if (all_sum)
@@ -153,7 +153,7 @@ extern "C" int unet_aie_ktimer_stats(unsigned long long *max_sum, unsigned long 
     return 0;
 }
 
-/*KT-*/extern "C" int unet_aie_stats(int *launches, int *run_rc, int *calls, unsigned long long *macs) {
+/*KT-*/extern "C" int aiednn_aie_stats(int *launches, int *run_rc, int *calls, unsigned long long *macs) {
     if (launches)
         *launches = g_aie_launches;
     if (run_rc)
@@ -305,7 +305,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
             }
         }
     if (bad) {
-        printf("[unet_aie_conv] %d nonfinite AIE outputs\n", bad);
+        printf("[aiednn_aie_conv] %d nonfinite AIE outputs\n", bad);
         return -4;
     }
     for (int n = 0; n < N; n++)

@@ -322,7 +322,7 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
         }
     }
     if (bad) {
-        printf("[unet_aie_linear] %d nonfinite AIE outputs\n", bad);
+        printf("[aiednn_aie_linear] %d nonfinite AIE outputs\n", bad);
         return -4;
     }
     {
@@ -347,11 +347,11 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
     return 0;
 }
 
-extern "C" int unet_aie_linear(int cid, void *args, int nargs, const uint16_t *wbf, int S) {
+extern "C" int aiednn_aie_linear(int cid, void *args, int nargs, const uint16_t *wbf, int S) {
     g_uc_calls++;
     const int rc = uc_linear((void *const *)args, nargs, wbf, S);
     if (rc != 0) {
-        printf("[unet_aie_linear] layer %d rc=%d\n", cid, rc);
+        printf("[aiednn_aie_linear] layer %d rc=%d\n", cid, rc);
         if (!g_uc_rc)
             g_uc_rc = rc;
     }

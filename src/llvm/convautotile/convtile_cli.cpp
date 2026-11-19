@@ -95,6 +95,11 @@ static int traceCommand(std::string src, const std::string &path, const Override
     std::vector<std::string> routed;
     for (auto &kd : ko.tu_decls)
         routed.push_back(kd.first);
+    // The kernel-TU block descriptors (block_io_names.h names), as aiehlc injects them.
+    for (auto &kd : ko.tu_decls)
+        for (auto &decl : kd.second)
+            if (decl.rfind("static", 0) == 0)
+                std::cout << "tu_decl " << kd.first << ": " << decl << "\n";
     KernelOnlyResult hs = verifySpaceKernels(src, dirOf(path), baseOf(path), routed);
     if (hs.found) {
         std::cout << hs.report;

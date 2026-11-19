@@ -27,7 +27,7 @@ SUFFIXES = (".cc", ".c", ".h")
 _PARAM = re.compile(r"@([A-Z][A-Z0-9_]*)@")
 
 __all__ = ["ROOT", "RUNTIME", "CATEGORIES", "TemplateError", "path", "template", "params", "render", "runtime_path",
-           "runtime_source", "templates"]
+           "runtime_source", "templates", "GEMM_KACC_TPARAMS", "gemm_kacc_targs", "gemm_kacc_launch"]
 
 
 class TemplateError(LookupError):
@@ -99,3 +99,23 @@ def runtime_path(name: str) -> Path:
 
 def runtime_source(name: str) -> str:
     return _read(runtime_path(name))
+
+
+# gemm/gemm_kacc_kernel.cc is a C++ template __global__ (aiehlc instantiates one kernel per distinct argument list
+# in the same source file; a single instance keeps the bare name gemm_kacc). Its template parameters, in order:
+GEMM_KACC_TPARAMS = ("CH", "KDIM", "PX", "KW", "AROWS", "BROWS", "TKW", "KCH", "NKC", "NT", "S", "TR")
+
+
+def gemm_kacc_targs(ch: int, k: int, px: int, g: dict) -> str:
+    """``<...>`` template argument list of the gemm_kacc instance (ch, k, px) with walk geometry *g* (a kacc_geom
+    dict: ntile, S, tkw, kch, nkc, kp, optional tr / arows / brows; default = not transposed)."""
+    tr = int(g.get("tr", 0))
+    vals = (ch, k, px, g["kp"] // 2, g.get("arows", px if tr else ch), g.get("brows", ch if tr else px), g["tkw"],
+            g["kch"], g["nkc"], g["ntile"], g["S"], tr)
+    return "<" + ", ".join(str(int(v)) for v in vals) + ">"
+
+
+def gemm_kacc_launch(ch: int, k: int, px: int, g: dict) -> str:
+    """The launch callee ``gemm_kacc<...>`` (write ``<callee><<<mesh>>>(a, b, c);`` in the TU that holds
+    ``template("gemm/gemm_kacc_kernel.cc")``)."""
+    return "gemm_kacc" + gemm_kacc_targs(ch, k, px, g)

@@ -8,8 +8,8 @@
 2. test_help: build_unet.py --aie accepts conv,linear,attn (old choices kept).
 3. test_driver (needs the fixture = an unpatched graph_driver.c + ag_work of a full UNet convert and the GPAT
    partition; GATT_REQUIRE_FIXTURE=1 makes a missing fixture a failure):
-   - part_attn.json -> 36 attn sites (18 groups) mapped to TVM nn_batch_matmul, all patched to unet_aie_attn with
-     PROF op=aie_host_attn; the kernel source has unet_aie_attn + aie_kacc_pack.h + the attn gemm_kacc instances;
+   - part_attn.json -> 36 attn sites (18 groups) mapped to TVM nn_batch_matmul, all patched to aiednn_aie_attn with
+     PROF op=aie_host_attn; the kernel source has aiednn_aie_attn + aie_kacc_pack.h + the attn gemm_kacc instances;
    - --aie conv,linear (part_all.json) output (graph_driver.c patch + aiek_unetconv.cc) byte-identical to the
      unet_aie.py of the base commit (GATT_BASE, default 85ec4ff = hl + gpat + bmk merge).
 Run: python3 example/aiegraph/unet_bk_sdm_tiny/test_attn_sites.py   (gcc/g++, numpy, onnx)
@@ -183,14 +183,14 @@ def _base_module():
     src = subprocess.run(["git", "-C", str(HERE), "show", f"{BASE}:example/aiegraph/unet_bk_sdm_tiny/unet_aie.py"],
                          capture_output=True, text=True, check=True).stdout
     d = Path(tempfile.mkdtemp(prefix="gatt_base_"))
-    (d / "unet_aie_base.py").write_text(src.replace("Path(__file__).resolve().parent", f"Path({str(HERE)!r})"))
-    spec = importlib.util.spec_from_file_location("unet_aie_base", d / "unet_aie_base.py")
+    (d / "aiednn_aie_base.py").write_text(src.replace("Path(__file__).resolve().parent", f"Path({str(HERE)!r})"))
+    spec = importlib.util.spec_from_file_location("aiednn_aie_base", d / "aiednn_aie_base.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
 
 
-KATTN = 'extern "C" int unet_aie_attn('
+KATTN = 'extern "C" int aiednn_aie_attn('
 KPACK = next(ln for ln in aiednn.template("attention/kacc_bmm_host.cc").splitlines() if ln.endswith('"aie_kacc_pack.h"'))
 SPEC = '"out x"'   # stand-in for the carrier's offload prototype spec (same for both modules)
 
@@ -236,9 +236,9 @@ def test_driver():
                     set(ua.attn_shapes(att)))
     k = _kernel(ua, Path(tempfile.mkdtemp(prefix="gatt_attn_")), shapes,
                 [(c["N"], c["K"], -(-c["M"] // 64) * 64, c["pxs"]) for c in lin], att=att)
-    nsite, ntag = t.count("    unet_aie_attn("), len(re.findall(r'GRAPH_PROF_END\(\d+, "aie unet_aie_attn \d+"\);', t))
+    nsite, ntag = t.count("    aiednn_aie_attn("), len(re.findall(r'GRAPH_PROF_END\(\d+, "aie aiednn_aie_attn \d+"\);', t))
     groups = len({c["group"] for c in att})
-    insts = sum(1 for s in ua.attn_shapes(att) if f"__global__ void {ua.kacc_name(*s)}(" in k)
+    insts = sum(1 for s in ua.attn_shapes(att) if f"{ua.kacc_name(*s)}<<<mesh>>>(" in k)
     print(f"GATTDRV attn partition_attn={natt} mapped={len(att)} groups={groups} sites={nsite} prof_tags={ntag} "
           f"prof_attn_branch={int('op=aie_host_attn%s' in t)} batch_matmul_left={t.count('_nn_batch_matmul(args')} "
           f"kernel_attn={int(KATTN in k)} pack_inc={int(KPACK in k)} "
@@ -246,9 +246,9 @@ def test_driver():
     assert natt == 36 and len(att) == 36 and groups == 18 and nsite == 36 and ntag == 36
     assert "op=aie_host_attn%s" in t and t.count("_nn_batch_matmul(args") == 0
     assert KATTN in k and KPACK in k and \
-        'export    unet_aie_attn' in k and insts == len(ua.attn_shapes(att))
+        'export    aiednn_aie_attn' in k and insts == len(ua.attn_shapes(att))
     # the conv / linear sites of the attn build are the same calls as without attn
-    assert t.count("    unet_aie_conv(") == len(sel) and t.count("    unet_aie_linear(") == len(lin)
+    assert t.count("    aiednn_aie_conv(") == len(sel) and t.count("    aiednn_aie_linear(") == len(lin)
 
 
 if __name__ == "__main__":

@@ -80,11 +80,10 @@ FA_COMMON = _tpl("attention/fa_common.cc")
 
 FA_NS = (_tpl("attention/fa_ns_head.cc") + _tpl("norm/fa_online_softmax.cc") + _tpl("attention/fa_ns_tail.cc"))
 
+#: one C++ template __global__ fa_kernel<NS, HEADS, NQ, MK, DH, SPLIT, E, NKV, QKROW, VROW, OROW> (aiehlc instantiates
+#: it per launch in the same source file); emitted once, every class launches fa_launch(c)
 FA_KERNEL = _tpl("attention/fa_kernel.cc")
-
-BODY_FULL = _tpl("attention/fa_body_full.cc")
-
-BODY_SPLIT = _tpl("attention/fa_body_split.cc")
+FA_TPARAMS = ("NS", "HEADS", "NQ", "MK", "DH", "SPLIT", "E", "NKV", "QKROW", "VROW", "OROW")
 
 
 def _sub(t: str, kv: dict) -> str:
@@ -101,16 +100,16 @@ def fa_prologue(classes: list) -> str:
     return t + "// AIEHLC_KERNEL_PROLOGUE_END\n"
 
 
-def fa_kernel_text(c: dict) -> str:
-    kv = dict(K=c["name"], NS="ns_" + c["name"], E=c["E"], E4=4 * c["E"], NKV=c["nkv"], QKROW=c["qkrow"],
-              VROW=c["vrow"], OROW=c["orow"], H=c["H"], N=c["N"], M=c["M"], D=c["D"])
-    body = _sub(BODY_SPLIT if c["split"] else BODY_FULL, kv)
-    if c["split"]:
-        kv.update(PNDOC="head pn, query block pm>>1, output half pm&1", QSEL="(j >> 1) == pn", QHALF="j & 1", NQB=8)
-    else:
-        kv.update(PNDOC="head pn, query block pm", QSEL="j == pn", QHALF="0", NQB=4)
-    kv["BODY"] = body
-    return _sub(FA_KERNEL, kv)
+def fa_targs(c: dict) -> str:
+    """``<...>`` template argument list of class *c*'s fa_kernel instance (FA_TPARAMS order)"""
+    vals = ("ns_" + c["name"], c["H"], c["N"], c["M"], c["D"], c["split"], c["E"], c["nkv"], c["qkrow"], c["vrow"],
+            c["orow"])
+    return "<" + ", ".join(str(v) for v in vals) + ">"
+
+
+def fa_launch(c: dict) -> str:
+    """The launch callee ``fa_kernel<...>`` of class *c* (the TU holds FA_KERNEL once)"""
+    return "fa_kernel" + fa_targs(c)
 
 
 FA_HOST = _tpl("attention/fa_host.cc")
@@ -121,7 +120,7 @@ def fa_host(classes: list) -> str:
                       % (c["H"], c["N"], c["M"], c["D"], c["split"], c["dq"], c["nkv"], c["E"], c["units"], c["upr"],
                          c["launches"], c["qkrow"], c["vrow"], c["orow"]) for c in classes)
     disp = "\n".join("    if (k == %d) {\n        %s<<<mesh>>>(q16, v16, o16);\n        return 0;\n    }"
-                     % (c["idx"], c["name"]) for c in classes)
+                     % (c["idx"], fa_launch(c)) for c in classes)
     return FA_HOST.replace("@CLASSES@", rows).replace("@DISPATCH@", disp)
 
 
@@ -129,14 +128,14 @@ DECL_FA = _tpl("attention/fa_decl.h")
 
 
 # ── Group-offload steps (design 2026-11-16-aiegraph-group-offload §5.3, sprint unet-m3 P1abi) ─────────────────────
-# Thin AIEK_STEP wrappers over unet_aie_attn_kl, so aiegraph's offload_group can place them instead of
+# Thin AIEK_STEP wrappers over aiednn_aie_attn_kl, so aiegraph's offload_group can place them instead of
 # keep_layout_rt.py's text rewrite. One wrapper per keep-layout role (aie_user_kernel.h has the step <-> role
 # table): a step's aiek_buf carries the [rows][H*D] linear output's pointer and row stride (ld = H*D), which is
 # exactly the (a, lda) / (b, ldb) the kl roles take today, so the generated call is the same kl call.
 # Not appended to the kernel source yet (that is S3: the driver must stay byte-equivalent until then).
 FA_STEPS = _tpl("attention/fa_steps.cc")
 
-#: step -> keep-layout role of unet_aie_attn_kl (keep_layout_rt.py roles 2/3/5/6)
+#: step -> keep-layout role of aiednn_aie_attn_kl (keep_layout_rt.py roles 2/3/5/6)
 FA_STEP_ROLES = {"fa_step_pack_q": 2, "fa_step_pack_k": 3, "fa_step_pack_v": 5, "fa_step_run_o": 6}
 
 
@@ -147,7 +146,7 @@ def fa_steps() -> str:
 
 # ── S3: FA groups as aiegraph group steps ─────────────────────────────────────────────────────────────────────────
 #: the keep-layout entry the steps call (was inserted by keep_layout_rt.fa_pass)
-DECL_KL = ("int unet_aie_attn_kl(int cid, int role, int cls, const float *a, int lda, float *b, int ldb,\n"
+DECL_KL = ("int aiednn_aie_attn_kl(int cid, int role, int cls, const float *a, int lda, float *b, int ldb,\n"
            "                     float s);   /* FA group steps (aiegraph offload_group, fa_attn.fa_step_emit) */\n")
 
 
@@ -162,7 +161,7 @@ def fa_group_steps(ag, g, cid_qk: int, cid_pv: int, cls: int) -> list:
 
 
 def fa_step_emit(g):
-    """offload_group(emit=): the driver code of a step = the unet_aie_attn_kl call its AIEK_STEP wrapper makes
+    """offload_group(emit=): the driver code of a step = the aiednn_aie_attn_kl call its AIEK_STEP wrapper makes
     (FA_STEP_ROLES, aie_user_kernel.h step <-> role table), with the boundary buffer's pointer and row stride"""
     bufs = {"fa_step_pack_q": g.q, "fa_step_pack_k": g.k, "fa_step_pack_v": g.v, "fa_step_run_o": g.o}
 
@@ -171,11 +170,11 @@ def fa_step_emit(g):
         t = (s["writes"] if role == 6 else s["reads"])
         assert t == [b.tensor], (g.name, s["name"], t, b.tensor)
         if role == 6:
-            call = "unet_aie_attn_kl(%d, 6, %d, 0, 0, (float *)tensors[%d].data, %d, 1.0f);" % (
+            call = "aiednn_aie_attn_kl(%d, 6, %d, 0, 0, (float *)tensors[%d].data, %d, 1.0f);" % (
                 c["cid"], c["cls"], b.tensor, b.ld)
         else:
-            call = "unet_aie_attn_kl(%d, %d, %d, (const float *)tensors[%d].data, %d, 0, 0, %.9ef);" % (
+            call = "aiednn_aie_attn_kl(%d, %d, %d, (const float *)tensors[%d].data, %d, 0, 0, %.9ef);" % (
                 c["cid"], role, c["cls"], b.tensor, b.ld, float(c.get("s", 1.0)))
         return {"c": ["UP_AIE_BEGIN(@K@);", call + "   /* %s %s */" % (g.name, s["name"]), "UP_AIE_END(@K@);"],
-                "tag": "unet_aie_attn %d" % c["cid"]}
+                "tag": "aiednn_aie_attn %d" % c["cid"]}
     return emit

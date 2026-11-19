@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  ******************************************************************************/
 #include "tilinglinalg_pipeline.h"
+#include "../../../../llvm/convautotile/block_io_names.h"
 
 #include "dmaptodmaphop.h"
 #include "hw/ResourceManager.h"
@@ -239,6 +240,7 @@ static std::string setupPipelineIRDir(const std::string &subdir) {
 
 // Block-load convention (aie_block_io.h) in a __global__(op, map) kernel body:
 //   aie::load_buffer(P, off, shape)  -> aiehlc_load_buffer(P, aiehlc_desc_P, aiehlc_cur_P, pid0, pid1, off, shape)
+//                                       (desc / cur names: convautotile/block_io_names.h)
 //   aie::store_buffer(P, off, shape) -> aiehlc_store_buffer(...)  (same extra arguments)
 //   aie::release(P) / aie::commit(P) -> aiehlc_release(P) / aiehlc_commit(P)
 //   aie::program_id(0|1)             -> this core's mesh row / col, from get_coreid()
@@ -272,7 +274,8 @@ static std::string dropBlockOptions(const std::string &body, const std::string &
     return out;
 }
 
-static std::string resolveBlockIoBuiltins(const std::string &body, int coreRowBase, int coreColBase) {
+static std::string resolveBlockIoBuiltins(const std::string &body, const std::string &kernel, int coreRowBase,
+                                          int coreColBase) {
     std::string out = dropBlockOptions(dropBlockOptions(body, "aie::load_buffer("), "aie::store_buffer(");
     auto replaceAll = [&out](const std::string &from, const std::string &to) {
         for (size_t pos = 0; (pos = out.find(from, pos)) != std::string::npos; pos += to.size())
@@ -290,8 +293,8 @@ static std::string resolveBlockIoBuiltins(const std::string &body, int coreRowBa
                 port.erase(0, 1);
             while (!port.empty() && std::isspace((unsigned char)port.back()))
                 port.pop_back();
-            std::string to = std::string("aiehlc_") + fn + "(" + port + ", aiehlc_desc_" + port + ", aiehlc_cur_" +
-                             port + ", aie::program_id(0), aie::program_id(1)";
+            std::string to = std::string("aiehlc_") + fn + "(" + port + ", " + convautotile::blockDescVar(kernel, port) +
+                             ", " + convautotile::blockCurVar(kernel, port) + ", aie::program_id(0), aie::program_id(1)";
             out.replace(pos, comma - pos, to);
             pos += to.size();
         }
@@ -1963,7 +1966,7 @@ after_host_emit:
                                                                   portVarNames, perTensorTiling);
             resolvedKernelBody = resolveArgDimBuiltin(resolvedKernelBody, "aie::get_arg_total_rounds_in_dim",
                                                       portVarNames, perTensorRounds);
-            resolvedKernelBody = resolveBlockIoBuiltins(resolvedKernelBody, coreRowBase, coreColBase);
+            resolvedKernelBody = resolveBlockIoBuiltins(resolvedKernelBody, computeKernelName, coreRowBase, coreColBase);
             stream << "// User-provided compute kernel (extracted from __global__ function)\n";
             stream << resolvedKernelBody << "\n";
             std::cout << "Compute kernel (user-provided) written to " << computePath << std::endl;

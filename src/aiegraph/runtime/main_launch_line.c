@@ -4,8 +4,8 @@
         int kloads = 0;
         unsigned cold_tiles = 0;
         int wl = 0;
-        unet_aie_stats(&wl, 0, 0, 0);
-        unet_aie_launch_stats(&aie_ms, &kloads, &cold_tiles);
+        aiednn_aie_stats(&wl, 0, 0, 0);
+        aiednn_aie_launch_stats(&aie_ms, &kloads, &cold_tiles);
         printf("LAUNCH warm ms_per_launch=%.3f launches=%d aie_wall_ms=%.3f kloads=%d opts=%s,cold_tile_loads=%u"
                " ctrlpkt=%s aot_fallbacks=%llu\n",
                wl ? aie_ms / wl : 0.0, wl, aie_ms, kloads, @MU@_LAUNCH_OPTS, cold_tiles, @MU@_CTRLPKT,
@@ -27,7 +27,7 @@
          * startio, DMA->host invalidate joins wait_io, the generated-host glue (lock init, createio, dev
          * sync, commit: gemm_bf16 call minus runtime phases) joins bdcfg */
         unsigned long long sp_pre = 0, sp_call = 0, sp_glue = 0, sp_post = 0;
-        unet_aie_split_stats(&sp_pre, &sp_call, &sp_glue, &sp_post);
+        aiednn_aie_split_stats(&sp_pre, &sp_call, &sp_glue, &sp_post);
         const unsigned long long c_kl = ph[0], c_bd = ph[1] + sp_glue, c_si = ph[3] + sp_pre, c_ce = ph[2],
                                  c_wi = wio + sp_post;
         const double rt_ms = (double)(ph[0] + ph[1] + ph[2] + ph[3] + wio) * cms;

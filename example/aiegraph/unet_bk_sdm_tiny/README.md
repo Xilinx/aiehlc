@@ -8,7 +8,7 @@ states 77×768) built with aiegraph → TVM C for the A78, with the conv layers 
 | File | What |
 |---|---|
 | `build_unet.py` | Build entry: ONNX → aiegraph.convert (a78, fp32 graph, bf16 weights) → `main.elf` with the 3 real inputs embedded and a cos/maxabs check against x86 ORT |
-| `unet_aie.py` | `--aie conv`: maps each partition layer (ONNX Conv) to its TVM call, builds the AIE archive on one carrier layer, patches `graph_driver.c` so those call sites call `unet_aie_conv()` |
+| `unet_aie.py` | `--aie conv`: maps each partition layer (ONNX Conv) to its TVM call, builds the AIE archive on one carrier layer, patches `graph_driver.c` so those call sites call `aiednn_aie_conv()` |
 | `partition.json` | The 37 conv layers on the AIE, 86,600 planned launches, aie_flop_frac 0.417 |
 | `p5_board.log` | The board run (P5) these files produced |
 

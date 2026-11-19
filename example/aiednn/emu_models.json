@@ -1,0 +1,5 @@
+{
+  "_doc": "Real ONNX models whose layers src/aiednn/test/test_cnn_templates_emu.py runs the CNN templates on (emu_cnn.MODELS). relu_cnn = ResNet-18 (Conv+ReLU, 7x7 stem, 1x1 shortcuts, FC 512->1000), silu_cnn = YOLO26n (Conv+SiLU, depthwise 3x3).",
+  "relu_cnn": "/scratch/staff/huaj/modelzoo/artifacts/resnet18/onnx/resnet18_fp32_op17.onnx",
+  "silu_cnn": "/scratch/staff/huaj/modelzoo/artifacts/yolo26/yolo26n.onnx"
+}

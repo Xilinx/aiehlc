@@ -554,12 +554,13 @@ mmul in the x86 emulation yet), blocks twice the bytes (7x14 tile). palmyra:
 AIEDNN is the library of fast AIE kernels for ML offload. How to develop a kernel
 for it (fast for a whole layer), integrate it, and add a custom op:
 **[tutorial/aiednn/howto/templatekernel.md](tutorial/aiednn/howto/templatekernel.md)**.
-Example `example/aiednn/gemm_kacc_bf16.cc`
-(bf16 GEMM, K accumulated in fp32 on the core, tile loop on the core, host
-pre-tiled chunks, fused ReLU) as a **real C++ template**,
-`template <int M, int N, int K, int TK = 64, bool RELU = true> __global__`,
-+ `gen_variants.py` (layer shapes -> de-duplicated template arguments + dispatch
-table). aiehlc instantiates templates **on the source text** before the
+The one library GEMM is `src/aiednn/gemm/gemm_kacc_kernel.cc`
+(bf16 GEMM, K accumulated in fp32 in the core's c window, tile loop on the core,
+host pre-tiled chunks) as a **real C++ template**,
+`template <int CH, int KDIM, int PX, int KW, int AROWS, int BROWS, int TKW, int KCH, int NKC, int NT, int S, bool TR> __global__`
+(arguments: `aiednn.gemm_kacc_launch(ch, k, px, aiegraph.cnn_chunk.kacc_geom(...))`),
++ `example/aiednn/gen_variants.py` (layer shapes -> de-duplicated instances in one
+source + dispatch table); compact self-checking form: `example/aiednn/tpl_two_instances.cc`. aiehlc instantiates templates **on the source text** before the
 analysis / port parser / kernel extraction (they all read shapes as text):
 `convautotile/kernel_template.cpp`, called from `aiehlc.cc:applyKernelTemplates`
 (after `inlineSourceIncludes`, before `applyConvAutoTiling`) and from

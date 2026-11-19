@@ -1,5 +1,5 @@
 """aiegraph.boardmain (unet-m4 P4): the generated board main.c / inputs header / driver glue are
-byte-identical to what the UNet example produced with its own MAIN_C, runtime_io_main(), unet_aie.main_c()
+byte-identical (up to the aiednn-tpl P4 kernel-ABI rename, see _old_module) to what the UNet example produced with its own MAIN_C, runtime_io_main(), unet_aie.main_c()
 and unet_aie.driver_template() before P4 (commit 5649d6a, read with `git show` from THIS worktree's repo).
 
 The generated main differs only in its leading comment (it starts with the aiegraph MARKER)."""
@@ -17,6 +17,7 @@ from aiegraph import boardmain as bm  # noqa: E402
 
 EX = ROOT / "example" / "aiegraph" / "unet_bk_sdm_tiny"
 OLD = "5649d6a"
+OLD_K = "unet"   # the kernel archive prefix at OLD
 IO = ("sample", "timestep_i32", "ehs")
 
 
@@ -26,6 +27,12 @@ def _old_module(rel: str, name: str):
                              check=True).stdout
     except (OSError, subprocess.CalledProcessError) as e:
         pytest.skip(f"git show {OLD}:{rel} unavailable: {e}")
+    # aiednn-tpl P4: the kernel archive prefix is aiednn (was the old model name OLD_K: <k>_aie_*, <k>_prof_print,
+    # site tag '"aie <k>_aie_lin ", <len>') and the stand-alone bench kernel bf16_gemm_kacc.cc left src/aiednn;
+    # apply the same rename to the old module (as boardmain._retarget does for a kernel prefix)
+    src = (src.replace(f'"aie {OLD_K}_aie_lin ", 17', '"aie aiednn_aie_lin ", 19')
+           .replace(f"{OLD_K}_aie_", "aiednn_aie_").replace(f"{OLD_K}_prof_print", "aiednn_prof_print")
+           .replace('"gemm/bf16_gemm_kacc.cc"', '"gemm/gemm_kacc_kernel.cc"'))
     mod = types.ModuleType(name)
     mod.__file__ = str(ROOT / rel)   # the old module resolves its templates relative to its own path
     if str(EX) not in sys.path:

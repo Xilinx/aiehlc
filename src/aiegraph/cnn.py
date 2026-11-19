@@ -28,7 +28,7 @@ import json
 import re
 from pathlib import Path
 
-from aiednn import path as _tplpath, template as _tpl
+from aiednn import gemm_kacc_launch, path as _tplpath, template as _tpl
 
 from .errors import AiegraphError
 
@@ -89,21 +89,8 @@ def kacc_geom(ch: int, k: int, px: int) -> dict:
 
 
 def _kname(ch, k, px):
-    return f"gemm_kacc_{ch}x{k}x{px}"
-
-
-def _kernel_text(ch: int, k: int, px: int) -> str:
-    g = kacc_geom(ch, k, px)
-    t = _tpl("gemm/gemm_kacc_kernel.cc")
-    for key, v in (("@NAME@", _kname(ch, k, px)), ("@SID@", f"{ch}x{k}x{px}"), ("@CH@", ch), ("@KW@", g["kp"] // 2),
-                   ("@PX@", px), ("@K@", k), ("@TKW@", g["tkw"]), ("@KCH@", g["kch"]), ("@NKC@", g["nkc"]),
-                   ("@NT@", g["ntile"]), ("@S@", g["S"]), ("@AROWS@", g["arows"]), ("@BROWS@", g["brows"]),
-                   ("@TR@", g["tr"]), ("@LHS@", "(const uint16_t *)w + s * 16 * kch" if g["tr"] else "x"),
-                   ("@RHS@", "x" if g["tr"] else "(const uint16_t *)w + s * 16 * kch")):
-        t = t.replace(key, str(v))
-    if "@" in t:
-        raise AiegraphError("cnn", f"gemm_kacc_kernel.cc: unfilled {sorted(set(re.findall(r'@[A-Z0-9_]+@', t)))}")
-    return t
+    """the launch callee of instance (ch, k, px): gemm_kacc<template args> (aiednn/gemm/gemm_kacc_kernel.cc)"""
+    return gemm_kacc_launch(ch, k, px, kacc_geom(ch, k, px))
 
 
 # the kacc host glue's C-linkage entries (stats / split / legacy conv entry) keep the template's own prefix
@@ -122,12 +109,14 @@ def kernel_source(spec: str, shapes: list, *, warm: bool = True, ctrlpkt: str = 
     if ctrlpkt not in ("off", "aot", "aot-kco"):
         raise AiegraphError("cnn", f"ctrlpkt={ctrlpkt!r}", hint="off, aot or aot-kco")
     shapes = sorted(set(shapes))
-    head = (_tpl("gemm/kacc_unit_head.cc").replace("@E@", entry).replace("@SRC@", str(_tplpath("gemm/bf16_gemm_kacc.cc")))
+    head = (_tpl("gemm/kacc_unit_head.cc").replace("@E@", entry).replace("@SRC@", str(_tplpath("gemm/gemm_kacc_kernel.cc")))
             .replace("@NSHAPES@", str(len(shapes))))
     if ctrlpkt != "off":
         head = _tpl("gemm/ctrlpkt_aot_pragmas.h") + (_tpl("gemm/ctrlpkt_kco_pragma.h") if ctrlpkt == "aot-kco"
                                                      else "") + head
-    ktext = "\n\n".join(_kernel_text(*s) for s in shapes)
+    for s in shapes:
+        kacc_geom(*s)   # every instance must have a walk
+    ktext = _tpl("gemm/gemm_kacc_kernel.cc")   # the template; one instance per launch below, same TU
     from .boardmain import kt_select
     host = kt_select(_tpl("conv2d/tile64_conv_host.cc") + _tpl("elementwise/epilogue_bias_residual.cc")
                      + _tpl("conv2d/tile64_conv_entry.cc"), False)

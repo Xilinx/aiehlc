@@ -1,6 +1,6 @@
 ---
 name: aiednnkernel
-description: Writing an AIEDNN kernel -- a DNN op (GEMM, conv as im2col GEMM) for the AIE as a parameterised template, one launch per layer, K accumulated in fp32 on the core (`example/aiednn/gemm_kacc_bf16.cc`, `gen_variants.py`, tutorial/aiednn/howto/templatekernel.md). Use for "the core window is N elements x R round(s) ..., but the kernel's blocks are 4N" on a GEMM with M rounds AND K rounds, board `wait_io TIMEOUT` on input shims ch 1 for a K-accumulating GEMM, `{.tile / .resident} need blocks that are whole rows`, a `template <...> __global__` kernel (`[KernelTemplate]` lines, "never launched", argument-count errors), a launch that is slower with a bigger K chunk, or choosing tile / TK / stationarity / variants.
+description: Writing an AIEDNN kernel -- a DNN op (GEMM, conv as im2col GEMM) for the AIE as a parameterised template, one launch per layer, K accumulated in fp32 on the core (`src/aiednn/gemm/gemm_kacc_kernel.cc`, `example/aiednn/tpl_two_instances.cc`, `gen_variants.py`, tutorial/aiednn/howto/templatekernel.md). Use for "the core window is N elements x R round(s) ..., but the kernel's blocks are 4N" on a GEMM with M rounds AND K rounds, board `wait_io TIMEOUT` on input shims ch 1 for a K-accumulating GEMM, `{.tile / .resident} need blocks that are whole rows`, a `template <...> __global__` kernel (`[KernelTemplate]` lines, "never launched", argument-count errors), a launch that is slower with a bigger K chunk, or choosing tile / TK / stationarity / variants.
 ---
 <!-- Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
      SPDX-License-Identifier: Apache-2.0 -->
@@ -44,8 +44,8 @@ pre-tiles A / W chunks in mmul operand order. One launch per layer.
   comes back byte-identical (checked on all 69 tracked examples). kemu's launch
   regex accepts `k<args><<<` (g++ instantiates natively there).
 - Macros the launch / kernel use: plain `#define`s, no trailing comments
-  (static bounds analysis); `gen_variants.py` rewrites the `GM ... GRELU`
-  instance block.
+  (static bounds analysis); `gen_variants.py` writes one source with the
+  library template and one launch per distinct instance (`kacc_geom` + `aiednn.gemm_kacc_launch`).
 - All ports one element type; bf16 out (fp32 out = int32-packed ports).
 - Cold launch: buffers are kernel BSS, re-written every launch: TK 128 (17 KB
   BSS) 53.6 ms vs TK 64 (9 KB) 33.0 ms on 256x64x2304; kload 98-99 %.

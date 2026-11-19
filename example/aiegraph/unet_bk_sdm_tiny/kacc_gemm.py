@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PDK: kacc_bench.sh --gemm -- the K-in-core gemm_kacc kernel (unet_aie.kacc_kernel_text) as a dense GEMM.
+"""PDK: kacc_bench.sh --gemm -- the K-in-core gemm_kacc kernel (aiednn gemm/gemm_kacc_kernel.cc template, unet_aie.KACC_KERNEL) as a dense GEMM.
 
   kacc_gemm.py <op_golden matmul dir> <out dir>   -> <out>/kacc_gemm.cc + kacc_{w,x,y}.bin + kacc_data.h
 
@@ -104,7 +104,7 @@ def main():
     (out / "kacc_data.h").write_text(_render("gemm/kacc_bench_data_gemm.h", CHS=chs, DATA=data, GMAC=f"{gmac:.6f}", GOLDEN=g, K=K, KP=kp, M=M, MP=Mp, N=N, OUT=out, PXS=pxs, S=S, SPLIT_PX=int(mode == 'px'), TAG=tag, TR=tr, Y_SHA=ysha))
     name = ua.kacc_name(chs, K, pxs)
     args = "Xs, Ws, Ys" if tr else "Ws, Xs, Ys"
-    src = (ua.CTRLPKT_PRAGMAS + _tpl("gemm/kacc_bench_prelude_gemm.cc") + ua.kacc_kernel_text(chs, K, pxs) + "\n" +
+    src = (ua.CTRLPKT_PRAGMAS + _tpl("gemm/kacc_bench_prelude_gemm.cc") + ua.KACC_KERNEL + "\n" +
            HOST.replace("@NAME@", name).replace("@ARGS@", args))
     (out / "kacc_gemm.cc").write_text(src)
     print(f"[kacc_bench] data={data} tag={tag} kernel={name} launches_per_pass={S}")
@@ -172,7 +172,7 @@ def main_bmm(g, out):
     name = ua.kacc_name(chs, Kp, pxs)
     args = "Xs, Ws, Ys" if tr else "Ws, Xs, Ys"
     src = (ua.CTRLPKT_PRAGMAS + _tpl("gemm/kacc_bench_prelude_bmm.cc") +
-           ua.kacc_kernel_text(chs, Kp, pxs) + "\n" + HOST_BMM.replace("@NAME@", name).replace("@ARGS@", args))
+           ua.KACC_KERNEL + "\n" + HOST_BMM.replace("@NAME@", name).replace("@ARGS@", args))
     (out / "kacc_gemm.cc").write_text(src)
     print(f"[kacc_bench] data={data} tag={tag} kernel={name} launches_per_pass={H * S}")
 

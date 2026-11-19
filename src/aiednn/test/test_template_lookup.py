@@ -1,5 +1,6 @@
-"""aiednn template lookup (sprint unet-m4 P1): every category has templates, names resolve to the files, text is
-verbatim, parameters are listed / filled, bad names fail, and the UNet example takes its C from here."""
+"""aiednn template lookup (sprint m4 P1, 2026-11-18): every category has templates, names resolve to the files, text is
+verbatim, parameters are listed / filled, bad names fail, and the aiegraph examples take their C from here
+(a bench/ sub-directory of an example may hold a stand-alone board bench source)."""
 import ast
 import sys
 from pathlib import Path
@@ -12,7 +13,7 @@ if str(SRC) not in sys.path:
 import aiednn  # noqa: E402
 
 REPO = SRC.parent
-UNET = REPO / "example" / "aiegraph" / "unet_bk_sdm_tiny"
+EXAMPLES = sorted(d for d in (REPO / "example" / "aiegraph").iterdir() if d.is_dir() and not d.name.startswith("_"))
 
 
 @pytest.mark.parametrize("cat", aiednn.CATEGORIES)
@@ -32,7 +33,7 @@ def test_aiednn_prefix_accepted():
     assert aiednn.path("aiednn/conv2d/bf16_gemm_convin.cc") == aiednn.path("conv2d/bf16_gemm_convin.cc")
 
 
-@pytest.mark.parametrize("bad", ["conv2d", "nosuchcat/x.cc", "conv2d/nosuch.cc", "conv2d/../gemm/bf16_gemm_kacc.cc",
+@pytest.mark.parametrize("bad", ["conv2d", "nosuchcat/x.cc", "conv2d/nosuch.cc", "conv2d/../gemm/gemm_kacc_kernel.cc",
                                  "conv2d/__init__.py", "/conv2d/bf16_gemm_convin.cc"])
 def test_bad_names_fail(bad):
     with pytest.raises(aiednn.TemplateError):
@@ -42,7 +43,7 @@ def test_bad_names_fail(bad):
 def test_params_and_render():
     name = "gemm/kacc_unit_head.cc"
     assert aiednn.params(name) == ["E", "NSHAPES", "SRC"]
-    t = aiednn.render(name, E="aiek_x", SRC="gemm/bf16_gemm_kacc.cc", NSHAPES=3)
+    t = aiednn.render(name, E="aiek_x", SRC="gemm/gemm_kacc_kernel.cc", NSHAPES=3)
     assert t.startswith("// aiek_x.cc --") and "(3)" in t and "@" not in t
     with pytest.raises(aiednn.TemplateError):
         aiednn.render(name, E="aiek_x")                      # missing
@@ -74,8 +75,8 @@ def _template_refs(py: Path):
     return out
 
 
-def test_unet_example_templates_resolve():
-    refs = [r for py in sorted(UNET.glob("*.py")) for r in _template_refs(py)]
+def test_example_templates_resolve():
+    refs = [r for d in EXAMPLES for py in sorted(d.glob("*.py")) for r in _template_refs(py)]
     assert len(refs) >= 30, refs
     cats = set()
     for f, name in refs:
@@ -86,8 +87,9 @@ def test_unet_example_templates_resolve():
     assert cats == set(aiednn.CATEGORIES), cats
 
 
-def test_unet_example_has_no_c():
-    assert not [p for p in UNET.rglob("*") if p.suffix in (".c", ".cc", ".h")]
-    for py in UNET.glob("*.py"):
+@pytest.mark.parametrize("ex", EXAMPLES, ids=lambda d: d.name)
+def test_example_has_no_c(ex):
+    assert not [p for p in ex.rglob("*") if p.suffix in (".c", ".cc", ".h") and "bench" not in p.relative_to(ex).parts]
+    for py in ex.glob("*.py"):
         t = py.read_text()
         assert "#include" not in t and "#define" not in t, py.name

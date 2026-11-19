@@ -1,6 +1,7 @@
 """x86 emulation harness for the aiednn CNN templates (conv2d/*_bf16.cc, gemm/fc_gemm_bf16.cc).
 
-A template is rendered with :func:`aiednn.render`, wrapped in the kemu kernel model
+A template is a C++ ``template <...> __global__`` kernel, read verbatim with :func:`aiednn.template` and launched
+as ``<kernel><targs><<<mesh>>>`` (:func:`launch_callee`), wrapped in the kemu kernel model
 (``aiegraph.kemu._PRELUDE``: aie::port blocks, mesh launch, ASan-checked block bounds) and
 ``src/mlir/runtime/aie_api_x86emu.h`` (bf16 x bf16 -> accfloat mmul), compiled with g++ and run
 on the layer's tensors. The layer -- shape AND weights -- comes from the real ONNX model: a
@@ -9,6 +10,8 @@ missing model, compiler or failed build is a test FAILURE, never a skip.
 from __future__ import annotations
 
 import functools
+import json
+import re
 import shutil
 import subprocess
 import sys
@@ -24,10 +27,9 @@ import aiednn  # noqa: E402
 from aiegraph.kemu import _LAUNCH, _PRELUDE  # noqa: E402
 
 REPO = SRC.parent
-MODELS = {
-    "resnet18": Path("/scratch/staff/huaj/modelzoo/artifacts/resnet18/onnx/resnet18_fp32_op17.onnx"),
-    "yolo26n": Path("/scratch/staff/huaj/modelzoo/artifacts/yolo26/yolo26n.onnx"),
-}
+# The real models (key -> ONNX path) live with the examples, not in the library: the tests only name the layer kind.
+MODELS = {k: Path(v) for k, v in json.loads((REPO / "example" / "aiednn" / "emu_models.json").read_text()).items()
+          if not k.startswith("_")}
 COS_MIN = 0.99999
 
 
@@ -137,12 +139,32 @@ int main() {
 """
 
 
+_TPL_HEAD = re.compile(r"template\s*<([^<>]*)>\s*__global__\s+void\s+(\w+)\s*\(")
+
+
+def template_head(template: str):
+    """``(kernel name, [template parameter names])`` of the aiednn template kernel *template*."""
+    m = _TPL_HEAD.search(aiednn.template(template))
+    assert m, f"{template}: no 'template <...> __global__ void <name>(' kernel"
+    names = [d.split()[-1].split("=")[0].strip() for d in m.group(1).split(",") if d.strip()]
+    return m.group(2), names
+
+
+def launch_callee(template: str, params: dict) -> str:
+    """``<kernel><v0, v1, ...>``: the template arguments of *params* in the order of the template header
+    (every parameter given, nothing extra)."""
+    name, names = template_head(template)
+    assert set(params) == set(names), f"{template}: missing {sorted(set(names) - set(params))} unknown {sorted(set(params) - set(names))}"
+    return name + "<" + ", ".join(str(int(params[n])) for n in names) + ">"
+
+
 def emulate(template: str, params: dict, inputs, out_shape, out_float: bool, mesh=(2, 2), timeout=900) -> np.ndarray:
-    """Run aiednn *template* (rendered with *params*, kernel name ``params['NAME']``) on x86 for
+    """Run aiednn *template* (the instance with template arguments *params*) on x86 for
     *inputs* (3 arrays: uint16 bf16 bits or float32), return the output (fp32 values)."""
     gxx = shutil.which("g++")
     assert gxx, "no host g++ on PATH"
-    src = aiednn.render(template, **params)
+    src = aiednn.template(template)
+    callee = launch_callee(template, params)
     with tempfile.TemporaryDirectory(prefix="aiednn_emu_") as tmp:
         t = Path(tmp)
         (t / "kemu_prelude.h").write_text(_PRELUDE)
@@ -155,7 +177,7 @@ def emulate(template: str, params: dict, inputs, out_shape, out_float: bool, mes
             (t / f"a{i}.bin").write_bytes(a.tobytes())
             sizes[f"N{i}"] = a.nbytes
         main = _MAIN
-        for k, v in {**sizes, "N3": n_out, "MR": mesh[0], "MC": mesh[1], "KNAME": params["NAME"]}.items():
+        for k, v in {**sizes, "N3": n_out, "MR": mesh[0], "MC": mesh[1], "KNAME": callee}.items():
             main = main.replace(f"@{k}@", str(v))
         harness = '#include "kemu_prelude.h"\n#include "kernel.cc"\n' + main
         (t / "harness.cc").write_text(_LAUNCH.sub(r"kemu::launch(\2, \1, ", harness))

@@ -1494,7 +1494,7 @@ KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, co
                 res.error = res.errors[0];
             continue;
         }
-        res.tu_decls[k.name] = routedTUDecls(plan, tr.fits);
+        res.tu_decls[k.name] = routedTUDecls(k.name, plan, tr.fits);
         for (auto &p : k.ports)
             res.blocks[k.name][p.var] = {p.shape, tr.fits[p.var], tr.opts.count(p.var) ? tr.opts[p.var] : BlockOpts()};
         for (auto &rp : plan.ports) {
@@ -1671,7 +1671,7 @@ void verifySpaceKernel(std::string &src, const std::string &srcDir, const std::s
             body.replace(p, from.size(), to);
     }
     src.replace(k.bodyOpen, k.bodyClose - k.bodyOpen + 1, body);
-    res.tu_decls[k.name] = routedTUDecls(plan, tr.fits);
+    res.tu_decls[k.name] = routedTUDecls(k.name, plan, tr.fits);
     res.est_ms[k.name] = d.ok ? d.est_ms : routingEstMs(plan, routingHints(plan));
     rep << "  => verified: " << plan.ports.size() << " ports match their GemmSpace; block descriptors from the "
         << "traced blocks\n";

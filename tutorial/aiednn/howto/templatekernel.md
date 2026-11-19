@@ -15,13 +15,20 @@ kernel says, in tensor coordinates, which block each core loads and stores, and
 the compiler derives the DMA and routing from it. The goal is a kernel that is
 **fast for a whole layer, not just correct for one tile**.
 
-The tutorial is built around one tested example:
+The tutorial is built around the library's one GEMM kernel and its compact teaching form:
 
 | File | What |
 |---|---|
-| [`example/aiednn/gemm_kacc_bf16.cc`](../../../example/aiednn/gemm_kacc_bf16.cc) | the kernel as a C++ template (`gemm_kacc<M, N, K, TK, RELU>`) + a self-checking `main()` |
-| [`example/aiednn/gemm_kacc_bf16.h`](../../../example/aiednn/gemm_kacc_bf16.h) | host side: test data, pre-tiling, fp32 reference, check, phase report |
-| [`example/aiednn/gen_variants.py`](../../../example/aiednn/gen_variants.py) | the generator: layer shapes -> template arguments -> one source per variant + dispatch table |
+| [`src/aiednn/gemm/gemm_kacc_kernel.cc`](../../../src/aiednn/gemm/gemm_kacc_kernel.cc) | **the** AIEDNN `gemm_kacc`: a C++ template (`gemm_kacc<CH, KDIM, PX, KW, AROWS, BROWS, TKW, KCH, NKC, NT, S, TR>`) that every aiegraph build instantiates, one instance per layer shape, all in one source (§3.1) |
+| [`src/aiednn/__init__.py`](../../../src/aiednn/__init__.py) | `aiednn.template()` (the kernel text, verbatim) and `aiednn.gemm_kacc_launch()` / `gemm_kacc_targs()` (the launch callee of one instance) |
+| [`example/aiednn/tpl_two_instances.cc`](../../../example/aiednn/tpl_two_instances.cc) | the same loop nest in its compact teaching form (`tpl2_gemm<M, N, K, TK, RELU>`, §3), launched as two instances + a self-checking `main()` |
+| [`example/aiednn/gemm_kacc_bf16.h`](../../../example/aiednn/gemm_kacc_bf16.h) | host side of the compact form: test data, pre-tiling, fp32 reference, check, phase report |
+| [`example/aiednn/gen_variants.py`](../../../example/aiednn/gen_variants.py) | the generator: layer shapes -> walk geometry -> template arguments of `gemm_kacc_kernel.cc` -> one source with every distinct instance + dispatch table |
+
+Until sprint aiednn-tpl (2026-11-19) the compact form was also a stand-alone
+example, `example/aiednn/gemm_kacc_bf16.cc` (`gemm_kacc<M, N, K, TK, RELU>`, one
+instance). It was removed so that the repository has **one** `gemm_kacc`; the
+board numbers of §1 and §8 were measured on it (see git `da30c4d`).
 
 Read [tutorial/aieprogram](../../aieprogram/README.md) first if `load_buffer`,
 `program_id` or `{.resident}` are new to you.
@@ -81,6 +88,12 @@ compiled kernels.
 `C[M][N] = relu(A[M][K] · W[N][K]ᵀ)`, bf16 in and out, fp32 accumulation, one
 launch on the 4×4 mesh. A conv layer is this GEMM after im2col: M = output
 pixels, K = Cin·kh·kw, N = Cout.
+
+The listing is the **compact teaching form** with one instance, as the former
+stand-alone example had it; today the same kernel body is `tpl2_gemm` in
+[`tpl_two_instances.cc`](../../../example/aiednn/tpl_two_instances.cc) (two
+instances, same `main()` pattern). The library kernel that the networks run is
+the same loop nest with the walk geometry spelled out as parameters (§3.1).
 
 ```cpp
 #include "gemm_kacc_bf16.h"
@@ -229,6 +242,41 @@ Two things that look odd and are deliberate:
 - **The odd index arithmetic** (`(m / 8) * kt + k / 8) * 64 + ...`). The
   blocks arrive pre-tiled in `mmul` operand order (§4.6), and this is how one
   element of a pre-tiled block is addressed.
+
+### 3.1 The library kernel: `src/aiednn/gemm/gemm_kacc_kernel.cc`
+
+The kernel the aiegraph builds launch (UNet conv / linear / attention, the CNN
+chunks) is the same decision set taken further: **C-stationary with the fp32
+accumulator in the c window** (so K can be any length, accumulated across
+chunks in L1), operands pre-tiled by the host as bf16 pairs in `int32` words,
+and the walk geometry fixed by template parameters:
+
+```cpp
+template <int CH, int KDIM, int PX, int KW, int AROWS, int BROWS, int TKW, int KCH, int NKC, int NT, int S, bool TR>
+__global__ void gemm_kacc(aie::port<input_window_int32 *, aie::IFM, aie::shape<AROWS, KW>> a_port,
+                          aie::port<input_window_int32 *, aie::WEIGHTS, aie::shape<BROWS, KW>> b_port,
+                          aie::port<output_window_int32 *, aie::OFM, aie::shape<AROWS, BROWS>> c_port);
+```
+
+| Parameter | Meaning | In the compact form |
+|---|---|---|
+| `CH`, `KDIM`, `PX` | channels (N), K in bf16, pixels (M) of the instance | `N`, `K`, `M` |
+| `KW` | padded K in int32 words (2 bf16 each) | `K` |
+| `AROWS`, `BROWS` | rows of the a / b ports (`CH` / `PX`; swapped when `TR`) | `M`, `N` |
+| `TKW`, `KCH`, `NKC` | K chunk in words / in bf16, chunks per tile | `TK`, `K / TK` |
+| `NT`, `S` | 16-row a tiles per core, 16-row b sub-tiles per core | `M / (4·16)`, 1 |
+| `TR` | transposed: a = X, b = W (the mmul's left operand stays W) | — |
+
+Nobody writes these numbers by hand. The geometry comes from
+`aiegraph.cnn_chunk.kacc_geom(ch, k, px)` (which also *refuses* shapes the
+kernel cannot cover, with the reason), and
+`aiednn.gemm_kacc_launch(ch, k, px, geom)` turns it into the launch callee, e.g.
+`gemm_kacc<64, 576, 256, 288, 64, 256, 16, 32, 18, 1, 4, 0>`. A build reads the
+template once (`aiednn.template("gemm/gemm_kacc_kernel.cc")`), writes one
+`<callee><<<mesh>>>(...)` per distinct layer shape in the same source, and aiehlc
+compiles one kernel per instance (§5). The epilogue (bias, activation,
+residual) is not in this kernel: the aiegraph host applies it on the fp32 c
+window (`src/aiednn/elementwise/`), §4.7 explains the trade-off.
 
 ---
 
@@ -483,8 +531,12 @@ Misuse is an error, never a silent default: a template kernel that is never
 launched, a launch with no template arguments, too many arguments, or a missing
 argument with no default. An instance that the kernel cannot cover is caught by
 the analysis, the same way as for a plain kernel. For example,
-`gemm_kacc<200, ...>` reports `512 output element(s) are never stored`, because
-200 is not a multiple of 4·16.
+`gemm_kacc<200, ...>` of the compact form reports `512 output element(s) are
+never stored`, because 200 is not a multiple of 4·16; for the library kernel,
+`NT = 2` on a 64-row a port reports `c_port block 0 on core (2,0): block dim 0
+covers [64, 80) outside the tensor extent 64` (the `template:` cases of
+`src/llvm/convautotile/unitest/kernel_trace_cases.py` run all of these on
+`gemm_kacc_kernel.cc`).
 
 **Parameters:** integral non-type (`int`, `unsigned`, `long`, `bool`, `size_t`,
 …) and `typename` / `class`, each with an optional default. Not supported:
@@ -492,41 +544,40 @@ packs, template template parameters, and a template launched only through a
 pointer.
 
 So one source covers every shape. What is left to the library is *picking* the
-arguments per layer. `gen_variants.py` writes them into the instance block
-(`GM` … `GRELU`) that the launch reads, one source per distinct set:
+arguments per layer. `gen_variants.py` does what the aiegraph builds do: the
+walk geometry per layer (`kacc_geom`, which refuses what the kernel cannot
+cover), the launch callee (`aiednn.gemm_kacc_launch`), de-duplication, and ONE
+source that holds the template once and launches every distinct instance:
 
 ```python
-def pick(layer):                      # gen_variants.py, abridged
-    m = ceil_to(layer["m"], MESH * TM)            # whole 16-row tiles per core (§4.2)
-    for cand in (256, 128, 64, 32, 16, 8):        # largest K chunk that fits (§4.3)
-        mem = 2 * (TM * cand + TN * cand) * BF16 + 2 * TM * TN * BF16
-        if mem <= PORT_BUDGET and cand <= layer["k"]:
-            tk = cand
-            break
-    k = ceil_to(layer["k"], tk)                   # zero K padding is exact (§4.5)
-    return {"GM": m, "GN": layer["n"], "GK": k, "GTK": tk, "GRELU": layer["relu"]}
-
-for i, layer in enumerate(layers):                # de-duplicate: same parameters = same kernel
-    params = pick(layer)
-    name = variants.setdefault(key(params), f"gemm_kacc_v{len(variants)}")
-    table.append({"layer": i, "variant": name, **params})   # -> dispatch.json
+for i, layer in enumerate(layers):                # gen_variants.py, abridged
+    ch, k, px = layer["n"], layer["k"], layer["m"]
+    g = kacc_geom(ch, k, px)                      # K chunk, tiles per core, padded K; or a refusal
+    if (ch, k, px) not in variants:               # de-duplicate: same arguments = same kernel
+        variants[(ch, k, px)] = (len(variants), aiednn.gemm_kacc_launch(ch, k, px, g))
+    table.append({"layer": i, "instance": variants[(ch, k, px)][0], ...})   # -> dispatch.json
+src = aiednn.template("gemm/gemm_kacc_kernel.cc") + host   # host: one <callee><<<mesh>>> per instance
 ```
 
 ```
 $ python3 example/aiednn/gen_variants.py --out /tmp/variants
-layer 0: M=256 N=64 K=2304 relu=1 -> gemm_kacc_v0 (TK 128, padded M 256 K 2304, waste 0.0%)
-layer 1: M=256 N=64 K=2304 relu=1 -> gemm_kacc_v0 (TK 128, padded M 256 K 2304, waste 0.0%)
-layer 2: M=512 N=64 K=1152 relu=0 -> gemm_kacc_v1 (TK 128, padded M 512 K 1152, waste 0.0%)
-layer 3: M=64 N=64 K=576 relu=1 -> gemm_kacc_v2 (TK 128, padded M 64 K 640, waste 10.0%)
-4 layers -> 3 variants in /tmp/variants (dispatch.json: layer -> variant)
+layer 0: M=256 N=64 K=576 -> instance 0 gemm_kacc<64, 576, 256, 288, 64, 256, 16, 32, 18, 1, 4, 0> (K chunk 32, 18 chunks, padded K 576)
+layer 1: M=256 N=64 K=576 -> instance 0 gemm_kacc<64, 576, 256, 288, 64, 256, 16, 32, 18, 1, 4, 0> (K chunk 32, 18 chunks, padded K 576)
+layer 2: M=256 N=128 K=576 -> instance 1 gemm_kacc<128, 576, 256, 288, 128, 256, 16, 32, 18, 2, 4, 0> (K chunk 32, 18 chunks, padded K 576)
+layer 3: M=64 N=128 K=1152 -> instance 2 gemm_kacc<128, 1152, 64, 576, 128, 64, 32, 64, 18, 2, 1, 0> (K chunk 64, 18 chunks, padded K 1152)
+4 layers -> 3 instances in /tmp/variants/gemm_kacc_variants.cc (dispatch.json: layer -> instance)
+$ build/aiehlc-convtile trace /tmp/variants/gemm_kacc_variants.cc
+[KernelTemplate] instance gemm_kacc<64, 576, 256, 288, 64, 256, 16, 32, 18, 1, 4, 0> -> gemm_kacc__64_576_256_288_64_256_16_32_18_1_4_0
+[KernelTemplate] instance gemm_kacc<128, 576, 256, 288, 128, 256, 16, 32, 18, 2, 4, 0> -> gemm_kacc__128_576_256_288_128_256_16_32_18_2_4_0
+[KernelTemplate] instance gemm_kacc<128, 1152, 64, 576, 128, 64, 32, 64, 18, 2, 1, 0> -> gemm_kacc__128_1152_64_576_128_64_32_64_18_2_1_0
+OK: every load_buffer / store_buffer matches the DMA
 ```
 
-One source per variant keeps each variant a separate, self-checking program.
-A library host that serves several layers can instead launch several instances
-from **one** source, `gemm_kacc<256, 64, 2304, 64, 1>` for one layer and
-`gemm_kacc<256, 64, 2304, 64, 0>` for another. Each becomes its own kernel ELF
-inside one host ELF. This was verified on the board: two instances, both
-16,384 / 16,384 bit-exact.
+Each instance becomes its own kernel ELF inside one host ELF, and the block
+descriptors are named per instance (`aiehlc_desc_<instance>_<port>`). This is
+how the networks are built: the UNet build launches 38 `gemm_kacc` instances
+from one source. Two instances of the compact form in one ELF were verified
+on the board (2026-11-15): 16,384 / 16,384 bit-exact each.
 
 The host then launches each layer with its variant, once per layer. Consecutive
 layers that share a variant need not reload the kernel (warm launch). On a real
@@ -547,8 +598,8 @@ every shape **fast**.
 
 | Level | For the GEMM / conv operator | Who makes it |
 |---|---|---|
-| template (source) | 1: `gemm_kacc`. One more per *structure*: B-stationary, direct conv, … | written by hand |
-| parameter sets (TM/TN/TK, layout, fusion, type) | one per distinct layer shape (demo: 4 layers → 3) | the generator, from the shapes |
+| template (source) | 1: `gemm_kacc` (`src/aiednn/gemm/gemm_kacc_kernel.cc`). One more per *structure*: B-stationary, direct conv, … | written by hand |
+| parameter sets (geometry, K chunk, layout, type) | one per distinct layer shape (demo: 4 layers → 3) | the generator, from the shapes |
 | compiled kernels | one ELF per parameter set | aiehlc |
 | at run time | one launch per layer; no reload when the variant repeats | the host, from the dispatch table |
 
@@ -581,9 +632,9 @@ files *are* the interface.
 
 | Deliverable | In the example | Why the library needs it |
 |---|---|---|
-| the template | `gemm_kacc_bf16.cc`: the kernel as a C++ template (`gemm_kacc<M, N, K, TK, RELU>`), instantiated by aiehlc at its launch | one source covers every shape of the op |
-| the host contract | `gemm_kacc_bf16.h`: operand layout (`ad_pretile`), fp32 reference (`ad_reference`), result check | callers must lay data out the way the kernel reads it, and every instance must be checkable |
-| the instantiation rules | `gen_variants.py`: `pick()` turns a layer shape into a legal, de-duplicated parameter set, or refuses it with the reason | the library serves shapes it has never seen, and refuses the ones the template cannot cover instead of mis-computing them |
+| the template | `src/aiednn/gemm/gemm_kacc_kernel.cc`: the kernel as a C++ template (`gemm_kacc<CH, …, TR>`), instantiated by aiehlc at each launch | one source covers every shape of the op |
+| the host contract | the operand layout and epilogue of the aiegraph host (`src/aiednn/conv2d/kacc_conv_host.cc`); for the compact form `gemm_kacc_bf16.h` (`ad_pretile`, `ad_reference`, check) | callers must lay data out the way the kernel reads it, and every instance must be checkable |
+| the instantiation rules | `aiegraph.cnn_chunk.kacc_geom` + `aiednn.gemm_kacc_launch` (used by `gen_variants.py` and the aiegraph builds): a layer shape → a legal, de-duplicated argument set, or a refusal with the reason | the library serves shapes it has never seen, and refuses the ones the template cannot cover instead of mis-computing them |
 | the dispatch entry | `dispatch.json`: layer → variant + parameters | how the caller finds the kernel for each layer |
 | the evidence | analysis OK, x86 emulation, board self-check, `--profiling` split (§8) | a library kernel must be proven correct and fast, not assumed so |
 
@@ -626,28 +677,27 @@ parameter, a new instance, or a new template.
 ## 8. Build, check, run
 
 ```bash
-# 1. the analysis (seconds): blocks fit the DMA, every vector access inside its block
-build/aiehlc-convtile trace example/aiednn/gemm_kacc_bf16.cc
-#   [KernelTemplate] instance gemm_kacc<256, 64, 2304, 64, 1> -> gemm_kacc
-#   OK: every load_buffer / store_buffer matches the DMA   (11 block accesses checked)
+# 1. the analysis (seconds) of the library kernel, every `template:` case (instances, defaults, misuse)
+python3 src/llvm/convautotile/unitest/kernel_trace_cases.py build/aiehlc-convtile "template:"
+#   [KernelTemplate] instance gemm_kacc<64, 576, 256, 288, 64, 256, 16, 32, 18, 1, 4, 0> -> gemm_kacc
+#   kernel_trace_cases: 9 passed, 0 failed
 
-# 2. build (aout/ lands in the current directory) and run on the board
-source script/aiehlc.sh --aie-version 5 --runtime-source-file $PWD/example/aiednn/gemm_kacc_bf16.cc
+# 2. the compact form, two instances, self-checking: build (aout/ lands in the cwd) and run on the board
+build/aiehlc-convtile trace example/aiednn/tpl_two_instances.cc
+source script/aiehlc.sh --aie-version 5 --runtime-source-file $PWD/example/aiednn/tpl_two_instances.cc
 python3 script/test/apppaltest.py -y --netload ./aout/main.elf
-#   === AIEDNN gemm_kacc<256, 64, 2304, 64, 1>: C = A . W^T, bf16, one launch ===
-#   [gemm_kacc] PERF SUMMARY launch 33.029 ms, 2.29 GOPS
-#   [gemm_kacc] check: 16384 / 16384 bit-exact, max 0 ULP
-#   PASS
+#   [tpl2_gemm<256, 64, 2304, 64, 1>] launch ... ms, then ad_check's line for its 16384 outputs
+#   [tpl2_gemm<128, 64, 2304, 64, 0>] launch ... ms, then ad_check's line for its 8192 outputs
 
 # 3. where the launch time goes: rebuild with --profiling
-source script/aiehlc.sh --aie-version 5 --profiling --runtime-source-file $PWD/example/aiednn/gemm_kacc_bf16.cc
-#   [gemm_kacc] PERF phases (PMU cycles): kload 41258745 (98.0%) bdcfg 475839 (1.1%) ... wait_io 305741 (0.7%)
+source script/aiehlc.sh --aie-version 5 --profiling --runtime-source-file $PWD/example/aiednn/tpl_two_instances.cc
 
-# 4. other shapes: generate the instances and build any of them the same way
+# 4. your layer shapes: one source with every instance of the library kernel, then trace / build it
 python3 example/aiednn/gen_variants.py --out /tmp/variants
+build/aiehlc-convtile trace /tmp/variants/gemm_kacc_variants.cc
 ```
 
-Results on palmyra (AIE2PS, 4×4 mesh), 2026-11-14:
+Results on palmyra (AIE2PS, 4×4 mesh), 2026-11-14, of the former stand-alone compact example (`gemm_kacc<M, N, K, TK, RELU>`, git `da30c4d`):
 
 | Instance | Shape (M×N×K), TK | Result | Launch |
 |---|---|---|---|
@@ -679,7 +729,7 @@ lever, not a faster inner loop.
 | "static bounds analysis: not evaluable" | a `// comment` on a `#define` line | comments on their own lines |
 | a few hundred outputs = the host's `memset` value on ~1 run in 6 | the generated launch invalidates the output only *before* the DMA | `Xil_DCacheInvalidateRange(C)` after the launch (in the example), until the generated launch invalidates outputs itself |
 | bf16 kernel "does not compile for tracing" | the x86 emulation has `bfloat16` but no `accfloat` / bf16 `mmul` | `#if defined(__chess__)` vector path + scalar `#else` (§3) |
-| N wider than 4·16 | this template gives each mesh column one 16-wide column of C | an N loop in the kernel: another template (`gen_variants.py` refuses) |
+| N wider than 4·16 (compact form) | the compact template gives each mesh column one 16-wide column of C | the library kernel walks S sub-tiles per core; `kacc_geom` refuses what it cannot cover |
 
 ---
 

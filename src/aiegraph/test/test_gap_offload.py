@@ -38,7 +38,7 @@ def _shapes():
 
 def _example_kacc_geom():
     pytest.importorskip("numpy")
-    spec = importlib.util.spec_from_file_location("unet_aie_ex", UNET_DIR / "unet_aie.py")
+    spec = importlib.util.spec_from_file_location("aiednn_aie_ex", UNET_DIR / "unet_aie.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.kacc_geom

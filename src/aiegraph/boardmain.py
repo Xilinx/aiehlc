@@ -47,29 +47,32 @@ def _rt(name: str) -> str:
         return f.read()
 
 
-# The runtime templates name the kernel archive's host ABI (``<k>_aie_stats``, ``<k>_aie_launch_stats``,
-# ``<k>_prof_print``, ...), the header defines (``<MODEL>_LAUNCH_WARM``) and the CMP tag after ONE
-# default prefix (kernel_prefix.txt); :func:`_retarget` renames them for another model / kernel prefix.
+# The runtime templates name the kernel archive's host ABI after ONE default kernel prefix (kernel_prefix.txt,
+# the aiednn library's own: ``aiednn_aie_stats``, ``aiednn_aie_launch_stats``, ``aiednn_prof_print``, ...) and the
+# header defines (``<MODEL>_LAUNCH_WARM``), PMU helpers and CMP tag after one default model name (DEFAULT_M);
+# :func:`_retarget` renames them for another model / kernel prefix.
 DEFAULT_K = (RUNTIME / "kernel_prefix.txt").read_text().strip()
+DEFAULT_M = "unet"
 
 
 def _retarget(text: str, model: str = None, kprefix: str = None) -> str:
     """*text* (a runtime template) for *model*'s header defines / CMP tag / PMU helpers and the kernel
-    archive prefix *kprefix* (default: *model*; both default to :data:`DEFAULT_K`: text unchanged)."""
-    d = DEFAULT_K
-    m = model or d
-    k = kprefix or m
-    if m == d and k == d:
+    archive prefix *kprefix* (default: :data:`DEFAULT_K` for the default model, else *model*; model and prefix
+    default to :data:`DEFAULT_M` / :data:`DEFAULT_K`: text unchanged)."""
+    d, dm = DEFAULT_K, DEFAULT_M
+    m = model or dm
+    k = kprefix or (d if m == dm else m)
+    if m == dm and k == d:
         return text
-    # site tags compared by prefix length: '"aie <k>_aie_lin ", 17' -> the new literal and its length
+    # site tags compared by prefix length: '"aie <k>_aie_lin ", 19' -> the new literal and its length
     text = re.sub(r'"aie %s_aie_(\w+) ", \d+' % d,
                   lambda g: '"aie %s_aie_%s ", %d' % (k, g.group(1), len("aie %s_aie_%s " % (k, g.group(1)))), text)
     text = re.sub(r"up_tag\[i\] \+ (\d+)",
                   lambda g: "up_tag[i] + %d" % (int(g.group(1)) + (len(k) - len(d)) *
                                                 (int(g.group(1)) >= len(f"aie {d}_aie_"))), text)
     text = text.replace(f"{d}_aie_", f"{k}_aie_").replace(f"{d}_prof_print", f"{k}_prof_print")
-    text = text.replace(f"{d}_pmc", f"{m}_pmc").replace(f"{d.upper()}_", f"{m.upper()}_")
-    return text.replace(f'p1_cmp("{d}"', f'p1_cmp("{m}"').replace(f'"AIE {d}: ', f'"AIE {m}: ')
+    text = text.replace(f"{dm}_pmc", f"{m}_pmc").replace(f"{dm.upper()}_", f"{m.upper()}_")
+    return text.replace(f'p1_cmp("{dm}"', f'p1_cmp("{m}"').replace(f'"AIE {dm}: ', f'"AIE {m}: ')
 
 
 def _fill(text: str, **kv) -> str:

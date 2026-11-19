@@ -154,7 +154,9 @@ std::string routedDeclsText(const std::string &kernel, const RoutingPlan &plan, 
 
 // Kernel-TU declarations of a routed kernel for the block convention
 // (src/mlir/runtime/aie_block_io.h): per port the traced fit as
-// aiehlc_desc_<port> + its cursor, which aie::load_buffer / store_buffer check.
-std::vector<std::string> routedTUDecls(const RoutingPlan &plan, const std::map<std::string, PortFit> &fits);
+// aiehlc_desc_<port> + its cursor (block_io_names.h: <instance>_<port> for a
+// multi-instance template kernel), which aie::load_buffer / store_buffer check.
+std::vector<std::string> routedTUDecls(const std::string &kernel, const RoutingPlan &plan,
+                                       const std::map<std::string, PortFit> &fits);
 
 } // namespace convautotile

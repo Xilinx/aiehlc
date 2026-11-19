@@ -111,12 +111,12 @@ def _fa_net(H=2, N=4, M=4, D=2, clobber=False, outside_reader=False, impure=Fals
     tq = n.call("reshape_exp_transpose" if impure else "reshape_transpose_multiply_reshape", [ql, sq], [H, N, D],
                 expand=[(sq, 0, 1)])
     tk = n.call("reshape_transpose_multiply_reshape_transpose", [kl, sk], [H, M, D], expand=[(sk, 2, 1)])
-    ts = n.call("nn_batch_matmul", [tq, tk], [H, N, M], site="unet_aie_attn(7, args, 3, 0, 0);")
+    ts = n.call("nn_batch_matmul", [tq, tk], [H, N, M], site="aiednn_aie_attn(7, args, 3, 0, 0);")
     if outside_reader:
         n.call("nn_relu", [tq], [H, N, D])
     tp = n.call("nn_softmax", [ts], [H, N, M])
     tv = n.call("reshape_transpose_reshape_transpose", [vl], [H, D, M])
-    to = n.call("nn_batch_matmul_1", [tp, tv], [H, N, D], site="unet_aie_attn(8, args, 3, 1, 0);")
+    to = n.call("nn_batch_matmul_1", [tp, tv], [H, N, D], site="aiednn_aie_attn(8, args, 3, 1, 0);")
     o2_sid = 900
     if clobber:   # a kept call between PV and the head merge writes the merged O buffer
         n.call("nn_relu_1", [vl], [1, N, C], sid=o2_sid)

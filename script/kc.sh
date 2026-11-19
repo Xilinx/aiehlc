@@ -467,6 +467,17 @@ if [[ "$platform" == "sim" ]]; then
     chess_elf_compiler+=" -DAIEHLC_KERNEL_SIM"
 fi
 
+# Extra kernel compile defines (off when unset): AIEHLC_KERNEL_DEFINES="-DX=1 ..."
+# reaches xchesscc before the kernel TU includes aie_api (a #define in the kernel
+# source comes after it). E.g. -D__AIE_API_WORKAROUND_CR_1223259__=1, the AIE API
+# switch for the aie2p Mist "no mappings for bundle ... concat ... mac32" error.
+if [ -n "${AIEHLC_KERNEL_DEFINES:-}" ]; then
+    compiler_flags_chess+=" ${AIEHLC_KERNEL_DEFINES}"
+    compiler_flags_llvm_aie_sel+=" ${AIEHLC_KERNEL_DEFINES}"
+    chess_elf_compiler+=" ${AIEHLC_KERNEL_DEFINES}"
+    echo "[kc.sh] AIEHLC_KERNEL_DEFINES: ${AIEHLC_KERNEL_DEFINES}"
+fi
+
 # Kernel-side logging + KERNELCONFIGOFFLOAD register tracing.
 #
 # Driven by the user's source:

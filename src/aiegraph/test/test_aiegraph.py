@@ -318,7 +318,7 @@ _FA_STEP_HARNESS = r"""
 #include "aie_user_kernel.h"
 static int g_n; static int g_role[8], g_cid[8], g_cls[8], g_lda[8], g_ldb[8]; static const float *g_a[8];
 static float *g_b[8]; static float g_s[8];
-extern "C" int unet_aie_attn_kl(int cid, int role, int cls, const float *a, int lda, float *b, int ldb, float s) {
+extern "C" int aiednn_aie_attn_kl(int cid, int role, int cls, const float *a, int lda, float *b, int ldb, float s) {
     g_cid[g_n] = cid; g_role[g_n] = role; g_cls[g_n] = cls; g_a[g_n] = a; g_lda[g_n] = lda; g_b[g_n] = b;
     g_ldb[g_n] = ldb; g_s[g_n] = s; g_n++;
     return 0;
@@ -345,7 +345,7 @@ int main(void) {
 
 def test_fa_steps_are_the_kl_calls(tmp_path):
     """x86: the four FA steps compile warning-free against the header and make exactly the
-    unet_aie_attn_kl calls keep_layout_rt.py writes today (roles 2/3/5/6, a/lda and b/ldb from aiek_buf)."""
+    aiednn_aie_attn_kl calls keep_layout_rt.py writes today (roles 2/3/5/6, a/lda and b/ldb from aiek_buf)."""
     if shutil.which("g++") is None:
         pytest.fail("g++ is required for the step ABI test")
     src = tmp_path / "h.cc"

@@ -713,7 +713,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
         }
     }
     if (bad) {
-        printf("[unet_aie_conv] %d nonfinite AIE outputs\n", bad);
+        printf("[aiednn_aie_conv] %d nonfinite AIE outputs\n", bad);
         return -4;
     }
     {
@@ -721,7 +721,7 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
         XTime_GetTime(&ut3);
         ahs_add_span(&g_ahs, AHS_SCATTER, lt1, ut3);
         const double us = 1e6 / (double)COUNTS_PER_SECOND;
-        /* GPOOL: [UCL] is recorded here and printed by unet_aie_split_stats() after graph_run (a printf per
+        /* GPOOL: [UCL] is recorded here and printed by aiednn_aie_split_stats() after graph_run (a printf per
          * layer cost ~3.5 ms of A78 time inside the site) */
         const int li = g_aie_launches - 1;
         if (li >= 0 && li < UC_UCL_MAX) {

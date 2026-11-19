@@ -66,16 +66,15 @@ def kacc_geom(ch: int, k: int, px: int) -> dict:
 
 
 def kacc_name(ch: int, k: int, px: int) -> str:
-    return f"gemm_kacc_{ch}x{k}x{px}"
-
-
-def kernel_text(ch: int, k: int, px: int) -> str:
-    """The gemm_kacc instance (ch, k, px) from ``aiednn/gemm/gemm_kacc_kernel.cc``."""
+    """the launch callee of instance (ch, k, px): gemm_kacc<template args>"""
     import aiednn
-    g = kacc_geom(ch, k, px)
-    return aiednn.render("gemm/gemm_kacc_kernel.cc", NAME=kacc_name(ch, k, px), SID=f"{ch}x{k}x{px}", CH=ch,
-                         KW=g["kp"] // 2, PX=px, K=k, TKW=g["tkw"], KCH=g["kch"], NKC=g["nkc"], NT=g["ntile"],
-                         S=g["S"], AROWS=ch, BROWS=px, TR=0, LHS="x", RHS="(const uint16_t *)w + s * 16 * kch")
+    return aiednn.gemm_kacc_launch(ch, k, px, kacc_geom(ch, k, px))
+
+
+def kernel_text() -> str:
+    """The gemm_kacc template (``aiednn/gemm/gemm_kacc_kernel.cc``); aiehlc instantiates it per launch."""
+    import aiednn
+    return aiednn.template("gemm/gemm_kacc_kernel.cc")
 
 
 @dataclass
@@ -168,7 +167,7 @@ def write_kernel(kdst, spec: str, plans: list, *, kprefix: str, entry: str, warm
         "@SRC@", str(aiednn.path("gemm/gemm_kacc_kernel.cc"))).replace("@NSHAPES@", str(len(shapes)))
     if ctrlpkt == "aot":
         head = aiednn.template("gemm/ctrlpkt_aot_pragmas.h") + head
-    kernels = "\n\n".join(kernel_text(*s) for s in shapes)
+    kernels = kernel_text()
     disp = "\n".join(f"    if (N == {n} && K == {k} && M == {px}) {{\n        {kacc_name(n, k, px)}<<<mesh>>>(kw, kx, ky);"
                      f"\n        return 0;\n    }}" for n, k, px in shapes)
     board = aiednn.render("conv2d/kacc_chunk_board.cc", K=kprefix, WARM=int(warm), CTRLPKT=int(ctrlpkt == "aot"),

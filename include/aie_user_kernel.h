@@ -277,9 +277,9 @@ typedef struct {
 static inline int aiek_buf_dense(const aiek_buf *b) { return b->ndim < 2 || b->ld == b->shape[b->ndim - 1]; }
 
 /* Step <-> FA role table (example/aiegraph/unet_bk_sdm_tiny/fa_attn.py FA_STEPS
- * wraps unet_aie_attn_kl; the runtime contract Jane's side relies on):
+ * wraps aiednn_aie_attn_kl; the runtime contract Jane's side relies on):
  *
- *   step             reads  writes  consts         unet_aie_attn_kl(cid, role, cls, a, lda, b, ldb, s)
+ *   step             reads  writes  consts         aiednn_aie_attn_kl(cid, role, cls, a, lda, b, ldb, s)
  *   fa_step_pack_q   q      -       cid, cls, s    role 2: a=q.data lda=q.ld, s = log2e-folded Q scale
  *   fa_step_pack_k   k      -       cid, cls, s    role 3: a=k.data lda=k.ld, s = K scale (counts 1 call)
  *   fa_step_pack_v   v      -       cid, cls       role 5: a=v.data lda=v.ld, s = 1

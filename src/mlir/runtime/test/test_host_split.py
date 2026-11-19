@@ -151,7 +151,7 @@ static int uc_kacc_launch(int, int, int, int32_t *, int32_t *, int32_t *) { retu
 extern "C" int site(int part, int cid, void *args, int qk, int swap, int CHP, int PXP, int Kp, int kp, int kch,
                     int splitpx, int S, int chs, int pxs, int tr) {
     ahs_set_site(&g_ahs, part);   /* graph_driver UP_AIE_BEGIN */
-    const int rc = unet_aie_attn(cid, args, 3, qk, swap, CHP, PXP, Kp, kp, kch, splitpx, S, chs, pxs, tr);
+    const int rc = aiednn_aie_attn(cid, args, 3, qk, swap, CHP, PXP, Kp, kp, kch, splitpx, S, chs, pxs, tr);
     ahs_set_site(&g_ahs, -1);     /* UP_AIE_END */
     return rc;
 }
@@ -227,13 +227,13 @@ static void XTime_GetTime(XTime *t) { *t = (g_now += 1000); }
 #include "aie_host_split.h"
 static ahs_table g_ahs;
 static double g_aie = 0.0;
-int unet_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles) {
+int aiednn_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles) {
     if (aie_ms) *aie_ms = g_aie;
     (void)kloads; (void)cold_tiles;
     return 0;
 }
-void unet_aie_host_split_site(int site) { ahs_set_site(&g_ahs, site); }
-int unet_aie_host_split_line(int site, char *buf, int n) { return ahs_format(&g_ahs, site, 1e6, buf, (size_t)n); }
+void aiednn_aie_host_split_site(int site) { ahs_set_site(&g_ahs, site); }
+int aiednn_aie_host_split_line(int site, char *buf, int n) { return ahs_format(&g_ahs, site, 1e6, buf, (size_t)n); }
 @PROF@
 static void aie_site(int kind, unsigned long long pk, unsigned long long sc, unsigned long long win,
                      unsigned long long wt) {
@@ -246,17 +246,17 @@ static void aie_site(int kind, unsigned long long pk, unsigned long long sc, uns
 int main(void) {
     { GRAPH_PROF_BEGIN(0); GRAPH_PROF_END(0, "cpu tvmgen_add"); }
     { GRAPH_PROF_BEGIN(2); UP_AIE_BEGIN(2); aie_site(1, 2000, 500, 4000, 1000); UP_AIE_END(2);
-      GRAPH_PROF_END(2, "aie unet_aie_conv 4"); }
+      GRAPH_PROF_END(2, "aie aiednn_aie_conv 4"); }
     { GRAPH_PROF_BEGIN(3); UP_AIE_BEGIN(3); aie_site(2, 1000, 250, 3000, 3000); UP_AIE_END(3);
-      GRAPH_PROF_END(3, "aie unet_aie_lin 9"); }
+      GRAPH_PROF_END(3, "aie aiednn_aie_lin 9"); }
 @ATTNSITE@
     ahs_add(&g_ahs, AHS_PACK, 123456);   /* outside any site: dropped */
-    unet_prof_print(100.0, g_aie);
+    aiednn_prof_print(100.0, g_aie);
     return 0;
 }
 """
 ATTNSITE = ('    { GRAPH_PROF_BEGIN(5); UP_AIE_BEGIN(5); aie_site(3, 4000, 4000, 2000, 500); UP_AIE_END(5);\n'
-            '      GRAPH_PROF_END(5, "aie unet_aie_attn 1"); }\n')
+            '      GRAPH_PROF_END(5, "aie aiednn_aie_attn 1"); }\n')
 
 
 def _drv(prof: str, attn: bool) -> str:
@@ -294,8 +294,8 @@ def test_no_aie_sites_total_zero():
 
 # ---------------------------------------------------------------- 4. wiring of the generated sources
 def test_kernel_sources_wired():
-    assert ua.HOST_CC.count('extern "C" void unet_aie_host_split_site(int site)') == 1
-    assert ua.HOST_CC.count('extern "C" int unet_aie_host_split_line(int site') == 1
+    assert ua.HOST_CC.count('extern "C" void aiednn_aie_host_split_site(int site)') == 1
+    assert ua.HOST_CC.count('extern "C" int aiednn_aie_host_split_line(int site') == 1
     for host, kind in ((ua.KACC_HOST, "AHS_KIND_CONV"), (ua.LINEAR_HOST, "AHS_KIND_LINEAR"),
                        (ua.ATTN_HOST, "AHS_KIND_ATTN")):
         assert f"ahs_begin(&g_ahs, {kind});" in host
@@ -309,5 +309,5 @@ def test_kernel_sources_wired():
     rt = (RT / "aie_runtime.c").read_text()
     assert "void __Runtime_host_split_wait_ticks(" in rt and "g_hs_wait_ticks += ahs_now() - __hs_t0;" in rt
     src = Path(ua.__file__).read_text()
-    assert src.count('"export    unet_aie_host_split_site\\\\n"') == 2
-    assert src.count('"export    unet_aie_host_split_line\\\\n"') == 2
+    assert src.count('"export    aiednn_aie_host_split_site\\\\n"') == 2
+    assert src.count('"export    aiednn_aie_host_split_line\\\\n"') == 2

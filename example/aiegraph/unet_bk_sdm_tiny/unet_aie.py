@@ -8,7 +8,7 @@ TVM C on the A78 (bf16 weights expanded into g_wscratch, Steve's .bss scratch).
             squares) of the ONNX initializer == those of the TVM param (the TVM
             OIHW{i}i{o}o weight is a permutation). Unique match or the build fails.
   * kernel  gemm_bf16 (p2k/bf16_gemm_convin.cc, verbatim): one launch = one 64x64x64
-            tile (bf16 x bf16 -> fp32). Host function unet_aie_conv() (C linkage)
+            tile (bf16 x bf16 -> fp32). Host function aiednn_aie_conv() (C linkage)
             runs any NCHWc conv as ceil(M/64)*ceil(N/64)*ceil(K/64) launches:
             activation fp32 -> bf16 RNE im2col tile, weight tile gathered straight
             from the COMPACT bf16 blob (weights.bin, never expanded), each 64-K slice
@@ -18,7 +18,7 @@ TVM C on the A78 (bf16 weights expanded into g_wscratch, Steve's .bss scratch).
             all of whose call sites are partition layers); calibrate/emulate (whole
             UNet on x86) are skipped -- force=True ignores their verdicts anyway.
   * driver  graph_driver.c is post-processed: each partition call site calls
-            unet_aie_conv(cid, args, nargs, g_params+off, sh, sw, ph, pw) instead of
+            aiednn_aie_conv(cid, args, nargs, g_params+off, sh, sw, ph, pw) instead of
             the TVM kernel, and its weight is NOT expanded into g_wscratch.
 """
 import json
@@ -367,13 +367,13 @@ def kt_select(text: str, ktimer: bool) -> str:
 
 def write_kernel(kdst: Path, spec: str, maxacc: int, warm: bool = False, ctrlpkt: str = "off",
                  ktimer: bool = False) -> Path:
-    spec = spec.replace('"out ', '"export    unet_aie_conv\\n"\n        "export    unet_aie_stats\\n"\n'
-                        '        "export    unet_aie_launch_stats\\n"\n'
-                        '        "export    unet_aie_host_split_site\\n"\n'
-                        '        "export    unet_aie_host_split_line\\n"\n' +
-                        ('        "export    unet_aie_ktimer_stats\\n"\n' if ktimer else '') +
-                        '        "export    unet_aie_split_stats\\n"\n        "out ', 1)
-    assert "export    unet_aie_conv" in spec, spec
+    spec = spec.replace('"out ', '"export    aiednn_aie_conv\\n"\n        "export    aiednn_aie_stats\\n"\n'
+                        '        "export    aiednn_aie_launch_stats\\n"\n'
+                        '        "export    aiednn_aie_host_split_site\\n"\n'
+                        '        "export    aiednn_aie_host_split_line\\n"\n' +
+                        ('        "export    aiednn_aie_ktimer_stats\\n"\n' if ktimer else '') +
+                        '        "export    aiednn_aie_split_stats\\n"\n        "out ', 1)
+    assert "export    aiednn_aie_conv" in spec, spec
     kdst.mkdir(parents=True, exist_ok=True)
     kcc = kdst / f"{ENTRY}.cc"
     head = _tpl("conv2d/tile64_conv_head.cc").replace("@E@", ENTRY).replace("@SRC@", str(P2K_KT if ktimer else P2K))
@@ -392,10 +392,10 @@ def write_kernel(kdst: Path, spec: str, maxacc: int, warm: bool = False, ctrlpkt
 
 
 # ─────────────────────────────── driver patch ───────────────────────────────
-DECL = ("int unet_aie_conv(int cid, void *args, int nargs, const uint16_t *wbf, "
+DECL = ("int aiednn_aie_conv(int cid, void *args, int nargs, const uint16_t *wbf, "
         "int sh, int sw, int ph, int pw);   /* build_unet.py --aie conv */\n"
-        "int unet_aie_linear(int cid, void *args, int nargs, const uint16_t *wbf, int S);   /* --aie conv,linear */\n")
-DECL_ATTN = ("int unet_aie_attn(int cid, void *args, int nargs, int qk, int swap, int chp, int pxp, int kk, int kp, "
+        "int aiednn_aie_linear(int cid, void *args, int nargs, const uint16_t *wbf, int S);   /* --aie conv,linear */\n")
+DECL_ATTN = ("int aiednn_aie_attn(int cid, void *args, int nargs, int qk, int swap, int chp, int pxp, int kk, int kp, "
              "int kch, "
              "int splitpx, int S, int chs, int pxs, int tr);   /* --aie conv,linear,attn (GATT) */\n")
 CALL_RE = re.compile(r"    GRAPH_PROF_BEGIN\((\d+)\);\n(#ifdef GRAPH_AIE_OFFLOAD\n.*?#endif\n|"
@@ -410,7 +410,7 @@ def patch_driver(text: str, sel: list) -> tuple:
     head = text.split("static uint8_t kernel_ws[")[0]
     if "UP_AIE_BEGIN(" in head or "up_pending_exp" in head:
         raise RuntimeError("driver already patched")
-    ag_steps = "int unet_aie_conv(int cid, void" in head
+    ag_steps = "int aiednn_aie_conv(int cid, void" in head
     att = [c for c in sel if c.get("kind") == "attn"]
     sel = [c for c in sel if c.get("kind") != "attn"]
     if ag_steps and sel:
@@ -446,7 +446,7 @@ def patch_driver(text: str, sel: list) -> tuple:
                          r"\(g_params \+ %d\), %dULL\);\n    tensors\[%d\]\.data = g_wscratch \+ \1;\n" % (off, wel, eid))
         hits = exp.findall(text)
         assert len(hits) == 1, (c["wname"], len(hits))
-        text = exp.sub("    tensors[%d].data = 0;   /* AIE conv %d: bf16 weight read in place by unet_aie_conv */\n"
+        text = exp.sub("    tensors[%d].data = 0;   /* AIE conv %d: bf16 weight read in place by aiednn_aie_conv */\n"
                        % (eid, c["cid"]), text)
         a1 = "    args[1].v_handle = &tensors[%d];\n" % eid
         assert text.count(a1) == 1, (c["wname"], text.count(a1))
@@ -456,37 +456,37 @@ def patch_driver(text: str, sel: list) -> tuple:
         assert cm and (nxt < 0 or cm.start() < nxt), c["wname"]
         calls = re.findall(r"(?:aie_)?(tvmgen_\w+)\(args, codes, (\d+), 0, 0, 0\);", cm.group(2))
         assert calls and all(s == c["symbol"] and int(k) == c["nargs"] for s, k in calls), (calls, c["symbol"])
-        if c.get("kind") == "linear":   # PDN: tag "aie unet_aie_lin <cid>" -> PROF op=aie_host_linear<cid>
+        if c.get("kind") == "linear":   # PDN: tag "aie aiednn_aie_lin <cid>" -> PROF op=aie_host_linear<cid>
             rep = ("    GRAPH_PROF_BEGIN(%s);\n    UP_AIE_BEGIN(%s);\n"
-                   "    unet_aie_linear(%d, args, %d, (const uint16_t *)(g_params + %d), %d);\n"
-                   "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie unet_aie_lin %d\");\n"
+                   "    aiednn_aie_linear(%d, args, %d, (const uint16_t *)(g_params + %d), %d);\n"
+                   "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie aiednn_aie_lin %d\");\n"
                    % (cm.group(1), cm.group(1), c["cid"], c["nargs"], off, c["S"], cm.group(1), cm.group(1), c["cid"]))
         else:
             rep = ("    GRAPH_PROF_BEGIN(%s);\n    UP_AIE_BEGIN(%s);\n"
-                   "    unet_aie_conv(%d, args, %d, (const uint16_t *)(g_params + %d), %d, %d, %d, %d);\n"
-                   "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie unet_aie_conv %d\");\n"
+                   "    aiednn_aie_conv(%d, args, %d, (const uint16_t *)(g_params + %d), %d, %d, %d, %d);\n"
+                   "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie aiednn_aie_conv %d\");\n"
                    % (cm.group(1), cm.group(1), c["cid"], c["nargs"], off, c["sh"], c["sw"], c["ph"], c["pw"],
                       cm.group(1), cm.group(1), c["cid"]))
         text = text[:cm.start()] + rep + text[cm.end():]
         n += 1
     nl = sum(1 for c in sel if c.get("kind") == "linear")
     if not ag_steps:
-        assert text.count("    unet_aie_conv(") == len(sel) - nl and text.count("    unet_aie_linear(") == nl
+        assert text.count("    aiednn_aie_conv(") == len(sel) - nl and text.count("    aiednn_aie_linear(") == nl
     if fam:   # S3: count the group steps arm_build emitted (2 per bmm site: pack_q+pack_k / pack_v+run_o)
-        nkl = len(re.findall(r"^    unet_aie_attn_kl\(", text, re.M))
+        nkl = len(re.findall(r"^    aiednn_aie_attn_kl\(", text, re.M))
         assert nkl == 2 * len(att), (nkl, len(att))
         assert not re.search(r"\btvmgen_default_fused_nn_(softmax|batch_matmul)\w*\(args, ",
                              text.split("float *graph_run(void)")[1]), "attention call left in graph_run"
         return text, n + len(att)
-    for c in att:   # GATT: tag "aie unet_aie_attn <cid>" -> PROF op=aie_host_attn<cid>
+    for c in att:   # GATT: tag "aie aiednn_aie_attn <cid>" -> PROF op=aie_host_attn<cid>
         text = _patch_attn_site(text, c)
         n += 1
-    assert text.count("    unet_aie_attn(") == len(att)
+    assert text.count("    aiednn_aie_attn(") == len(att)
     return text, n
 
 
 def _patch_attn_site(text: str, c: dict) -> str:
-    """GATT: one TVM nn_batch_matmul call site (located by its unique args[0..2] tensor block) -> unet_aie_attn.
+    """GATT: one TVM nn_batch_matmul call site (located by its unique args[0..2] tensor block) -> aiednn_aie_attn.
     No weight: both operands are activations, packed at run time by the host (aie_kacc_pack.h)."""
     e0, e1 = c["eids"]
     blk = ("    args[0].v_handle = &tensors[%d];\n    args[1].v_handle = &tensors[%d];\n"
@@ -500,15 +500,15 @@ def _patch_attn_site(text: str, c: dict) -> str:
     assert calls and all(s == c["symbol"] and int(k) == c["nargs"] for s, k in calls), (calls, c["symbol"])
     if c.get("fa") is not None:  # GFA: role 0 = QK (pack Q, K), role 1 = PV (pack V, launch, write O)
         rep = ("    GRAPH_PROF_BEGIN(%s);\n    UP_AIE_BEGIN(%s);\n"
-               "    unet_aie_attn(%d, args, %d, %d, %d);   /* fa %s g%d %s */\n"
-               "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie unet_aie_attn %d\");\n"
+               "    aiednn_aie_attn(%d, args, %d, %d, %d);   /* fa %s g%d %s */\n"
+               "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie aiednn_aie_attn %d\");\n"
                % (cm.group(1), cm.group(1), c["cid"], c["nargs"], int(c["role"] == "pv"), c["fa"], c["role"],
                   c["group"], c["onnx"].replace("*/", "*_/"), cm.group(1), cm.group(1), c["cid"]))
         return text[:cm.start()] + rep + text[cm.end():]
     g = c["geo"]
     rep = ("    GRAPH_PROF_BEGIN(%s);\n    UP_AIE_BEGIN(%s);\n"
-           "    unet_aie_attn(%d, args, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d);   /* %s g%d %s */\n"
-           "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie unet_aie_attn %d\");\n"
+           "    aiednn_aie_attn(%d, args, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d);   /* %s g%d %s */\n"
+           "    UP_AIE_END(%s);\n    GRAPH_PROF_END(%s, \"aie aiednn_aie_attn %d\");\n"
            % (cm.group(1), cm.group(1), c["cid"], c["nargs"], int(c["role"] == "qk"), g["swap"], g["CHP"], g["PXP"],
               g["Kp"], g["kp"], g["kch"], g["splitpx"], g["S"], g["chs"], g["pxs"], g["tr"], c["role"], c["group"],
               c["onnx"].replace("*/", "*_/"), cm.group(1), cm.group(1), c["cid"]))
@@ -533,7 +533,7 @@ def prof_c_attn() -> str:
 # Y[ch][px] = W[ch,:] . X[px,:]; Maxwell's c013 kernel walks 16-row channel tiles on each core
 # (px = 64 = 4 mesh cols x 16); here each core also walks px/64 16-wide pixel tiles (kplan's
 # per-layer walk of 64x64 output macro tiles). Host: im2col + pre-tiling (bf16) only; NO K-sum.
-KACC_CC = _tplpath("gemm/bf16_gemm_kacc.cc")
+KACC_CC = _tplpath("gemm/gemm_kacc_kernel.cc")
 
 
 def kacc_wlayout(w6, N: int, K: int, M: int):
@@ -585,7 +585,9 @@ def prelayout_weights(wbin: Path, sel: list) -> int:
 
 
 def kacc_name(ch: int, k: int, px: int) -> str:
-    return f"gemm_kacc_{ch}x{k}x{px}"
+    """the launch callee of instance (ch, k, px): gemm_kacc<template args> (aiednn.gemm_kacc_launch)"""
+    import aiednn
+    return aiednn.gemm_kacc_launch(ch, k, px, kacc_geom(ch, k, px))
 
 
 def kacc_geom(ch: int, k: int, px: int) -> dict:
@@ -622,20 +624,7 @@ def kacc_geom(ch: int, k: int, px: int) -> dict:
                 arows=rows, brows=cols, l1=l1)
 
 
-KACC_KERNEL = _tpl("gemm/gemm_kacc_kernel.cc")
-
-
-def kacc_kernel_text(ch: int, k: int, px: int) -> str:
-    g = kacc_geom(ch, k, px)
-    t = KACC_KERNEL
-    for key, v in (("@NAME@", kacc_name(ch, k, px)), ("@SID@", f"{ch}x{k}x{px}"), ("@CH@", ch), ("@KW@", g["kp"] // 2), ("@PX@", px), ("@K@", k),
-                   ("@TKW@", g["tkw"]), ("@KCH@", g["kch"]), ("@NKC@", g["nkc"]), ("@NT@", g["ntile"]),
-                   ("@S@", g["S"]), ("@AROWS@", g["arows"]), ("@BROWS@", g["brows"]), ("@TR@", g["tr"]),
-                   ("@LHS@", "(const uint16_t *)w + s * 16 * kch" if g["tr"] else "x"),
-                   ("@RHS@", "x" if g["tr"] else "(const uint16_t *)w + s * 16 * kch")):
-        t = t.replace(key, str(v))
-    assert "@" not in t
-    return t
+KACC_KERNEL = _tpl("gemm/gemm_kacc_kernel.cc")   # C++ template __global__: aiehlc instantiates it per launch
 
 
 def kacc_host(shapes: list, lin: list = (), att: list = ()) -> str:
@@ -665,38 +654,38 @@ ATTN_HOST = _tpl("attention/kacc_bmm_host.cc")
 
 def write_kernel_kacc(kdst: Path, spec: str, shapes: list, warm: bool = False, ctrlpkt: str = "off",
                       lin: list = (), att: list = (), fa: list = ()) -> Path:
-    """--kincore: aiek_unetconv.cc = one gemm_kacc instance per distinct (ch, K, px) + host unet_aie_conv;
-    lin (PDN): (N, K, Mp, pxs) per linear layer -> + host unet_aie_linear"""
-    spec = spec.replace('"out ', '"export    unet_aie_conv\\n"\n        "export    unet_aie_stats\\n"\n' +
-                        ('        "export    unet_aie_linear\\n"\n' if lin else '') +
-                        ('        "export    unet_aie_attn\\n"\n' if att else '') +
-                        ('        "export    unet_aie_attn_kl\\n"\n' if fa else '') +  # P4a keep-layout
-                        '        "export    unet_aie_launch_stats\\n"\n'
-                        '        "export    unet_aie_host_split_site\\n"\n'
-                        '        "export    unet_aie_host_split_line\\n"\n'
-                        '        "export    unet_aie_split_stats\\n"\n        "out ', 1)
-    assert "export    unet_aie_conv" in spec, spec
+    """--kincore: aiek_unetconv.cc = one gemm_kacc instance per distinct (ch, K, px) + host aiednn_aie_conv;
+    lin (PDN): (N, K, Mp, pxs) per linear layer -> + host aiednn_aie_linear"""
+    spec = spec.replace('"out ', '"export    aiednn_aie_conv\\n"\n        "export    aiednn_aie_stats\\n"\n' +
+                        ('        "export    aiednn_aie_linear\\n"\n' if lin else '') +
+                        ('        "export    aiednn_aie_attn\\n"\n' if att else '') +
+                        ('        "export    aiednn_aie_attn_kl\\n"\n' if fa else '') +  # P4a keep-layout
+                        '        "export    aiednn_aie_launch_stats\\n"\n'
+                        '        "export    aiednn_aie_host_split_site\\n"\n'
+                        '        "export    aiednn_aie_host_split_line\\n"\n'
+                        '        "export    aiednn_aie_split_stats\\n"\n        "out ', 1)
+    assert "export    aiednn_aie_conv" in spec, spec
     kdst.mkdir(parents=True, exist_ok=True)
     kcc = kdst / f"{ENTRY}.cc"
     head = (_tpl("gemm/kacc_unit_head.cc").replace("@E@", ENTRY).replace("@SRC@", str(KACC_CC))
             .replace("@NSHAPES@", str(len(shapes))))
     if ctrlpkt == "aot":
         head = CTRLPKT_PRAGMAS + head
-    ktext = "\n\n".join(kacc_kernel_text(*s) for s in shapes)
-    if fa:  # GFA (--attn-fa): flash-attention prologue (static helpers) before the kernels, one kernel per class
-        import fa_attn
+    ktext = KACC_KERNEL if shapes else ""   # one template; aiehlc instantiates it per launch (same TU)
+    if fa:  # GFA (--attn-fa): flash-attention prologue (static helpers) before the kernels; the fa_kernel template
+        import fa_attn  # once, aiehlc instantiates it per class launch (fa_attn.fa_launch in fa_host)
         head = head + fa_attn.fa_prologue(fa) + "\n"
-        ktext = ktext + "\n\n" + "\n\n".join(fa_attn.fa_kernel_text(c) for c in fa)
+        ktext = ktext + "\n\n" + fa_attn.FA_KERNEL
     host = kt_select(HOST_CC, False)
     # replace the 64x64-tile uc_conv (host K-sum) by the one-launch version up to its epilogue
     i0 = host.index("static int uc_conv(")
-    i1 = host.index('extern "C" int unet_aie_conv(')  # GPOOL: epilogue fused into the kacc scatter
+    i1 = host.index('extern "C" int aiednn_aie_conv(')  # GPOOL: epilogue fused into the kacc scatter
     host = host[:i0] + (kacc_host(shapes, lin, [c["geo"] for c in att]) if att and not fa else kacc_host(shapes, lin)) + host[i1:]
-    if lin:  # PDN: unet_aie_linear before unet_aie_conv
-        j = host.index('extern "C" int unet_aie_conv(int cid')
+    if lin:  # PDN: aiednn_aie_linear before aiednn_aie_conv
+        j = host.index('extern "C" int aiednn_aie_conv(int cid')
         host = host[:j] + LINEAR_HOST.lstrip("\n") + host[j:]
-    if att:  # GATT: unet_aie_attn before unet_aie_conv
-        j = host.index('extern "C" int unet_aie_conv(int cid')
+    if att:  # GATT: aiednn_aie_attn before aiednn_aie_conv
+        j = host.index('extern "C" int aiednn_aie_conv(int cid')
         if fa:
             import fa_attn
             host = host[:j] + fa_attn.fa_host(fa).lstrip("\n") + host[j:]

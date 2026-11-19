@@ -1,16 +1,20 @@
 // aiednn/conv2d/stem7x7_bf16.cc -- 7x7 stride-2 stem conv (ResNet conv1: 3x224x224 -> 64x112x112, pad 3),
-// bf16 in / out, fp32 accumulation, bias + optional ReLU fused (@ACT@: 0 none, 1 ReLU, 2 SiLU).
+// bf16 in / out, fp32 accumulation, bias + optional ReLU fused (ACT: 0 none, 1 ReLU, 2 SiLU).
 // Implicit GEMM on aie::mmul<4,8,4,bf16,bf16,accfloat>: the 3 input channels are one K chunk (K = 147, zero tail
 // to 152), the core gathers the im2col tile of 4 output pixels from its zero-padded input block.
-// Ports: x [CI][H][W], w = ONNX weight [CO][CI*7*7], b fp32 [CO], y [CO][OH][OW].
-__global__ void @NAME@(aie::port<input_window_bfloat16 *, aie::IFM, aie::shape<@CI@, @H@, @W@>> x_@NAME@,
-                       aie::port<input_window_bfloat16 *, aie::WEIGHTS, aie::shape<@CO@, @K@>> w_@NAME@,
-                       aie::port<input_window_float *, aie::WEIGHTS, aie::shape<@CO@>> b_@NAME@,
-                       aie::port<output_window_bfloat16 *, aie::OFM, aie::shape<@CO@, @OH@, @OW@>> y_@NAME@) {
-    constexpr int CI = @CI@, CO = @CO@, OH = @OH@, OW = @OW@, KH = @KH@, KW = @KW@, S = @S@, P = @P@;
-    constexpr int TCO = @TCO@, TOH = @TOH@, TCI = @TCI@; // block: TCO out channels x TOH out rows; K chunk = TCI ch
-    static_assert(@K@ == CI * KH * KW, "w is the ONNX weight [CO][CI][KH][KW] seen as [CO][K]");
+// Ports: x [CI][HP][WP] (padded), w = ONNX weight [CO][CI*7*7], b fp32 [CO] (as bf16 [CO][2]), y [CO][OH][OW].
+// The input is the zero-padded tensor [CI][HP][WP] = [CI][H + 2P][W + 2P] (aiehlc's conv convention: the IFM is
+// the DDR buffer as the kernel reads it, already padded), so every block lies inside it. The fp32 bias travels
+// as bf16 pairs [CO][2] (aiehlc gives all ports of a kernel one window element type and has no float window).
+template <int CI, int HP, int WP, int CO, int OH, int OW, int KH, int KW, int S, int K, int TCO, int TOH, int TCI, int ACT>
+__global__ void stem7x7_bf16(aie::port<input_window_bfloat16 *, aie::IFM, aie::shape<CI, HP, WP>> x_port,
+                             aie::port<input_window_bfloat16 *, aie::WEIGHTS, aie::shape<CO, K>> w_port,
+                             aie::port<input_window_bfloat16 *, aie::WEIGHTS, aie::shape<CO, 2>> b_port,
+                             aie::port<output_window_bfloat16 *, aie::OFM, aie::shape<CO, OH, OW>> y_port) {
+    // TCO / TOH / TCI: a block is TCO out channels x TOH out rows; the K chunk is TCI input channels
+    static_assert(K == CI * KH * KW, "w is the ONNX weight [CO][CI][KH][KW] seen as [CO][K]");
     static_assert(KH == 7 && KW == 7 && S == 2 && TCI == CI, "stem: 7x7 s2, all input channels in one chunk");
+    static_assert(OH == (HP - KH) / S + 1 && OW == (WP - KW) / S + 1, "conv geometry");
     static_assert(CO % TCO == 0 && TCO % 4 == 0 && OH % TOH == 0 && CI % TCI == 0, "block must tile the layer");
     constexpr int NP = TOH * OW, NPG = (NP + 3) / 4;      // output pixels of a block, in mmul groups of 4
     constexpr int KC = TCI * KH * KW, KB = (KC + 7) / 8;  // K of one chunk, in 8-deep mmul steps (tail = 0)
@@ -28,7 +32,7 @@ __global__ void @NAME@(aie::port<input_window_bfloat16 *, aie::IFM, aie::shape<@
                 for (int q = 0; q < NPG; q++)
                     aie::store_v(acc[g][q], aie::zeros<float, 16>());
             for (int c0 = 0; c0 < CI; c0 += TCI) {
-                const bfloat16 *w = aie::load_buffer(w_@NAME@, {co0, c0 * KH * KW}, {TCO, KC});
+                const bfloat16 *w = aie::load_buffer(w_port, {co0, c0 * KH * KW}, {TCO, KC});
                 for (int g = 0; g < TCO / 4; g++)
                     for (int kb = 0; kb < KB; kb++) {
                         aie::vector<bfloat16, 32> a = aie::zeros<bfloat16, 32>();
@@ -37,9 +41,8 @@ __global__ void @NAME@(aie::port<input_window_bfloat16 *, aie::IFM, aie::shape<@
                                 a.set(w[(g * 4 + r) * KC + kb * 8 + kk], r * 8 + kk);
                         aie::store_v(wp[g][kb], a);
                     }
-                aie::release(w_@NAME@);
-                const bfloat16 *x = aie::load_buffer(x_@NAME@, {c0, oh0 * S - P, -P}, {TCI, IHT, IWT},
-                                                     {.pad = aie::pad_value::zero});
+                aie::release(w_port);
+                const bfloat16 *x = aie::load_buffer(x_port, {c0, oh0 * S, 0}, {TCI, IHT, IWT});
                 for (int q = 0; q < NPG; q++) {
                     for (int kb = 0; kb < KB; kb++) {
                         aie::vector<bfloat16, 32> b = aie::zeros<bfloat16, 32>();
@@ -62,29 +65,30 @@ __global__ void @NAME@(aie::port<input_window_bfloat16 *, aie::IFM, aie::shape<@
                         aie::store_v(acc[g][q], m.template to_vector<float>());
                     }
                 }
-                aie::release(x_@NAME@);
+                aie::release(x_port);
             }
-            const float *bias = aie::load_buffer(b_@NAME@, {co0}, {TCO});
-            bfloat16 *y = aie::store_buffer(y_@NAME@, {co0, oh0, 0}, {TCO, TOH, OW});
+            const float *bias = (const float *)aie::load_buffer(b_port, {co0, 0}, {TCO, 2});
+            bfloat16 *y = aie::store_buffer(y_port, {co0, oh0, 0}, {TCO, TOH, OW});
             for (int g = 0; g < TCO / 4; g++)
                 for (int q = 0; q < NPG; q++) {
                     aie::vector<float, 16> bv;
                     for (int i = 0; i < 16; i++)
                         bv.set(bias[g * 4 + i / 4], i);
                     aie::vector<float, 16> v = aie::add(aie::load_v<16>(acc[g][q]), bv);
-                    if constexpr (@ACT@ == 1) // fused ReLU
+                    if constexpr (ACT == 1) // fused ReLU
                         v = aie::max(v, aie::zeros<float, 16>());
-                    if constexpr (@ACT@ == 2) { // fused SiLU: v * sigmoid(v) = v / (1 + 2^(-v * log2 e))
+                    if constexpr (ACT == 2) { // fused SiLU: v * sigmoid(v) = v / (1 + 2^(-v * log2 e))
                         const aie::vector<float, 16> e = aie::exp2<float>(aie::mul(v, -1.4426950408889634f).template to_vector<float>());
                         v = aie::mul(v, aie::inv(aie::add(e, aie::broadcast<float, 16>(1.0f)))).template to_vector<float>();
                     }
                     aie::accum<accfloat, 16> o;
-                    const aie::vector<bfloat16, 16> ob = o.from_vector(v).template to_vector<bfloat16>();
+                    o.from_vector(v);
+                    const aie::vector<bfloat16, 16> ob = o.template to_vector<bfloat16>();
                     for (int i = 0; i < 16; i++)
                         if (q * 4 + i % 4 < NP)
                             y[(g * 4 + i / 4) * NP + q * 4 + i % 4] = ob[i];
                 }
-            aie::release(b_@NAME@);
-            aie::commit(y_@NAME@);
+            aie::release(b_port);
+            aie::commit(y_port);
         }
 }

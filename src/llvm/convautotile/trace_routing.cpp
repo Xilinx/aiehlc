@@ -5,6 +5,7 @@
  * Kernel trace -> routing carriers. See trace_routing.h.
  ******************************************************************************/
 #include "trace_routing.h"
+#include "block_io_names.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -422,7 +423,8 @@ std::string routedDeclsText(const std::string &kernel, const RoutingPlan &plan, 
     return os.str();
 }
 
-std::vector<std::string> routedTUDecls(const RoutingPlan &plan, const std::map<std::string, PortFit> &fits) {
+std::vector<std::string> routedTUDecls(const std::string &kernel, const RoutingPlan &plan,
+                                       const std::map<std::string, PortFit> &fits) {
     auto list4 = [](const std::vector<int> &v) {
         std::string s = "{";
         for (int i = 0; i < 4; i++)
@@ -435,11 +437,11 @@ std::vector<std::string> routedTUDecls(const RoutingPlan &plan, const std::map<s
         if (it == fits.end())
             continue;
         const PortFit &f = it->second;
-        out.push_back("static const aiehlc_blk_desc aiehlc_desc_" + rp.var + " = {" + std::to_string(f.rank) + ", " +
+        out.push_back("static const aiehlc_blk_desc " + blockDescVar(kernel, rp.var) + " = {" + std::to_string(f.rank) + ", " +
                       list4(f.shape) + ", " + list4(f.base_p0) + ", " + list4(f.base_p1) + ", " + list4(f.step_i) +
                       ", " + list4(f.step_j) + ", " + std::to_string(f.rounds_i) + ", " + std::to_string(f.rounds_j) +
                       "};");
-        out.push_back("static aiehlc_blk_cursor aiehlc_cur_" + rp.var + ";");
+        out.push_back("static aiehlc_blk_cursor " + blockCurVar(kernel, rp.var) + ";");
     }
     return out;
 }

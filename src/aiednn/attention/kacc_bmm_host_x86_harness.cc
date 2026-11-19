@@ -35,5 +35,5 @@ extern "C" int launches(void) { return g_aie_launches; }
 @ATTN@
 extern "C" int site(int cid, void *args, int qk, int swap, int CHP, int PXP, int Kp, int kp, int kch, int splitpx,
                     int S, int chs, int pxs, int tr) {
-    return unet_aie_attn(cid, args, 3, qk, swap, CHP, PXP, Kp, kp, kch, splitpx, S, chs, pxs, tr);
+    return aiednn_aie_attn(cid, args, 3, qk, swap, CHP, PXP, Kp, kp, kch, splitpx, S, chs, pxs, tr);
 }

@@ -3,3 +3,15 @@
 test_keep_layout_codegen.py  # unet-m4 P3: keep_layout_codegen.py deleted -- the folds are aiegraph groups now:
                              # test_match_kinds.py (conv+layout / linear+layout / dense+silu, counter-examples),
                              # test_pure_perm.py (purity), src/aiednn/test/test_fa_strided_packs.py (FA packs)
+# Renames 'old_id -> new_id' (basename::name): the base-passing old id is OK only if new_id PASSES now.
+# why: aiednn-tpl P4 (06844a4/b5606d7) took network names out of src/aiednn -- the same cases, generic names.
+test_cnn_templates_emu.py::test_dw3x3_yolo26n[c64_80] -> test_cnn_templates_emu.py::test_dw3x3[c64_80]
+test_cnn_templates_emu.py::test_dw3x3_yolo26n[c80_80] -> test_cnn_templates_emu.py::test_dw3x3[c80_80]
+test_cnn_templates_emu.py::test_dw3x3_yolo26n[c128_20] -> test_cnn_templates_emu.py::test_dw3x3[c128_20]
+test_cnn_templates_emu.py::test_dw3x3_yolo26n[c256_20] -> test_cnn_templates_emu.py::test_dw3x3[c256_20]
+test_cnn_templates_emu.py::test_fc_gemm_resnet18_classifier -> test_cnn_templates_emu.py::test_fc_gemm_512x1000
+test_cnn_templates_emu.py::test_stem7x7_resnet18_conv1 -> test_cnn_templates_emu.py::test_stem7x7_s2
+# why: bf16_gemm_kacc.cc left src/aiednn (one gemm_kacc: gemm/gemm_kacc_kernel.cc); the example tests are per network now
+test_template_lookup.py::test_bad_names_fail[conv2d/../gemm/bf16_gemm_kacc.cc] -> test_template_lookup.py::test_bad_names_fail[conv2d/../gemm/gemm_kacc_kernel.cc]
+test_template_lookup.py::test_unet_example_has_no_c -> test_template_lookup.py::test_example_has_no_c[unet_bk_sdm_tiny]
+test_template_lookup.py::test_unet_example_templates_resolve -> test_template_lookup.py::test_example_templates_resolve

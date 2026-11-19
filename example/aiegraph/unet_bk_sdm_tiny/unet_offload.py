@@ -100,7 +100,7 @@ def offload(a, emod, out: Path):
     nlin_part = sum(1 for L in part["layers"] if L.get("cls") == "linear")
     lin = []
     if "linear" in a.aie.split(","):
-        # PDN: the partition's linear layers (TVM nn_contrib_dense_pack) -> unet_aie_linear, gemm_kacc
+        # PDN: the partition's linear layers (TVM nn_contrib_dense_pack) -> aiednn_aie_linear, gemm_kacc
         lin = [dict(g.info, group=g) for g in emod.match("linear", partition=part, model=onnx_model)]
         for c in lin:
             c["S"], c["pxs"] = ua.kacc_split(c["N"], c["K"], -(-c["M"] // 64) * 64)
@@ -116,7 +116,7 @@ def offload(a, emod, out: Path):
         raise SystemExit("--aie conv,linear needs --kincore (gemm_kacc)")
     att = []
     if "attn" in a.aie.split(","):
-        # GATT: the partition's attention bmm layers (TVM nn_batch_matmul) -> unet_aie_attn, gemm_kacc + runtime pack
+        # GATT: the partition's attention bmm layers (TVM nn_batch_matmul) -> aiednn_aie_attn, gemm_kacc + runtime pack
         natt_part = sum(1 for L in part["layers"] if L.get("cls") == "attn")
         if not natt_part:
             raise SystemExit("--aie conv,linear,attn: partition has no attn layers (autopart --mode attn)")
@@ -240,24 +240,24 @@ def offload(a, emod, out: Path):
             c = by_call[k]
             rd, wr, args = step_io(cg, g, k) if g.info.get("fold") else (c["group"].x, c["group"].y, None)
             if c["kind"] == "linear":
-                steps.append(ag.step("unet_aie_linear", reads=rd, writes=wr, args=args, at=k if args else None,
+                steps.append(ag.step("aiednn_aie_linear", reads=rd, writes=wr, args=args, at=k if args else None,
                                      weights=c["group"].w.as_bf16(layout=lambda w, c=c: ua.kacc_dense_wlayout(
                                          w, c["N"], c["K"], c["pxs"])),
                                      consts=dict(cid=c["cid"], S=c["S"]), call=("cid", "args", "nargs", "wbf", "S"),
-                                     wrap=("UP_AIE_BEGIN", "UP_AIE_END"), tag=f"aie unet_aie_lin {c['cid']}"))
+                                     wrap=("UP_AIE_BEGIN", "UP_AIE_END"), tag=f"aie aiednn_aie_lin {c['cid']}"))
             else:
-                steps.append(ag.step("unet_aie_conv", reads=rd, writes=wr, args=args, at=k if args else None,
+                steps.append(ag.step("aiednn_aie_conv", reads=rd, writes=wr, args=args, at=k if args else None,
                                      weights=c["group"].w.as_bf16(layout=lambda w, c=c: ua.kacc_wlayout(
                                          w, c["N"], c["K"], c["M"])),
                                      consts=dict(cid=c["cid"], sh=c["sh"], sw=c["sw"], ph=c["ph"], pw=c["pw"]),
                                      call=("cid", "args", "nargs", "wbf", "sh", "sw", "ph", "pw"),
-                                     wrap=("UP_AIE_BEGIN", "UP_AIE_END"), tag=f"aie unet_aie_conv {c['cid']}"))
+                                     wrap=("UP_AIE_BEGIN", "UP_AIE_END"), tag=f"aie aiednn_aie_conv {c['cid']}"))
         plan = emod.offload_group(g, kcc, steps=steps,
                                   launch=dict(aie=sum(by_call[k]["launches"] for k in g.calls if k in by_call)))
         nw += sum(s["weights"]["nbytes"] for s in plan.steps)
         ng += 1
-    log(f"aiegraph offload_group: {len(sel)} call steps in {ng} groups ({len(sel) - len(lin)} unet_aie_conv + "
-        f"{len(lin)} unet_aie_linear), WPRE bf16 kacc-layout weights {nw} B (layers/partition.json groups)")
+    log(f"aiegraph offload_group: {len(sel)} call steps in {ng} groups ({len(sel) - len(lin)} aiednn_aie_conv + "
+        f"{len(lin)} aiednn_aie_linear), WPRE bf16 kacc-layout weights {nw} B (layers/partition.json groups)")
     if a.keep_layout:
         nf = 0
         for g in emod.match("dense+silu"):
@@ -283,8 +283,8 @@ def offload(a, emod, out: Path):
     import fa_attn
     emod.driver_template(**bm.driver_glue(fa_attn.DECL_FA + fa_attn.DECL_KL if att else "", attn=bool(att)))
     n = len(sel) + len(att)
-    log(f"graph_driver.c: {n} partition call sites -> unet_aie_conv ({n - len(lin) - len(att)}) + "
-        f"unet_aie_linear ({len(lin)})" + (f" + unet_aie_attn ({len(att)})" if att else "") +
+    log(f"graph_driver.c: {n} partition call sites -> aiednn_aie_conv ({n - len(lin) - len(att)}) + "
+        f"aiednn_aie_linear ({len(lin)})" + (f" + aiednn_aie_attn ({len(att)})" if att else "") +
         " (aiegraph group steps + driver template)")
 
     # gates 3-4 = aiegraph's group-level x86 check (TVM's C vs the step's x86 model, cos >= 0.999,
@@ -304,13 +304,13 @@ def offload(a, emod, out: Path):
 
 
 def check_driver(drv: str, n_patched) -> tuple:
-    """The linked graph_driver.c's (unet_aie_conv, unet_aie_linear, unet_aie_attn) call sites == *n_patched*
-    (an FA group's QK / PV site = unet_aie_attn_kl role 3 (K pack) / role 6 (launch + O))."""
-    nkl = len(re.findall(r"    unet_aie_attn_kl\(\d+, [36], ", drv))
-    got = (drv.count("    unet_aie_conv("), drv.count("    unet_aie_linear("), drv.count("    unet_aie_attn(") + nkl)
+    """The linked graph_driver.c's (aiednn_aie_conv, aiednn_aie_linear, aiednn_aie_attn) call sites == *n_patched*
+    (an FA group's QK / PV site = aiednn_aie_attn_kl role 3 (K pack) / role 6 (launch + O))."""
+    nkl = len(re.findall(r"    aiednn_aie_attn_kl\(\d+, [36], ", drv))
+    got = (drv.count("    aiednn_aie_conv("), drv.count("    aiednn_aie_linear("), drv.count("    aiednn_aie_attn(") + nkl)
     if got != tuple(n_patched):
-        raise SystemExit(f"build FAILED: linked driver has {got} unet_aie_conv/unet_aie_linear/unet_aie_attn "
+        raise SystemExit(f"build FAILED: linked driver has {got} aiednn_aie_conv/aiednn_aie_linear/aiednn_aie_attn "
                          f"call sites, expected {n_patched}")
-    log(f"linked driver: {got[0]} call sites -> unet_aie_conv + {got[1]} -> unet_aie_linear (AIE), "
-        f"weights of those read as bf16 in place" + (f"; {got[2]} -> unet_aie_attn" if got[2] else ""))
+    log(f"linked driver: {got[0]} call sites -> aiednn_aie_conv + {got[1]} -> aiednn_aie_linear (AIE), "
+        f"weights of those read as bf16 in place" + (f"; {got[2]} -> aiednn_aie_attn" if got[2] else ""))
     return got

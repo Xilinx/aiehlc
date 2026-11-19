@@ -1,5 +1,5 @@
 
-/* GFA (--attn-fa): fused flash-attention sites. unet_aie_attn(cid, args, nargs, role, cls): role 0 = the QK^T
+/* GFA (--attn-fa): fused flash-attention sites. aiednn_aie_attn(cid, args, nargs, role, cls): role 0 = the QK^T
  * bmm site (packs Q x log2e and the centred K into the class qk buffer, no launch), role 1 = the PV bmm site
  * (packs V, launches the class kernel units/4 times, writes O f32). The TVM softmax between them is gone. */
 typedef struct {
@@ -339,22 +339,22 @@ static int uc_fa_kl(int role, int k, const float *a, int lda, float *b, int ldb,
     return 0;
 }
 
-extern "C" int unet_aie_attn(int cid, void *args, int nargs, int role, int cls) {
+extern "C" int aiednn_aie_attn(int cid, void *args, int nargs, int role, int cls) {
     g_uc_calls++;
     const int rc = uc_fa((void *const *)args, nargs, role, cls);
     if (rc != 0) {
-        printf("[unet_aie_attn] fa layer %d role %d cls %d rc=%d\n", cid, role, cls, rc);
+        printf("[aiednn_aie_attn] fa layer %d role %d cls %d rc=%d\n", cid, role, cls, rc);
         if (!g_uc_rc)
             g_uc_rc = rc;
     }
     return rc;
 }
-extern "C" int unet_aie_attn_kl(int cid, int role, int cls, const float *a, int lda, float *b, int ldb, float s) {
+extern "C" int aiednn_aie_attn_kl(int cid, int role, int cls, const float *a, int lda, float *b, int ldb, float s) {
     if (role == 3 || role == 6)
         g_uc_calls++; /* one count per original QK / PV site */
     const int rc = uc_fa_kl(role, cls, a, lda, b, ldb, s);
     if (rc != 0) {
-        printf("[unet_aie_attn_kl] fa layer %d role %d cls %d rc=%d\n", cid, role, cls, rc);
+        printf("[aiednn_aie_attn_kl] fa layer %d role %d cls %d rc=%d\n", cid, role, cls, rc);
         if (!g_uc_rc)
             g_uc_rc = rc;
     }

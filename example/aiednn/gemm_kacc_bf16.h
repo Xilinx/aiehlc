@@ -2,7 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Host side of gemm_kacc_bf16.cc (tutorial/aiednn/howto/templatekernel.md):
+ * Host side of the compact gemm_kacc form (tpl_two_instances.cc, tutorial/aiednn/howto/templatekernel.md):
  *   C[M][N] = epilogue(A[M][K] . W[N][K]^T),  bf16 in, fp32 accumulate, bf16 out.
  *
  * Pre-tiling. The kernel loads A and W in chunks of 16 rows x TK columns and

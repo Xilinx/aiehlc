@@ -102,7 +102,7 @@ with open(f"{out}/kacc_data.h", "w") as f:
 print(f"[kacc_bench] data={data} tag={tag}")
 EOF
 
-cp -f "$ROOT/src/aiednn/gemm/bf16_gemm_kacc.cc" "$OUT/bf16_gemm_kacc.cc"
+cp -f "$ROOT/example/aiegraph/unet_bk_sdm_tiny/bench/bf16_gemm_kacc.cc" "$OUT/bf16_gemm_kacc.cc"
 cd "$OUT"
 rm -rf aout
 set +eu
