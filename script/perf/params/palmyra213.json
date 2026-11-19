@@ -1,0 +1,83 @@
+{
+ "aie_clk_mhz": 999.98,
+ "bd_switch_cyc": 1.0,
+ "board": "palmyra213",
+ "ddr_rd_cols": 4,
+ "ddr_rd_gbps": 9.59,
+ "ddr_wr_cols": 4,
+ "ddr_wr_gbps": 8.831,
+ "dm_bank_conflict_cyc": 11.58,
+ "dm_bank_conflict_dma_elapsed_cyc_per_kib": 0.0,
+ "dm_bank_conflict_evt": {
+  "diff": [
+   0,
+   0
+  ],
+  "elapsed_diff": [
+   4132,
+   4132
+  ],
+  "elapsed_same": [
+   4132,
+   4132
+  ],
+  "same": [
+   1482,
+   0
+  ]
+ },
+ "dm_bank_conflict_unit": "CONFLICT_DM_BANK_0 cycles per KiB of bank traffic, 2 MM2S + 2 S2MM streams in one 8 KiB bank minus the 4-bank case; DMA elapsed penalty in dm_bank_conflict_dma_elapsed_cyc_per_kib",
+ "dma_b_per_cyc": 8.0,
+ "dma_first_byte_cyc": 21.0,
+ "dma_points": [
+  [
+   256,
+   53
+  ],
+  [
+   1024,
+   149
+  ],
+  [
+   4096,
+   533
+  ],
+  [
+   8192,
+   1045
+  ],
+  [
+   16384,
+   2069
+  ],
+  [
+   28672,
+   3605
+  ]
+ ],
+ "lock_acq_cyc": 17.0,
+ "lock_chain_extra_cyc_per_bd": 0.0,
+ "lock_handoff_points": {
+  "bytes": 256,
+  "handoff_cyc": 49,
+  "leg_cyc": 53
+ },
+ "log": "/scratch/staff/huaj/tmp/costmodel_mb/palmyra213/run_20261119_145103.log",
+ "path": "baremetal",
+ "pmu_hz": 1316653452,
+ "ss_hop_cyc": 4.0,
+ "ss_hop_points": [
+  [
+   0,
+   53
+  ],
+  [
+   4,
+   69
+  ],
+  [
+   6,
+   77
+  ]
+ ]
+}
