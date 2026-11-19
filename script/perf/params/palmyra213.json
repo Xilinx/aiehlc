@@ -2,10 +2,73 @@
  "aie_clk_mhz": 999.98,
  "bd_switch_cyc": 1.0,
  "board": "palmyra213",
+ "ddr_burst_b_per_cyc": 8.93,
+ "ddr_burst_cyc0": 8.13,
+ "ddr_burst_points": [
+  [
+   32,
+   11.699
+  ],
+  [
+   64,
+   13.833
+  ],
+  [
+   128,
+   24.701
+  ],
+  [
+   256,
+   36.054
+  ]
+ ],
+ "ddr_burst_stride": 4096,
+ "ddr_burst_unit": "AIE cycles per burst (memtile S2MM task time slope over n bursts), shim MM2S 2-D BD, 4 KiB stride",
+ "ddr_log": "/scratch/staff/huaj/tmp/costmodel_mb/palmyra213/ddr/run_20261119_152505.log",
  "ddr_rd_cols": 4,
- "ddr_rd_gbps": 9.59,
+ "ddr_rd_cols_points": [
+  [
+   1,
+   5.737
+  ],
+  [
+   2,
+   9.736
+  ],
+  [
+   3,
+   9.895
+  ],
+  [
+   4,
+   9.301
+  ]
+ ],
+ "ddr_rd_gbps": 9.301,
+ "ddr_rd_gbps_best": 9.821,
+ "ddr_rd_reps": 9,
  "ddr_wr_cols": 4,
- "ddr_wr_gbps": 8.831,
+ "ddr_wr_cols_points": [
+  [
+   1,
+   6.097
+  ],
+  [
+   2,
+   8.403
+  ],
+  [
+   3,
+   8.238
+  ],
+  [
+   4,
+   9.422
+  ]
+ ],
+ "ddr_wr_gbps": 9.422,
+ "ddr_wr_gbps_best": 9.525,
+ "ddr_wr_reps": 9,
  "dm_bank_conflict_cyc": 11.58,
  "dm_bank_conflict_dma_elapsed_cyc_per_kib": 0.0,
  "dm_bank_conflict_evt": {
