@@ -155,3 +155,12 @@ def test_des_import():
     op = {"instance": _inst(), "host": {"bd_us": 5.0}}
     r = rl.roofline(op, dict(_HAND_PARAMS), {"core_cyc": 1000})
     assert isinstance(r, dict)
+
+
+def test_des_ddr_model_select():
+    # cal key ddr_model="bytes" overrides the per-burst DDR model even when the params carry the burst microbenchmark
+    p = dict(_HAND_PARAMS, ddr_burst_cyc0=8.0, ddr_burst_b_per_cyc=8.0)
+    assert des.burst_model(p) and not des.burst_model(dict(p, ddr_model="bytes"))
+    op = {"instance": _inst(), "host": {"bd_us": 5.0}}
+    d = des.predict_launch(op, dict(p, ddr_model="bytes"), {"core_cyc": 1000})
+    assert d["wait_ms"] == pytest.approx(des.predict_launch(op, dict(_HAND_PARAMS), {"core_cyc": 1000})["wait_ms"])
