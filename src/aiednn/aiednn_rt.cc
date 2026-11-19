@@ -29,6 +29,7 @@
 #include "aiednn_rt_internal.h"
 #include "aiednn_rt_phead.h" /* dequantized sources (attr.src_scales on layer norm / softmax / sdpa) */
 #include "aiednn_rt_gemm.h"
+#include "aiednn_rt_eager.h" /* eager mode: one kernel instance per layer shape */
 #include "aiednn_rt_ntile.h"
 #include "aiednn_rt_dwn.h"
 #include "aiednn_rt_itemsn.h"
@@ -40,6 +41,8 @@
 #include "aiednn_rt_pool.h"
 #include "aie_modes_lut.h"
 #include "aiednn_rt_lut.h"
+#include "aiednn_rt_eager_lut.h"  /* eager mode: table lookups on the lut template */
+#include "aiednn_rt_eager_norm.h" /* eager mode: layer / RMS norm rows on the lnorm template */
 #include "aiednn_rt_eltblk.h"
 #include "aiednn_rt_red.h"
 #include "aiednn_rt_steps.h"
@@ -93,7 +96,8 @@ static const char *kind_str(aiednn_primitive_kind_t k) {
                                   "rope",
                                   "gen_index",
                                   "dynamic_quantize",
-                                  "linear_attention"};
+                                  "linear_attention",
+                                  "custom"};
     return (int)k >= 1 && (int)k < (int)(sizeof names / sizeof names[0]) ? names[k] : "?";
 }
 
@@ -163,6 +167,7 @@ static int acc_sp_densify(const rt_impl *self, const rt_prob *p, rt_bind *bind, 
 static int run_sp_densify(const rt_impl *self, aiednn_primitive *prim, void *const *ptr);
 static int run_ref_sparse_mm(const rt_impl *self, aiednn_primitive *prim, void *const *ptr);
 static int run_ref_slice(const rt_impl *self, aiednn_primitive *prim, void *const *ptr); /* aiednn_rt_slice.h */
+static int run_ref_custom(const rt_impl *self, aiednn_primitive *prim, void *const *ptr); /* aiednn_rt_custom.h */
 static int run_ref_gmlp(const rt_impl *self, aiednn_primitive *prim, void *const *ptr);  /* aiednn_rt_fused.h */
 static int acc_gx_gmlp(const rt_impl *self, const rt_prob *p, rt_bind *bind, char *why, int cap);
 static int run_gx_gmlp(const rt_impl *self, aiednn_primitive *prim, void *const *ptr);
@@ -217,8 +222,9 @@ static void rt_init(void) {
     char name[64];
     for (int i = 0; i < aiednn_impl_count; i++) {
         const aiednn_impl_t *g = &aiednn_impl_list[i];
-        add_impl(g->name, g->kind, g->specificity, acc_gen, run_gen, g);
-        if (is_gemm_block(g)) {
+        if (strncmp(g->name, "aie:eager_", 10)) /* an eager instance runs only through its eager: impl */
+            add_impl(g->name, g->kind, g->specificity, acc_gen, run_gen, g);
+        if (is_gemm_block(g) && !is_eager_inst(g)) { /* an eager instance serves only its own shape (eager:mm) */
             snprintf(name, sizeof name, "blocked:%s", g->name);
             add_impl(name, aiednn_matmul, 0, acc_blocked, run_blocked, g);
         }
@@ -297,6 +303,64 @@ static void rt_init(void) {
             snprintf(name, sizeof name, "dwblk:%s", g->name);
             add_impl(name, aiednn_convolution, 1, acc_dwblk, run_dwblk, g);
             g_impls[g_nimpls - 1].caps = RT_CAP_NHWC; /* items gather / scatter nhwc channels (dw_item) */
+        }
+    }
+    for (int i = 0; i < aiednn_impl_count; i++)
+        if (is_eager_inst(&aiednn_impl_list[i])) { /* eager mode: the instance of the layer's exact shape */
+            add_impl("eager:mm", aiednn_matmul, 2, acc_eager_mm, run_blocked, nullptr);
+            break;
+        }
+    for (int i = 0; i < aiednn_impl_count; i++) {
+        rt_eager_q q;
+        if (rt_eager_q_of(&aiednn_impl_list[i], &q)) { /* eager mode, requant on the core (gemm_q instances) */
+            add_impl("eager:mmq", aiednn_matmul, 3, acc_eager_mmq, run_eager_mmq, nullptr);
+            add_impl("eager:convq", aiednn_convolution, 3, acc_eager_convq, run_eager_convq, nullptr);
+            break;
+        }
+    }
+    for (int i = 0; i < aiednn_impl_count; i++) {
+        rt_eager_rope q;
+        if (rt_eager_rope_of(&aiednn_impl_list[i], &q)) { /* eager mode: rotary position embedding (rope instances) */
+            add_impl("eager:rope", aiednn_rope, 3, acc_eager_rope, run_eager_rope, nullptr);
+            break;
+        }
+    }
+    for (int i = 0; i < aiednn_impl_count; i++) {
+        rt_eager_lnorm q;
+        if (rt_eager_lnorm_of(&aiednn_impl_list[i], &q)) { /* eager mode: layer / RMS norm rows (lnorm instances) */
+            add_impl("eager:lnorm", aiednn_layer_normalization, 3, acc_eager_lnorm, run_eager_lnorm, nullptr);
+            break;
+        }
+    }
+    for (int i = 0; i < aiednn_impl_count; i++) {
+        rt_eager_quant q;
+        if (rt_eager_quant_of(&aiednn_impl_list[i], &q)) { /* eager mode: f32 -> 8-bit quantize (quant instances) */
+            add_impl("eager:quant", aiednn_reorder, 3, acc_eager_quant, run_eager_quant, nullptr);
+            break;
+        }
+    }
+    for (int i = 0; i < aiednn_impl_count; i++) {
+        rt_eager_lut q;
+        if (rt_eager_lut_of(&aiednn_impl_list[i], &q)) { /* eager mode: per-channel 8-bit functions (lut instances) */
+            static const aiednn_primitive_kind_t kinds[] = {aiednn_eltwise, aiednn_prelu, aiednn_batch_normalization,
+                                                            aiednn_binary, aiednn_reorder};
+            for (aiednn_primitive_kind_t k : kinds)
+                add_impl("eager:lut", k, 3, acc_eager_lut, run_eager_lut, nullptr);
+            break;
+        }
+    }
+    for (int i = 0; i < aiednn_impl_count; i++) {
+        rt_eager_dw q;
+        if (rt_eager_dw_of(&aiednn_impl_list[i], &q)) { /* eager mode: depthwise + requant (dwconv_q instances) */
+            add_impl("eager:dwq", aiednn_convolution, 3, acc_eager_dwq, run_eager_dwq, nullptr);
+            break;
+        }
+    }
+    for (int i = 0; i < aiednn_impl_count; i++) {
+        rt_eager_pool q;
+        if (rt_eager_pool_of(&aiednn_impl_list[i], &q)) { /* eager mode: 8-bit pooling (pool instances) */
+            add_impl("eager:pool", aiednn_pooling, 3, acc_eager_pool, run_eager_pool, nullptr);
+            break;
         }
     }
     add_impl("nhwc:pooling", aiednn_pooling, 0, acc_nhwc_pool, run_nhwc_pool, nullptr); /* aiednn_rt_layout.h */
@@ -384,6 +448,7 @@ static void rt_init(void) {
         {"ref:gen_index", aiednn_gen_index, run_ref_gen_index},
         {"ref:dynamic_quantize", aiednn_dynamic_quantize, run_ref_dynq},
         {"ref:linear_attention", aiednn_linear_attention, run_ref_linattn},
+        {"ref:custom", aiednn_custom, run_ref_custom},
     };
     for (unsigned i = 0; i < sizeof refs / sizeof refs[0]; i++)
         add_impl(refs[i].name, refs[i].kind, -1, acc_any, refs[i].run, nullptr);
@@ -1339,6 +1404,7 @@ extern "C" aiednn_status_t aiednn_pooling_forward_create_attr(aiednn_primitive_t
 #include "aiednn_rt_sparse.h"     /* CSR src matmul: densify+ (AIE GEMM) and ref: */
 #include "aiednn_rt_ptail.h"      /* post-ops on non-GEMM primitives */
 #include "aiednn_rt_slice.h"      /* strided sub-tensor copy */
+#include "aiednn_rt_custom.h"     /* a user operator run on the host (framework custom ops) */
 #include "aiednn_rt_fused.h"      /* gated MLP, RoPE */
 #include "aiednn_rt_dynq.h"       /* gen_index, dynamic quantize / dequantize */
 #include "aiednn_rt_deconvbwd.h"  /* deconvolution backward as convolutions */

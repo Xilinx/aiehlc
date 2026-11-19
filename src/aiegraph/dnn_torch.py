@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import operator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -506,12 +507,57 @@ class _Lowerer:
 
     # functions / methods -----------------------------------------------------
     def function(self, node, fn):
+        from .dnn_export import is_custom_op
+        if is_custom_op(fn):
+            return self.custom(node, fn)
         return _lower_call(self, node, getattr(fn, "__name__", str(fn)), [self.val(a) for a in node.args],
                            {k: self.val(v) for k, v in node.kwargs.items()})
+
+    def custom(self, node, fn):
+        """a framework custom op: aiednn_custom_create, the user's function run on the host (dnn_custom)"""
+        srcs = [self.val(a) for a in node.args]
+        if not srcs or not all(isinstance(v, _Tid) for v in srcs) or node.kwargs:
+            raise AiegraphError("dnn_torch", f"{node.name}: custom op {custom_op_name(fn)} with non-tensor arguments "
+                                "is not supported (tensor arguments only)")
+        tm = node.meta.get("tensor_meta")
+        dt = _TORCH_DT.get(str(getattr(tm, "dtype", None)))
+        if dt is None:
+            raise AiegraphError("dnn_torch", f"{node.name}: custom op output dtype {getattr(tm, 'dtype', None)}")
+        y = self.g.new(self.shape(node), dt)
+        ins = [int(v) for v in srcs]
+        self.g.op(node.name, "aiednn_custom_create", [("int", len(ins)), ("mds", ins), ("md", y),
+                                                       ("custom", custom_op_name(fn))],
+                  [(("multi", i), t) for i, t in enumerate(ins)] + [("DST", y)], y)
+        return _Tid(y)
 
     def method(self, node, name):
         return _lower_call(self, node, name, [self.val(a) for a in node.args],
                            {k: self.val(v) for k, v in node.kwargs.items()})
+
+
+#: torch dtypes a custom op may return, by name (torch is imported lazily here)
+_TORCH_DT = {"torch.float32": "f32", "torch.int8": "s8", "torch.uint8": "u8", "torch.int32": "s32"}
+
+
+def custom_op_name(fn) -> str:
+    """the qualified name a custom op is carried by through AGraph / MLIR / C: ns::op.overload"""
+    return f"{fn.namespace}::{fn._schema.name.split('::')[-1]}.{fn._overloadname}"
+
+
+def custom_op(name: str):
+    """the torch OpOverload of a qualified custom-op name"""
+    import torch
+    ns, rest = name.split("::")
+    op, ov = rest.split(".")
+    return getattr(getattr(getattr(torch.ops, ns), op), ov)
+
+
+def _custom_callback(name: str):
+    """the workstation executor's aiednn_custom_fn_t: the custom op run through PyTorch itself"""
+    import torch
+    from .dnn_ctypes import custom_fn
+    op = custom_op(name)
+    return custom_fn(lambda ins: op(*[torch.from_numpy(np.ascontiguousarray(a)) for a in ins]).numpy())
 
 
 class _Tid(int):
@@ -1084,6 +1130,10 @@ def run_ctypes(g: AGraph, lib, x=None, keep: bool = False):
                 a = (C.c_int64 * len(item[1]))(*item[1])
                 keepalive.append(a)
                 cargs.append(a)
+            elif k == "custom":                    # the user's function: here the op through PyTorch
+                cb = _custom_callback(item[1])
+                keepalive.append(cb)
+                cargs += [cb, C.c_void_p()]
             elif k == "mds":
                 arr = (type(md((1,), "f32")) * len(item[1]))(*[md(g.tensors[t].shape, g.tensors[t].dt) for t in item[1]])
                 keepalive.append(arr)
@@ -1159,7 +1209,7 @@ def _int_gemm(g: AGraph, op: Op) -> bool:
 
 
 def emit_app(g: AGraph, out: Path, golden: np.ndarray, tol: float, float_top1: int = -1,
-             verify_gemm: bool = True, autotune=None, prefer: str = "aie") -> Path:
+             verify_gemm: bool = True, autotune=None, prefer: str = "aie", custom_sources=()) -> Path:
     """C app running *g* through aiednn on the x86 / board build, checking the output
     against *golden* (rel L2 < *tol* and the same top-1). *verify_gemm*: re-run every
     integer conv / deconv / matmul on ref: with the same inputs and compare bit for bit
@@ -1178,6 +1228,7 @@ def emit_app(g: AGraph, out: Path, golden: np.ndarray, tol: float, float_top1: i
     aoff, arena = (g.plan, g.arena) if g.plan is not None else _plan_memory(g)
     check = max([int(np.prod(g.tensors[op.out].shape)) * 4 for op in g.ops if _int_gemm(g, op)] + [64])
     lines = _app_head(g, out, arena, gold_off, int(np.prod(golden.shape)), tol, float_top1)
+    lines[lines.index("#include <string.h>") + 1:lines.index("#include <string.h>") + 1] = _custom_includes(g, out, custom_sources)
     lines.insert(lines.index(f"#define FLOAT_TOP1 {float_top1}"),   # images: one top-1 per row of [batch, classes]
                  f"#define BATCH {golden.shape[0] if golden.ndim >= 2 else 1}")
     lines += [f"#define VERIFY_GEMM {int(verify_gemm)}",
@@ -1194,6 +1245,36 @@ def emit_app(g: AGraph, out: Path, golden: np.ndarray, tol: float, float_top1: i
     path = out / f"{g.name}_app.cc"
     path.write_text("\n".join(lines) + "\n")
     return path
+
+
+def custom_c_symbol(name: str) -> str:
+    """the C function implementing custom op *name* (ns::op.overload): aiednn_custom_<ns>_<op>_<overload>"""
+    return "aiednn_custom_" + re.sub(r"\W", "_", name.replace("::", "_").replace(".", "_"))
+
+
+CUSTOM_SIGNATURE = ("int {sym}(int nsrc, const aiednn_memory_desc_t *srcs, const void *const *src_data, "
+                    "const aiednn_memory_desc_t *dst, void *dst_data, void *ctx)")
+
+
+def _custom_includes(g: AGraph, out: Path, custom_sources) -> list:
+    """the user's C implementations of the graph's custom ops: each source copied next to the app as a header
+    (the board build copies the app dir's *.h; the x86 build includes it) and every op's symbol checked"""
+    need = sorted({custom_c_symbol(i[1]) for op in g.ops for i in op.create if i[0] == "custom"})
+    if not need:
+        return []
+    lines, text = ["/* framework custom ops, run on the host (aiednn_custom_create) */"], ""
+    for src in custom_sources:
+        src = Path(src)
+        hdr = out / f"custom_{src.stem}.h"
+        hdr.write_text(src.read_text())
+        text += hdr.read_text()
+        lines.append(f'#include "{hdr.name}"')
+    missing = [s for s in need if not re.search(rf"\b{s}\s*\(", text)]
+    if missing:
+        raise AiegraphError("dnn_torch", f"{g.name}: no C implementation of custom op(s) {', '.join(missing)}",
+                            hint="pass custom_sources=[file.c] defining " + "; ".join(
+                                CUSTOM_SIGNATURE.format(sym=s) for s in missing))
+    return lines + [""]
 
 
 def _app_head(g, out, arena, gold_off, ngold, tol, float_top1) -> list:
@@ -1267,6 +1348,8 @@ def _c_op(g: AGraph, i: int, op: Op, int_gemm: bool = False) -> list:
         elif k == "i64s":
             pre.append(f"        static const int64_t c{j}[] = {{{', '.join(map(str, item[1]))}}};")
             cargs.append(f"c{j}")
+        elif k == "custom":                   # the user's C function (emit_app's custom_sources), no context
+            cargs += [custom_c_symbol(item[1]), "nullptr"]
         elif k == "mds":
             pre.append(f"        static const aiednn_memory_desc_t c{j}[] = {{"
                        + ", ".join(_c_md(g.tensors[t]) for t in item[1]) + "};")

@@ -107,6 +107,7 @@ typedef enum {
     aiednn_gen_index = 31,        /* the index along an axis */
     aiednn_dynamic_quantize = 32, /* quantize / dequantize with scales / zero points given at execute */
     aiednn_linear_attention = 33, /* gated delta rule: Gated DeltaNet, KDA, gated linear attention */
+    aiednn_custom = 34,           /* a user operator: dst = fn(srcs), run on the host */
 } aiednn_primitive_kind_t;
 
 typedef enum {
@@ -588,6 +589,16 @@ aiednn_status_t aiednn_linear_attention_create(aiednn_primitive_t *p, const aied
                                                const aiednn_memory_desc_t *gate, const aiednn_memory_desc_t *beta,
                                                const aiednn_memory_desc_t *state_in, const aiednn_memory_desc_t *dst,
                                                const aiednn_memory_desc_t *state_out, float scale, unsigned flags);
+
+/* ── custom operator ───────────────────────────────────────────────────────
+ * A user operator with no aiednn primitive (a framework's opaque custom op): dst = fn(srcs), run on the host
+ * CPU between the primitives around it. fn gets the sources' and dst's descriptors and buffers (dense,
+ * row-major) and ctx; it returns 0 on success, anything else fails the execute. Execute args:
+ * AIEDNN_ARG_MULTIPLE_SRC + i (i < nsrc), AIEDNN_ARG_DST. Any data types; 1..AIEDNN_MAX_SRCS sources. */
+typedef int (*aiednn_custom_fn_t)(int nsrc, const aiednn_memory_desc_t *srcs, const void *const *src_data,
+                                  const aiednn_memory_desc_t *dst, void *dst_data, void *ctx);
+aiednn_status_t aiednn_custom_create(aiednn_primitive_t *p, int nsrc, const aiednn_memory_desc_t *srcs,
+                                     const aiednn_memory_desc_t *dst, aiednn_custom_fn_t fn, void *ctx);
 
 /* ── CTC loss ──────────────────────────────────────────────────────────────
  * SRC: log-probabilities [T, N, C] (log-softmax over C, blank = class 0), LABELS s32 [N, Lmax],

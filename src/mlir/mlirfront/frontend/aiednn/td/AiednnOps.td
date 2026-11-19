@@ -230,6 +230,18 @@ def Aiednn_ConcatOp : Aiednn_Op<"concat", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Aiednn_CustomOp : Aiednn_Op<"custom", []> {
+  let summary = "a user operator run on the host: result = name(srcs)";
+  let description = [{
+    A framework custom op aiednn has no primitive for (aiednn_custom_create): the model compiler keeps it as a
+    call of the user's C function `name` on the host. Not Pure: the function is opaque, so two calls are never
+    merged and an unused one is not dropped.
+  }];
+  let arguments = (ins Variadic<Aiednn_Tensor>:$srcs, StrAttr:$name);
+  let results = (outs Aiednn_Tensor:$result);
+  let assemblyFormat = "$srcs prop-dict attr-dict `:` functional-type(operands, results)";
+}
+
 def Aiednn_SumOp : Aiednn_Op<"sum", [Pure]> {
   let summary = "y = sum_i scales[i] * srcs[i]";
   let arguments = (ins Variadic<Aiednn_Tensor>:$srcs, DenseF32ArrayAttr:$scales);

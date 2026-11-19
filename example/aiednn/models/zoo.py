@@ -100,8 +100,20 @@ class MixerHead(nn.Module):
         return F.softmax(self.fc(y), dim=-1)
 
 
+class Mlp(nn.Module):
+    """eager mode's first model: three Linear layers (N = 64, the eager GEMM template's fixed N) with ReLU;
+    64 input rows, so every layer is one M = 64 instance with no padding"""
+
+    def __init__(self, k: int = 256, n: int = 64):
+        super().__init__()
+        self.l1, self.l2, self.l3 = nn.Linear(k, n), nn.Linear(n, n), nn.Linear(n, n)
+
+    def forward(self, x):
+        return self.l3(F.relu(self.l2(F.relu(self.l1(x)))))
+
+
 CUSTOM = {"tiny_vit": (TinyViT, (1, 3, 32, 32)), "tiny_unet": (TinyUNet, (1, 3, 32, 32)),
-          "mixer_head": (MixerHead, (1, 3, 32, 32))}
+          "mixer_head": (MixerHead, (1, 3, 32, 32)), "mlp": (Mlp, (64, 256))}
 
 
 # ── benchmark models (doc/design/aiednn.md section 34): the common cases the library's optimized

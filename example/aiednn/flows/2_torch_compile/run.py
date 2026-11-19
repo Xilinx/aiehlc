@@ -57,7 +57,7 @@ def run_compile(m, x, model: str) -> int:
 
 def run_export(m, x, a) -> int:
     from aiegraph import dnn_export
-    out = OUT / f"flow2_export_{a.model}_{a.mode}"
+    out = OUT / (f"flow2_export_{a.model}_{a.mode}" + (f"_eager_{a.eager}" if a.eager else ""))
     out.mkdir(parents=True, exist_ok=True)
     if a.pt2:                                  # a program exported earlier (torch.export.save)
         ep = torch.export.load(a.pt2)
@@ -67,7 +67,8 @@ def run_export(m, x, a) -> int:
         torch.export.save(ep, out / f"{a.model}.pt2")
         print(f"exported: {out / f'{a.model}.pt2'}")
     rep, g, _ = dnn_export.compile_exported(ep, x, mode=a.mode, name=a.model, target=a.target, out=out,
-                                            vitis_settings=a.vitis_settings, top1_range=getattr(m, "top1_range", None))
+                                            vitis_settings=a.vitis_settings, top1_range=getattr(m, "top1_range", None),
+                                            eager=a.eager)
     print(g.summary())
     if rep.ok and (a.target == "x86" or a.board):   # the program is built; running it is a separate step
         dnn_export.run(rep, board=a.board)
@@ -87,6 +88,10 @@ def main() -> int:
     ap.add_argument("--export", action="store_true", help="torch.export -> the model compiler -> a C app / board ELF")
     ap.add_argument("--pt2", default=None, help="compile a saved ExportedProgram (implies --export)")
     ap.add_argument("--mode", default="int8", choices=["f32", "int8"])
+    ap.add_argument("--eager", nargs="?", const="library", default=None, choices=["library", "plan"],
+                    help="--export: eager mode -- every layer on a template kernel instance loaded right before it "
+                         "runs; 'library' (default) the premade template library, 'plan' instances generated for "
+                         "this model's shapes")
     ap.add_argument("--target", default="x86", choices=["x86", "vek280", "vek385"])
     ap.add_argument("--board", default=None, help="run the built ELF on this board (a non-x86 --target)")
     ap.add_argument("--vitis-settings", default=None)
