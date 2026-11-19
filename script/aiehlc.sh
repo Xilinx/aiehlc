@@ -861,8 +861,15 @@ if [ ${GPP_RC:-1} -ne 0 ]; then
     return ${GPP_RC}
 fi
 if [ "${DEBUG_SYMS}" -eq 0 ]; then
-    echo "Stripping extra ELF symbols..."
+    # Keep the full ELF next to the stripped one (same contract as
+    # hostcompile.sh): rt_result/heap-hook checks and addr2line on a board
+    # fault need the symbols of the exact binary that ran.
+    cp -f $HOST_BUILD_DIR/main.elf $HOST_BUILD_DIR/main.debug.elf
+    echo "Stripping extra ELF symbols (full symbols kept in main.debug.elf)..."
     ${TOOL_PREFIX}strip $HOST_BUILD_DIR/main.elf
+else
+    # main.elf already has symbols; drop a stale debug copy from an earlier build.
+    rm -f $HOST_BUILD_DIR/main.debug.elf
 fi
 
 echo "Build complete."
