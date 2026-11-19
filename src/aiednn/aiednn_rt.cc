@@ -50,6 +50,7 @@
 #include "aiednn_rt_sdpa.h"
 #include "aie_modes_bf16.h"
 #include "aiednn_rt_bf16.h"
+#include "aiednn_rt_eager_float.h" /* eager mode: float matmul on the gemm_bf16 template */
 #include "aiednn_rt_wq.h"
 #include "aie_modes_fpool.h"
 #include "aie_modes_fvec.h"
@@ -224,7 +225,7 @@ static void rt_init(void) {
         const aiednn_impl_t *g = &aiednn_impl_list[i];
         if (strncmp(g->name, "aie:eager_", 10)) /* an eager instance runs only through its eager: impl */
             add_impl(g->name, g->kind, g->specificity, acc_gen, run_gen, g);
-        if (is_gemm_block(g) && !is_eager_inst(g)) { /* an eager instance serves only its own shape (eager:mm) */
+        if (is_gemm_block(g) && strncmp(g->name, "aie:eager_", 10)) { /* eager instances: only their eager: impl */
             snprintf(name, sizeof name, "blocked:%s", g->name);
             add_impl(name, aiednn_matmul, 0, acc_blocked, run_blocked, g);
         }
@@ -315,6 +316,14 @@ static void rt_init(void) {
         if (rt_eager_q_of(&aiednn_impl_list[i], &q)) { /* eager mode, requant on the core (gemm_q instances) */
             add_impl("eager:mmq", aiednn_matmul, 3, acc_eager_mmq, run_eager_mmq, nullptr);
             add_impl("eager:convq", aiednn_convolution, 3, acc_eager_convq, run_eager_convq, nullptr);
+            break;
+        }
+    }
+    for (int i = 0; i < aiednn_impl_count; i++) {
+        rt_eager_bf q;
+        if (rt_eager_bf_of(&aiednn_impl_list[i], &q)) { /* eager mode: float matmul (gemm_bf16 instances) */
+            add_impl("eager:bf16", aiednn_matmul, 3, acc_eager_bf16, run_eager_bf16, nullptr);
+            add_impl("eager:bf16x3", aiednn_matmul, 3, acc_eager_bf16x3, run_eager_bf16x3, nullptr);
             break;
         }
     }

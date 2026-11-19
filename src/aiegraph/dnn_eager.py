@@ -258,6 +258,13 @@ def as_dwconv(g, i: int) -> tuple:
 
 #: lut: one instance per model serves every per-channel function of one 8-bit value (the runtime builds the
 #: tables with ref: on all 256 codes, so it is exact) and uses the largest M x N present
+BF16_PARAMS = (64, 64, 128, 32, 16)  # gemm_bf16<M, N, K, TK, TM>: one instance tiles every float GEMM (board-proven)
+#: float GEMM-family work: these creates with an f32 / bf16 source reach the AIE through eager:bf16 / bf16x3
+FLOAT_GEMM_FNS = ("aiednn_matmul_forward_create", "aiednn_matmul_forward_create_attr",
+                  "aiednn_inner_product_forward_create", "aiednn_inner_product_forward_create_attr",
+                  "aiednn_convolution_forward_create", "aiednn_convolution_forward_create_attr",
+                  "aiednn_deconvolution_forward_create", "aiednn_deconvolution_forward_create_attr")
+FLOAT_COMPOSITE_WORDS = ("sdpa", "rnn", "lstm", "gru", "gated_mlp", "linear_attention")
 LUT_PARAMS = (256, 128, 32)        # M, N, TM (N in {64, 128}; TM >= N / 4)
 LUT_FAMILIES = ("aiednn_eltwise_forward", "aiednn_prelu_forward", "aiednn_batch_normalization_forward",
                 "aiednn_binary", "aiednn_reorder")
@@ -390,7 +397,8 @@ TEMPLATES = {"gemm_s8": ("gemm_s8_eager_kernel.cc", "gemm_s8_eager_ref.h", "int3
              "lut": ("lut_eager_kernel.cc", "lut_eager_ref.h", "int8_t"),
              "quant": ("quant_eager_kernel.cc", "quant_eager_ref.h", "int8_t"),
              "lnorm": ("lnorm_eager_kernel.cc", "lnorm_eager_ref.h", "int8_t"),
-             "rope": ("rope_eager_kernel.cc", "rope_eager_ref.h", "int8_t")}
+             "rope": ("rope_eager_kernel.cc", "rope_eager_ref.h", "int8_t"),
+             "gemm_bf16": ("gemm_bf16_eager_kernel.cc", "gemm_bf16_eager_ref.h", "int32_t")}
 GEMM_TEMPLATES = ("gemm_s8", "gemm_q", "gemm_qr")
 COMMON_HEADER = "eager_common.h"
 KERNEL_HEADER = TEMPLATES["gemm_s8"][0]
@@ -430,6 +438,13 @@ def _emit(i: Instance) -> dict:
                 f'out   int8  [{M},{N}]  dst\\n"')
         return dict(sig="int8_t *A, int8_t *W, int8_t *Y", launch=f"lut<{M}, {N}, {TM}><<<mesh>>>(A, W, Y)",
                     entry=f"{M}, {N}", ref=f"{M}, {N}", spec=spec)
+    if i.template == "gemm_bf16":
+        M, N, K, TK, TM = i.params
+        spec = (f'"kernel    eager_{i.name}\\nop        gemm_s8s32\\nmatch     dense\\nreference {REF_FILE}\\n'
+                f'target    vek280\\nin    int8  [{M},{2 * K}]  src\\nparam int8  [{N},{2 * K}]  weight\\n'
+                f'out   int32 [{M},{N}]  dst\\n"')
+        return dict(sig="int8_t *A, int8_t *W, int32_t *C", launch=f"gemm_bf16<{M}, {N}, {K}, {TK}, {TM}><<<mesh>>>(A, W, C)",
+                    entry=f"{M}, {N}, {K}", ref=f"{M}, {N}, {K}, {TK}", spec=spec)
     if i.template == "rope":
         R, D, TR, IN = i.params
         spec = (f'"kernel    eager_{i.name}\\nop        pool\\nmatch     conv2d\\nreference {REF_FILE}\\n'
@@ -520,11 +535,31 @@ def write_sources(p: EagerPlan, out) -> Path:
     return entry
 
 
+def float_gemm_candidate(g, op) -> bool:
+    """a float GEMM-family op (f32 / bf16 matmul, inner product, conv, deconv) or an f32 composite built on a
+    float GEMM (attention, RNN, gated MLP, linear attention): served by the gemm_bf16 instance"""
+    try:
+        src = g.tensors[_create_md(op, 0)].dt
+    except Exception:
+        return False
+    if src not in ("f32", "bf16"):
+        return False
+    if op.fn in FLOAT_GEMM_FNS:
+        return g.tensors[_create_md(op, 1)].dt in ("f32", "bf16")
+    return any(w in op.fn for w in FLOAT_COMPOSITE_WORDS)
+
+
 def plan(g, model: "str | None" = None) -> EagerPlan:
     """the instance list of AGraph *g*: every GEMM-family layer either joins the instance of its padded
     shape or is refused with a reason"""
     by_key, refused, seen, other = {}, [], 0, 0
     for i, op in enumerate(g.ops):
+        if float_gemm_candidate(g, op):      # one gemm_bf16 instance tiles every float GEMM (eager:bf16 / bf16x3)
+            seen += 1
+            inst = by_key.setdefault(("gemm_bf16",) + BF16_PARAMS,
+                                     Instance(0, 0, 0, 0, BF16_PARAMS[-1], "gemm_bf16", BF16_PARAMS))
+            inst.ops.append(dict(op=i, name=op.name, kind="float_gemm"))
+            continue
         pparams, why = as_pool(g, i)
         if pparams is not None:
             other += 1
@@ -634,6 +669,7 @@ LIBRARY = (
     ("quant", 128, 64, 0, 16), ("quant", 128, 64, 1, 16),         # f32 -> s8 / u8 (the input quantize)
     ("lnorm", 128, 768, 2, 0), ("lnorm", 128, 768, 2, 1),         # layer / RMS norm rows <= 768 f32
     ("rope", 128, 64, 8, 0), ("rope", 128, 64, 8, 1),             # RoPE, head dim 64, half-split / interleaved
+    ("gemm_bf16",) + BF16_PARAMS,                                  # float matmul (bf16; f32 as bf16x3) + f32 composites
 )
 
 

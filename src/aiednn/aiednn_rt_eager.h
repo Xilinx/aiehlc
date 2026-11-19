@@ -12,7 +12,10 @@
 #ifndef AIEDNN_RT_EAGER_H
 #define AIEDNN_RT_EAGER_H
 
-static int is_eager_inst(const aiednn_impl_t *g) { return strncmp(g->name, "aie:eager_", 10) == 0 && is_gemm_block(g); }
+/* a gemm_s8 instance (gemm_bf16's spec has the same s8 / s8 / s32 signature: bf16 as bytes, f32 bits out) */
+static int is_eager_inst(const aiednn_impl_t *g) {
+    return strncmp(g->name, "aie:eager_gemm_s8__", 19) == 0 && is_gemm_block(g);
+}
 
 static int64_t eager_blk_launches(const aiednn_impl_t *e, int64_t M, int64_t N, int64_t K) {
     const int64_t bm = e->args[0].dims[0], bn = e->args[1].dims[0], bk = e->args[0].dims[1];
