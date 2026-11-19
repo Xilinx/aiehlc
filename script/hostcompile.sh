@@ -554,10 +554,16 @@ echo ""
 # start. Such a source is meant to be embedded in a larger program, so archive
 # the objects into a static library instead and let the caller supply main().
 #
-# Detect the entry point from the GENERATED host.cc: `int main()` is a
+# Detect the entry point from the GENERATED host.cc: `int main(...)` is a
 # user-written main passed through verbatim, `void main()` is the MLIR-only
 # emission that the fixups below promote to `int main()`. Neither => library.
-if grep -q 'int main()' "${WORKLOCAL_DIR}/host.cc"; then
+# Match any signature -- `int main()`, `int main(void)`, `int main(int argc,
+# char **argv)` -- not only the literal `int main()`: before this, a source with
+# `int main(int, char**)` was silently archived as a library on baremetal (exit
+# 0, no main.elf). Anchored at line start so a comment mentioning main() is not
+# taken for a definition.
+HOST_USER_MAIN_RE='^[[:space:]]*int[[:space:]]+main[[:space:]]*\('
+if grep -Eq "${HOST_USER_MAIN_RE}" "${WORKLOCAL_DIR}/host.cc"; then
     HOST_ENTRY_KIND="user-main"
 elif grep -q 'void main()' "${WORKLOCAL_DIR}/host.cc"; then
     HOST_ENTRY_KIND="mlir-main"
@@ -588,7 +594,7 @@ echo ""
 # Fix generated host.cc for C++: forward decl, int main(), return 0 in main, __global__
 HOST_FIXED="${BUILD_DIR}/host_fixed.cc"
 if [ "${HOST_ENTRY_KIND}" = "user-main" ]; then
-    # User source already provides int main() — only add __global__ define
+    # User source already provides int main(...) — only add __global__ define
     sed -e '/#include "aie_runtime.h"/a\
 #define __global__
 ' \
