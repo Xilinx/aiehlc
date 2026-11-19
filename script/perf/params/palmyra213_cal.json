@@ -1,7 +1,10 @@
 {
- "b_overlap_cyc": 75434.0101,
- "chunk_ovh_cyc": 57.09,
- "ddr_bw_scale": 2.037,
+ "b_prefetch_b": 177898.8887,
+ "chunk_ovh_cyc": 58.42,
+ "compute_exposed": 0.0014,
+ "ddr_bw_scale": 1.5312,
+ "ddr_model": "bytes",
+ "ddr_run0_b": 44.5968,
  "fitted_on": [
   "u_conv_1024x2880x320",
   "u_conv_256x2880x640",
@@ -23,7 +26,6 @@
  ],
  "meas": "rt_wait_io",
  "n": 17,
- "round_fixed_cyc": 49365.1925,
- "round_ovh_cyc": 67.76,
+ "round_fixed_cyc": 17311.6877,
  "src_params": "/scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj/.worktrees/costmodel/script/perf/params/palmyra213.json"
 }

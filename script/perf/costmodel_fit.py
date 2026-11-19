@@ -11,14 +11,15 @@ board (palmyra213) per-kernel logs of script/perf/p0_one_kernel.sh.
 * measured value: rt_wait_io of the LAUNCH split_detail line (per launch, ms), NOT wait_io (that adds host_inval).
 * --rerun-kernel first re-runs the first kernels.tsv row live on the board (p0_one_kernel.sh) and adds that fresh
   point (kind=rerun) to the table; it is predicted, not used for calibration.
-* calibration (CAL_DEFAULTS keys of des.py), 5 constants (cal_params=):
-  - chunk_ovh_cyc, round_ovh_cyc: NNLS of DES compute (ISS core_cyc + ovh) against the board compute counters
-    (--kboard board_compute.json: median over launch tags of max-tile active - lock_stall - stream_stall);
-  - ddr_bw_scale (per-burst DDR: achieved / independent-column burst time), round_fixed_cyc and b_overlap_cyc
-    (wait-window start: fixed per-round latency, AIE work done before the host's wait starts per b-port share)
-    by minimax of |log(pred/meas)| over the stored kernels.
-  Written to --cal-out (default params/<board>_kcal.json).  Overfit guard: leave-one-kernel-out refit of all 5
-  constants, loo_maxrel = max held-out |pred/meas - 1| (printed on the COSTMODEL line).
+* calibration (CAL_DEFAULTS keys of des.py), 6 constants (cal_params=), DDR model bytes-only (cal ddr_model=bytes):
+  - chunk_ovh_cyc: least squares (relative) of DES compute (ISS core_cyc + ovh * chunks) against the board compute
+    counters (--kboard board_compute.json: median over launch tags of max-tile active - lock_stall - stream_stall);
+  - ddr_bw_scale, ddr_run0_b (achieved DDR bandwidth and per-run overhead of the shim BD run), b_prefetch_b (b-port
+    bytes streamed while the host still issues the round), round_fixed_cyc (fixed per-round latency) and
+    compute_exposed (share of core compute on the wait-window critical path) by minimax of |log(pred/meas)| over
+    the stored kernels.
+  Written to --cal-out (default params/<board>_kcal.json).  Overfit guard: leave-one-kernel-out refit of all 6
+  constants, loo_maxrel = max held-out |pred/meas - 1| (printed on the COSTMODEL line, also with --cal).
 """
 from __future__ import annotations
 
@@ -42,7 +43,8 @@ from aiegraph.costmodel.roofline import roofline  # noqa: E402
 
 BOARD_RE = re.compile(r"^BOARD machine=(\S+) midr=(0x[0-9a-f]+) board=(\S+)$")
 KTSV = "/scratch/staff/huaj/aiengineers/arthur/tasks/2026-11-19_costmodel/kernels.tsv"
-CAL_KEYS = ("chunk_ovh_cyc", "round_ovh_cyc", "ddr_bw_scale", "round_fixed_cyc", "b_overlap_cyc")
+CAL_KEYS = ("chunk_ovh_cyc", "ddr_bw_scale", "ddr_run0_b", "b_prefetch_b", "round_fixed_cyc", "compute_exposed")
+DDR_MODEL = "bytes"
 
 
 def board_marker(path):
@@ -75,7 +77,7 @@ def load_point(path, kern, kind, name=None):
 
 
 def nnls_compute(points, params):
-    """chunk_ovh_cyc, round_ovh_cyc >= 0 minimising the relative error of DES compute vs board compute."""
+    """chunk_ovh_cyc >= 0 minimising the relative error of DES compute vs board compute."""
     import numpy as np
     from scipy.optimize import nnls
     pts = [p for p in points if p["board_compute_cyc"]]
@@ -83,31 +85,33 @@ def nnls_compute(points, params):
     for p in pts:
         g = des.geometry(p["op"])
         w = 1.0 / p["board_compute_cyc"]
-        X.append([g["chunks"] * w, g["R"] * w])
+        X.append([g["chunks"] * w])
         y.append((p["board_compute_cyc"] - p["cycles"]["core_cyc"]) * w)
     coef, _ = nnls(np.array(X), np.array(y))
-    return {"chunk_ovh_cyc": round(float(coef[0]), 2), "round_ovh_cyc": round(float(coef[1]), 2)}
+    return {"chunk_ovh_cyc": round(float(coef[0]), 2)}
 
 
 def fit_wait(points, params, cal):
-    """ddr_bw_scale, round_fixed_cyc, b_overlap_cyc by minimax |log(pred/meas)| (+ 0.5 mean square)."""
+    """ddr_bw_scale, ddr_run0_b, b_prefetch_b, round_fixed_cyc, compute_exposed by minimax |log(pred/meas)|
+    (+ 0.5 mean square), bytes-only DDR model."""
     import numpy as np
     from scipy.optimize import minimize
 
     def unpack(x):
         c = dict(cal)
-        c.update({"round_fixed_cyc": x[0] * 1e3, "ddr_bw_scale": abs(x[1]), "b_overlap_cyc": x[2] * 1e3})
+        c.update({"round_fixed_cyc": abs(x[0]) * 1e3, "ddr_bw_scale": abs(x[1]), "ddr_run0_b": abs(x[2]),
+                  "compute_exposed": min(1.0, abs(x[3])), "b_prefetch_b": abs(x[4]) * 1e3})
         return c
 
     def obj(x):
-        p2 = dict(params)
+        p2 = dict(params, ddr_model=DDR_MODEL)
         p2.update(unpack(x))
         e = np.array([math.log(max(des.predict_launch(p["op"], p2, p["cycles"])["wait_ms"], 1e-9) / p["meas_ms"])
                       for p in points])
         return float(np.max(np.abs(e)) + 0.5 * np.mean(e ** 2))
 
     best = None
-    for x0 in ([0.0, 2.0, 0.0], [40.0, 2.0, 60.0], [10.0, 1.5, 20.0], [50.0, 2.0, 75.0]):
+    for x0 in ([17.0, 1.5, 45.0, 0.01, 178.0], [20.0, 1.5, 40.0, 0.3, 100.0], [40.0, 1.0, 20.0, 0.7, 0.0]):
         x = list(x0)
         for _rs in range(6):  # Nelder-Mead restarts from the incumbent (the minimax objective is not smooth)
             o = minimize(obj, x, method="Nelder-Mead", options={"maxiter": 3000, "maxfev": 3000, "xatol": 1e-6,
@@ -123,7 +127,7 @@ def fit_wait(points, params, cal):
 
 
 def calibrate(points, params):
-    return fit_wait(points, params, nnls_compute(points, params))
+    return dict(fit_wait(points, params, nnls_compute(points, params)), ddr_model=DDR_MODEL)
 
 
 def loo_maxrel(points, params):
@@ -131,7 +135,7 @@ def loo_maxrel(points, params):
     worst = 0.0
     for i, q in enumerate(points):
         rest = [p for p in points if p["kernel"] != q["kernel"]]
-        p2 = dict(params)
+        p2 = dict(params, ddr_model=DDR_MODEL)
         p2.update(calibrate(rest, params))
         rel = abs(des.predict_launch(q["op"], p2, q["cycles"])["wait_ms"] / q["meas_ms"] - 1.0)
         print("[fit] loo %-26s rel=%.3f" % (q["kernel"], rel))
@@ -249,6 +253,8 @@ def main():
     print("[fit] cal " + " ".join("%s=%s" % (k, cal[k]) for k in sorted(cal) if k in des.CAL_DEFAULTS))
     p2 = dict(params)
     p2.update({k: v for k, v in cal.items() if k in des.CAL_DEFAULTS})
+    if "ddr_model" in cal:
+        p2["ddr_model"] = cal["ddr_model"]
     cal_params = len([k for k in cal if k in des.CAL_DEFAULTS])
     print("[fit] ddr model=%s (ddr_burst_cyc0=%s ddr_burst_b_per_cyc=%s)" % (
         "per-burst" if des.burst_model(p2) else "bytes-only", p2.get("ddr_burst_cyc0"), p2.get("ddr_burst_b_per_cyc")))
@@ -300,7 +306,7 @@ def main():
     st = [abs(p["pred"]["stall_ms"] - p["board_stall_cyc"] / clk_khz) * 1e3 for p in rows if p["board_stall_cyc"]]
     print("[fit] report DES stall vs board lock+stream stall: abs err max=%.1f us mean=%.1f us n=%d "
           "(board stall includes core idle during host issue; profiling on)" % (max(st), sum(st) / len(st), len(st)))
-    loo = loo_maxrel(points, params) if not a.cal else float("nan")
+    loo = loo_maxrel(points, params)
     print("COSTMODEL K fit: R2=%.3f maxrel=%.3f n=%d kernels=%d logs=%d board_logs=%d meas=rt_wait_io"
           " cal_params=%d loo_maxrel=%.3f" % (r2, mr, len(rows), kernels, n_logs, n_board, cal_params, loo))
     print("DES compute: maxrel=%.3f n=%d src=perfctr" % (cmr, len(comp)))

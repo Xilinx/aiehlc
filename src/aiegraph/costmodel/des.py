@@ -36,7 +36,11 @@ Terms:
             stream (BDs issued first) and the cores already run.  Only the DES timeline after the wait start is
             predicted: per round max(0, round + round_fixed_cyc - overlap - b_overlap_cyc * b/(a+b)), b/(a+b) = the
             b-port share of the round's bytes (S/(S+1)); sum over rounds.
-Calibrated keys (script/perf/costmodel_fit.py, defaults = uncalibrated physics): CAL_DEFAULTS.
+Calibrated keys (script/perf/costmodel_fit.py, defaults = uncalibrated physics): CAL_DEFAULTS.  The palmyra213
+calibration (K2c) uses 6: chunk_ovh_cyc (compute), ddr_bw_scale + ddr_run0_b (bytes-only DDR, ddr_model="bytes"),
+b_prefetch_b, round_fixed_cyc and compute_exposed.  compute_exposed calibrates to ~0: inside the host's wait window
+the round is DDR-tail-limited; the board PERFIO split (R=1 yolo launches) shows >=88 % of the core compute runs
+before the host enters __Runtime_wait_io, i.e. hidden behind the host BD issue.
 """
 from __future__ import annotations
 
@@ -92,7 +96,11 @@ def ddr_eff_bpc(op: Dict[str, Any], params: Dict[str, Any]) -> float:
 
 
 def burst_model(params: Dict[str, Any]) -> bool:
-    return "ddr_burst_cyc0" in params and "ddr_burst_b_per_cyc" in params
+    """Per-burst DDR model only if the params carry the burst microbenchmark and the calibration does not select the
+    bytes-only model (cal key ddr_model="bytes": the single-column strided-burst time does not transfer to the
+    concurrent 4-column kacc traffic on palmyra213, K2c: maxrel 0.309 per-burst vs 0.190 bytes-only)."""
+    return params.get("ddr_model", "burst") != "bytes" and "ddr_burst_cyc0" in params and \
+        "ddr_burst_b_per_cyc" in params
 
 
 def ddr_burst_cyc(op: Dict[str, Any], params: Dict[str, Any]) -> float:
