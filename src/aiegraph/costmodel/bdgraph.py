@@ -205,6 +205,13 @@ def _interp_cols(points: List[List[float]], n: int) -> float:
     return pts[-1][1]
 
 
+# Host issue cost per BD config (us) for the bdgraph form, per board.  palmyra213: median of
+# (bdcfg+startio ms) / measured bdcfg calls over Arthur's 17 kacc kernels (k_pred_vs_meas.tsv, profiling on);
+# leave-one-out median |rel| of launch ~ issue + ddr_floor = 7.4%, same as in-sample.  Conv kernels run
+# 6.5-9.5 us (issue blocks when DMA per config is slower); see xiaojiang/tasks/2026-11-20_ddr-floor-vs-meas.
+BD_US_FIT = {"palmyra213": 5.67}
+
+
 def ddr_floor(ddr: Optional[Dict[str, Any]], params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Lower bound in AIE cycles for moving one launch's shim bytes -- report only, never added to total_ms.
 

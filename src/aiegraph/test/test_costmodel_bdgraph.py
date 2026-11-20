@@ -222,3 +222,32 @@ def test_given_the_maxwell_2k_mesh_build_on_palmyra213_then_the_floor_is_read_bo
     fl = bdgraph.ddr_floor(bdgraph.features(REAL)["ddr_bytes"], board_params("palmyra213"))
     # 512 KiB read over 4 shim cols at the 4-col point 9.301 GB/s = 56.4 us; stream 8192 cyc, write 7.8k cyc
     assert fl["bound"] == "rd" and fl["ms"] == pytest.approx(524288 / 9.301e6, rel=1e-3)
+
+
+def test_given_no_bd_us_on_palmyra213_then_the_board_fit_prices_issue(tmp_path, cycles_file):
+    d = _write(tmp_path, LOOPED, [_bd(0, 256)], HOST)
+    r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "aot_window"}}], cycles=cycles_file)
+    op = r["ops"][0]
+    assert op["bd_us"] == bdgraph.BD_US_FIT["palmyra213"] == 5.67 and op["bd_us_source"] == "board_fit"
+    assert r["issue_ms"] == pytest.approx(17 * 5.67 / 1e3) and "host_bd_us" not in r["unpriced"]
+
+
+def test_given_an_op_bd_us_then_it_wins_over_the_board_fit(tmp_path, cycles_file):
+    d = _write(tmp_path, LOOPED, [_bd(0, 256)], HOST)
+    r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "aot_window"},
+                   "host": {"bd_us": 2.0}}], cycles=cycles_file)
+    assert r["ops"][0]["bd_us_source"] == "op" and r["issue_ms"] == pytest.approx(17 * 2.0 / 1e3)
+
+
+def test_given_a_board_without_a_fit_and_no_bd_us_then_issue_stays_unpriced(tmp_path, cycles_file):
+    d = _write(tmp_path, LOOPED, [_bd(0, 256)], HOST)
+    prm = estimate_mod_board_params()
+    r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "aot_window"}}],
+                 board="other_board", params=prm, cycles=cycles_file)
+    assert r["issue_ms"] is None and "host_bd_us" in r["unpriced"]
+
+
+def estimate_mod_board_params():
+    import sys as _s
+    return {k: v for k, v in _s.modules["aiegraph.costmodel.estimate"].board_params("palmyra213").items()
+            if k not in ("bdgraph_bd_us", "host_bd_us")}
