@@ -23,7 +23,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__aarch64__) && !defined(__chess__)
 #include <arm_neon.h>
+#define UC_NEON 1
+#else
+#define UC_NEON 0
+#endif
 
 #ifndef __AIESIM__
 #include "xil_cache.h"
@@ -47,6 +52,7 @@ static int uc_zva64(void) {
     }
     return z;
 }
+#if UC_NEON
 /* GHL: in-place 4x4 fp32 transpose (rows r0..r3 -> columns) */
 static inline void uc_tr4(float32x4_t &r0, float32x4_t &r1, float32x4_t &r2, float32x4_t &r3) {
     const float32x4x2_t t01 = vtrnq_f32(r0, r1), t23 = vtrnq_f32(r2, r3);
@@ -227,6 +233,11 @@ static int uc_scatter16(const float *Ys, int P, int N, int tr, int mbase, int mv
     return (int)vaddvq_u32(badv);
 }
 /* ---- end of copy ---- */
+#else /* non-aarch64 front-end parse of this file (aiehlc.sh): never run on the board */
+static int uc_scatter16(const float *, int, int, int, int, int, float *, int, int, const float *const *, const int *, int) {
+    return -1; /* -> chk=BAD */
+}
+#endif
 
 #define YBYTES 2621440u
 #define YWORDS (YBYTES / 4u)
