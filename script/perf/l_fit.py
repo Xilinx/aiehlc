@@ -9,7 +9,10 @@
       (kload_w is 11 on every aot point -> collinear with const).  Non-const features that are constant over
       a cfg's points are unidentifiable and get coef 0.  off-cold is skipped when no DIR has it (one-DIR runs
       on M1-L/kernels behave as before).
-      Prints  LFIT cfg=<cfg> board=<b> n=<n> r2=%.3f maxrel=%.3f loo_maxrel=%.3f
+      A DIR may also be a source leaf itself (basename off|off-reload|off-alt|aot|...); with only leaf DIRs,
+      cfgs without logs are skipped instead of failing.  off-alt (two kernels alternating on the same tiles,
+      core_reset every launch) is an off source that makes rst identifiable (M1.2.2 P2c).
+      Prints  LFIT cfg=<cfg> board=<b> n=<n> r2=%.3f maxrel=%.3f loo_maxrel=%.3f kload_w=%.4e rst=%.4e
       and writes a reproducible JSON (sort_keys, fixed decimals, no paths/timestamps).
   l_fit.py --check-unet CFG=LOG [...] [--params JSON]
       apppaltest UNet logs (no BOARD line): board/launches from 'CMP unet board=.. aie_launches=.. run_rc=0',
@@ -61,7 +64,21 @@ def _fit(X, y):
     return np.round(coef, ND)
 
 
-SOURCES = {"off": ("off", "off-reload")}  # off-reload is a dir alias only, no LFIT line of its own
+SOURCES = {"off": ("off", "off-reload", "off-alt")}  # off-reload/off-alt are dir aliases only, no LFIT line of their own
+# off-alt (M1.2.2 P2b): two kernels alternating on the same tiles -> core_reset every launch; makes rst identifiable
+
+
+def src_logs(d, src):
+    """DIR/<src>/*.log, or DIR/*.log when DIR itself is the <src> leaf (basename == src)."""
+    d = Path(d)
+    if d.name == src and any(d.glob("*.log")):
+        return sorted(d.glob("*.log"))
+    return sorted((d / src).glob("*.log"))
+
+
+def is_leaf(d):
+    d = Path(d)
+    return d.name in {s for v in SOURCES.values() for s in v} | set(CFGS) and any(d.glob("*.log"))
 FIXED0 = {"aot": ("kload_w", "rst"), "aot-kco": ("kload_w", "rst")}
 COLD_FREE = ("const", "kload_w")
 BASE_CFGS = ("off", "aot", "aot-kco")  # always reported (fa539124); others only when some DIR has them
@@ -171,8 +188,9 @@ def main():
             logs = []  # (src, path), union over all DIRs
             for d in a.kernels:
                 for src in SOURCES.get(cfg, (cfg,)):
-                    logs += [(src, lg) for lg in sorted((Path(d) / src).glob("*.log"))]
-            if not logs and cfg not in BASE_CFGS:
+                    logs += [(src, lg) for lg in src_logs(d, src)]
+            leaf_only = all(is_leaf(d) for d in a.kernels)  # leaf DIRs: report only the cfgs they hold
+            if not logs and (cfg not in BASE_CFGS or leaf_only):
                 continue
             names = [f"{src}/{lg.stem}" for src, lg in logs]
             if len(set(names)) != len(names):
@@ -197,7 +215,8 @@ def main():
                 pr = float(np.dot(feature_row(p["calls"], p["words"]), coef))
                 print(f"  {cfg:8s} {nm:35s} kload_w={p['words']['kload_w']:7.1f} rst={p['calls']['core_reset']:5.2f} "
                       f"meas={p['l_meas']:.4f} pred={pr:.4f} rel={abs(pr - p['l_meas']) / p['l_meas']:.3f}")
-            print(f"LFIT cfg={cfg} board={a.board} n={len(pts)} r2={r2:.3f} maxrel={maxrel:.3f} loo_maxrel={loo:.3f}")
+            print(f"LFIT cfg={cfg} board={a.board} n={len(pts)} r2={r2:.3f} maxrel={maxrel:.3f} loo_maxrel={loo:.3f} "
+                  f"kload_w={coef[FEATURES.index('kload_w')]:.4e} rst={coef[FEATURES.index('rst')]:.4e}")
             out["cfg"][cfg] = {"coef": {k: float(f"{v:.{ND}f}") for k, v in zip(FEATURES, coef)},
                                "n": len(pts), "r2": float(f"{r2:.3f}"), "maxrel": float(f"{maxrel:.3f}"),
                                "loo_maxrel": float(f"{loo:.3f}"),
