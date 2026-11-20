@@ -45,15 +45,14 @@
                ph[1] * cms / nl, ph[3] * cms / nl, wio * cms / nl, sp_glue * cms / nl, sp_pre * cms / nl,
                sp_post * cms / nl, sp_call * cms / nl, rt_ms, sum_ms, aie_ms, (aie_ms - sum_ms) / nl, pmc1 - pmc0,
                g_s);
-#if defined(AIEHLC_PROFILING) && AIEHLC_PROFILING
-        /* M1.1 launch words per launch since boot (aie_runtime.c __Runtime_launch_words) */
+        /* M1.1 launch words per launch since boot (aie_runtime.c __Runtime_launch_words: always defined, zeros
+         * without AIEHLC_PROFILING). No #if here: main.c is not compiled with the runtime EXTRA_DEFS. */
         unsigned long long wm = 0, wc = 0, wp[4] = {0, 0, 0, 0}, wx = 0;
         unsigned int wbd = 0, wrs = 0;
         __Runtime_launch_words(&wm, &wc, wp, &wbd, &wrs, &wx);
         printf("LAUNCH split_words mmio_w=%.1f cp_w=%.1f bd_n=%.1f rst_n=%.1f kload_w=%.1f bdcfg_w=%.1f startio_w=%.1f coreen_w=%.1f\n",
                (double)wm / nl, (double)wc / nl, (double)wbd / nl, (double)wrs / nl, (double)wp[0] / nl,
                (double)wp[1] / nl, (double)wp[3] / nl, (double)wp[2] / nl);
-#endif
         fflush(stdout);
     }
 #endif

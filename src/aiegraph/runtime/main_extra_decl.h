@@ -8,6 +8,7 @@ void __Runtime_phase_cycles(unsigned long long *cyc, unsigned int *calls) __asm_
 void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls) __asm__("_Z24__Runtime_wait_io_cyclesPyPj");
 void __Runtime_kload_split_cycles(unsigned long long *elf_cyc, unsigned int *elf_n, unsigned long long *rst_cyc, unsigned int *rst_n) __asm__("_Z28__Runtime_kload_split_cyclesPyPjS_S0_");
 void __Runtime_setup_split_cycles(unsigned long long *plan_cyc, unsigned int *plan_n, unsigned long long *sync_cyc, unsigned int *sync_n) __asm__("_Z28__Runtime_setup_split_cyclesPyPjS_S0_");
+void __Runtime_launch_words(unsigned long long *mmio_w, unsigned long long *cp_w, unsigned long long *ph_w, unsigned int *bd_n, unsigned int *rst_n, unsigned long long *other_w) __asm__("_Z22__Runtime_launch_wordsPyS_S_PjS0_S_");
 unsigned long long __Runtime_ctrl_aot_fallbacks(void) __asm__("_Z28__Runtime_ctrl_aot_fallbacksv");
 void __Runtime_ctrl_shim_bd_ctrl_stats_print(void) __asm__("_Z39__Runtime_ctrl_shim_bd_ctrl_stats_printv");
 /* A78 PMU cycle counter (the runtime's RT_PROF_* clock): enabled here without the C reset, read
