@@ -615,7 +615,10 @@ def kacc_geom(ch: int, k: int, px: int) -> dict:
     tr = 2 * (16 * tkw * 4 + (px // 4) * tkw * 4 + 16 * (px // 4) * 4) > 29696
     if tr:
         tkw = 32
-        while (ch // 4) * tkw > 1024 or (k // 2) % tkw:
+        # KACC_TR_TKW_CAP (costmodel run-size probe, default 1024 words): cap on the transposed b window ch/4 x tkw;
+        # a heuristic (aiehlc maxBufferBytes default), not a hardware limit -- Maxwell peer:1120041418-5e63e7
+        cap = int(_os.environ.get("KACC_TR_TKW_CAP", "1024"))
+        while (ch // 4) * tkw > cap or (k // 2) % tkw:
             tkw //= 2
     assert tkw >= 4 and (k // 2) % tkw == 0, (ch, k, px, tkw)
     # K padded by one zero chunk when the W port would be square (ch == k/2 words): aiehlc's GemmSpace
