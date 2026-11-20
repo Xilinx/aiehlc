@@ -13,7 +13,7 @@ RT = Path(__file__).resolve().parents[1]
 ROOT = RT.parents[2]
 sys.path.insert(0, str(ROOT / "example/aiegraph/unet_bk_sdm_tiny"))
 import kacc_gemm as kg  # noqa: E402
-import unet_aie as ua  # noqa: E402
+from aiegraph import kaccbench as ua  # noqa: E402
 
 SRC = r"""
 #include "aie_kacc_pack.h"

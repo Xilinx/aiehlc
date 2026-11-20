@@ -296,7 +296,10 @@ def test_no_aie_sites_total_zero():
 def test_kernel_sources_wired():
     assert ua.HOST_CC.count('extern "C" void aiednn_aie_host_split_site(int site)') == 1
     assert ua.HOST_CC.count('extern "C" int aiednn_aie_host_split_line(int site') == 1
-    for host, kind in ((ua.KACC_HOST, "AHS_KIND_CONV"), (ua.LINEAR_HOST, "AHS_KIND_LINEAR"),
+    import aiednn   # the kacc conv / linear host glue aiegraph.kincore assembles
+    kacc_host = "".join(aiednn.template(t) for t in ("conv2d/kacc_conv_host_head.cc", "layout/neon_tr4_f32.cc",
+                                                     "conv2d/kacc_conv_host.cc"))
+    for host, kind in ((kacc_host, "AHS_KIND_CONV"), (aiednn.template("gemm/kacc_linear_host.cc"), "AHS_KIND_LINEAR"),
                        (ua.ATTN_HOST, "AHS_KIND_ATTN")):
         assert f"ahs_begin(&g_ahs, {kind});" in host
         for ph in ("AHS_PACK", "AHS_SCATTER"):
@@ -308,6 +311,8 @@ def test_kernel_sources_wired():
     assert "__Runtime_host_split_wait_ticks" in ua.HOST_CC
     rt = (RT / "aie_runtime.c").read_text()
     assert "void __Runtime_host_split_wait_ticks(" in rt and "g_hs_wait_ticks += ahs_now() - __hs_t0;" in rt
-    src = Path(ua.__file__).read_text()
-    assert src.count('"export    aiednn_aie_host_split_site\\\\n"') == 2
-    assert src.count('"export    aiednn_aie_host_split_line\\\\n"') == 2
+    src = Path(ua.__file__).read_text()     # the 64x64 writer (unet_aie.write_kernel) + the kacc one (aiegraph.kincore)
+    assert src.count('"export    aiednn_aie_host_split_site\\\\n"') == 1
+    assert src.count('"export    aiednn_aie_host_split_line\\\\n"') == 1
+    from aiegraph import kincore
+    assert {"aiednn_aie_host_split_site", "aiednn_aie_host_split_line"} <= set(kincore.EXPORTS_TAIL)

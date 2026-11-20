@@ -78,7 +78,10 @@ def _template_refs(py: Path):
 
 
 def test_example_templates_resolve():
-    refs = [(py, *r) for d in EXAMPLES for py in sorted(d.glob("*.py")) for r in _template_refs(py)]
+    # unet-decl P3: the examples are going declaration-only -- the template references moved with the source
+    # assembly into src/aiegraph (flashattn / attnsite / kincore / cnn), so both are scanned
+    pys = [py for d in EXAMPLES for py in sorted(d.glob("*.py"))] + sorted((REPO / "src" / "aiegraph").glob("*.py"))
+    refs = [(py, *r) for py in pys for r in _template_refs(py)]
     assert len(refs) >= 30, refs
     cats = set()
     for py, f, name in refs:

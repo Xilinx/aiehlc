@@ -11,7 +11,6 @@ x86 only. The UNet tests need onnx + the bk-sdm-tiny export and skip without the
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -38,10 +37,9 @@ def _shapes():
 
 def _example_kacc_geom():
     pytest.importorskip("numpy")
-    spec = importlib.util.spec_from_file_location("aiednn_aie_ex", UNET_DIR / "unet_aie.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.kacc_geom
+    # unet-decl P4d: the example's unet_aie.py (whose kacc_geom delegated here) is gone; d5e9f15 has it
+    from aiegraph.kaccbench import kacc_geom
+    return kacc_geom
 
 
 def test_tile_mode_counts_every_tile():
@@ -79,7 +77,7 @@ def test_bad_mode():
 
 @pytest.mark.skipif(not PARTITION.is_file(), reason="no unet partition.json")
 def test_kincore_geom_matches_example_kacc_geom():
-    """the planner IS the board-proven walk of unet_aie.kacc_geom (example keeps using it)"""
+    """the planner IS the board-proven walk of aiegraph.kaccbench.kacc_geom (the bench uses it)"""
     kacc_geom = _example_kacc_geom()
     shapes = _shapes()
     assert len(shapes) >= 10

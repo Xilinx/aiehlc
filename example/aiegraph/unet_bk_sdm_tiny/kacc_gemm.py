@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""PDK: kacc_bench.sh --gemm -- the K-in-core gemm_kacc kernel (aiednn gemm/gemm_kacc_kernel.cc template, unet_aie.KACC_KERNEL) as a dense GEMM.
+"""PDK: kacc_bench.sh --gemm -- the K-in-core gemm_kacc kernel (aiednn gemm/gemm_kacc_kernel.cc template, aiegraph.kaccbench.KACC_KERNEL) as a dense GEMM.
 
   kacc_gemm.py <op_golden matmul dir> <out dir>   -> <out>/kacc_gemm.cc + kacc_{w,x,y}.bin + kacc_data.h
 
 Golden dir: a.npy [1, M, K] f32, b.npy [K, N] f32, y.npy [1, M, N] f32, meta.json (op_golden p0 MatMul).
-Mapping onto gemm_kacc(ch, k, px) (Y[ch][px] = W[ch, :] . X[px, :], see unet_aie.kacc_geom):
+Mapping onto gemm_kacc(ch, k, px) (Y[ch][px] = W[ch, :] . X[px, :], see aiegraph.kaccbench.kacc_geom):
   ch = N (out features, W = b^T [N][K]), px = M padded to a multiple of 64 (zero rows, not compared), k = K.
 If one instance does not fit the core (kacc_geom asserts: the fp32 accumulator window is too big), the GEMM is
 split into S launches of one instance, along px first (X rows contiguous), then along ch (W rows contiguous).
@@ -47,7 +47,7 @@ def _bench_render(name: str, **kv) -> str:
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import unet_aie as ua  # noqa: E402
+from aiegraph import kaccbench as ua  # noqa: E402
 
 
 def bf16(a):  # round to nearest even
@@ -77,7 +77,7 @@ def plan(N, K, Mp):
 
 def layout(rows_bf16, kp, kch, wside):
     """natural [R][kp] bf16 -> kacc chunk layout: 16-row block, chunk j at j*kch of each row, in-chunk flat
-    f = hi*8*kch + kb*64 + (W: mm*8 + kk | X: kk*8 + nn)  (unet_aie.kacc_wlayout / uc_conv im2col table)"""
+    f = hi*8*kch + kb*64 + (W: mm*8 + kk | X: kk*8 + nn)  (aiegraph.wlayout.kacc_wlayout / uc_conv im2col table)"""
     R = rows_bf16.shape[0]
     t = rows_bf16.reshape(R // 16, 2, 8, kp // kch, kch // 8, 8)       # blk hi lo j kb kk
     t = t.transpose(0, 3, 1, 4, 2, 5) if wside else t.transpose(0, 3, 1, 4, 5, 2)

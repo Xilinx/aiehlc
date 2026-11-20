@@ -1,4 +1,4 @@
-"""GAP-B x86 test: partition.json ``keep_layout`` on the bk-sdm-tiny UNet (unet_aie.keep_layout_plan,
+"""GAP-B x86 test: partition.json ``keep_layout`` on the bk-sdm-tiny UNet (aiegraph.fold.keep_layout_plan,
 build_unet.keep_layout_step, aiegraph.partition.plan_keep_layout).
 
 1. test_no_field_unchanged: the shipped partition.json (no keep_layout) -> keep_layout_step returns None, writes
@@ -12,7 +12,8 @@ build_unet.keep_layout_step, aiegraph.partition.plan_keep_layout).
    host Transpose+Reshape result (bit-identical, no data movement); nchw is not -> plan rejects it.
 4. test_unet_host_consumer_rejected: same row with the consumers left on the host -> AiegraphError naming the
    LayerNormalization (today's partition cannot keep the layout there; never silently ignored).
-Run: python3 -m pytest -q example/aiegraph/unet_bk_sdm_tiny/test_layout_keep.py   (numpy, onnx)
+Moved from example/aiegraph/unet_bk_sdm_tiny/ (unet-decl P3).
+Run: python3 -m pytest -q src/aiegraph/test/test_layout_keep.py   (numpy, onnx)
 """
 import json
 import os
@@ -24,10 +25,11 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-sys.path.insert(0, str(HERE))
+EX = ROOT / "example" / "aiegraph" / "unet_bk_sdm_tiny"   # unet_offload.keep_layout_step, partition.json
+sys.path.insert(0, str(EX))
 sys.path.insert(0, str(ROOT / "src"))
 import unet_offload as bu  # noqa: E402
-import unet_aie as ua  # noqa: E402
+from aiegraph.fold import keep_layout_plan  # noqa: E402
 from aiegraph.errors import AiegraphError  # noqa: E402
 
 ONNX = Path(os.environ.get("GATT_ONNX", "/scratch/staff/huaj/modelzoo/artifacts/bk-sdm-tiny/unet_sim.onnx"))
@@ -46,11 +48,11 @@ def model():
 
 
 def test_no_field_unchanged(tmp_path):
-    part = json.loads((HERE / "partition.json").read_text())
+    part = json.loads((EX / "partition.json").read_text())
     assert not any("keep_layout" in L for L in part["layers"])
     layers = [dict(onnx=L["node"], cid=L["idx"]) for L in part["layers"]]
     before = json.dumps(layers)
-    assert bu.keep_layout_step(ua, ONNX, part, layers, tmp_path / "o") is None
+    assert bu.keep_layout_step(ONNX, part, layers, tmp_path / "o") is None
     assert json.dumps(layers) == before and not (tmp_path / "o").exists()
 
 
@@ -62,7 +64,7 @@ def _part():
 @need_onnx
 def test_unet_proj_in_kept(model, tmp_path, capsys):
     layers = [dict(onnx=PROJ_IN, cid=2), dict(onnx=NORM1, cid=100), dict(onnx=RES, cid=101)]
-    keep = bu.keep_layout_step(ua, model, _part(), layers, tmp_path)
+    keep = bu.keep_layout_step(model, _part(), layers, tmp_path)
     assert keep["kept"] == 1 and keep["label_ops"] == 2
     e = keep["edges"][0]
     assert e["node"] == PROJ_IN and e["layout"] == "nhwc"
@@ -91,11 +93,11 @@ def test_unet_proj_in_label_proof(model):
     p = _part()
     p["layers"][0]["keep_layout"] = True                                     # nchw -> needs a real transpose
     with pytest.raises(AiegraphError, match="moves data|real transpose"):
-        ua.keep_layout_plan(model, p)
+        keep_layout_plan(model, p)
 
 
 @need_onnx
 def test_unet_host_consumer_rejected(model):
     p = {"layers": [_part()["layers"][0]]}
     with pytest.raises(AiegraphError, match="LayerNormalization.*host"):
-        ua.keep_layout_plan(model, p)
+        keep_layout_plan(model, p)

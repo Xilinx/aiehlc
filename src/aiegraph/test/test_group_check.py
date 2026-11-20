@@ -200,10 +200,9 @@ def unet_net():
 
 
 def test_carrier_layer_group_check(unet_net, tmp_path):
-    sys.path.insert(0, str(UNET_EX))
-    import unet_aie as ua
+    import aiednn
     ref = tmp_path / "aiek_unetconv_ref.c"
-    ref.write_text(ua.REF_C.replace("@E@", ua.ENTRY))
+    ref.write_text(aiednn.template("conv2d/conv_bf16_carrier_ref.c").replace("@E@", "aiek_unetconv"))
     kp = _carrier_kp(unet_net, ref)
     layer_checker()(unet_net, [kp], True)
     assert kp.selected == [14] and not kp.rejected, kp.rejected
@@ -212,10 +211,10 @@ def test_carrier_layer_group_check(unet_net, tmp_path):
 
 
 def test_carrier_layer_wrong_reference_rejected(unet_net, tmp_path):
-    sys.path.insert(0, str(UNET_EX))
-    import unet_aie as ua
+    import aiednn
     ref = tmp_path / "aiek_unetconv_ref.c"           # the stride/pad of the model off by one
-    ref.write_text(ua.REF_C.replace("@E@", ua.ENTRY).replace("PH = (KH - 1) / 2", "PH = 0"))
+    ref.write_text(aiednn.template("conv2d/conv_bf16_carrier_ref.c").replace("@E@", "aiek_unetconv")
+                   .replace("PH = (KH - 1) / 2", "PH = 0"))
     kp = _carrier_kp(unet_net, ref)
     layer_checker()(unet_net, [kp], True)
     assert kp.selected == [] and kp.rejected[14][0] == "group-check", kp.rejected

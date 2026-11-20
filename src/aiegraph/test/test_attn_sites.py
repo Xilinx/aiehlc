@@ -1,21 +1,22 @@
-"""GATT x86 regression test (GAP-aiegraph-attn-site + GAP-aiegraph-prof-attn, sprint unet-m2-s8).
+"""GATT x86 regression test of aiegraph.attnsite (moved from example/aiegraph/unet_bk_sdm_tiny/test_attn_sites.py,
+unet-decl P3: the attention site geometry / host / driver patch left the example for src/aiegraph).
 
-1. test_attn_host: the generated host C of an attention site (unet_aie.ATTN_HOST, verbatim) compiled with g++ on x86
-   against stubs; uc_kacc_launch is emulated in Python from the kacc port layouts (kacc_gemm.layout inverse,
-   kacc_yidx). Every distinct attention geometry of the bk-sdm-tiny UNet (unet_aie.bmm_geom): the site's f32 output
-   == the PKC recipe kc_bf16out_pad64 (bf16 operands, keys centred over the real keys for QK^T, one bf16 SRS),
-   and softmax(QK^T) == softmax of the fp32 reference (centring is softmax-invariant).
-2. test_help: build_unet.py --aie accepts conv,linear,attn (old choices kept).
-3. test_driver (needs the fixture = an unpatched graph_driver.c + ag_work of a full UNet convert and the GPAT
-   partition; GATT_REQUIRE_FIXTURE=1 makes a missing fixture a failure):
-   - part_attn.json -> 36 attn sites (18 groups) mapped to TVM nn_batch_matmul, all patched to aiednn_aie_attn with
-     PROF op=aie_host_attn; the kernel source has aiednn_aie_attn + aie_kacc_pack.h + the attn gemm_kacc instances;
-   - --aie conv,linear (part_all.json) output (graph_driver.c patch + aiek_unetconv.cc) byte-identical to the
-     unet_aie.py of the base commit (GATT_BASE, default 85ec4ff = hl + gpat + bmk merge).
-Run: python3 example/aiegraph/unet_bk_sdm_tiny/test_attn_sites.py   (gcc/g++, numpy, onnx)
+1. test_attn_host: the attention host entry (attnsite.ATTN_HOST, verbatim) compiled with g++ on x86 against stubs;
+   uc_kacc_launch is emulated in Python from the kacc port layouts (kacc_gemm.layout inverse, kacc_yidx). Every
+   distinct attention geometry of the diffusion example (attnsite.bmm_geom): the site's f32 output == the PKC
+   recipe kc_bf16out_pad64 (bf16 operands, keys centred over the real keys for QK^T, one bf16 SRS), and
+   softmax(QK^T) == softmax of the fp32 reference (centring is softmax-invariant).
+2. test_help: the example's build_unet.py --aie accepts conv,linear,attn (old choices kept).
+3. test_driver (needs the fixture = an unpatched graph_driver.c + ag_work of a full convert and the GPAT
+   partition; GATT_REQUIRE_FIXTURE=1 makes a missing fixture a failure): part_attn.json -> 36 attn sites
+   (18 groups) via attnsite.attn_sites, all patched by attnsite.patch_driver to aiednn_aie_attn with PROF
+   op=aie_host_attn; the kincore source with attnsite.attn_kernel_parts has aiednn_aie_attn + aie_kacc_pack.h +
+   the attn gemm_kacc instances. (The old (a) part -- the conv,linear patch byte-identical to the example's
+   unet_aie.py at GATT_BASE -- went with the example's map_layers; d5e9f15 has it.)
+4. test_<fn>_rejects_*: counter-examples of every attnsite planner.
+Run: python3 -m pytest -q src/aiegraph/test/test_attn_sites.py   (gcc/g++, numpy, onnx)
 """
 import ctypes
-import importlib.util
 import json
 import os
 import re
@@ -26,13 +27,22 @@ from pathlib import Path
 
 import numpy as np
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-sys.path.insert(0, str(HERE))
+EX = ROOT / "example" / "aiegraph" / "unet_bk_sdm_tiny"   # build_unet.py, kacc_gemm.py, the x86 harness
+sys.path.insert(0, str(EX))
 sys.path.insert(0, str(ROOT / "src"))
 import aiednn  # noqa: E402
 import kacc_gemm as kg  # noqa: E402
-import unet_aie as ua  # noqa: E402
+from aiegraph import attnsite, kincore  # noqa: E402
+from aiegraph.cnn import kacc_geom  # noqa: E402
+from aiegraph.errors import AiegraphError  # noqa: E402
+
+#: the conv host glue whose uc_dlt typedef the harness reuses
+HOST_CC = (aiednn.template("conv2d/tile64_conv_host.cc") + aiednn.template("elementwise/epilogue_bias_residual.cc")
+           + aiednn.template("conv2d/tile64_conv_entry.cc"))
 
 FIX = Path(os.environ.get("GATT_FIXTURE", "/scratch/staff/huaj/tmp/unet_m2/s8/gatt/fixture"))
 PATT = Path(os.environ.get("GATT_PART_ATTN", "/scratch/staff/huaj/tmp/unet_m2/s7/gpat/part_attn.json"))
@@ -40,7 +50,7 @@ PALL = Path(os.environ.get("GATT_PART_ALL", "/scratch/staff/huaj/tmp/unet_m2/s6/
 ONNX = Path(os.environ.get("GATT_ONNX", "/scratch/staff/huaj/modelzoo/artifacts/bk-sdm-tiny/unet_sim.onnx"))
 BASE = os.environ.get("GATT_BASE", "85ec4ff")
 
-HARNESS = (HERE / "kacc_bmm_host_x86_harness.cc").read_text(encoding="utf-8")  # x86 stubs around ATTN_HOST
+HARNESS = (HERE / "data" / "kacc_bmm_host_x86_harness.cc").read_text(encoding="utf-8")  # x86 stubs around ATTN_HOST
 
 
 class DLT(ctypes.Structure):
@@ -51,10 +61,10 @@ class DLT(ctypes.Structure):
 
 
 def build_lib():
-    host = ua.HOST_CC
+    host = HOST_CC
     i0 = host.index("typedef struct {\n    void *data;")
     dlt = host[i0:host.index("} uc_dlt;", i0) + len("} uc_dlt;")]
-    src = HARNESS.replace("@DLT@", dlt).replace("@ATTN@", ua.ATTN_HOST)
+    src = HARNESS.replace("@DLT@", dlt).replace("@ATTN@", attnsite.ATTN_HOST)
     d = Path(tempfile.mkdtemp(prefix="gatt_"))
     (d / "h.cc").write_text(src)
     subprocess.check_call(["g++", "-O2", "-shared", "-fPIC", "-Wall", "-Werror", "-Wno-unused-function",
@@ -101,7 +111,7 @@ def cos(a, b):
 
 
 def run_site(L, H, M, K, N, qk, seed):
-    g = ua.bmm_geom(H, M, K, N)
+    g = attnsite.bmm_geom(H, M, K, N)
     rng = np.random.default_rng(seed)
     X = rng.standard_normal((H, M, K)).astype(np.float32)
     W = (rng.standard_normal((H, N, K)) + (1.5 if qk else 0.0)).astype(np.float32)   # QK: keys with a common offset
@@ -112,7 +122,7 @@ def run_site(L, H, M, K, N, qk, seed):
     seen = []
 
     def launch(ch, k, px, ow, ox, oy):   # emulated gemm_kacc instance (ch, k, px): Y[ch][px] = W[ch,:] . X[px,:]
-        geo = ua.kacc_geom(ch, k, px)
+        geo = kacc_geom(ch, k, px)
         kp, kch, tr = geo["kp"], geo["kch"], geo["tr"]
         wn = f32(unlayout(kw[2 * ow:2 * ow + ch * kp].copy(), ch, kp, kch, True)).astype(np.float64)
         xn = f32(unlayout(kx[2 * ox:2 * ox + px * kp].copy(), px, kp, kch, False)).astype(np.float64)
@@ -163,7 +173,7 @@ def test_attn_host():
 
 
 def test_help():
-    r = subprocess.run([sys.executable, str(HERE / "build_unet.py"), "--help"], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, str(EX / "build_unet.py"), "--help"], capture_output=True, text=True)
     assert r.returncode == 0 and "conv,linear,attn" in r.stdout and "conv,linear}" not in r.stdout, r.stdout
     assert "{none,conv,conv,linear,conv,linear,attn}" in r.stdout.replace("\n", "").replace(" ", ""), r.stdout
 
@@ -179,81 +189,123 @@ def _fixture():
     return FIX
 
 
-def _base_module():
-    src = subprocess.run(["git", "-C", str(HERE), "show", f"{BASE}:example/aiegraph/unet_bk_sdm_tiny/unet_aie.py"],
-                         capture_output=True, text=True, check=True).stdout
-    d = Path(tempfile.mkdtemp(prefix="gatt_base_"))
-    (d / "aiednn_aie_base.py").write_text(src.replace("Path(__file__).resolve().parent", f"Path({str(HERE)!r})"))
-    spec = importlib.util.spec_from_file_location("aiednn_aie_base", d / "aiednn_aie_base.py")
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
-
-
 KATTN = 'extern "C" int aiednn_aie_attn('
 KPACK = next(ln for ln in aiednn.template("attention/kacc_bmm_host.cc").splitlines() if ln.endswith('"aie_kacc_pack.h"'))
-SPEC = '"out x"'   # stand-in for the carrier's offload prototype spec (same for both modules)
-
-
-def _kernel(mod, d, shapes, lin, **kw):
-    kcc = mod.write_kernel_kacc(d, SPEC, shapes, warm=True, ctrlpkt="aot", lin=lin, **kw)
-    return kcc.read_text()
+SPEC = '"out x"'   # stand-in for the carrier's offload prototype spec
 
 
 def test_driver():
     fx = _fixture()
     if fx is None:
         return
-    from frontend.tvmrelay.arm_build import param_offsets
     drv = (fx / "graph_driver.c").read_text()
     work = fx / "ag_work"
-    # (a) --aie conv,linear: byte-identical to the base commit's unet_aie.py
-    base = _base_module()
-    part = json.loads(PALL.read_text())
-    out = {}
-    # one mapping (map_layers / map_linears behave the same on a partition without attn layers), fed to both
-    sel0, _ = ua.map_layers(ONNX, part, work, param_offsets)
-    lin0 = ua.map_linears(ONNX, part, work, param_offsets)
-    for name, mod in (("base", base), ("new", ua)):
-        sel, lin = [dict(c) for c in sel0], [dict(c) for c in lin0]
-        allsel = sel + lin
-        t, n = mod.patch_driver(drv, [dict(c) for c in allsel])
-        shapes = sorted({(c["N"], c["K"], c["M"]) for c in sel} | {(c["N"], c["K"], c["pxs"]) for c in lin})
-        ltup = [(c["N"], c["K"], -(-c["M"] // 64) * 64, c["pxs"]) for c in lin]
-        k = _kernel(mod, Path(tempfile.mkdtemp(prefix=f"gatt_{name}_")), shapes, ltup)
-        out[name] = (t, n, k)
-    same_drv, same_k = out["base"][0] == out["new"][0], out["base"][2] == out["new"][2]
-    print(f"GATTDRV conv,linear sites={out['new'][1]} driver_identical={int(same_drv)} kernel_identical={int(same_k)}")
-    assert same_drv and same_k and out["new"][1] == out["base"][1] and "aie_host_attn" not in out["new"][0]
-    # (b) --aie conv,linear,attn on the GPAT partition
     pa = json.loads(PATT.read_text())
-    sel, _ = ua.map_layers(ONNX, pa, work, param_offsets)
-    lin = ua.map_linears(ONNX, pa, work, param_offsets)
-    att = ua.map_attn(pa, work)
+    att = attnsite.attn_sites(pa, work, onnx=ONNX)
     natt = sum(1 for L in pa["layers"] if L.get("cls") == "attn")
-    t, n = ua.patch_driver(drv, [dict(c) for c in sel + lin] + att)
-    shapes = sorted({(c["N"], c["K"], c["M"]) for c in sel} | {(c["N"], c["K"], c["pxs"]) for c in lin} |
-                    set(ua.attn_shapes(att)))
-    k = _kernel(ua, Path(tempfile.mkdtemp(prefix="gatt_attn_")), shapes,
-                [(c["N"], c["K"], -(-c["M"] // 64) * 64, c["pxs"]) for c in lin], att=att)
+    t, n = attnsite.patch_driver(drv, att)
+    shapes = attnsite.attn_shapes(att)
+    k = kincore.write_source(Path(tempfile.mkdtemp(prefix="gatt_attn_")), SPEC, shapes, entry="aiek_attn",
+                             warm=True, ctrlpkt="aot", **attnsite.attn_kernel_parts(att)).read_text()
     nsite, ntag = t.count("    aiednn_aie_attn("), len(re.findall(r'GRAPH_PROF_END\(\d+, "aie aiednn_aie_attn \d+"\);', t))
     groups = len({c["group"] for c in att})
-    insts = sum(1 for s in ua.attn_shapes(att) if f"{ua.kacc_name(*s)}<<<mesh>>>(" in k)
+    insts = sum(1 for s in shapes if f"{kincore.kacc_name(*s)}<<<mesh>>>(" in k)
     print(f"GATTDRV attn partition_attn={natt} mapped={len(att)} groups={groups} sites={nsite} prof_tags={ntag} "
           f"prof_attn_branch={int('op=aie_host_attn%s' in t)} batch_matmul_left={t.count('_nn_batch_matmul(args')} "
           f"kernel_attn={int(KATTN in k)} pack_inc={int(KPACK in k)} "
-          f"attn_instances={insts}/{len(ua.attn_shapes(att))} launches={sum(c['launches'] for c in att)}")
-    assert natt == 36 and len(att) == 36 and groups == 18 and nsite == 36 and ntag == 36
+          f"attn_instances={insts}/{len(shapes)} launches={sum(c['launches'] for c in att)}")
+    assert natt == 36 and len(att) == 36 and groups == 18 and nsite == 36 and ntag == n == 36
     assert "op=aie_host_attn%s" in t and t.count("_nn_batch_matmul(args") == 0
-    assert KATTN in k and KPACK in k and \
-        'export    aiednn_aie_attn' in k and insts == len(ua.attn_shapes(att))
-    # the conv / linear sites of the attn build are the same calls as without attn
-    assert t.count("    aiednn_aie_conv(") == len(sel) and t.count("    aiednn_aie_linear(") == len(lin)
+    assert KATTN in k and KPACK in k and 'export    aiednn_aie_attn' in k and insts == len(shapes)
 
 
-if __name__ == "__main__":
-    test_help()
-    print("GATTHELP ok")
-    test_attn_host()
-    test_driver()
-    print("GATT ALL OK")
+# ── counter-examples (static_check: test_<fn>_rejects*) ─────────────────────────────────────────────────────
+
+def test_kacc_plan_splits_and_rejects_no_fit():
+    assert attnsite.kacc_plan(64, 64, 64) == ("none", 1, 64, 64)
+    mode, S, ch, px = attnsite.kacc_plan(1024, 1024, 4096)
+    assert mode in ("px", "ch") and S > 1 and kacc_geom(ch, 1024, px)
+
+
+def test_kacc_plan_rejects_unaligned():
+    with pytest.raises(AiegraphError, match="no split"):
+        attnsite.kacc_plan(40, 64, 64)          # ch not a multiple of 64: no instance, no split
+
+
+def test_bmm_geom_rejects_empty_dim():
+    with pytest.raises(AiegraphError, match="must all be >= 1"):
+        attnsite.bmm_geom(8, 0, 64, 64)
+
+
+def test_bmm_geom_pads_and_swaps():
+    g = attnsite.bmm_geom(8, 1024, 40, 1024)    # square, big: swapped, K padded to 64 (and past 64 / 128)
+    assert g["swap"] == 1 and g["Kp"] % 64 == 0 and g["kp"] // 2 not in (32, 64)
+    g = attnsite.bmm_geom(8, 256, 80, 77)       # N = 77 keys padded to 128, not swapped
+    assert g["swap"] == 0 and g["CHP"] >= 128 and g["PXP"] == 256
+
+
+def test_attn_sites_rejects_partition_without_attn(tmp_path):
+    with pytest.raises(AiegraphError, match="no attn rows"):
+        attnsite.attn_sites({"layers": [{"node": "c0", "cls": "conv"}]}, tmp_path)
+
+
+def test_attn_shapes_rejects_rows_without_geometry():
+    assert attnsite.attn_shapes([{"geo": attnsite.bmm_geom(8, 256, 80, 256)}] * 2) == \
+        attnsite.attn_shapes([{"geo": attnsite.bmm_geom(8, 256, 80, 256)}])
+    with pytest.raises(AiegraphError, match="without geometry"):
+        attnsite.attn_shapes([{"onnx": "/qk/MatMul"}])
+
+
+def test_attn_kernel_parts_rejects_no_site():
+    with pytest.raises(AiegraphError, match="no attention site"):
+        attnsite.attn_kernel_parts([])
+    kw = attnsite.attn_kernel_parts([{"geo": attnsite.bmm_geom(8, 256, 80, 256)}])
+    assert kw["exports"] == ("aiednn_aie_attn",) and KATTN in kw["host_entries"] and len(kw["bufs"]) == 1
+
+
+def test_prof_c_attn_rejects_missing_anchor(monkeypatch):
+    from aiegraph import boardmain
+    assert "op=aie_host_attn" in attnsite.prof_c_attn() and "op=aie_host_attn" not in boardmain.prof_c()
+    monkeypatch.setattr(boardmain, "_rt", lambda name: "/* no branch anchor */\n")
+    with pytest.raises(AiegraphError, match="anchor"):
+        attnsite.prof_c_attn()
+
+
+_DRV = """static uint8_t kernel_ws[64];
+void graph_bf16_expand(float *d, const uint16_t *src, uint64_t n) {
+    for (uint64_t i = 0; i < n; ++i) d[i] = (uint32_t)src[i] << 16;
+}
+float *graph_run(void) {
+    args[0].v_handle = &tensors[3];
+    args[1].v_handle = &tensors[4];
+    args[2].v_handle = &tensors[5];
+    GRAPH_PROF_BEGIN(7);
+    tvmgen_default_fused_nn_batch_matmul(args, codes, 3, 0, 0, 0);
+    GRAPH_PROF_END(7, "tvmgen_default_fused_nn_batch_matmul");
+    return 0;
+}
+"""
+
+
+def _site_row(**kw):
+    r = dict(kind="attn", eids=[3, 4], yeid=5, symbol="tvmgen_default_fused_nn_batch_matmul", nargs=3, cid=9,
+             onnx="/attn/MatMul", node=12, role="qk", group=0, geo=attnsite.bmm_geom(8, 256, 80, 256))
+    r.update(kw)
+    return r
+
+
+def test_patch_driver_attn_site():
+    t, n = attnsite.patch_driver(_DRV, [_site_row()])
+    assert n == 1 and t.count("    aiednn_aie_attn(9, args, 3, 1, ") == 1 and "batch_matmul(args" not in t
+    assert 'GRAPH_PROF_END(7, "aie aiednn_aie_attn 9");' in t and attnsite.DECL_ATTN in t
+    assert "up_pending_exp = 0;" in t and "op=aie_host_attn" in t
+
+
+def test_patch_driver_rejects_twice_patched_and_wrong_callee():
+    t, _ = attnsite.patch_driver(_DRV, [_site_row()])
+    with pytest.raises(AiegraphError, match="already patched"):
+        attnsite.patch_driver(t, [_site_row()])
+    with pytest.raises(AiegraphError, match="expected tvmgen_default_fused_nn_softmax"):
+        attnsite.patch_driver(_DRV, [_site_row(symbol="tvmgen_default_fused_nn_softmax")])
+    with pytest.raises(AiegraphError, match="group steps"):   # FA rows that aiegraph did not place
+        attnsite.patch_driver(_DRV, [_site_row(fa=0)])

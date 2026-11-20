@@ -75,7 +75,7 @@ def kacc_geom(ch: int, k: int, px: int) -> dict:
     tr = 2 * (16 * tkw * 4 + (px // 4) * tkw * 4 + 16 * (px // 4) * 4) > 29696
     if tr:
         tkw = 32
-        while (ch // 4) * tkw > 1024 or (k // 2) % tkw:
+        while tkw >= 4 and ((ch // 4) * tkw > 1024 or (k // 2) % tkw):   # tkw < 4: no walk (refused below)
             tkw //= 2
     if tkw < 4 or (k // 2) % tkw:
         raise AiegraphError("cnn", f"gemm_kacc instance {ch}x{k}x{px}: no K chunk (tkw={tkw})")

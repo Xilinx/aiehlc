@@ -8,14 +8,16 @@ states 77×768) built with aiegraph → TVM C for the A78, with the conv layers 
 | File | What |
 |---|---|
 | `build_unet.py` | Build entry: ONNX → aiegraph.convert (a78, fp32 graph, bf16 weights) → `main.elf` with the 3 real inputs embedded and a cos/maxabs check against x86 ORT |
-| `unet_aie.py` | `--aie conv`: maps each partition layer (ONNX Conv) to its TVM call, builds the AIE archive on one carrier layer, patches `graph_driver.c` so those call sites call `aiednn_aie_conv()` |
+| `unet_offload.py` | `--aie conv[,linear[,attn]] --kincore`: declares the partition layers as aiegraph groups (generic `aiegraph.kincore` / `aiegraph.attnsite` / `aiegraph.flashattn` code), builds the AIE archive on one carrier layer |
+| `kacc_gemm.py`, `kacc_bench.sh` | stand-alone gemm_kacc bench (`aiegraph.kaccbench`, bench text in `bench/`) |
 | `partition.json` | The 37 conv layers on the AIE, 86,600 planned launches, aie_flop_frac 0.417 |
 | `p5_board.log` | The board run (P5) these files produced |
 
-UNet-only C text lives in this directory: `build_unet.py`'s `MAIN_C`, the bench text in `bench/`, and
-`bf16_gemm_convin.cc` (`gemm_bf16`, one 64×64×64 bf16 tile per launch), its `--ktimer` variant
-`bf16_gemm_convin_ktimer.cc`, the TU head `tile64_conv_head.cc`, the x86 rounding-mode probe `softfloat_rm_reset.cc`
-and the x86 test harness `kacc_bmm_host_x86_harness.cc` (used by `test_attn_sites.py`). Every generic kernel and host-glue
+UNet-only C text lives in this directory: `build_unet.py`'s `MAIN_C` and the bench text in `bench/`.
+The 64×64×64 tile path (`--aie` without `--kincore`, its kernel text and the core-timer build option) was dropped in unet-decl;
+it can be recovered at commit d5e9f15.
+The attention sites, the flash-attention groups and the driver glue are generic aiegraph code (`aiegraph.attnsite`,
+`aiegraph.flashattn`; their tests and the x86 harness are in `src/aiegraph/test/`). Every generic kernel and host-glue
 template is read from the aiednn library, the board compare tool from the aiegraph runtime:
 
 | Template | What |

@@ -199,24 +199,19 @@ def test_check_region():
 
 # ── group-offload steps: ag.step vs AIEK_STEP (design 2026-11-16 §5.3) ──────
 
-FA_DIR = REPO / "example" / "aiegraph" / "unet_bk_sdm_tiny"
 INC = REPO / "include"
 
 
 def _fa_steps():
-    sys.path.insert(0, str(FA_DIR))
-    try:
-        import fa_attn
-    finally:
-        sys.path.remove(str(FA_DIR))
-    return fa_attn
+    from aiegraph import flashattn
+    return flashattn
 
 
 @pytest.fixture
 def fa_src(tmp_path):
-    """The real FA step wrappers (fa_attn.FA_STEPS) as a kernel source."""
+    """The real FA step wrappers (aiegraph.flashattn.FA_STEPS) as a kernel source."""
     p = tmp_path / "fa_steps.cc"
-    p.write_text(_fa_steps().fa_steps())
+    p.write_text(_fa_steps().FA_STEPS)
     return p
 
 
@@ -349,7 +344,7 @@ def test_fa_steps_are_the_kl_calls(tmp_path):
     if shutil.which("g++") is None:
         pytest.fail("g++ is required for the step ABI test")
     src = tmp_path / "h.cc"
-    src.write_text(_FA_STEP_HARNESS.replace("@STEPS@", _fa_steps().fa_steps()))
+    src.write_text(_FA_STEP_HARNESS.replace("@STEPS@", _fa_steps().FA_STEPS))
     exe = tmp_path / "h"
     import subprocess
     proc = subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror", f"-I{INC}", str(src), "-o", str(exe)],

@@ -6,7 +6,7 @@
 # (.incbin of those files, host side only), then runs script/aiehlc.sh --aie-version 5 in <dir>.
 #   kacc_bench.sh --gemm --golden <op_golden/p0_matmul_gemm_s0_cond/cNNN_matmul_...> --out <dir>   (PDK)
 # --gemm: a MatMul golden (a.npy [1,M,K], b.npy [K,N], y.npy) through kacc_gemm.py: the generic gemm_kacc instance
-# (unet_aie.kacc_kernel_text, M padded to 64) + a bench main (warm-up pass, timed pass, KCMP vs y.npy), built
+# (aiegraph.kaccbench: kincore gemm_kacc template, M padded to 64) + a bench main (warm-up pass, timed pass, KCMP vs y.npy), built
 # like the UNet --kincore path: --launch-opt warm defs + --skip-bss + --ctrlpkt aot pragmas.
 #   kacc_bench.sh --bmm --golden <op_golden/p0_matmul_gemm_s0_cond/cNNN_matmul_1x8x...> --out <dir>   (PBK)
 # --bmm: attention bmm golden (a.npy [1,H,M,K], b.npy [1,H,K,N]); A and B are embedded in their NATURAL f32 layout

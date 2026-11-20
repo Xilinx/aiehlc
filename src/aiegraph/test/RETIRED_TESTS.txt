@@ -15,3 +15,17 @@ test_cnn_templates_emu.py::test_stem7x7_resnet18_conv1 -> test_cnn_templates_emu
 test_template_lookup.py::test_bad_names_fail[conv2d/../gemm/bf16_gemm_kacc.cc] -> test_template_lookup.py::test_bad_names_fail[conv2d/../gemm/gemm_kacc_kernel.cc]
 test_template_lookup.py::test_unet_example_has_no_c -> test_template_lookup.py::test_example_has_no_c[unet_bk_sdm_tiny]
 test_template_lookup.py::test_unet_example_templates_resolve -> test_template_lookup.py::test_example_templates_resolve
+# why: unet-decl P3 -- the attention sites / FA group / driver glue left the example for aiegraph.attnsite /
+# aiegraph.flashattn; the example tests that imported unet_aie / unet_offload moved to src/aiegraph/test (same
+# basename and test names; test_driver now runs attnsite.attn_sites/patch_driver, its old conv,linear part vs
+# the example's unet_aie.py is at d5e9f15)
+test_attn_sites.py::test_attn_host -> test_attn_sites.py::test_attn_host
+test_attn_sites.py::test_help -> test_attn_sites.py::test_help
+test_attn_sites.py::test_driver -> test_attn_sites.py::test_driver
+test_layout_keep.py::test_no_field_unchanged -> test_layout_keep.py::test_no_field_unchanged
+test_layout_keep.py::test_unet_proj_in_kept -> test_layout_keep.py::test_unet_proj_in_kept
+test_layout_keep.py::test_unet_proj_in_label_proof -> test_layout_keep.py::test_unet_proj_in_label_proof
+test_layout_keep.py::test_unet_host_consumer_rejected -> test_layout_keep.py::test_unet_host_consumer_rejected
+# unet-decl P4d: the example's unet_aie.py and its 64x64-path C text are deleted (recoverable at d5e9f15); no test
+# id retired or renamed: test_main_gen.py reads that C text with git show d5e9f15, test_gap_offload.py compares
+# against aiegraph.kaccbench.kacc_geom (new, test_kaccbench.py)
