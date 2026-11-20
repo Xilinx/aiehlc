@@ -279,6 +279,13 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
         g_sp_glue += (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL;
         g_sp_post += sp3 - sp2;
         g_sp_pre += sp1 - sp0;
+        /* M2 N segment: the same in-launch host glue per site (PMU cycles; ahs_cal pairs them with XTime) */
+        ahs_add(&g_ahs, AHS_GLUE, (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL);
+        ahs_add(&g_ahs, AHS_FLUSH, sp1 - sp0);
+        ahs_add(&g_ahs, AHS_INVAL, sp3 - sp2);
+        ahs_launch(&g_ahs);
+        ahs_cal(&g_ahs, sp0, (unsigned long long)lt0);
+        ahs_cal(&g_ahs, sp3, (unsigned long long)lt1);
         g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
         g_aie_launches++;
     }

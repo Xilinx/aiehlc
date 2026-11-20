@@ -23,10 +23,12 @@ UNET = ROOT / "example/aiegraph/unet_bk_sdm_tiny"
 sys.path.insert(0, str(UNET))
 import unet_aie as ua  # noqa: E402
 
-LINE = re.compile(r"^PROF aie_host_split part=(\d+) kind=(attn|conv|linear) pack_ms=([\d.]+) scatter_ms=([\d.]+) "
-                  r"dma_ms=([\d.]+) wait_ms=([\d.]+)$", re.M)
+GLUE = r" glue_ms=[\d.]+ flush_ms=[\d.]+ inval_ms=[\d.]+ launches=\d+"   # M2: appended, old fields unchanged
+LINE = re.compile(r"^PROF aie_host_split part=(\d+) kind=(attn|conv|linear|fa) pack_ms=([\d.]+) scatter_ms=([\d.]+) "
+                  r"dma_ms=([\d.]+) wait_ms=([\d.]+)(?=" + GLUE + "$)", re.M)
 TOTAL = re.compile(r"^PROF aie_host_split_total host_split_n=(\d+) pack_ms=([\d.]+) scatter_ms=([\d.]+) "
-                   r"dma_ms=([\d.]+) wait_ms=([\d.]+)$", re.M)
+                   r"dma_ms=([\d.]+) wait_ms=([\d.]+)(?=" + GLUE + "$)", re.M)
+NOGLUE = " glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0"
 
 
 def _cc(src: str, name: str, cxx: bool = False, shared: bool = True) -> Path:
@@ -104,14 +106,14 @@ def test_header_accumulate_and_format():
     assert L.count() == 3 and L.calls(8) == 2
     n, s = _fmt(L, 3)
     assert n == len(s) and s == ("PROF aie_host_split part=3 kind=conv pack_ms=2.500 scatter_ms=0.750 "
-                                 "dma_ms=2.500 wait_ms=2.500"), s
+                                 "dma_ms=2.500 wait_ms=2.500" + NOGLUE), s
     assert _fmt(L, 7)[1] == ("PROF aie_host_split part=7 kind=attn pack_ms=0.000 scatter_ms=0.000 dma_ms=0.000 "
-                             "wait_ms=2.000")
+                             "wait_ms=2.000" + NOGLUE)
     assert LINE.match(_fmt(L, 8)[1]).group(2) == "linear"
     assert _fmt(L, 4) == (0, "")            # never entered
     t = TOTAL.match(_fmt(L, -1)[1])
     assert t and t.groups() == ("3", "2.501", "0.750", "2.500", "4.500"), _fmt(L, -1)
-    assert _fmt(L, 3, hz=2e6)[1].endswith("dma_ms=1.250 wait_ms=1.250")
+    assert _fmt(L, 3, hz=2e6)[1].endswith("dma_ms=1.250 wait_ms=1.250" + NOGLUE)
 
 
 # ---------------------------------------------------------------- 2. generated attention host
@@ -311,3 +313,153 @@ def test_kernel_sources_wired():
     src = Path(ua.__file__).read_text()
     assert src.count('"export    aiednn_aie_host_split_site\\\\n"') == 2
     assert src.count('"export    aiednn_aie_host_split_line\\\\n"') == 2
+
+
+# ---------------------------------------------------------------- 5. M2 N segment: in-launch glue per site
+# AHS_GLUE / AHS_FLUSH / AHS_INVAL (PMU cycles, same values as the global g_sp_glue / g_sp_pre / g_sp_post) and the
+# per-site launch count, appended to the PROF line (old fields and order unchanged), for conv / linear / fa sites.
+GLUE_HDR = HDR + r"""
+void glue(int g, int f, int i) { ahs_add(&T, AHS_GLUE, g); ahs_add(&T, AHS_FLUSH, f); ahs_add(&T, AHS_INVAL, i);
+                                ahs_launch(&T); }
+void cal(unsigned long long c, unsigned long long t) { ahs_cal(&T, c, t); }
+"""
+
+FA_HARNESS = r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+@DLT@
+#define UC_NEON 0
+#define UC_CTRLPKT 0
+typedef unsigned long long XTime;
+static XTime g_now = 0;
+static void XTime_GetTime(XTime *t) { *t = (g_now += 10); }
+#define UC_HS_DEFINED 1
+#include "aie_host_split.h"
+static ahs_table g_ahs;
+static unsigned long long g_wait = 0, g_cyc = 0, g_rt = 0;
+static inline unsigned long long uc_hs_wait(void) { return g_wait += 3; }
+static inline unsigned long long uc_pmc(void) { return g_cyc += 100; }    /* 100 cycles per read */
+static inline unsigned long long uc_rt_cyc(void) { return g_rt += 30; }   /* runtime phases: 30 per read pair */
+static unsigned long long g_sp_pre = 0, g_sp_call = 0, g_sp_glue = 0, g_sp_post = 0;
+static unsigned long long g_uc_aie_ticks = 0, g_uc_macs = 0;
+static int g_aie_launches = 0, g_uc_calls = 0, g_uc_rc = 0;
+static void *__Runtime_Alloc(size_t n) { return calloc(1, n); }
+static void uc_sync_pre(const void *, size_t, const void *, size_t, const void *, size_t) {}
+static void uc_sync_post(const void *, size_t) {}
+@FA@
+extern "C" int site(int part, int role, void *args) {
+    ahs_set_site(&g_ahs, part);
+    const int rc = aiednn_aie_attn(7, args, 3, role, 0);
+    ahs_set_site(&g_ahs, -1);
+    return rc;
+}
+extern "C" unsigned long long ticks(int s, int ph) { return g_ahs.s[s].t[ph]; }
+extern "C" unsigned nlaunch(int s) { return g_ahs.s[s].launches; }
+extern "C" unsigned long long sp(int i) { return i == 0 ? g_sp_pre : i == 1 ? g_sp_glue : g_sp_post; }
+extern "C" int launches(void) { return g_aie_launches; }
+extern "C" int line(int s, char *b, int n) { g_ahs.cyc_hz = 1e6; return ahs_format(&g_ahs, s, 1e6, b, (size_t)n); }
+"""
+
+
+def test_glue_header_fields_kinds_and_length():
+    """AHS_GLUE/FLUSH/INVAL + launches appended for conv / linear / fa; cycles -> ms by ahs_cal; line <= 191"""
+    L = ctypes.CDLL(str(_cc(GLUE_HDR, "ghdr")))
+    for f in ("add", "span", "window", "cal"):
+        getattr(L, f).argtypes = None
+    L.ticks.restype = ctypes.c_ulonglong
+    L.fmt.argtypes = [ctypes.c_int, ctypes.c_double, ctypes.c_char_p, ctypes.c_int]
+    L.cal(U(0), U(0))                   # 1000 PMU cycles per tick: cyc_hz = 1e9 at tick_hz 1e6
+    L.cal(U(10**9), U(10**6))
+    for part, kind in ((2, 1), (3, 2), (5, 4)):
+        L.set_site(part)
+        L.begin(kind)
+        L.window(U(4000), U(1000))
+        for _ in range(part):           # `part` launches of glue 1.5 ms, flush 0.25 ms, inval 0.125 ms each
+            L.glue(1500000, 250000, 125000)
+    rows = {}
+    for part in (2, 3, 5):
+        n, s = _fmt(L, part)
+        m = LINE.match(s)
+        assert m and n == len(s) <= 191, s
+        rows[m.group(2)] = s
+        assert s.endswith(" wait_ms=1.000 glue_ms=%.3f flush_ms=%.3f inval_ms=%.3f launches=%d"
+                          % (1.5 * part, 0.25 * part, 0.125 * part, part)), s
+    assert set(rows) == {"conv", "linear", "fa"}, rows
+    t = _fmt(L, -1)[1]
+    assert TOTAL.match(t) and t.endswith("glue_ms=15.000 flush_ms=2.500 inval_ms=1.250 launches=10"), t
+    # worst case under site_prof.c's char hs_[192]: last site, 5-digit ms everywhere, 6-digit launch count
+    L.set_site(1023)
+    L.begin(2)
+    for ph in range(4):
+        L.add(ph, U(99999 * 10**3))
+    for ph in (4, 5, 6):                # AHS_GLUE, AHS_FLUSH, AHS_INVAL
+        L.add(ph, U(99999 * 10**6))
+    for _ in range(3):
+        L.glue(0, 0, 0)
+    for s in (1023, -1):
+        n, txt = _fmt(L, s)
+        assert n == len(txt) and n <= 191 and re.search(GLUE + "$", txt), (n, txt)
+
+
+def test_glue_fa_host_split():
+    """the generated FA host (fa_attn.fa_host: kind=fa, from zero) books glue/flush/inval/launches on its site and
+    the same values into the global g_sp_* (split_detail); the QK (pack) site gets kind=fa with 0 launches"""
+    import fa_attn
+    att = [dict(group=0, role="qk", xshape=[8, 128, 40], wshape=[8, 77, 40], yshape=[8, 128, 77]),
+           dict(group=0, role="pv", xshape=[8, 128, 77], wshape=[8, 40, 77], yshape=[8, 128, 40])]
+    cls = fa_attn.fa_classes(att)
+    host = fa_attn.fa_host(cls)
+    for a in ("ahs_add(&g_ahs, AHS_GLUE,", "ahs_add(&g_ahs, AHS_FLUSH,", "ahs_add(&g_ahs, AHS_INVAL,",
+              "ahs_launch(&g_ahs);", "ahs_begin(&g_ahs, AHS_KIND_FA);", "g_sp_glue +="):
+        assert a in host, a
+    i0, i1 = host.index("static int uc_fa_launch("), host.index("/* block layouts")
+    host = host[:i0] + "static int uc_fa_launch(int, uint16_t *, uint16_t *, uint16_t *) { g_cyc += 1000; return 0; }\n" \
+        + host[i1:]
+    src = ua.HOST_CC
+    j = src.index("typedef struct {\n    void *data;")
+    dlt = src[j:src.index("} uc_dlt;", j) + len("} uc_dlt;")]
+    L = ctypes.CDLL(str(_cc(FA_HARNESS.replace("@DLT@", dlt).replace("@FA@", host), "fa", cxx=True)))
+    for f in ("ticks", "sp"):
+        getattr(L, f).restype = ctypes.c_ulonglong
+    c = cls[0]
+    H, N, M, D = c["H"], c["N"], c["M"], c["D"]
+    rng = np.random.default_rng(2)
+    Q = rng.standard_normal((H, N, D)).astype(np.float32)
+    K = rng.standard_normal((H, M, D)).astype(np.float32)
+    P = np.zeros((H, N, M), np.float32)
+    VT = rng.standard_normal((H, D, M)).astype(np.float32)
+    O = np.zeros((H, N, D), np.float32)
+    keep = []
+    a0 = [_dlt(Q, keep), _dlt(K, keep), _dlt(P, keep)]
+    a1 = [_dlt(P, keep), _dlt(VT, keep), _dlt(O, keep)]
+    args0 = (ctypes.c_void_p * 3)(*[ctypes.addressof(d) for d in a0])
+    args1 = (ctypes.c_void_p * 3)(*[ctypes.addressof(d) for d in a1])
+    assert L.site(8, 0, args0) == 0 and L.site(9, 1, args1) == 0
+    nl = c["launches"]
+    assert L.launches() == nl == L.nlaunch(9) and L.nlaunch(8) == 0
+    # per launch: flush = sp1-sp0 = 100, inval = sp3-sp2 = 100, glue = (sp2-sp1) - (rt1-rt0) = 1100 - 30
+    assert [L.ticks(9, p) for p in (4, 5, 6)] == [1070 * nl, 100 * nl, 100 * nl]
+    assert (L.sp(1), L.sp(0), L.sp(2)) == (L.ticks(9, 4), L.ticks(9, 5), L.ticks(9, 6))   # == global g_sp_*
+    assert L.ticks(9, 2) + L.ticks(9, 3) == 10 * nl and L.ticks(9, 3) == 3 * nl       # dma + wait = windows
+    assert L.ticks(8, 0) > 0 and L.ticks(9, 0) > 0 and L.ticks(9, 1) > 0                # pack (QK, V) / scatter (O)
+    b = ctypes.create_string_buffer(256)
+    for part, launches in ((8, 0), (9, nl)):
+        n = L.line(part, b, 256)
+        s = b.value.decode()
+        m = LINE.match(s)
+        assert m and m.group(2) == "fa" and n <= 191 and s.endswith(" launches=%d" % launches), s
+    L.line(9, b, 256)                   # cyc_hz = 1e6: 1070 cycles = 1.070 ms
+    assert b.value.decode().endswith("glue_ms=%.3f flush_ms=%.3f inval_ms=%.3f launches=%d"
+                                     % (1.070 * nl, 0.1 * nl, 0.1 * nl, nl)), b.value
+
+
+def test_glue_kacc_sources_wired():
+    """conv (kacc_conv_host.cc) and linear (kacc_linear_host.cc) book the same glue/flush/inval as g_sp_* per site"""
+    for host in (ua.KACC_HOST, ua.LINEAR_HOST):
+        assert host.count("ahs_add(&g_ahs, AHS_GLUE, (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL);") \
+            == host.count("g_sp_glue += (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL;") == 1
+        for a in ("ahs_add(&g_ahs, AHS_FLUSH, sp1 - sp0);", "ahs_add(&g_ahs, AHS_INVAL, sp3 - sp2);",
+                  "ahs_launch(&g_ahs);", "ahs_cal(&g_ahs, sp0, (unsigned long long)lt0);"):
+            assert host.count(a) == 1, a
