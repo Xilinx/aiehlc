@@ -626,9 +626,11 @@ def kacc_geom(ch: int, k: int, px: int) -> dict:
     kp = k + 2 * tkw if ch == k // 2 else k
     # KACC_KP_PAD (costmodel stride probe, opt-in, default off): pad K with zero chunks up to this kp so the DDR
     # row stride changes (palmyra213: kp 320/656/1280 run_b fast, 960 slow). Applied only when > kp, a multiple of
-    # 2*tkw, and kp/2 avoids ch, 32 and 64 (Maxwell's legality rule for the pad).
+    # 2*tkw, and kp/2 avoids ch, 32 and 64 (Maxwell's legality rule for the pad) -- and px when transposed: there
+    # the a port is [px][kp/2], so kp/2 == px is the same square-port mis-size (runb12: 1024x1600x320 kp 2048 ->
+    # "core window 40 elements vs kernel_block 640", BlueprintToScheduleKernelPass failed).
     kpad = int(_os.environ.get("KACC_KP_PAD", "0"))
-    if kpad > kp and kpad % (2 * tkw) == 0 and kpad // 2 not in (ch, 32, 64):
+    if kpad > kp and kpad % (2 * tkw) == 0 and kpad // 2 not in (ch, 32, 64) + ((px,) if tr else ()):
         kp = kpad
     rows, cols = (px, ch) if tr else (ch, px)   # a-port rows (walked by t) / b-port rows (whole range per core)
     l1 = 2 * (16 * tkw * 4 + (cols // 4) * tkw * 4 + 16 * (cols // 4) * 4)
