@@ -88,14 +88,16 @@ SHIM_BD = "__Runtime_dma_bd_config@shim"   # host_counts key: __Runtime_dma_bd_c
 _TARGS = re.compile(r"gemm_kacc<\s*(\d+(?:\s*,\s*\d+){11})\s*>")
 
 
-def host_counts(host_cc, fn="host_canonicalized", txt=None):
-    """{runtime API name: executed calls per launch} of host function fn (host_canonicalized[_<kernel>])."""
+def _walk(host_cc, fn, txt=None):
+    """yield (raw line, code without comments, executions per launch, {tile var: row}) of host function fn:
+    executions = product of the trip counts of the enclosing `for (size_t v = vA; v < vB; v += vC)` loops
+    (constants resolved from the function's size_t definitions); loop header lines are not yielded."""
     if txt is None:
         txt = open(host_cc).read()
     m = re.search(r"^void %s\(.*?\{\n(.*?)^\}" % re.escape(fn), txt, re.S | re.M)
     if not m:
         raise ValueError("no %s in %s" % (fn, host_cc))
-    consts, counts, locs = {}, {}, {}
+    consts, locs = {}, {}
     stack = []  # [(depth at loop open, trip)]
     depth = 0
     for line in m.group(1).split("\n"):
@@ -118,6 +120,16 @@ def host_counts(host_cc, fn="host_canonicalized", txt=None):
             stack.append((depth, trip))
             depth += code_after.count("{") - code_after.count("}")
             continue
+        yield line, code, mult, locs
+        depth += code.count("{") - code.count("}")
+        while stack and depth <= stack[-1][0]:
+            stack.pop()
+
+
+def host_counts(host_cc, fn="host_canonicalized", txt=None):
+    """{runtime API name: executed calls per launch} of host function fn (host_canonicalized[_<kernel>])."""
+    counts = {}
+    for _line, code, mult, locs in _walk(host_cc, fn, txt):
         for c in _CALL.findall(code):
             counts[c] = counts.get(c, 0) + mult
         # a plain __Runtime_dma_bd_config on a shim tile (row 0) takes the XAIE_BACKEND_OP_CONFIG_SHIMDMABD RunOp
@@ -125,10 +137,58 @@ def host_counts(host_cc, fn="host_canonicalized", txt=None):
         for v in _BDCFG_TILE.findall(code):
             if locs.get(v) == 0:
                 counts[SHIM_BD] = counts.get(SHIM_BD, 0) + mult
-        depth += code.count("{") - code.count("}")
-        while stack and depth <= stack[-1][0]:
-            stack.pop()
     return counts
+
+
+_BDC = re.compile(r"/\* DMA BD Config: (.*?) \*/")
+_CIO = re.compile(r"/\* Create IO: channel_id=(\d+), bd_id=(\d+), tile=\((\d+),(\d+)\), direction=(MM2S|S2MM) \*/")
+
+
+def bd_run_b(bd):
+    """contiguous byte run of one BD: plain BD = len; multidim: d0 is contiguous when d0_stride == 4 (32-bit
+    element), then d1.. merge while d<i>_stride == bytes covered so far; the run never exceeds len"""
+    nd = bd.get("num_dims", 0)
+    if not nd:
+        return bd["len"]
+    if bd["d0_stride"] != 4:
+        return 4
+    run = 4 * bd["d0_wrap"]
+    for i in range(1, nd):
+        if bd.get("d%d_stride" % i) != run:
+            break
+        run *= bd["d%d_wrap" % i]
+    return min(run, bd["len"])
+
+
+def shim_bd_shapes(host_cc, fn, txt=None):
+    """shim (row 0) BDs of host function fn, one dict per BD comment of the codegen
+    ('/* DMA BD Config: bd_id=.., len=<bytes>, .., num_dims=.., d<i>_stride=<bytes>, d<i>_wrap=.. */', present in
+    the off and the aot/aot-kco host.cc alike: aot drops the calls but keeps the comments). Each BD belongs to the
+    next '/* Create IO: .. tile=(c,r), direction=.. */' (a chained / out-of-order BD group is created once, on its
+    first BD). Adds tile, dir, mult (executions per launch, _walk) and run_b (bd_run_b).
+    Raises on a BD comment with no following Create IO."""
+    out, pend = [], []
+    for line, _code, mult, _locs in _walk(host_cc, fn, txt):
+        bm = _BDC.search(line)
+        if bm:
+            d = {}
+            for kv in bm.group(1).split(", "):
+                k, _, v = kv.partition("=")
+                d[k] = v if v in ("true", "false") else int(v)
+            d["mult"] = mult
+            pend.append(d)
+            continue
+        cm = _CIO.search(line)
+        if cm:
+            col, row, dr = int(cm.group(3)), int(cm.group(4)), cm.group(5)
+            for d in pend:
+                if row == 0:
+                    d.update(tile=(col, row), dir=dr, run_b=bd_run_b(d))
+                    out.append(d)
+            pend = []
+    if pend:
+        raise ValueError("%s: %d BD comments without a following Create IO" % (fn, len(pend)))
+    return out
 
 
 def window_cp_words(ctrlpkt_h, return_route=False):
