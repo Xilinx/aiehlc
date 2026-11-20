@@ -75,7 +75,7 @@ def base_sites(build, build_log):
         elif kind == "linear":
             x, _w, y = c[2]
             M, K, N = x[0], x[1], y[1]
-            s = dict(kind="linear", MK=M * K, MN=M * N, Mw=M, Kw=K, Nw=N)
+            s = dict(kind="linear", MK=M * K, MN=M * N, Mw=M, Kw=K, Nw=N, pack_slow_elems=pack_slow_elems(M, K))
         else:
             if ls:
                 g = gfa[c[3]]
@@ -83,9 +83,18 @@ def base_sites(build, build_log):
                          Mw=g["h"] * g["n"], Kw=g["d"], Nw=g["m"])
             else:
                 s = dict(kind="attn", MK=0, MN=0, cls=c[3], Mw=0, Kw=0, Nw=0)
+        s.setdefault("pack_slow_elems", 0)
         s.update(cid=c[1], launches=len(ls), kernels=sorted({k for k, _s, _d in ls}))
         out.append(s)
     return out
+
+
+def pack_slow_elems(M, K):
+    """x elements uc_linear packs on the scalar slow path (kacc_linear_host.cc:45,96-100): rows are padded to
+    Mp = (M+63)&~63; the NEON 8x8 path takes only full 8-row groups below M (m0 % 8 == 0 and m0+8 <= M), every
+    other padded row (M % 8 tail + zero padding up to Mp) goes through the 4-row scalar path, K elements each.
+    Linear sites only (0 for conv / fa / attn)."""
+    return (((M + 63) & ~63) - 8 * (M // 8)) * K
 
 
 def wbytes(kernel):

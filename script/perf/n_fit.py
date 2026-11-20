@@ -57,7 +57,8 @@ from aiegraph.costmodel.unet_seq import read  # noqa: E402
 
 KINDS = ("conv", "linear", "fa")
 FEATS = ("MK", "MN", "launches", "wbytes", "cp_w", "bdcfg_w", "rr", "rr_pair", "kswitch", "kfirst",
-         "in_pack_bytes", "out_scatter_bytes", "relayout")  # = b6450ac9
+         "in_pack_bytes", "out_scatter_bytes", "relayout",  # = b6450ac9
+         "pack_slow_elems")  # P2: x elems on uc_linear's scalar pack path (kacc_linear_host.cc:45,96-100), linear only
 MAX_FEATS = {"conv": 7, "linear": 5, "fa": 5}  # active features per kind (fa has n=18; off conv 7 feats -> 0.164)
 TOP_LOO = 40   # in-sample best subsets re-ranked by leave-one-out max relative error
 GATE = 0.200
