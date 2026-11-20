@@ -22,13 +22,35 @@ Output:
   M3SUM   cfg=.. log=.. K_site_ms=.. K_split_ms=.. L_site_ms=.. L_split_ms=.. N_site_ms=.. KL_vs_rt_phase_sum_rel=..
           site_launches=.. unmapped=.. PASS|FAIL
   M3PROBE ALL logs=.. sites=.. unmapped=.. PASS|FAIL      (rc=1 on FAIL)
+
+  m3_site.py --kl --build-root DIR --cycles unet_kernel_cycles.json
+             (--fit CFG=LOG ... --out PARAMS.json | --params PARAMS.json) --check CFG=LOG ...
+Per-site prediction of K + L (ms, whole site = launches x per-launch) against the measured K + L above.
+  K kacc  des.predict_launch(instance, palmyra213.json + palmyra213_kcal.json (ddr_model=bytes, as the K2c fit),
+          core_cyc of the --cycles json) wait_ms x launches; ddr_bw_scale is refit per cfg on --fit
+  K fa    kfa_scale x core_cyc_site / aie_clk (FA has no ISS anchor: core_cyc is P1's formula_noloo); kfa_scale
+          ('effective K' of FA) is fit per cfg on --fit
+  L       sum over the site's launches of launch_l.predict_l(static per-launch features, cfg), params
+          l_palmyra213.json; features: static_feat.unet_site_feat (bdcfg/startio calls, bdcfg_w/cp_w + rr), per-launch
+          kload_w replayed as kload_static.kload_static, core_reset = 0: core_reset is timed inside kload
+          (main_launch_line.c:28), the site L (dma - glue - flush - inval) counts kload once, while launch_l's l_def
+          adds core_reset a second time (rst term).
+Fit: per cfg, minimax relative error of K+L on the --fit sites; kacc sites depend only on ddr_bw_scale and fa sites
+only on kfa_scale, so each is a 1-D grid (KL_S_GRID, KL_F_GRID).  LOO = leave-one-site-out refit on the fit log,
+max held-out rel.  --check logs are never fitted.  Gate per cfg: every site rel <= KL_MAXREL and R2 >= KL_R2.
+  KLSITE  cfg=.. kind cid launches K_meas L_meas K_pred L_pred rel
+  KLGATE  cfg=.. log=.. board=.. launches=.. sites=.. ddr_bw_scale=.. kfa_scale=.. r2=.. maxrel=.. loo_maxrel=..
+          sum_rel=.. (printed only) PASS|FAIL
+  KLGATE  ALL src=board cfgs=.. sites=.. r2_min=.. maxrel=.. loo_maxrel=.. PASS|FAIL   (rc=1 on FAIL)
 """
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from n_fit import measure  # noqa: E402
 
 SITES_PER_CFG = {"linear": 72, "conv": 48, "fa": 18}
@@ -98,12 +120,257 @@ def probe(cfg, log, build):
     return ok, len(rows), unmapped
 
 
+# ------------------------------------------------------------------ --kl: K + L prediction per site
+HERE = Path(__file__).resolve().parent
+KL_MAXREL = 0.20
+KL_R2 = 0.90
+KL_S_GRID = [round(0.50 + 0.005 * i, 3) for i in range(501)]   # ddr_bw_scale 0.50 .. 3.00
+KL_F_GRID = [round(0.05 + 0.01 * i, 2) for i in range(496)]    # kfa_scale 0.05 .. 5.00
+
+
+def _g6(x):
+    return float("%.6g" % x)
+
+
+def k_params():
+    prm = json.load(open(HERE / "params" / "palmyra213.json"))
+    cal = json.load(open(HERE / "params" / "palmyra213_kcal.json"))
+    prm.update({k: v for k, v in cal.items() if isinstance(v, (int, float))})
+    prm["ddr_model"] = cal.get("ddr_model", "bytes")
+    return prm
+
+
+def kload_per_launch(build):
+    """per-launch kload_w of a UNet build: the replay of kload_static.kload_static, one value per launch"""
+    from aiegraph.costmodel import kswitch
+    from aiegraph.costmodel import kload_static as ks
+    from aiegraph.costmodel.rst_static import AIE_TILE_ROW_START
+    b = Path(build)
+    defs = ks.build_defs(b)
+    sites = ks.load_sites(b)
+    warm = bool(defs.get("PM_WARM_SKIP"))
+    launches, _ = kswitch.unet_launches(str(b), require_warm=warm)
+    if all(c for c, _ in sites):
+        out = [float(ks.CTRL_KLOAD_W)] * len(launches)
+    else:
+        objdir = b / "ag_work/aiek/aiek_unetconv/worklocal/build"
+        cache, res, out = {}, {}, []
+        for i, ln in enumerate(launches):
+            blob = ln["blob"]
+            if blob not in cache:
+                obj = objdir / (blob[len("_binary_"):-len("_start")] + ".o")
+                cache[blob] = ks.tile_words(ks.elf_segments(ks.elf_from_obj(obj, blob)), defs)
+            pm, other = cache[blob]
+            w = 0
+            for t in ln["tiles"]:
+                if t[1] < AIE_TILE_ROW_START:
+                    continue
+                cold = not (warm and res.get(t) == blob)
+                res[t] = blob
+                w += (ks.DMA_RESET_W if i else 0) + ks.CORE_CTRL_W + other + (pm if cold else 0)
+            out.append(float(w))
+    ref = ks.kload_static(b)["kload_w"]
+    if abs(sum(out) / len(out) - ref) > 1e-6 * max(1.0, ref):
+        raise ValueError("per-launch kload_w mean %.3f != kload_static %.3f" % (sum(out) / len(out), ref))
+    return out, [ln["kernel"] for ln in launches]
+
+
+def l_sites(build, cfg):
+    """{(kind, cid): predicted L ms of the site} from build-dir static features only"""
+    from aiegraph.costmodel import launch_l
+    from aiegraph.costmodel.static_feat import unet_site_feat
+    from site_feat import site_feats
+    lp = launch_l.load_params(str(HERE / "params" / "l_palmyra213.json"))
+    seq = unet_site_feat(build)
+    kw, kk = kload_per_launch(build)
+    if kk != [d["kernel"] for d in seq]:
+        raise ValueError("kload launch order != unet_site_feat launch order")
+    st, _ = site_feats(build, build + ".build.log")
+    out, i = {}, 0
+    for s in st:
+        tot = 0.0
+        for j in range(i, i + s["launches"]):
+            d = seq[j]
+            calls = {"bdcfg": d["bdcfg_calls"], "startio": d["startio_calls"], "core_reset": 0.0}
+            words = {"bdcfg_w": d["bdcfg_w"] + d["rr"], "cp_w": d["cp_w"] + d["rr"], "kload_w": kw[j]}
+            tot += launch_l.predict_l(calls, words, cfg, lp)
+        out[(s["kind"], s["cid"])] = tot
+        i += s["launches"]
+    return out
+
+
+class KLCfg:
+    """one cfg: static L per site, K of kacc sites on the ddr_bw_scale grid, FA core time"""
+
+    def __init__(self, cfg, build, cyc, prm):
+        from aiegraph.costmodel import des
+        self.cfg, self.build, self.prm = cfg, build, prm
+        self.L = l_sites(build, cfg)
+        self.cyc = {(c["kind"], c["cid"]): c for c in cyc["sites"]}
+        self.clk_khz = float(prm["aie_clk_mhz"]) * 1e3
+        self._des = des
+        self._k = {}
+
+    def k_launch(self, key, s):
+        c = self.cyc[key]
+        ik = (json.dumps(c["instance"], sort_keys=True), c["core_cyc"], s)
+        if ik not in self._k:
+            p = dict(self.prm, ddr_bw_scale=s)
+            self._k[ik] = self._des.predict_launch({"instance": c["instance"]}, p, {"core_cyc": c["core_cyc"]})["wait_ms"]
+        return self._k[ik]
+
+    def rows(self, log):
+        rows, txt = site_rows(self.build, log)
+        out = []
+        for r in rows:
+            key = (r["kind"], r["cid"])
+            c = self.cyc.get(key)
+            if c is None or c["kernel"] not in (r.get("kernels") or []) or int(c["launches"]) != r["launches"]:
+                raise ValueError("site %s%d: no matching --cycles entry" % key)
+            out.append(dict(r, key=key, Lp=self.L[key]))
+        return out, txt
+
+    def pred(self, r, s, f):
+        if r["kind"] == "fa":
+            k = f * float(self.cyc[r["key"]]["core_cyc_site"]) / self.clk_khz
+        else:
+            k = self.k_launch(r["key"], s) * r["launches"]
+        return k, r["Lp"]
+
+
+def _rel_grid(kc, rows):
+    """(kacc idx, fa idx, rel matrix sites x grid) of K+L on the s grid (kacc) / f grid (fa)"""
+    import numpy as np
+    ka = [i for i, r in enumerate(rows) if r["kind"] != "fa"]
+    fa = [i for i, r in enumerate(rows) if r["kind"] == "fa"]
+    rel_s = np.array([[abs(sum(kc.pred(rows[i], s, 1.0)) / (rows[i]["K"] + rows[i]["L"]) - 1.0) for s in KL_S_GRID]
+                      for i in ka]).reshape(len(ka), len(KL_S_GRID))
+    rel_f = np.array([[abs(sum(kc.pred(rows[i], 1.0, f)) / (rows[i]["K"] + rows[i]["L"]) - 1.0) for f in KL_F_GRID]
+                      for i in fa]).reshape(len(fa), len(KL_F_GRID))
+    return ka, fa, rel_s, rel_f
+
+
+def _argmin_max(rel, grid, drop=None):
+    """grid value minimising the max over rows of rel (row drop excluded; first on ties)"""
+    import numpy as np
+    if drop is not None:
+        rel = np.delete(rel, drop, axis=0)
+    if rel.shape[0] == 0:
+        return 1.0
+    return grid[int(np.argmin(rel.max(axis=0)))]
+
+
+def kl_fit(kc, rows):
+    """(ddr_bw_scale, kfa_scale, fit maxrel, LOO maxrel): minimax rel of K+L per site on rows; separable (kacc
+    sites depend on ddr_bw_scale only, fa sites on kfa_scale only).  LOO = leave-one-site-out refit, held-out rel."""
+    ka, fa, rel_s, rel_f = _rel_grid(kc, rows)
+    s = _argmin_max(rel_s, KL_S_GRID)
+    f = _argmin_max(rel_f, KL_F_GRID)
+    fit = max(rel_s[:, KL_S_GRID.index(s)].max() if ka else 0.0, rel_f[:, KL_F_GRID.index(f)].max() if fa else 0.0)
+    loo = 0.0
+    for j in range(len(ka)):
+        loo = max(loo, rel_s[j, KL_S_GRID.index(_argmin_max(rel_s, KL_S_GRID, j))])
+    for j in range(len(fa)):
+        loo = max(loo, rel_f[j, KL_F_GRID.index(_argmin_max(rel_f, KL_F_GRID, j))])
+    return s, f, float(fit), float(loo)
+
+
+def kl_check(kc, log, s, f, loo):
+    rows, txt = kc.rows(log)
+    m = _CMP.findall(txt)
+    board, launches, rc = m[-1] if m else ("-", "-1", "-1")
+    y, p, rels = [], [], []
+    for r in rows:
+        kp, lp = kc.pred(r, s, f)
+        meas = r["K"] + r["L"]
+        rel = abs(kp + lp - meas) / meas
+        y.append(meas)
+        p.append(kp + lp)
+        rels.append(rel)
+        print("KLSITE cfg=%s %s%d launches=%d K_meas=%.3f L_meas=%.3f K_pred=%.3f L_pred=%.3f rel=%.3f"
+              % (kc.cfg, r["kind"], r["cid"], r["launches"], r["K"], r["L"], kp, lp, rel))
+    mean = sum(y) / len(y)
+    sst = sum((v - mean) ** 2 for v in y)
+    r2 = 1.0 - sum((a - b) ** 2 for a, b in zip(y, p)) / sst if sst > 0 else float("-inf")
+    mx = max(rels)
+    sum_rel = abs(sum(p) - sum(y)) / sum(y)
+    ok = rc == "0" and len(rows) == sum(SITES_PER_CFG.values()) and mx <= KL_MAXREL and r2 >= KL_R2
+    print("KLGATE cfg=%s log=%s board=%s launches=%s sites=%d ddr_bw_scale=%.3f kfa_scale=%.2f r2=%.3f maxrel=%.3f "
+          "loo_maxrel=%s sum_rel=%.3f %s" % (kc.cfg, log, board, launches, len(rows), s, f, r2, mx,
+                                             "%.3f" % loo if loo is not None else "-", sum_rel,
+                                             "PASS" if ok else "FAIL"))
+    return ok, len(rows), r2, mx
+
+
+def kl_main(a):
+    root = a.build_root.rstrip("/")
+    cyc = json.load(open(a.cycles))
+    prm = k_params()
+    kcs = {}
+
+    def kc_of(cfg):
+        if cfg not in kcs:
+            kcs[cfg] = KLCfg(cfg, "%s/unet_%s" % (root, cfg), cyc, prm)
+        return kcs[cfg]
+
+    if a.fit:
+        out = {"board": "palmyra213", "def": "per site K+L ms; K kacc = DES wait_ms x launches (palmyra213 + kcal, "
+               "ddr_bw_scale per cfg), K fa = kfa_scale x core_cyc_site / aie_clk, L = launch_l.predict_l static "
+               "(core_reset=0)", "fit": "minimax rel K+L per site on the fit log", "cfg": {}}
+        for spec in a.fit:
+            cfg, log = spec.split("=", 1)
+            kc = kc_of(cfg)
+            rows, _ = kc.rows(log)
+            s, f, mx, loo = kl_fit(kc, rows)
+            print("KLFIT cfg=%s log=%s sites=%d ddr_bw_scale=%.3f kfa_scale=%.2f fit_maxrel=%.3f loo_maxrel=%.3f"
+                  % (cfg, log, len(rows), s, f, mx, loo))
+            out["cfg"][cfg] = {"ddr_bw_scale": _g6(s), "kfa_scale": _g6(f), "fit_log": Path(log).name,
+                               "fit_maxrel": _g6(mx), "loo_maxrel": _g6(loo), "sites": len(rows)}
+        with open(a.out, "w") as fh:
+            fh.write(json.dumps(out, indent=1, sort_keys=True) + "\n")
+        print("[kl] params -> %s" % a.out)
+    else:
+        out = json.load(open(a.params))
+    ok, nsite, r2s, mxs, loos = True, 0, [], [], []
+    for spec in a.check:
+        cfg, log = spec.split("=", 1)
+        c = out["cfg"].get(cfg)
+        if c is None:
+            print("KLGATE cfg=%s log=%s no fitted params FAIL" % (cfg, log))
+            ok = False
+            continue
+        o, n, r2, mx = kl_check(kc_of(cfg), log, c["ddr_bw_scale"], c["kfa_scale"], c.get("loo_maxrel"))
+        ok &= o
+        nsite += n
+        r2s.append(r2)
+        mxs.append(mx)
+        loos.append(c.get("loo_maxrel", float("nan")))
+    ok &= len(r2s) == len(a.check) and len(r2s) > 0
+    print("KLGATE ALL src=board cfgs=%d sites=%d r2_min=%.3f maxrel=%.3f loo_maxrel=%.3f %s"
+          % (len(r2s), nsite, min(r2s) if r2s else float("nan"), max(mxs) if mxs else float("nan"),
+             max(loos) if loos else float("nan"), "PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--probe", action="store_true", required=True)
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--probe", action="store_true")
+    mode.add_argument("--kl", action="store_true")
     ap.add_argument("--build-root", required=True)
-    ap.add_argument("runs", nargs="+", metavar="CFG=LOG[,LOG...]")
+    ap.add_argument("--cycles")
+    ap.add_argument("--fit", nargs="+", metavar="CFG=LOG")
+    ap.add_argument("--out")
+    ap.add_argument("--params")
+    ap.add_argument("--check", nargs="+", metavar="CFG=LOG")
+    ap.add_argument("runs", nargs="*", metavar="CFG=LOG[,LOG...]")
     a = ap.parse_args()
+    if a.kl:
+        if not a.cycles or not a.check or bool(a.fit) == bool(a.params) or (a.fit and not a.out):
+            ap.error("--kl needs --cycles, --check and either --fit + --out or --params")
+        return kl_main(a)
+    if not a.runs:
+        ap.error("--probe needs CFG=LOG runs")
     root = a.build_root.rstrip("/")
     ok, nlogs, nsites, nun = True, 0, 0, 0
     for spec in a.runs:

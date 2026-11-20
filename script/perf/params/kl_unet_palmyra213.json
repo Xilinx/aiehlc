@@ -1,0 +1,23 @@
+{
+ "board": "palmyra213",
+ "cfg": {
+  "aot-kco": {
+   "ddr_bw_scale": 1.285,
+   "fit_log": "unet_aot-kco.a.log",
+   "fit_maxrel": 0.461211,
+   "kfa_scale": 1.63,
+   "loo_maxrel": 0.46435,
+   "sites": 138
+  },
+  "off": {
+   "ddr_bw_scale": 1.25,
+   "fit_log": "unet_off.a.log",
+   "fit_maxrel": 0.360604,
+   "kfa_scale": 0.86,
+   "loo_maxrel": 0.505412,
+   "sites": 138
+  }
+ },
+ "def": "per site K+L ms; K kacc = DES wait_ms x launches (palmyra213 + kcal, ddr_bw_scale per cfg), K fa = kfa_scale x core_cyc_site / aie_clk, L = launch_l.predict_l static (core_reset=0)",
+ "fit": "minimax rel K+L per site on the fit log"
+}
