@@ -126,7 +126,7 @@ def estimate_bdgraph(op: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, An
     (bd_configs x bd_us) when the BD write path is known.  K-segment terms are not priced yet."""
     from . import bdgraph
     f = bdgraph.features(op["bdgraph"])
-    unpriced = ["glue", "l", "wait(bdgraph K model)", "dma_bytes"]
+    unpriced = ["glue", "l", "wait(bdgraph K model)", "dma_time(bytes counted)"]
     issue = None
     bd_us = (op.get("host") or {}).get("bd_us", params.get("host_bd_us"))
     if f["bd_write_path"] is None:

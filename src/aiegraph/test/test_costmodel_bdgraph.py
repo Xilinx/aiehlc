@@ -93,7 +93,7 @@ def test_given_bd_write_path_and_bd_us_then_issue_ms_is_bd_configs_times_bd_us(t
                            "host": {"bd_us": 2.0}}], "launches": 3}, cycles=cycles_file)
     assert r["issue_ms"] == pytest.approx(17 * 2.0 / 1e3 * 3)
     assert r["total_ms"] == pytest.approx(r["issue_ms"])
-    assert r["wait"] is None and "wait(bdgraph K model)" in r["unpriced"] and "dma_bytes" in r["unpriced"]
+    assert r["wait"] is None and "wait(bdgraph K model)" in r["unpriced"] and "dma_time(bytes counted)" in r["unpriced"]
 
 
 def test_given_no_bd_write_path_then_issue_is_unpriced_and_total_is_zero(tmp_path, cycles_file):
@@ -126,3 +126,54 @@ def test_given_the_maxwell_2k_mesh_build_then_counts_match_its_host_cc():
     f = bdgraph.features(REAL)
     assert f["rounds"] == 4 and f["bd_config"] == {"launch": 96, "round": 24}
     assert f["bd_configs_per_launch"] == 192
+
+
+# ---- DDR bytes per launch (one start runs the BD chain R times, every run moves the full len; peer:1120010346-95530d)
+
+def test_given_a_chained_shim_bd_and_a_looped_startio_then_ddr_bytes_are_chain_times_r_times_trip(tmp_path):
+    chain = [_bd(0, 4096, next_bd=1), _bd(1, 1024, next_bd=-1), _bd(2, 999)]   # bd 2 is not on the chain
+    host = [{"line": 10, "kind": "createio", "bd_id": 0}, {"line": 20, "kind": "loop"},
+            {"line": 21, "kind": "startio", "code": "ioevent v9 = __Runtime_startio(v1, v8, 0, 3);"},
+            {"line": 30, "kind": "loopend"}]
+    f = bdgraph.features(_write(tmp_path, LOOPED, [_bd(0, 64)], host, shim_bds=chain))
+    ch = f["ddr_bytes"]["channels"][0]
+    assert ch["run_bytes"] == 5120 and ch["runs"] == 3 * 5
+    assert f["ddr_bytes"]["mm2s"] == 5120 * 15 and f["ddr_bytes"]["s2mm"] == 0
+
+
+def test_given_a_startio_without_a_literal_r_then_start_io_repeat_count_is_used(tmp_path):
+    host = [{"line": 10, "kind": "createio", "bd_id": 0}, {"line": 11, "kind": "startio", "code": "x = f(v);"}]
+    f = bdgraph.features(_write(tmp_path, [{"repeat_count": 2}], [_bd(0, 64)], host))
+    assert f["ddr_bytes"]["mm2s"] == 2 * 4096
+
+
+def test_given_a_cyclic_chain_then_each_bd_is_counted_once_per_run():
+    assert bdgraph.chain_bytes([_bd(0, 100, next_bd=1), _bd(1, 50, next_bd=0)], 0) == 150
+    assert bdgraph.chain_bytes([_bd(0, 100)], 7) is None
+
+
+def test_given_a_looped_startio_and_unknown_rounds_then_ddr_bytes_are_none(tmp_path):
+    ssa = [{"repeat_count": 1, "inside_scf_for": True, "loop_range": "%c0..%n"}]
+    host = [{"line": 10, "kind": "createio", "bd_id": 0}, {"line": 20, "kind": "loop"},
+            {"line": 21, "kind": "startio", "code": "__Runtime_startio(v1, v8, 0, 1);"}, {"line": 30, "kind": "loopend"}]
+    f = bdgraph.features(_write(tmp_path, ssa, [_bd(0, 64)], host))
+    assert f["ddr_bytes"]["mm2s"] is None
+    assert bdgraph.features({"worklocal": str(tmp_path), "trip_count": 4})["ddr_bytes"]["mm2s"] == 4 * 4096
+
+
+S12 = Path("/scratch/staff/huaj/tmp/s12dma_run/m2/aout/worklocal")
+
+
+@pytest.mark.skipif(not (S12 / "schedule_view.json").exists(), reason="real build dir not present")
+def test_given_the_s12_m2_build_then_ddr_bytes_equal_its_2x2048_i32_in_and_out():
+    d = bdgraph.features(S12)["ddr_bytes"]
+    assert d["mm2s"] == 2 * 2048 * 4 and d["s2mm"] == 2 * 2048 * 4
+
+
+@pytest.mark.skipif(not (REAL / "schedule_view.json").exists(), reason="real build dir not present")
+def test_given_the_maxwell_2k_mesh_build_then_shim_mm2s0_moves_4x4x4096_per_launch():
+    # host.cc l.632/636: startio(..., 2, 4) inside the 0..4 loop, BD len 4096 -> 64 KiB per launch (Amit's count)
+    d = bdgraph.features(REAL)["ddr_bytes"]
+    mm2s0 = [c for c in d["channels"] if c["tile"] == (0, 0) and c["dir"] == "MM2S" and c["ch"] == 0][0]
+    assert mm2s0["bytes"] == 4 * 4 * 4096
+    assert d["mm2s"] == 8 * 65536 and d["s2mm"] == 4 * 16 * 256 * 4
