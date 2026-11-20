@@ -205,7 +205,11 @@ def cost_model(f: dict) -> dict:
     cfg_ms = cfg_words * (CTRL_NS if host["ctrl_calls"] else WRITE_NS) / 1e6
     known = elf_ms + cfg_ms
     measured = f["run"]["measured_ms"]
-    return {"cores": cores, "elf_load_ms": round(elf_ms, 3), "elf_words_per_core": int(words),
+    est = None
+    if f.get("group"):  # forward to the cost layer (aiegraph.costmodel.estimate) when the facts carry a group
+        from .costmodel import estimate
+        est = estimate(f["group"], board=f.get("board", "palmyra213"))
+    return {"cores": cores, "estimate": est, "elf_load_ms": round(elf_ms, 3), "elf_words_per_core": int(words),
             "config_ms": round(cfg_ms, 3), "config_words": int(cfg_words),
             "teardown": host["teardown"], "computing": not f["src"]["backbone"],
             "known_ms": round(known, 3), "measured_ms": measured,
