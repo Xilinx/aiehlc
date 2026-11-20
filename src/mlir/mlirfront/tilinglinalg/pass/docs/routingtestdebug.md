@@ -2,7 +2,7 @@
      SPDX-License-Identifier: Apache-2.0 -->
 #Test steps
 ## laungch test script
-- cd /scratch/staff/huaj/amdaiehlc/aiehlc/src/mlir/mlirfront/tilinglinalg/pass/unitest
+- cd <repo>/src/mlir/mlirfront/tilinglinalg/pass/unitest
 - source ./piplinerun.sh rebuild
 ## check the output
 - if no aieruntime or AieRt_Debug not in the log, the test run failed , redo the "launch test"

@@ -478,7 +478,7 @@ So: LLVM is required either way. To enable `--relay-ptq`:
 ```bash
 sudo apt install zlib1g-dev libzstd-dev     # the only two things missing
 python src/frontend/tvmrelay/setup_tvm016.py --yes \
-    --llvm /scratch/staff/huaj/llvm-project/build/bin/llvm-config
+    --llvm <llvm-build>/bin/llvm-config
 ```
 
 Host LLVM 19 is already detected as compatible — zlib/zstd were the sole cmake

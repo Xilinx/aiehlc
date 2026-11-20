@@ -2,7 +2,7 @@
      SPDX-License-Identifier: Apache-2.0 -->
 #Test steps
 ## laungch test script
-- cd /scratch/staff/huaj/amdaiehlc/aiehlc/src/mlir/mlirfront/tilinglinalg/pass/unitest
+- cd <repo>/src/mlir/mlirfront/tilinglinalg/pass/unitest
 - source ./piplinerun.sh rebuild
 ## check the output
 - check [aie_runtime]     shim buf@0x***** [0..15]: xx  , the xx should be consistent at least have  64 item,  each 64 should either 30 or 40 and another 64 should be 31 or 41

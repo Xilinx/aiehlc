@@ -42,63 +42,63 @@ dataflowmap.receive at %core_port_in_B
 /*
 builtin.module {
 
-  // 定义一个函数来设置 "缓存并转发" 的顺序广播
+  // Define a function that sets up a "cache-and-forward" sequential broadcast
   dma_hop.func @cache_and_forward_broadcast() {
 
-    // --- 1. 定义物理 Tile 实例 (The "Where") ---
+    // --- 1. Define the physical tile instances (The "Where") ---
     %shim_tile = dma_hop.tile { col = 0, row = 0 } -> !dma_hop.tile
     %tile_A    = dma_hop.tile { col = 1, row = 2 } -> !dma_hop.tile
     %tile_B    = dma_hop.tile { col = 2, row = 2 } -> !dma_hop.tile
     
-    // --- 2. 定义物理端口 (The "Doors") ---
+    // --- 2. Define the physical ports (The "Doors") ---
     %port_shim_out = dma_hop.port on %shim_tile { ... } -> !dma_hop.port
     %port_A_in = dma_hop.port on %tile_A { ... } -> !dma_hop.port
     %port_A_out = dma_hop.port on %tile_A { ... } -> !dma_hop.port
     %port_B_in = dma_hop.port on %tile_B { ... } -> !dma_hop.port
 
-    // --- 3. 定义 Hops (The Physical Links) ---
+    // --- 3. Define the hops (The Physical Links) ---
     %hop_1 = dma_hop.create_hop %port_shim_out -> %port_A_in -> !dma_hop.hop
     %hop_2 = dma_hop.create_hop %port_A_out -> %port_B_in -> !dma_hop.hop
 
     
-    // --- 4. 定义 Path (The Full Route) ---
+    // --- 4. Define the path (The Full Route) ---
     //
-    // vvvv 这里是您建议的修改 vvvv
+    // vvvv the change you suggested vvvv
     // 
-    // "consumers" 和 "tee_points" 现在是路径的静态属性。
-    // 这定义了数据流的完整拓扑。
+    // "consumers" and "tee_points" are now static attributes of the path.
+    // This defines the complete topology of the data flow.
     %serial_path = dma_hop.create_path [%hop_1, %hop_2] {
         consumers = [ %port_A_in, %port_B_in ],
-        tee_points = [ %port_A_in ] // 明确指出 Tile A 需要分流
+        tee_points = [ %port_A_in ] // states explicitly that tile A must tee off a copy
     } -> !dma_hop.path
     //
-    // ^^^^ 修改结束 ^^^^
+    // ^^^^ end of change ^^^^
     
 
-    // --- 5. 准备数据和 `memref` 缓冲区 (The "What") ---
+    // --- 5. Prepare the data and the `memref` buffers (The "What") ---
     %data = memref.alloc() : memref<1024xf32, memory_space = "DDR"> 
     %buffer_A = dma_hop.alloc_buffer on %tile_A { ... } -> memref<1024xf32, ...>
     %buffer_B = dma_hop.alloc_buffer on %tile_B { ... } -> memref<1024xf32, ...>
 
     
-    // --- 6. 执行传输 (The "How" & "When") ---
+    // --- 6. Perform the transfer (The "How" & "When") ---
     //
-    // vvvv dma_hop.push 也随之简化了 vvvv
+    // vvvv dma_hop.push is simplified accordingly vvvv
     //
-    // 它不再需要复杂的 "port -> buffer" 映射。
-    // 它只需要按顺序提供缓冲区,
-    // 这个顺序 *必须* 匹配 %serial_path 中 'consumers' 属性的顺序。
-    // (即 %buffer_A 对应 %port_A_in, %buffer_B 对应 %port_B_in)
+    // It no longer needs a complex "port -> buffer" mapping.
+    // It only needs the buffers supplied in order,
+    // and that order *must* match the order of the 'consumers' attribute in %serial_path.
+    // (i.e. %buffer_A maps to %port_A_in, %buffer_B maps to %port_B_in)
     dma_hop.push %data onto %serial_path
       outputs (%buffer_A, %buffer_B) 
     //
-    // ^^^^ 修改结束 ^^^^
+    // ^^^^ end of change ^^^^
     
 
-    // --- 7. 同步 ---
+    // --- 7. Synchronize ---
     dma_hop.sync %serial_path
 
-    // --- 8. 释放资源 ---
+    // --- 8. Release resources ---
     dma_hop.dealloc_buffer %buffer_A
     dma_hop.dealloc_buffer %buffer_B
     memref.dealloc %data

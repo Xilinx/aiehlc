@@ -3,7 +3,7 @@
 Add stream-switch **control packet** support so `routing.cc` can route packets that
 perform in-tile **register/memory writes** — the mechanism used by
 `_XAie_LoadElfStrmSwFromMemPkt` / `XAie_LoadElfStrmSwPkt` in
-`/proj/xsjsswstaff/gregoryw/kernel-loading/aie-rt/driver/src/core/xaie_elfloader.c`.
+aie-rt's `driver/src/core/xaie_elfloader.c`.
 
 Use cases: **kernel-ELF load acceleration AND generic config writes** → one general
 control-packet infrastructure.
@@ -149,8 +149,8 @@ tile/port/packet modeling. Concretely:
    (getter `getLocalsinkport()` present). Note: `gen.sh` has a pre-existing arg-quoting quirk;
    ran `mlir-tblgen` directly:
    ```
-   TBG=/scratch/staff/huaj/llvm-project/build/bin/mlir-tblgen
-   INC=/scratch/staff/huaj/llvm-project/mlir/include
+   TBG=<llvm-build>/bin/mlir-tblgen
+   INC=<llvm-project>/mlir/include
    $TBG -gen-op-defs  td/routinghwop.td -dialect=routinghw -Itd -I. -I$INC -o inc/routinghwop.cc.inc
    $TBG -gen-op-decls td/routinghwop.td -dialect=routinghw -Itd -I. -I$INC -o inc/routinghwop.h.inc
    ```

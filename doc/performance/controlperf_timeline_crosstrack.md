@@ -266,7 +266,7 @@ can't produce output until the host releases the lock, so the output DMA starves
 
 ---
 
-## 6. Whole-time pie (饼图) — every behavior as a % of the 633.493 µs run
+## 6. Whole-time pie chart — every behavior as a % of the 633.493 µs run
 
 > Rendered by any Mermaid-aware viewer (GitHub, VS Code, most markdown previewers).
 > Slice values are µs; Mermaid prints the % automatically.

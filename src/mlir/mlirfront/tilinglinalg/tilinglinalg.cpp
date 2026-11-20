@@ -113,14 +113,14 @@ void tilinglinalg::creatematmul(int m, int k, int n) {
       //builder.getArrayAttr({"cyclic", "cyclic", "cyclic"});
      ///*
     auto outer = builder.create<mlir::transform::TileUsingForallOp>(
-      builder.getUnknownLoc(),
-      /*target=*/target,
-      /*staticNumThreads=*/numThreads,        // 走“num_threads”那条重载
-      /*spec      =*/mlir::transform::NumThreadsSpec(),    // 绝大多数场景直接 None
-      /*mapping   =*/mapping);            // 可 later attach gpu.block 等
+        builder.getUnknownLoc(),
+        /*target=*/target,
+        /*staticNumThreads=*/numThreads,                  // take the "num_threads" overload
+        /*spec      =*/mlir::transform::NumThreadsSpec(), // None in almost every case
+        /*mapping   =*/mapping);                          // can later attach gpu.block etc.
 
     Value tiledOpH   = outer.getResult(0);      // = %gridTile
-    // Value forallH = outer.getResult(1);      // = %forallGrid（如果需要的话）
+    // Value forallH = outer.getResult(1);      // = %forallGrid (if needed)
 
     builder.create<mlir::transform::TileUsingForallOp>(builder.getUnknownLoc(),
                                       tiledOpH/*target*/,

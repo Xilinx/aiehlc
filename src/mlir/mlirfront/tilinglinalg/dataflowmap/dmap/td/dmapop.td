@@ -52,7 +52,7 @@ def dmap_FuncOp : dmapop<"func",[
       $_state.addAttribute("sym_name", Memo);
       $_state.addAttribute("funcType", type);
 
-      // 2. Region 和 Block
+      // 2. Region and block
       auto *bodyRegion = $_state.addRegion();
       Block *bodyBlock = new Block();
       bodyRegion->push_back(bodyBlock);

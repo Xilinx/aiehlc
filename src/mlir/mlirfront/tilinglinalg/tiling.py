@@ -188,7 +188,7 @@ module {
     scf.forall (%m, %k, %n) in (4, 2, 2) {
 
       // ---------------------------------
-      // ①  计算各维偏移
+      // (1) compute the per-dimension offsets
       // ---------------------------------
       %m64 = affine.apply affine_map<(d0) -> (d0 * 64)>(%m)  // row
       %n32 = affine.apply affine_map<(d0) -> (d0 * 32)>(%n)  // col-A
@@ -261,7 +261,7 @@ module attributes {transform.with_named_sequence = @do_tiling} {
       
     // 
     scf.for %arg3 = %c0 to %c4 step %c1 {  
-      // 计算当前行的偏移量  
+      // compute the offset of the current row  
       %row_offset = affine.apply affine_map<(d0) -> (d0 * 64)>(%arg3)  
         
       // 

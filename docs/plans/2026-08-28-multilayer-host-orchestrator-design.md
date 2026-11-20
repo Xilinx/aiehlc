@@ -157,7 +157,7 @@ on the same DDR pointers (invalidate before/flush after around each CPU call).
   `<cpu_op>.c` into one dir → run multi-kernel `hostcompile.sh` → `aout/main.elf`.
 - **A1:** `reconstruct_resnet_cc` → `aiehlc resnet.cc` (existing Clang multi-kernel path) →
   `aout/main.elf`.
-- **HW run:** `python test/mainelfpaltest.py` (board `palmyra`, ELF `/home/huaj/aiehlc/main.elf`).
+- **HW run:** `python test/mainelfpaltest.py` (board `palmyra`, ELF `~/aiehlc/main.elf`).
 
 ## 8. Verification
 

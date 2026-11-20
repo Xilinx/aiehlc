@@ -24,11 +24,11 @@ void testdialect::initialize()  {
     #define GET_OP_LIST
     #include "testop.cc.inc"
         >();
-    // 如果有 Attr / Type：addAttributes<...>(); addTypes<...>();
-     addAttributes<
+    // if there are Attrs / Types: addAttributes<...>(); addTypes<...>();
+    addAttributes<
     #define GET_ATTRDEF_LIST
     #include "testattr.cc.inc"
-    >();
+        >();
 
         // 3. Types
     addTypes<
@@ -116,10 +116,10 @@ public:
         SmallVector<OpFoldResult> lbs = {builder.getIndexAttr(0)};
         SmallVector<OpFoldResult> ubs = {builder.getIndexAttr(16)};
         SmallVector<OpFoldResult> steps = {builder.getIndexAttr(1)};
-  // ──────────────────────────────
-  // 2. 创建 scf.forall
-  //    OpBuilder 会回调一个 lambda，让你往 region 里塞指令
-  // ──────────────────────────────
+        // ──────────────────────────────
+        // 2. Create the scf.forall
+        //    OpBuilder calls back a lambda that lets you put ops into the region
+        // ──────────────────────────────
         auto scf = builder.create<mlir::scf::ForallOp>(
                     location,
                     lbs, ubs, steps,

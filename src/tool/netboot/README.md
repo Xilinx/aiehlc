@@ -212,8 +212,8 @@ still takes ~50 s.
 From the dev box by hand:
 
 ```bash
-python3 src/tool/netboot/netload.py status --via huaj@10.23.224.213 --proxy /home/huaj/aiehlc/netboot/netboot_proxy.py
-python3 src/tool/netboot/netload.py load aout/main.elf --via huaj@10.23.224.213 --proxy /home/huaj/aiehlc/netboot/netboot_proxy.py
+python3 src/tool/netboot/netload.py status --via <user>@<palip> --proxy ~/aiehlc/netboot/netboot_proxy.py
+python3 src/tool/netboot/netload.py load aout/main.elf --via <user>@<palip> --proxy ~/aiehlc/netboot/netboot_proxy.py
 ```
 
 Or on `PALIP` itself (direct TCP):

@@ -131,7 +131,7 @@ operator's shell would print a line per packet and wreck the `PERF` numbers.
 warning, not an error, so a stale tool accepts the file and silently omits the
 feature. Check `[aiehlc] Detected #pragma ...` — all **five** must appear (`KERNELCONFIGOFFLOAD` on `{2,6}` relies on two compiler fixes; see `doc/debug/troubleshoot_aie_offload_timeout.md`) — or
 `strings build/aiehlc | grep control_plan_shim_bd_ctrl`. Rebuild with
-`make -C build CMAKE_COMMAND=/scratch/staff/huaj/aiehlc/.venv/bin/cmake aiehlc -j16`
+`make -C build CMAKE_COMMAND=<venv>/bin/cmake aiehlc -j16`
 (skill: **mlirbuildsandbox**).
 
 Not enabled here: `#pragma control_packet_mode(aot)`, which precomputes the

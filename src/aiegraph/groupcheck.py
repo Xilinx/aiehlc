@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 ###############################################################################
-"""Group-level x86 check (design 2026-11-16-aiegraph-group-offload §6 "x86 校验", step S4).
+"""Group-level x86 check (design 2026-11-16-aiegraph-group-offload §6 "x86 check", step S4).
 
 A group's steps only agree with TVM *together*, so the check runs the group, not the
 network:

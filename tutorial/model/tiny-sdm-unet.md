@@ -53,19 +53,19 @@ Key points:
 | What | Path used in this tutorial | Notes |
 |---|---|---|
 | aiehlc source, `unet_m4` branch | the `aiehlchj` repository | all the code in this tutorial is on this branch |
-| LLVM/MLIR build | `/scratch/staff/huaj/llvm-project/build` | to build aiehlc |
+| LLVM/MLIR build | `<llvm-build>` | to build aiehlc |
 | Vitis 2026.x and the aarch64 bare-metal toolchain | found by `script/setup.sh` | same as for any aiehlc use |
-| Python environment (numpy, onnx, onnxruntime, Pillow, and aiegraph's dependencies) | `/scratch/staff/huaj/aiehlc/.venv/bin/python3` | used for building and for image generation |
-| bk-sdm-tiny ONNX | `/scratch/staff/huaj/modelzoo/artifacts/bk-sdm-tiny/` (`unet_sim.onnx`, `unet.onnx`, `pipeline_ref_256/p00_steps.npz`, `p1/parts/`) | for the build |
-| bk-sdm-tiny model zoo | `/scratch/staff/huaj/aiehlc/model_zoo/bk-sdm-tiny/` (text encoder, UNet, VAE, tokenizer) | for image generation |
-| `aie_imagegen` (with `palmyra_stage_runner`) | `/scratch/staff/huaj/aiehlc/aiehlc-sdxl-wt/palmyra-runner/script` | aiehlc-sdxl repository, branch `jane/palmyra-stage-runner`, at least 7245e1f (includes the read-back fix) |
+| Python environment (numpy, onnx, onnxruntime, Pillow, and aiegraph's dependencies) | `<venv>/bin/python3` | used for building and for image generation |
+| bk-sdm-tiny ONNX | `<modelzoo>/artifacts/bk-sdm-tiny/` (`unet_sim.onnx`, `unet.onnx`, `pipeline_ref_256/p00_steps.npz`, `p1/parts/`) | for the build |
+| bk-sdm-tiny model zoo | `<model-zoo>/bk-sdm-tiny/` (text encoder, UNet, VAE, tokenizer) | for image generation |
+| `aie_imagegen` (with `palmyra_stage_runner`) | `<aiehlc-sdxl>/palmyra-runner/script` | aiehlc-sdxl repository, branch `jane/palmyra-stage-runner`, at least 7245e1f (includes the read-back fix) |
 
-The rest of the tutorial uses these variables:
+The rest of the tutorial uses these variables: Replace each `<...>` placeholder (`<repo>`, `<venv>`, `<modelzoo>`, ...) with the path on your machine.
 
 ```bash
-export AIEHLC=/scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj   # repository root
+export AIEHLC=<repo>   # repository root
 export WORK=$HOME/unet_work                                          # your work directory (inputs, build output, images)
-export PY=/scratch/staff/huaj/aiehlc/.venv/bin/python3
+export PY=<venv>/bin/python3
 mkdir -p $WORK
 ```
 
@@ -118,8 +118,8 @@ For aiegraph itself, see the [aiegraph tutorial](../../doc/tutorial_aiegraph.md)
 
 ```bash
 cmake -S $T -B $T/build \
-      -DLLVM_DIR=/scratch/staff/huaj/llvm-project/build/lib/cmake/llvm \
-      -DMLIR_DIR=/scratch/staff/huaj/llvm-project/build/lib/cmake/mlir
+      -DLLVM_DIR=<llvm-build>/lib/cmake/llvm \
+      -DMLIR_DIR=<llvm-build>/lib/cmake/mlir
 cmake --build $T/build --target aiehlc -j 32          # about 1 minute
 ls -la $T/build/aiehlc
 ```
@@ -133,7 +133,7 @@ You must use the aiehlc built from this branch (it has the two KCO fixes: the `k
 The build needs one real input, both as the initial contents of the `.aiehlc_io` section and for the self-check on the board:
 
 ```bash
-/scratch/staff/huaj/modelzoo/venv/bin/python -I $T/example/aiegraph/unet_bk_sdm_tiny/export_real_io.py \
+<modelzoo-venv>/bin/python -I $T/example/aiegraph/unet_bk_sdm_tiny/export_real_io.py \
     --step 0 --branch cond --out $WORK/real_io
 ```
 
@@ -313,7 +313,7 @@ These are the only things it asks of aiegraph:
 ```bash
 cd $T/example/aiegraph/unet_bk_sdm_tiny
 env -u AIEHLC_ROOT AIEHLC_BIN=$T/build/aiehlc $PY build_unet.py \
-    --onnx /scratch/staff/huaj/modelzoo/artifacts/bk-sdm-tiny/unet_sim.onnx \
+    --onnx <modelzoo>/artifacts/bk-sdm-tiny/unet_sim.onnx \
     --real-io $WORK/real_io \
     --wdtype bf16 \
     --partition partition_p4a.json \
@@ -405,9 +405,9 @@ Parameters: prompt "a photo of an orange, citrus fruit, high quality", negative 
 **Compare with the host version (optional).** First generate a reference image on the host with the same parameters, then let `run_orange.sh` also compute PSNR and cos:
 
 ```bash
-cd $WORK && PYTHONPATH=/scratch/staff/huaj/aiehlc/aiehlc-sdxl-wt/palmyra-runner/script $PY -m aie_imagegen \
+cd $WORK && PYTHONPATH=<aiehlc-sdxl>/palmyra-runner/script $PY -m aie_imagegen \
     -p "a photo of an orange, citrus fruit, high quality" --negative-prompt "blurry, deformed, low quality" \
-    -o $WORK/host_seed2.png --backend host --zoo /scratch/staff/huaj/aiehlc/model_zoo \
+    -o $WORK/host_seed2.png --backend host --zoo <model-zoo> \
     --model bk-sdm-tiny --size 256 --steps 25 --seed 2 --guidance 7.5 --decoder vae
 cd $T/example/aiegraph/unet_bk_sdm_tiny
 REF=$WORK/host_seed2.png ./run_orange.sh $WORK/build/main.elf $WORK/img 2 25

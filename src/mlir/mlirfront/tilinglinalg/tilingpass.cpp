@@ -94,7 +94,7 @@ void DataPatternAnalysis(scf::ForallOp& forall, OpBuilder& builder,
         }
       }
     }
-     // 判定每个 IV 是否缺席
+    // decide whether each IV is absent
     std::vector<int> missingpos; 
     for (auto en : llvm::enumerate(ivs)) {
       unsigned pos = en.index();
@@ -218,9 +218,9 @@ void TilingCodePass::runOnOperation() {
           auto size0= 0;
           if (auto szOpt = mlir::getConstantIntValue(sub.getMixedSizes()[0])) {
             size0 = *szOpt;
-            llvm::outs() << "静态常量尺寸 = " << size0 << "\n";
+            llvm::outs() << "static constant size = " << size0 << "\n";
           } else {
-            llvm::outs() << "Dynamic 常量尺寸 = " << size0 << "\n";
+              llvm::outs() << "dynamic constant size = " << size0 << "\n";
           }
           //sub.getMixedSizes()[0].get<mlir::Attribute>().cast<IntegerAttr>().getInt();
           auto size1=0;

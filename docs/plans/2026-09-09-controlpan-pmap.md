@@ -255,7 +255,7 @@ def test_parse_ports_ignores_malformed():
 
 **Step 2: Run to verify it fails**
 
-Run: `cd /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj && python3 -m pytest src/tool/debug/tests/test_controlpan_pmap.py -v > /tmp/claude/pmap.txt 2>&1; cat /tmp/claude/pmap.txt`
+Run: `cd <repo> && python3 -m pytest src/tool/debug/tests/test_controlpan_pmap.py -v > /tmp/claude/pmap.txt 2>&1; cat /tmp/claude/pmap.txt`
 Expected: FAIL — `ModuleNotFoundError: No module named 'controlpan_pmap'`.
 
 **Step 3: Write minimal parser**
@@ -332,7 +332,7 @@ def parse(text):
 
 **Step 4: Run to verify parse_ports tests pass**
 
-Run: `cd /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj && python3 -m pytest src/tool/debug/tests/test_controlpan_pmap.py -v > /tmp/claude/pmap.txt 2>&1; cat /tmp/claude/pmap.txt`
+Run: `cd <repo> && python3 -m pytest src/tool/debug/tests/test_controlpan_pmap.py -v > /tmp/claude/pmap.txt 2>&1; cat /tmp/claude/pmap.txt`
 Expected: 2 passed.
 
 **Step 5: Commit**
@@ -387,7 +387,7 @@ def test_parse_summary_counts():
 
 **Step 2: Run to verify pass (parser already handles these)**
 
-Run: `cd /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj && python3 -m pytest src/tool/debug/tests/test_controlpan_pmap.py -v > /tmp/claude/pmap.txt 2>&1; cat /tmp/claude/pmap.txt`
+Run: `cd <repo> && python3 -m pytest src/tool/debug/tests/test_controlpan_pmap.py -v > /tmp/claude/pmap.txt 2>&1; cat /tmp/claude/pmap.txt`
 Expected: 6 passed. (If EAST/SPINE pairing fails, the `_DELTA`/`_OPP` maps in Task 4 need fixing — fix minimally, re-run.)
 
 **Step 3: Commit**
@@ -434,7 +434,7 @@ elif u.path == "/ctrlplan/load":
 
 Write a tiny scratch check (not committed) that the branch is reachable: grep it exists and the parser import resolves.
 
-Run: `cd /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj && python3 -c "import sys; sys.path.insert(0,'src/tool/debug'); import controlpan_pmap; print(controlpan_pmap.parse('CONTROLPAN-PMAP col=0 row=0 port=NORTH idx=0 dir=fwd ms=master id=1\nCONTROLPAN-PMAP col=0 row=1 port=SOUTH idx=0 dir=fwd ms=slave id=1'))" > /tmp/claude/ep.txt 2>&1; cat /tmp/claude/ep.txt`
+Run: `cd <repo> && python3 -c "import sys; sys.path.insert(0,'src/tool/debug'); import controlpan_pmap; print(controlpan_pmap.parse('CONTROLPAN-PMAP col=0 row=0 port=NORTH idx=0 dir=fwd ms=master id=1\nCONTROLPAN-PMAP col=0 row=1 port=SOUTH idx=0 dir=fwd ms=slave id=1'))" > /tmp/claude/ep.txt 2>&1; cat /tmp/claude/ep.txt`
 Expected: a dict with `count=2`, one edge `(0,0)->(0,1)`.
 
 Run: `grep -n "/ctrlplan/load\|import controlpan_pmap" src/tool/debug/schedule_debug_server.py`
@@ -517,7 +517,7 @@ Ensure `dmClearBtn` also clears the overlay: in the Clear handler, add `ctrlPlan
 
 **Step 4: Verify the page still renders (server not required)**
 
-Run: `cd /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj && python3 -c "import sys; sys.path.insert(0,'src/tool/debug'); import schedule_view; print('import ok')" > /tmp/claude/sv.txt 2>&1; cat /tmp/claude/sv.txt`
+Run: `cd <repo> && python3 -c "import sys; sys.path.insert(0,'src/tool/debug'); import schedule_view; print('import ok')" > /tmp/claude/sv.txt 2>&1; cat /tmp/claude/sv.txt`
 Expected: `import ok` (no syntax error in the edited module).
 
 Run: `grep -n "dmLoadCtrlPlan\|ctrlPlanEdges\|drawCtrlPlanOverlay" src/tool/debug/schedule_view.py`
@@ -568,5 +568,5 @@ git commit -m "docs: document CONTROLPAN-PMAP runtime flag + device-map overlay"
 
 Run the full debug parser suite plus the existing provenance suite to confirm nothing regressed:
 
-Run: `cd /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj && python3 -m pytest src/tool/debug/tests/test_controlpan_pmap.py src/tool/debug/tests/test_xaiehost2provenance.py -v > /tmp/claude/all.txt 2>&1; tail -30 /tmp/claude/all.txt`
+Run: `cd <repo> && python3 -m pytest src/tool/debug/tests/test_controlpan_pmap.py src/tool/debug/tests/test_xaiehost2provenance.py -v > /tmp/claude/all.txt 2>&1; tail -30 /tmp/claude/all.txt`
 Expected: all controlpan_pmap tests + all existing provenance tests pass.
