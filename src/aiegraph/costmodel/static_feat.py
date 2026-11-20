@@ -179,6 +179,58 @@ def feat_of_counts(c, ctrlpkt_h):
     }
 
 
+UNET_TOT = ("bdcfg_calls", "startio_calls", "bdcfg_w", "cp_w")
+
+
+def window_rr_tiles(ctrlpkt_h):
+    """{shim tile (col, row): return-route words of its segment} of one shim-BD window (window_cp_words split by tile)."""
+    txt = open(ctrlpkt_h).read()
+    out = {}
+    for c, r, body in re.findall(r"/\* shim \((\d+),(\d+)\) segment, stream id 0x[0-9a-f]+, \d+ words \*/\n"
+                                 r"static const uint32_t \w+\[\] = \{(.*?)\n\};", txt, re.S):
+        rr_w = 0
+        for blk in re.split(r"\n\s*\n", body):
+            if "return route" in blk:
+                rr_w += len(re.findall(r"0x[0-9a-fA-F]+u", re.sub(r"/\*.*?\*/", "", blk, flags=re.S)))
+        out[(int(c), int(r))] = out.get((int(c), int(r)), 0) + rr_w
+    return out
+
+
+def unet_site_feat(build):
+    """per-launch features of a UNet aiegraph build dir in graph_run launch order (unet_seq): one dict per launch
+    with kernel, site_fn, desc, the kernel's single-launch P1 values (bdcfg_calls, startio_calls, bdcfg_w, cp_w,
+    kicks, shim_bd, tile_bd), kswitch (kernel != previous launch's), rr (return-route words resent on this
+    launch: the kernel's rr only when kswitch and it kicks a window), rr_tiles ({shim tile: rr words}) and prev.
+    unet_static_feat = (sum of these + rr into cp_w/bdcfg_w) / launches."""
+    wl = os.path.join(build, UNET_WL)
+    host = os.path.join(wl, "host.cc")
+    txt = open(host).read()
+    seq = unet_launches(build)
+    if not seq:
+        raise ValueError("no launches in %s" % build)
+    per = {}
+    out = []
+    prev = None
+    for k, site, desc in seq:
+        if k not in per:
+            c = host_counts(host, "host_canonicalized_" + k, txt)
+            h = os.path.join(wl, "host_ctrlpkt_%s.h" % k)
+            f = feat_of_counts(c, h)
+            f["rr"] = window_cp_words(h, return_route=True) if f["kicks"] else 0
+            f["rr_tiles"] = window_rr_tiles(h) if f["kicks"] else {}
+            f["shim_bd"] = c.get(SHIM_BD, 0)
+            f["tile_bd"] = c.get("__Runtime_dma_bd_config", 0) - f["shim_bd"]
+            per[k] = f
+        f = per[k]
+        sw = k != prev
+        d = {x: f[x] for x in UNET_TOT + ("kicks", "shim_bd", "tile_bd")}
+        d.update(kernel=k, site_fn=site, desc=desc, kswitch=int(sw), rr=f["rr"] if sw and f["kicks"] else 0,
+                 rr_tiles=f["rr_tiles"], prev=prev)
+        out.append(d)
+        prev = k
+    return out
+
+
 def unet_static_feat(build):
     """per-launch features of a UNet aiegraph build dir: each site's single-launch value (P1 kernel formulas on
     host_canonicalized_<kernel> + host_ctrlpkt_<kernel>.h) summed over the graph_run launch sequence
@@ -187,37 +239,21 @@ def unet_static_feat(build):
     One UNet-only term: rt_sb_begin (aie_runtime.c:6714) re-runs rt_sb_prepare when the control fabric differs
     from the last armed one (g_sb.f != f), i.e. on every kernel switch, and that window resends the shim-row
     return-route prefix that the kernel benchmarks (one kernel, re-armed once) amortise to 0."""
-    wl = os.path.join(build, UNET_WL)
-    host = os.path.join(wl, "host.cc")
-    txt = open(host).read()
-    seq = unet_launches(build)
-    if not seq:
-        raise ValueError("no launches in %s" % build)
-    per, tot = {}, {"bdcfg_calls": 0.0, "startio_calls": 0.0, "bdcfg_w": 0.0, "cp_w": 0.0}
-    info = {"launches": len(seq), "kernels": 0, "switches": 0, "rr_w": 0, "kicks": 0, "shim_bd": 0, "tile_bd": 0}
-    prev = None
-    for k, _site, _desc in seq:
-        if k not in per:
-            c = host_counts(host, "host_canonicalized_" + k, txt)
-            h = os.path.join(wl, "host_ctrlpkt_%s.h" % k)
-            f = feat_of_counts(c, h)
-            f["rr"] = window_cp_words(h, return_route=True) if f["kicks"] else 0
-            f["shim_bd"] = c.get(SHIM_BD, 0)
-            f["tile_bd"] = c.get("__Runtime_dma_bd_config", 0) - f["shim_bd"]
-            per[k] = f
-        f = per[k]
+    seq = unet_site_feat(build)
+    tot = {x: 0.0 for x in UNET_TOT}
+    info = {"launches": len(seq), "kernels": len({d["kernel"] for d in seq}), "switches": 0, "rr_w": 0, "kicks": 0,
+            "shim_bd": 0, "tile_bd": 0}
+    for d in seq:
         for x in tot:
-            tot[x] += f[x]
-        if k != prev and f["kicks"]:
-            tot["cp_w"] += f["rr"]
-            tot["bdcfg_w"] += f["rr"]
-            info["rr_w"] += f["rr"]
-        info["switches"] += k != prev
-        info["kicks"] += f["kicks"]
-        info["shim_bd"] += f["shim_bd"]
-        info["tile_bd"] += f["tile_bd"]
-        prev = k
-    info["kernels"] = len(per)
+            tot[x] += d[x]
+        if d["rr"]:
+            tot["cp_w"] += d["rr"]
+            tot["bdcfg_w"] += d["rr"]
+            info["rr_w"] += d["rr"]
+        info["switches"] += d["kswitch"]
+        info["kicks"] += d["kicks"]
+        info["shim_bd"] += d["shim_bd"]
+        info["tile_bd"] += d["tile_bd"]
     n = float(len(seq))
     return {x: v / n for x, v in tot.items()}, info
 
