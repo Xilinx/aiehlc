@@ -9,7 +9,7 @@ Per site (n_feat.sites of DIR/unet_<cfg>, aligned with the log's 'PROF part=<i> 
   site_ms - aie_ms is the PROF part 'ms'; glue/flush/inval come from 'PROF aie_host_split part=<i>'.
   aie_ms (in launch: kload, rt_*) belongs to K+L, not N.
 Model per (cfg, kind in conv|linear|fa), sites with launches>0 only:
-  N = a*MK + b*MN + c*launches + d       (least squares; a feature constant over the kind's sites -> coef 0)
+  N = a*MK + b*MN + c*launches + d       (least squares on relative error, weight 1/N; a feature constant over the kind's sites -> coef 0)
 Host-only sites (attn roles with 0 launches) are not fitted: their summed fit-run ms is frozen as attn_host_ms
 and only enters total_rel.
   NSRC  cfg=.. log=.. board=.. launches=.. run_rc=..                  (from 'CMP unet board=..')
@@ -104,7 +104,8 @@ def fit_kind(rows):
     X = np.array([[float(r[f]) for f in FEATS] for r in rows])
     active = [bool(np.ptp(X[:, j]) > 0) for j in range(len(FEATS))]
     y = np.array([r["N"] for r in rows])
-    coef, *_ = np.linalg.lstsq(design(rows, active), y, rcond=None)
+    w = 1.0 / y  # relative-error least squares: the gate is per-site maxrel, not absolute ms
+    coef, *_ = np.linalg.lstsq(design(rows, active) * w[:, None], y * w, rcond=None)
     full, k = [], 0
     for on in active:
         full.append(float(coef[k]) if on else 0.0)
