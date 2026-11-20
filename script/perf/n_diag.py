@@ -7,6 +7,11 @@ check that it reproduces across two board runs (a, b) of the same config.
 
 Build dir per cfg is R/unet_<cfg> (same layout as n_fit.py).  dom = component with max |delta|;
 det=1 iff dom(a)==dom(b) and |d_a-d_b|/max(|d_a|,|d_b|) <= 0.10.
+
+Noise floor: a component's delta counts only if |d| > NOISE[cfg][comp] * max(site1, site2) for that component,
+where NOISE is the measured same-ELF a/b per-site max relative diff (shuhua 2026-11-20_M2/postmortem_noise.md;
+flush/inval have no reference and use the cfg's largest measured rel noise).  If no component clears its floor in a run, dom=none for that run
+(the pair has no measurable difference); dom=none in both runs is reproducible, so det=1.
 """
 import argparse
 import importlib.util
@@ -22,6 +27,8 @@ _spec.loader.exec_module(n_fit)
 
 COMPS = ("pack", "scatter", "glue", "flush", "inval")
 AB_TOL = 0.10
+NOISE = {"aot-kco": {"glue": 0.077, "pack": 0.118, "scatter": 0.117},
+         "off": {"glue": 0.050, "pack": 0.159, "scatter": 0.127}}
 _SPLIT = re.compile(r"^PROF aie_host_split part=(\d+) kind=(\w+) (.*)$", re.M)
 _PAIR = re.compile(r"^([a-z]+)(\d+)$")
 
@@ -96,12 +103,20 @@ def main(argv=None):
                     delta = {c: s2["comp"].get(c, 0.0) - s1["comp"].get(c, 0.0) for c in COMPS}
                     ds.append((delta, s1, s2, prev))
                 (da, s1, s2, prev), (db, _, _, _) = ds
-                dom_a = max(COMPS, key=lambda c: abs(da[c]))
-                dom_b = max(COMPS, key=lambda c: abs(db[c]))
-                x, y = da[dom_a], db[dom_a]
+                nz = NOISE.get(cfg, {})
+                nz = {c: nz.get(c, max(nz.values()) if nz else 0.0) for c in COMPS}
+
+                def dom_of(d, r1, r2):
+                    sig = [c for c in COMPS
+                           if abs(d[c]) > nz.get(c, 0.0) * max(r1["comp"].get(c, 0.0), r2["comp"].get(c, 0.0))]
+                    return max(sig, key=lambda c: abs(d[c])) if sig else "none"
+                dom_a = dom_of(da, ds[0][1], ds[0][2])
+                dom_b = dom_of(db, ds[1][1], ds[1][2])
+                kc = dom_a if dom_a != "none" else max(COMPS, key=lambda c: abs(da[c]))
+                x, y = da[kc], db[kc]
                 m = max(abs(x), abs(y))
                 ab_rel = abs(x - y) / m if m > 0 else 0.0
-                det = int(dom_a == dom_b and ab_rel <= AB_TOL)
+                det = int(dom_a == dom_b and (dom_a == "none" or ab_rel <= AB_TOL))
                 same = int(kname(s1) == kname(s2))
                 print("NDIAG cfg=%s pair=%s kernel_same=%d dom=%s d_a=%.3f d_b=%.3f ab_rel=%.3f det=%d "
                       "dom_b=%s prev_kernel=%s/%s N_a=%.3f/%.3f | %s"
