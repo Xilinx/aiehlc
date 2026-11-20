@@ -442,9 +442,11 @@ awk -v name="$NAME" -v kern="$KERNEL" -v alt="$ALT" -v cp="$CTRLPKT" -v lm="$LAU
     if (!(t in A) || ac > A[t]) { A[t] = ac; C[t] = ac - ls - ss }
 }
 /^\[PERFIO\] tag=[0-9]+ tile=/ {
-    t = ""; io = 0
-    for (i = 2; i <= NF; i++) { split($i, f, "="); if (f[1] == "tag") t = f[2]; if (f[1] == "io_active") io = f[2] + 0 }
-    if (!(t in IO) || io > IO[t]) IO[t] = io
+    t = ""; io = 0; pio = 0; gp = 0
+    for (i = 2; i <= NF; i++) { split($i, f, "="); if (f[1] == "tag") t = f[2]; if (f[1] == "io_active") io = f[2] + 0
+        if (f[1] == "pre_io_active") pio = f[2] + 0; if (f[1] == "snap_gap_cyc") gp = f[2] + 0 }
+    if (!(t in IO) || io > IO[t]) { IO[t] = io; PIO[t] = pio }
+    if (!(t in GP) || gp > GP[t]) GP[t] = gp
 }
 /^\[PERFSUM\] tag=/ { nps++ }
 /^LAUNCH split_detail calls/ { for (i = 1; i <= NF; i++) { split($i, f, "=")
@@ -459,13 +461,18 @@ END {
     printf "[p0] perf_tags=%d perfsum=%d aie_clk_mhz=%s (assumed unless --aie-clk-mhz) %s\n", n, nps, clk, kcmp
     printf "P0 board=%s machine=%s kernel=%s ctrlpkt=%s launch=%s%s launches=%d rt_wait_io_ms=%s core_src=perfctr active_cyc=%d compute_cyc=%d pred_ms=%.3f meas_ms=%s rel=%.3f\n",
         name, mach, kern, cp, lm, (alt != "" ? " alt=" alt : ""), L, meas, act, cmp, pred, meas, (meas > 0 ? (pred > meas ? pred - meas : meas - pred) / meas : 0)
-    # PERFCHK (M3.1 P0): io_active = core counter 0 from the first startio to the report (the [PERFIO] lines), per
-    # launch the slowest core tile (max io_active), mean over launches; wait_cyc = rt_wait_io_ms x 1e6 (1000 MHz clock,
-    # the --aie-clk-mhz default); io_le_wait=1 when the core was active no longer than the host waited.
-    ni = 0; si = 0
-    for (t in IO) { ni++; si += IO[t] }
-    io_m = (ni > 0 ? si / ni : -1); wc = w * clk * 1000.0
+    # PERFCHK (M3.1.1 PC): io_active = core counter 0 summed over the wait windows only (rt_core_perf_wait_snap
+    # after rt_sb_ack_wait, next to __wio_t0, read after the window; [PERFIO] io_active after PA), per launch the
+    # slowest core tile (max io_active), mean over launches; snap_gap = host snapshot -> __wio_t0 gap per launch
+    # (counters already running), mean over launches; wait_cyc = rt_wait_io_ms x 1e6 x clk/1000.
+    # io_le_wait=1 when io <= wait + gap.  KWIN: ratio = io/(wait+gap); ok=1 iff perfio_n==launches, io>0, ratio<=1.02.
+    ni = 0; si = 0; spi = 0; sg = 0
+    for (t in IO) { ni++; si += IO[t]; spi += PIO[t]; sg += GP[t] }
+    io_m = (ni > 0 ? si / ni : -1); pio_m = (ni > 0 ? spi / ni : -1); gp_m = (ni > 0 ? sg / ni : 0); wc = w * clk * 1000.0
     printf "PERFCHK cfg=%s kernel=%s active_cyc=%d io_active_cyc=%d wait_cyc=%d io_le_wait=%d\n",
-        cp, kern, act, io_m, wc, (ni > 0 && io_m <= wc ? 1 : 0)
+        cp, kern, act, io_m, wc, (ni > 0 && io_m <= wc + gp_m ? 1 : 0)
+    den = wc + gp_m; ratio = (den > 0 ? io_m / den : -1)
+    printf "KWIN cfg=%s kernel=%s launches=%d perfio_n=%d io_active_cyc=%d pre_io_active_cyc=%d wait_cyc=%d snap_gap_cyc=%d ratio=%.3f ok=%d\n",
+        cp, kern, L, ni, io_m, pio_m, wc, gp_m, ratio, (ni == L + 0 && io_m > 0 && ratio >= 0 && ratio <= 1.02 ? 1 : 0)
 }' "$RUN"
 [ "$RRC" -eq 0 ] || { echo "[p0] apppaltest rc=$RRC"; exit "$RRC"; }
