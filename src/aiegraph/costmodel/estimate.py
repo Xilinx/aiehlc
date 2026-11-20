@@ -131,7 +131,6 @@ def estimate_bdgraph(op: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, An
     floor = bdgraph.ddr_floor(f["ddr_bytes"], params)
     if floor is None:
         unpriced.append("dma_time(bytes counted)")
-    runb = bdgraph.ddr_runb(floor, f["ddr_bytes"], params.get("bdgraph_run_b_factor"))
     issue = None
     bd_us = (op.get("host") or {}).get("bd_us", params.get("host_bd_us"))
     bd_us_src = "op" if "bd_us" in (op.get("host") or {}) else ("params" if bd_us is not None else None)
@@ -145,6 +144,7 @@ def estimate_bdgraph(op: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, An
         unpriced.append("host_bd_us")
     else:
         issue = f["bd_configs_per_launch"] * float(bd_us) / 1e3
+    runb = bdgraph.ddr_runb(floor, f["ddr_bytes"], params.get("bdgraph_run_b_factor"), issue)
     if f["locked_bds"]:
         unpriced.append("locks(AM020)")
     if f["runtime_bds_skipped"]:

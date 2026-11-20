@@ -274,7 +274,27 @@ def test_given_a_32b_run_shim_read_on_palmyra213_then_ddr_runb_uses_the_board_fi
     op = r["ops"][0]
     assert op["bdgraph"]["ddr_bytes"]["channels"][0]["run_b"] == 32
     assert op["ddr_runb"]["factor"] == pytest.approx(bdgraph.RUN_B_FACTOR_FIT["palmyra213"][32])
-    assert op["ddr_runb"]["ms"] == pytest.approx(op["ddr"] * 1.45) and r["total_ms"] == r["issue_ms"]
+    assert op["ddr_runb"]["ms"] == pytest.approx(op["ddr"] * 2.67) and r["total_ms"] == r["issue_ms"]
+    assert op["ddr_runb"]["launch_ms"] == pytest.approx(max(op["issue_ms"] + op["ddr"], op["ddr_runb"]["ms"]))
+
+
+def test_given_a_dma_bound_32b_launch_then_the_run_penalty_sets_launch_ms():
+    # u_conv_1024x2880x320 on palmyra213: floor 3.80 > issue 2.74; measured 10.174 ms at 32 B runs
+    ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=32)]}
+    r = bdgraph.ddr_runb({"ms": 3.80}, ddr, bdgraph.RUN_B_FACTOR_FIT["palmyra213"], issue_ms=2.74)
+    assert r["regime"] == "dma" and r["launch_ms"] == pytest.approx(3.80 * 2.67)
+
+
+def test_given_an_issue_bound_32b_launch_then_run_size_is_hidden_under_issue():
+    # u_lin_1024x320x320 on palmyra213: floor 0.42 << issue 2.69; TKW 8 -> 16 changed nothing (3.295 -> 3.299 ms)
+    ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=32)]}
+    r32 = bdgraph.ddr_runb({"ms": 0.42}, ddr, bdgraph.RUN_B_FACTOR_FIT["palmyra213"], issue_ms=2.69)
+    assert r32["regime"] == "issue" and r32["launch_ms"] == pytest.approx(2.69 + 0.42)
+
+
+def test_given_no_issue_then_ddr_runb_has_no_launch_ms():
+    ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=32)]}
+    assert "launch_ms" not in bdgraph.ddr_runb({"ms": 1.0}, ddr, {32: 2.0})
 
 
 UCONV = Path("/scratch/staff/huaj/tmp/costmodel_p0/u_conv_1024x2880x320/aout/worklocal")
@@ -286,5 +306,6 @@ def test_given_the_u_conv_1024_build_then_every_shim_read_is_a_32b_run():
     ddr = bdgraph.features(UCONV)["ddr_bytes"]
     rd = [c for c in ddr["channels"] if c["dir"] == "MM2S"]
     assert rd and {c["run_b"] for c in rd} == {32}
-    rb = bdgraph.ddr_runb(bdgraph.ddr_floor(ddr, board_params("palmyra213")), ddr, {32: 1.45})
-    assert rb["factor"] == pytest.approx(1.45)
+    rb = bdgraph.ddr_runb(bdgraph.ddr_floor(ddr, board_params("palmyra213")), ddr, {32: 2.67}, issue_ms=480 * 5.67e-3)
+    assert rb["factor"] == pytest.approx(2.67) and rb["regime"] == "dma"
+    assert rb["launch_ms"] == pytest.approx(10.174, rel=0.05)   # measured 10.174 ms/launch (in-sample: f was fit here)

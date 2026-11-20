@@ -212,17 +212,23 @@ def _interp_cols(points: List[List[float]], n: int) -> float:
 # 6.5-9.5 us (issue blocks when DMA per config is slower); see xiaojiang/tasks/2026-11-20_ddr-floor-vs-meas.
 BD_US_FIT = {"palmyra213": 5.67}
 
-# Short-DDR-run penalty on the read floor, per board: {run_b: factor}.  palmyra213: the 4 u_lin_1024 + u_conv_1024
-# kernels read with 32 B runs and their (launch - issue) / ddr_floor is 1.27-1.83 (64/128 B kernels 0.84-1.30);
-# leave-one-out median factor 1.42-1.49 -> 1.45.  LOO launch error max |rel| 0.358 -> 0.199, mean 7.4% -> 4.7%.
-# Caveat: run_b == 32 coincides with M == 1024 in that corpus (xiaojiang/tasks/2026-11-20_ddr-floor-vs-meas/runb_loo.txt).
-RUN_B_FACTOR_FIT = {"palmyra213": {32: 1.45}}
+# Short-DDR-run penalty, per board: {run_b: factor} = DMA-alone time / ddr_floor when the launch is DMA-bound.
+# palmyra213 A/B (same tree, only TKW changes; xiaojiang/tasks/2026-11-20_runb-ab):
+#   u_conv_1024x2880x320 (floor 3.80 > issue 2.74 ms)  32 B -> 64 B runs: 10.174 -> 6.919 ms (-32%)
+#   u_lin_1024x1280x320  (floor 1.69 < issue 2.88 ms)                     5.259 -> 5.074 ms (-3.5%)
+#   u_lin_1024x320x320   (floor 0.42 < issue 2.69 ms)                     3.295 -> 3.299 ms (0%)
+# so the 32 B penalty only shows when the DMA outlasts issue + floor: launch ~ max(issue + floor, floor x f).
+# f(32) = 10.174 / 3.80 = 2.67 from the ONE DMA-bound 32 B kernel (n=1; low confidence).  The P4f additive 1.45 fitted
+# the u_lin_1024 residual, which the A/B shows is not run size (xiaojiang/tasks/2026-11-20_runb-overlap/fit.txt).
+RUN_B_FACTOR_FIT = {"palmyra213": {32: 2.67}}
 
 
 def ddr_runb(floor: Optional[Dict[str, Any]], ddr: Optional[Dict[str, Any]],
-             factors: Optional[Dict[int, float]]) -> Optional[Dict[str, Any]]:
-    """Run-length-adjusted DDR time: floor ms x the MM2S-byte-weighted factor of each read channel's head-BD run_b
-    (factor 1 for run_b not in ``factors``).  An estimate, not a bound -- report only, like ddr_floor."""
+             factors: Optional[Dict[int, float]], issue_ms: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Run-length-adjusted DDR time: ms = floor x the MM2S-byte-weighted factor of each read channel's head-BD run_b
+    (factor 1 for run_b not in ``factors``) = the DMA-alone time.  With ``issue_ms`` also launch_ms =
+    max(issue + floor, ms) and regime "dma" when the run-limited DMA dominates, else "issue" (run size hidden).
+    An estimate, not a bound -- report only, like ddr_floor."""
     if floor is None or ddr is None or not factors:
         return None
     rd = [c for c in ddr["channels"] if c["bytes"] and str(c["dir"]).upper() == "MM2S"]
@@ -230,7 +236,12 @@ def ddr_runb(floor: Optional[Dict[str, Any]], ddr: Optional[Dict[str, Any]],
     if not tot:
         return None
     fac = sum(c["bytes"] * float(factors.get(c.get("run_b"), 1.0)) for c in rd) / tot
-    return {"ms": floor["ms"] * fac, "factor": fac}
+    out = {"ms": floor["ms"] * fac, "factor": fac}
+    if issue_ms is not None:
+        base = float(issue_ms) + floor["ms"]
+        out["launch_ms"] = max(base, out["ms"])
+        out["regime"] = "dma" if out["ms"] > base else "issue"
+    return out
 
 
 def ddr_floor(ddr: Optional[Dict[str, Any]], params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
