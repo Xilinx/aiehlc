@@ -624,6 +624,12 @@ def kacc_geom(ch: int, k: int, px: int) -> dict:
     # K padded by one zero chunk when the W port would be square (ch == k/2 words): aiehlc's GemmSpace
     # derivation then mis-sizes the A window (gemm_kacc_1280x2560x64: 24 elements instead of 512)
     kp = k + 2 * tkw if ch == k // 2 else k
+    # KACC_KP_PAD (costmodel stride probe, opt-in, default off): pad K with zero chunks up to this kp so the DDR
+    # row stride changes (palmyra213: kp 320/656/1280 run_b fast, 960 slow). Applied only when > kp, a multiple of
+    # 2*tkw, and kp/2 avoids ch, 32 and 64 (Maxwell's legality rule for the pad).
+    kpad = int(_os.environ.get("KACC_KP_PAD", "0"))
+    if kpad > kp and kpad % (2 * tkw) == 0 and kpad // 2 not in (ch, 32, 64):
+        kp = kpad
     rows, cols = (px, ch) if tr else (ch, px)   # a-port rows (walked by t) / b-port rows (whole range per core)
     l1 = 2 * (16 * tkw * 4 + (cols // 4) * tkw * 4 + 16 * (cols // 4) * 4)
     assert l1 <= 29696, (ch, k, px, l1)
