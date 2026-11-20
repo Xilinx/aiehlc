@@ -309,6 +309,8 @@ static int uc_kacc_launch(int N, int K, int M, int32_t *kw, int32_t *kx, int32_t
 
 static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, int sw, int ph, int pw) {
     XTime ut0; /* [UCL] per-layer split: host pre-tiling (W re-tile + im2col) | AIE window | host post */
+    printf("[UCS] l=%d conv\n", g_aie_launches); /* P4bp: names a hanging launch; printed before ut0, outside the timed window */
+    fflush(stdout);
     XTime_GetTime(&ut0);
     ahs_begin(&g_ahs, AHS_KIND_CONV);
     if (nargs < 4)
@@ -620,8 +622,6 @@ static int uc_conv(void *const *argv, int nargs, const uint16_t *wbf, int sh, in
 #endif
     uc_sync_pre(g_kw, wbytes, g_kx, xbytes, g_ky, (size_t)M * N * 4);
     const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
-    printf("[UCS] l=%d M=%d N=%d K=%d tkw=%d\n", g_aie_launches, M, N, K, kch / 2); /* P4bp: names a hanging launch */
-    fflush(stdout);
     const int lrc = uc_kacc_launch(N, K, M, g_kw, g_kx, g_ky); // ONE launch: the whole layer, K summed in the cores
     g_kw = kw_pool;
     const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();

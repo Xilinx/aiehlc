@@ -91,6 +91,7 @@ int main() {
         hcache[pass] = ms(tf, t1) + ms(t2, ti);
         host[pass] = ms(t0, t1) + ms(t2, t3);
     }
+    /* winlint: ok -- after the timed passes (t3), before the untimed-in-[BENCH] unpad sweep */
     printf("[BENCH] aie_wall_ms=%.3f host_ms=%.3f launches=%d host_pack_ms=%.3f host_cache_ms=%.3f host_unpad_ms=%.3f "
            "warmup_aie_ms=%.3f warmup_host_ms=%.3f heads=%d swap=%d gmac_padded=%.4f ms_per_gmac=%.2f\n", aie[1],
            host[1], launches, hpack[1], hcache[1], host[1] - hpack[1] - hcache[1], aie[0], host[0], KACC_H,

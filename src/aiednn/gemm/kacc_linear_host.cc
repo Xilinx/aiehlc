@@ -29,6 +29,8 @@ static unsigned long long g_uc_whook_tiles = 0, g_uc_whook_all = 0; /* m-tiles d
 #endif
 static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
     XTime ut0;
+    printf("[UCS] l=%d lin S=%d\n", g_aie_launches, S); /* names a hanging launch (l..l+S-1); outside the timed window */
+    fflush(stdout);
     XTime_GetTime(&ut0);
     ahs_begin(&g_ahs, AHS_KIND_LINEAR);
     int wzc_ = 0;
@@ -214,8 +216,6 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
         if (s == 0) /* GHL: host->DMA sync in the first launch's window, as uc_conv */
             uc_sync_pre(g_kw, wbytes, g_kx, xbytes, g_ky, ybytes);
         const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
-        printf("[UCS] l=%d lin M=%d N=%d K=%d px=%d s=%d/%d tkw=%d\n", g_aie_launches, M, N, K, P, s, S, tkw);
-        fflush(stdout);
 #if UC_NEON && UC_WHOOK
         if (s > 0 && (g_uc_var & 1) == 0 && (s - 1) * P < M) { /* block s-1 scattered while launch s computes */
             wh.Ys = Y + (size_t)(s - 1) * N * P;
