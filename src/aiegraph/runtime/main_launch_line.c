@@ -1,4 +1,10 @@
-#ifdef @MU@_LAUNCH_WARM
+    /* M1.2.1 T-J2: the split / split_detail / split_words lines print for every AIE build (cold included);
+     * only the summary line differs: literal "LAUNCH warm" under the boardmain header define
+     * @MU@_LAUNCH_WARM, else literal "LAUNCH cold" with the same fields (l_fit _WARM regex keys on them).
+     * No AIEHLC_PROFILING #if here: main.c is not compiled with the runtime EXTRA_DEFS. */
+#ifndef @MU@_CTRLPKT
+#define @MU@_CTRLPKT "na"
+#endif
     {
         double aie_ms = 0.0;
         int kloads = 0;
@@ -6,10 +12,17 @@
         int wl = 0;
         aiednn_aie_stats(&wl, 0, 0, 0);
         aiednn_aie_launch_stats(&aie_ms, &kloads, &cold_tiles);
+#ifdef @MU@_LAUNCH_WARM
         printf("LAUNCH warm ms_per_launch=%.3f launches=%d aie_wall_ms=%.3f kloads=%d opts=%s,cold_tile_loads=%u"
                " ctrlpkt=%s aot_fallbacks=%llu\n",
                wl ? aie_ms / wl : 0.0, wl, aie_ms, kloads, @MU@_LAUNCH_OPTS, cold_tiles, @MU@_CTRLPKT,
                __Runtime_ctrl_aot_fallbacks());
+#else
+        printf("LAUNCH cold ms_per_launch=%.3f launches=%d aie_wall_ms=%.3f kloads=%d opts=%s,cold_tile_loads=%u"
+               " ctrlpkt=%s aot_fallbacks=%llu\n",
+               wl ? aie_ms / wl : 0.0, wl, aie_ms, kloads, "cold", cold_tiles, @MU@_CTRLPKT,
+               __Runtime_ctrl_aot_fallbacks());
+#endif
         /* P1: per-launch split of aie_wall_ms by runtime phase (A78 pmccntr, AIEHLC_PROFILING=1 runtime).
          * PH_COREEN is the A78 cost of the core-enable writes, not AIE compute: the AIE compute is
          * inside wait_io (completion = output-DMA drain). core_reset is part of kload. */
@@ -55,4 +68,3 @@
                (double)wp[1] / nl, (double)wp[3] / nl, (double)wp[2] / nl);
         fflush(stdout);
     }
-#endif
