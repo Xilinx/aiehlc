@@ -74,7 +74,8 @@ def test_split_perf_counters_board_c2():
 
 
 # ---- P0b: L / N partition of the LAUNCH split (no overlap between rt_* and host_*) ----
-SPLIT_LOGS = ["c16.log", "p7_yboard0.log.excerpt", "u_lin_1024x320x320.log"]
+SPLIT_LOGS = ["c16.log", "p7_yboard0.log.excerpt", "u_lin_1024x320x320.log",
+              "l_offreload_u_lin_1024x320x320.log", "l_offcold_u_lin_1024x320x320.log"]
 
 
 @pytest.mark.parametrize("name", SPLIT_LOGS)
