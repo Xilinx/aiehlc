@@ -23,6 +23,8 @@
 #      core_src=perfctr active_cyc=<a> compute_cyc=<c> pred_ms=<c/aie_clk> meas_ms=<= rt_wait_io_ms> rel=<|p-m|/m>
 # active_cyc / compute_cyc: per timed launch, the slowest core tile (max active_cyc over the [PERF] tiles of that tag),
 # compute = active - lock_stall - stream_stall of that tile; the P0 line carries the mean over the launches.
+# Then one line PERFCHK cfg=<ctrlpkt> kernel=<k> active_cyc=<P0 mean> io_active_cyc=<[PERFIO] io_active, slowest core,
+# mean> wait_cyc=<rt_wait_io_ms x clk_mhz x 1e3> io_le_wait=<0|1> (counter 0 sanity after the ECC-scrub fix a56aa0f3).
 # Inputs are synthetic (seeded N(0,1) A[M,K], B[K,N]; y = A@B fp32): the shape is the kernel's, the data is not.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -439,6 +441,11 @@ awk -v name="$NAME" -v kern="$KERNEL" -v alt="$ALT" -v cp="$CTRLPKT" -v lm="$LAU
         if (f[1] == "lock_stall") ls = f[2] + 0; if (f[1] == "stream_stall") ss = f[2] + 0 }
     if (!(t in A) || ac > A[t]) { A[t] = ac; C[t] = ac - ls - ss }
 }
+/^\[PERFIO\] tag=[0-9]+ tile=/ {
+    t = ""; io = 0
+    for (i = 2; i <= NF; i++) { split($i, f, "="); if (f[1] == "tag") t = f[2]; if (f[1] == "io_active") io = f[2] + 0 }
+    if (!(t in IO) || io > IO[t]) IO[t] = io
+}
 /^\[PERFSUM\] tag=/ { nps++ }
 /^LAUNCH split_detail calls/ { for (i = 1; i <= NF; i++) { split($i, f, "=")
         if (f[1] == "rt_wait_io") w = f[2]; if (f[1] == "launches") L = f[2] } }
@@ -452,5 +459,13 @@ END {
     printf "[p0] perf_tags=%d perfsum=%d aie_clk_mhz=%s (assumed unless --aie-clk-mhz) %s\n", n, nps, clk, kcmp
     printf "P0 board=%s machine=%s kernel=%s ctrlpkt=%s launch=%s%s launches=%d rt_wait_io_ms=%s core_src=perfctr active_cyc=%d compute_cyc=%d pred_ms=%.3f meas_ms=%s rel=%.3f\n",
         name, mach, kern, cp, lm, (alt != "" ? " alt=" alt : ""), L, meas, act, cmp, pred, meas, (meas > 0 ? (pred > meas ? pred - meas : meas - pred) / meas : 0)
+    # PERFCHK (M3.1 P0): io_active = core counter 0 from the first startio to the report (the [PERFIO] lines), per
+    # launch the slowest core tile (max io_active), mean over launches; wait_cyc = rt_wait_io_ms x 1e6 (1000 MHz clock,
+    # the --aie-clk-mhz default); io_le_wait=1 when the core was active no longer than the host waited.
+    ni = 0; si = 0
+    for (t in IO) { ni++; si += IO[t] }
+    io_m = (ni > 0 ? si / ni : -1); wc = w * clk * 1000.0
+    printf "PERFCHK cfg=%s kernel=%s active_cyc=%d io_active_cyc=%d wait_cyc=%d io_le_wait=%d\n",
+        cp, kern, act, io_m, wc, (ni > 0 && io_m <= wc ? 1 : 0)
 }' "$RUN"
 [ "$RRC" -eq 0 ] || { echo "[p0] apppaltest rc=$RRC"; exit "$RRC"; }
