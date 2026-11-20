@@ -131,6 +131,7 @@ def estimate_bdgraph(op: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, An
     floor = bdgraph.ddr_floor(f["ddr_bytes"], params)
     if floor is None:
         unpriced.append("dma_time(bytes counted)")
+    runb = bdgraph.ddr_runb(floor, f["ddr_bytes"], params.get("bdgraph_run_b_factor"))
     issue = None
     bd_us = (op.get("host") or {}).get("bd_us", params.get("host_bd_us"))
     bd_us_src = "op" if "bd_us" in (op.get("host") or {}) else ("params" if bd_us is not None else None)
@@ -149,7 +150,7 @@ def estimate_bdgraph(op: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, An
     if f["runtime_bds_skipped"]:
         unpriced.append(f"runtime_bds({f['runtime_bds_skipped']})")
     return {"kernel": op.get("kernel"), "recipe": op.get("recipe"), "wait": None, "compute": None,
-            "ddr": floor["ms"] if floor else None, "ddr_floor": floor, "l_ms": None, "issue_ms": issue, "bd_us": bd_us if issue is not None else None,
+            "ddr": floor["ms"] if floor else None, "ddr_floor": floor, "ddr_runb": runb, "l_ms": None, "issue_ms": issue, "bd_us": bd_us if issue is not None else None,
             "bd_us_source": bd_us_src if issue is not None else None, "bound": None, "rounds": f["rounds"], "bdgraph": f,
             "bytes_in": op.get("bytes_in"), "bytes_out": op.get("bytes_out"), "unpriced": unpriced}
 
@@ -167,6 +168,10 @@ def estimate(group: Any, board: str = "palmyra213", params: Optional[Dict[str, A
         from .bdgraph import BD_US_FIT
         if board in BD_US_FIT:
             prm = {**prm, "bdgraph_bd_us": BD_US_FIT[board]}
+    if "bdgraph_run_b_factor" not in prm:
+        from .bdgraph import RUN_B_FACTOR_FIT
+        if board in RUN_B_FACTOR_FIT:
+            prm = {**prm, "bdgraph_run_b_factor": RUN_B_FACTOR_FIT[board]}
     table = load_cycles(cycles)
     ops = _ops(group)
     launches = int(group.get("launches", 1)) if isinstance(group, dict) else 1

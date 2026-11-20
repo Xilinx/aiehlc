@@ -251,3 +251,40 @@ def estimate_mod_board_params():
     import sys as _s
     return {k: v for k, v in _s.modules["aiegraph.costmodel.estimate"].board_params("palmyra213").items()
             if k not in ("bdgraph_bd_us", "host_bd_us")}
+
+
+# --- run-length (run_b) factor on the DDR floor (P4f) ---
+
+def test_given_mixed_read_runs_then_the_factor_is_byte_weighted_and_writes_are_ignored():
+    chs = [dict(_ch(0, "MM2S", 3000), run_b=32), dict(_ch(1, "MM2S", 1000), run_b=128), dict(_ch(2, "S2MM", 9999), run_b=32)]
+    r = bdgraph.ddr_runb({"ms": 2.0}, {"mm2s": 4000, "s2mm": 9999, "channels": chs}, {32: 1.4})
+    assert r["factor"] == pytest.approx((3000 * 1.4 + 1000) / 4000) and r["ms"] == pytest.approx(2.0 * r["factor"])
+
+
+def test_given_no_floor_or_no_factors_then_no_run_b_estimate():
+    ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=32)]}
+    assert bdgraph.ddr_runb(None, ddr, {32: 1.4}) is None and bdgraph.ddr_runb({"ms": 1.0}, ddr, None) is None
+
+
+def test_given_a_32b_run_shim_read_on_palmyra213_then_ddr_runb_uses_the_board_fit_and_stays_out_of_total(tmp_path, cycles_file):
+    host = [{"line": 10, "kind": "createio", "bd_id": 0}, {"line": 11, "kind": "startio", "code": "__Runtime_startio(a, b, 0, 1);"}]
+    shim = [_bd(0, 4096, dim_strides=[4, 64], dim_wraps=[8, 128])]   # 8 words = 32 B contiguous, then jump
+    d = _write(tmp_path, [{"repeat_count": 1}], [_bd(0, 64)], host, shim_bds=shim)
+    r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "jit_mmio"}}], cycles=cycles_file)
+    op = r["ops"][0]
+    assert op["bdgraph"]["ddr_bytes"]["channels"][0]["run_b"] == 32
+    assert op["ddr_runb"]["factor"] == pytest.approx(bdgraph.RUN_B_FACTOR_FIT["palmyra213"][32])
+    assert op["ddr_runb"]["ms"] == pytest.approx(op["ddr"] * 1.45) and r["total_ms"] == r["issue_ms"]
+
+
+UCONV = Path("/scratch/staff/huaj/tmp/costmodel_p0/u_conv_1024x2880x320/aout/worklocal")
+
+
+@pytest.mark.skipif(not (UCONV / "schedule_view.json").exists(), reason="real build dir not present")
+def test_given_the_u_conv_1024_build_then_every_shim_read_is_a_32b_run():
+    from aiegraph.costmodel.estimate import board_params
+    ddr = bdgraph.features(UCONV)["ddr_bytes"]
+    rd = [c for c in ddr["channels"] if c["dir"] == "MM2S"]
+    assert rd and {c["run_b"] for c in rd} == {32}
+    rb = bdgraph.ddr_runb(bdgraph.ddr_floor(ddr, board_params("palmyra213")), ddr, {32: 1.45})
+    assert rb["factor"] == pytest.approx(1.45)

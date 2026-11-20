@@ -190,8 +190,9 @@ def _ddr_bytes(dfs: Dict[str, Any], sv: Dict[str, Any], ovr: Optional[int], roun
                 n += r * int(k)
             b = n * per_run if ok else None
             d = "mm2s" if str(key[2]).upper() == "MM2S" else "s2mm"
+            hb = next((x for x in dc.get("bd_chain", []) if x.get("bd_id") == head), None)
             rows.append({"tile": loc, "dir": key[2], "ch": key[3], "head_bd": head, "run_bytes": per_run,
-                         "runs": n, "bytes": b})
+                         "runs": n, "bytes": b, "run_b": run_bytes(hb) if hb is not None else None})
             tot[d] = None if (b is None or tot[d] is None) else tot[d] + b
     return {"mm2s": tot["mm2s"], "s2mm": tot["s2mm"], "channels": rows}
 
@@ -210,6 +211,26 @@ def _interp_cols(points: List[List[float]], n: int) -> float:
 # leave-one-out median |rel| of launch ~ issue + ddr_floor = 7.4%, same as in-sample.  Conv kernels run
 # 6.5-9.5 us (issue blocks when DMA per config is slower); see xiaojiang/tasks/2026-11-20_ddr-floor-vs-meas.
 BD_US_FIT = {"palmyra213": 5.67}
+
+# Short-DDR-run penalty on the read floor, per board: {run_b: factor}.  palmyra213: the 4 u_lin_1024 + u_conv_1024
+# kernels read with 32 B runs and their (launch - issue) / ddr_floor is 1.27-1.83 (64/128 B kernels 0.84-1.30);
+# leave-one-out median factor 1.42-1.49 -> 1.45.  LOO launch error max |rel| 0.358 -> 0.199, mean 7.4% -> 4.7%.
+# Caveat: run_b == 32 coincides with M == 1024 in that corpus (xiaojiang/tasks/2026-11-20_ddr-floor-vs-meas/runb_loo.txt).
+RUN_B_FACTOR_FIT = {"palmyra213": {32: 1.45}}
+
+
+def ddr_runb(floor: Optional[Dict[str, Any]], ddr: Optional[Dict[str, Any]],
+             factors: Optional[Dict[int, float]]) -> Optional[Dict[str, Any]]:
+    """Run-length-adjusted DDR time: floor ms x the MM2S-byte-weighted factor of each read channel's head-BD run_b
+    (factor 1 for run_b not in ``factors``).  An estimate, not a bound -- report only, like ddr_floor."""
+    if floor is None or ddr is None or not factors:
+        return None
+    rd = [c for c in ddr["channels"] if c["bytes"] and str(c["dir"]).upper() == "MM2S"]
+    tot = sum(c["bytes"] for c in rd)
+    if not tot:
+        return None
+    fac = sum(c["bytes"] * float(factors.get(c.get("run_b"), 1.0)) for c in rd) / tot
+    return {"ms": floor["ms"] * fac, "factor": fac}
 
 
 def ddr_floor(ddr: Optional[Dict[str, Any]], params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
