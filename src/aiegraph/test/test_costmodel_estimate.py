@@ -72,9 +72,9 @@ def test_given_a_resident_op_then_resident_is_flagged_unpriced(cycles_file):
     assert "resident" in estimate([_op(resident=True)], cycles=cycles_file)["unpriced"]
 
 
-def test_given_a_bdgraph_op_then_it_is_reserved(cycles_file):
-    with pytest.raises(NotImplementedError, match="des-json gap"):
-        estimate([_op(bdgraph={})], cycles=cycles_file)
+def test_given_a_bdgraph_op_without_build_json_then_it_says_which_file_is_missing(cycles_file, tmp_path):
+    with pytest.raises(FileNotFoundError, match="dfscheduleprovenancemap"):
+        estimate([_op(bdgraph={"worklocal": str(tmp_path)})], cycles=cycles_file)
 
 
 def test_given_an_unknown_recipe_or_kernel_then_it_fails_loudly(cycles_file):

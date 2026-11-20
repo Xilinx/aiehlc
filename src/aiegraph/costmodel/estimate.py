@@ -15,8 +15,10 @@ Input schema (settled in the cost channel: Steve's form, field ``recipe`` not ``
              "core_cyc": int,                         # ISS cycles -- else looked up
              "host": {"bd_us": float},                # host BD-issue cost per BD (segment L input)
              "l": {"cfg": "off|off-cold|aot|aot-kco", "calls": {...}, "words": {...}},  # L features, per launch
-             "bdgraph": {...}}                        # RESERVED: BD/port/lock graph exported from the build JSON
-                                                      # (Amit's des-json gap table); NotImplementedError for now
+             "bdgraph": {"worklocal": dir,            # build JSON dir (dfscheduleprovenancemap + schedule_view)
+                         "bd_write_path": "jit_mmio|aot_window|uart_degraded",  # required to price issue_ms
+                         "trip_count": int}}          # optional; else start_io.loop_range (see bdgraph.py)
+                                                      # -> counts only + issue_ms; K terms listed in "unpriced"
 
 Output (ms per group execution; per-op rows in "ops"):
 
@@ -29,7 +31,7 @@ Output (ms per group execution; per-op rows in "ops"):
     l_ms     = segment L, launch_l.predict_l (kload + core_reset + coreen + rt_bdcfg + rt_startio), only if the
                op carries "l"; its per-term split (kload/cfg/start) is not fitted separately -> those stay None
     glue     = segment N (host glue), M2 -- None
-    total_ms = sum of the priced terms (wait + l_ms) x launches; terms that could not be priced are listed in
+    total_ms = sum of the priced terms (wait + l_ms + issue_ms) x launches; terms that could not be priced are listed in
                "unpriced" so a caller never mistakes a partial sum for the full launch time.
 """
 from __future__ import annotations
@@ -88,8 +90,7 @@ def _ops(group: Any) -> List[Dict[str, Any]]:
 def estimate_op(op: Dict[str, Any], params: Dict[str, Any],
                 table: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     if "bdgraph" in op:
-        raise NotImplementedError("bdgraph input (BD/port/lock graph from the build JSON) is reserved until the "
-                                  "des-json gap table lands (amit/tasks/2026-11-20_des-json-gap/)")
+        return estimate_bdgraph(op, params)
     recipe = op.get("recipe")
     if not str(recipe).startswith(KACC_PREFIX):
         raise NotImplementedError(f"recipe {recipe!r} has no K model yet (only {KACC_PREFIX}* instances)")
@@ -120,6 +121,36 @@ def estimate_op(op: Dict[str, Any], params: Dict[str, Any],
             "bytes_in": op.get("bytes_in"), "bytes_out": op.get("bytes_out"), "unpriced": unpriced}
 
 
+def estimate_bdgraph(op: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """bdgraph form: structural counts from the build JSON (bdgraph.features) + the host BD-issue time
+    (bd_configs x bd_us) when the BD write path is known.  K-segment terms are not priced yet."""
+    from . import bdgraph
+    f = bdgraph.features(op["bdgraph"])
+    unpriced = ["glue", "l", "wait(bdgraph K model)", "dma_bytes"]
+    issue = None
+    bd_us = (op.get("host") or {}).get("bd_us", params.get("host_bd_us"))
+    if f["bd_write_path"] is None:
+        unpriced.append("bd_write_path")
+    elif f["bd_configs_per_launch"] is None:
+        unpriced.append("rounds_unknown")
+    elif bd_us is None:
+        unpriced.append("host_bd_us")
+    else:
+        issue = f["bd_configs_per_launch"] * float(bd_us) / 1e3
+    if f["locked_bds"]:
+        unpriced.append("locks(AM020)")
+    if f["runtime_bds_skipped"]:
+        unpriced.append(f"runtime_bds({f['runtime_bds_skipped']})")
+    return {"kernel": op.get("kernel"), "recipe": op.get("recipe"), "wait": None, "compute": None, "ddr": None,
+            "l_ms": None, "issue_ms": issue, "bound": None, "rounds": f["rounds"], "bdgraph": f,
+            "bytes_in": op.get("bytes_in"), "bytes_out": op.get("bytes_out"), "unpriced": unpriced}
+
+
+def _sum(rows: List[Dict[str, Any]], key: str) -> Optional[float]:
+    v = [r[key] for r in rows if r.get(key) is not None]
+    return sum(v) if v else None
+
+
 def estimate(group: Any, board: str = "palmyra213", params: Optional[Dict[str, Any]] = None,
              cycles: Optional[str] = None) -> Dict[str, Any]:
     """Predicted ms of one execution of ``group`` (see module docstring for the schema)."""
@@ -128,14 +159,13 @@ def estimate(group: Any, board: str = "palmyra213", params: Optional[Dict[str, A
     ops = _ops(group)
     launches = int(group.get("launches", 1)) if isinstance(group, dict) else 1
     rows = [estimate_op(op, prm, table) for op in ops]
-    wait = sum(r["wait"] for r in rows)
-    l_vals = [r["l_ms"] for r in rows if r["l_ms"] is not None]
-    l_ms = sum(l_vals) if l_vals else None
+    wait, l_ms, issue = _sum(rows, "wait"), _sum(rows, "l_ms"), _sum(rows, "issue_ms")
+    comp, ddr = _sum(rows, "compute"), _sum(rows, "ddr")
     unpriced = sorted({u for r in rows for u in r["unpriced"]})
-    bounds = {r["bound"] for r in rows}
+    bounds = {r["bound"] for r in rows if r["bound"] is not None}
+    x = (lambda v: v * launches if v is not None else None)
     return {"kload": None, "cfg": None, "start": None, "glue": None,
-            "wait": wait * launches, "compute": sum(r["compute"] for r in rows) * launches,
-            "ddr": sum(r["ddr"] for r in rows) * launches, "l_ms": l_ms * launches if l_ms is not None else None,
-            "total_ms": (wait + (l_ms or 0.0)) * launches,
-            "bound": bounds.pop() if len(bounds) == 1 else "mixed", "launches": launches,
+            "wait": x(wait), "compute": x(comp), "ddr": x(ddr), "l_ms": x(l_ms), "issue_ms": x(issue),
+            "total_ms": ((wait or 0.0) + (l_ms or 0.0) + (issue or 0.0)) * launches,
+            "bound": bounds.pop() if len(bounds) == 1 else ("mixed" if bounds else None), "launches": launches,
             "board": board, "unpriced": unpriced, "ops": rows}
