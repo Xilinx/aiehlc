@@ -245,7 +245,9 @@ RUN_B_FACTOR_FIT_P4J = {"palmyra213": {32: 1.87, 16: 2.53}}
 # EMPIRICAL: the cause is unknown (single-stream and 8-stream open-page bank models and the base offset were all
 # rejected), so a stride not in the table takes the conservative slow factor.  Form: {"by_stride": {B: f},
 # "default": f} per run_b; plain numbers and {"issue", "dma"} dicts keep working.
-RUN_B_FACTOR_FIT = {"palmyra213": {32: {"by_stride": {640: 1.33, 1312: 1.33, 2560: 1.33}, "default": 1.87},
+# P4l (RESULT11): K=960 padded to kp 1024 (stride 2048 B, KACC_KP_PAD) -> wait/floor 1.25 at M 512/1024/2048
+# (kp 960: 1.74..1.77; kp 976 / 1952 B: 1.63, left at the default).  2048 joins the fast class at the class 1.33.
+RUN_B_FACTOR_FIT = {"palmyra213": {32: {"by_stride": {640: 1.33, 1312: 1.33, 2048: 1.33, 2560: 1.33}, "default": 1.87},
                                    16: 2.53}}
 
 # Host issue time per launch, per board (P4j): issue_ms = bd_ms x bd_configs_per_launch + rd_frac x ddr_floor rd term

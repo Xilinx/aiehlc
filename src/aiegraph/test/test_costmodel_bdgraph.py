@@ -395,7 +395,7 @@ def test_given_a_strided_bd_then_row_stride_is_its_second_dim_stride_and_a_plain
     assert bdgraph.row_stride({"len": 4096}) is None and bdgraph.row_stride(None) is None
 
 
-@pytest.mark.parametrize("stride,f", [(640, 1.33), (1312, 1.33), (2560, 1.33),
+@pytest.mark.parametrize("stride,f", [(640, 1.33), (1312, 1.33), (2048, 1.33), (2560, 1.33),
                                       (1920, 1.87), (3200, 1.87), (5120, 1.87), (None, 1.87), (2576, 1.87)])
 def test_given_palmyra213_p4k_then_a_32b_read_takes_the_fast_factor_only_at_a_fast_stride(stride, f):
     ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=32, row_stride_b=stride)]}
@@ -418,7 +418,9 @@ def test_given_a_16b_read_then_p4k_keeps_the_single_16b_factor():
 @pytest.mark.parametrize("build,meas", [("costmodel_runb2/u_lin_1024x1280x320_tkw8", 5.259),     # P4j +15.9%
                                         ("costmodel_runb7/u_lin_512x640x320_tkw8", 1.758),       # P4j +18.5%
                                         ("costmodel_runb5/u_lin_2048x1280x320_tkw8", 9.941),     # P4j +16.3%
-                                        ("costmodel_runb7/u_lin_512x960x320_tkw8", 2.377)])      # slow stride
+                                        ("costmodel_runb7/u_lin_512x960x320_tkw8", 2.377),       # slow stride
+                                        ("costmodel_runb8/u_lin_1024x960x320_kp1024_tkw8", 4.559),  # P4l padded
+                                        ("costmodel_runb8/u_lin_2048x960x320_kp1024_tkw8", 8.555)])  # P4l padded
 def test_given_palmyra213_fast_and_slow_stride_builds_then_p4k_launch_ms_is_within_7pct(build, meas):
     hit = sorted(RUNB.glob("costmodel_runb*/" + build.split("/", 1)[1] + "/aout/worklocal/schedule_view.json"))
     if not hit:
