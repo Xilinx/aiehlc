@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """Fit / check the L (launch overhead) model.
 
-  l_fit.py --kernels DIR [--board palmyra213] --out FIT.json
-      DIR/<cfg>/*.log for cfg in off, aot, aot-kco; per-cfg least squares of
-      L_meas = const + a*bdcfg_calls + b*startio_calls + c*bdcfg_w + d*cp_w (per launch).
+  l_fit.py --kernels DIR [DIR ...] [--board palmyra213] --out FIT.json
+      DIR/<src>/*.log, union over all DIRs; per-cfg least squares of
+      L_meas = const + a*bdcfg_calls + b*startio_calls + c*bdcfg_w + d*cp_w + e*kload_w + f*rst (per launch).
+      Sources: off <- {off, off-reload} (reload = UNet switching kernels on the same tiles), other cfgs <- the
+      same-named dir.  off-cold fits only const+kload_w (other coefs from off); aot/aot-kco fix kload_w=rst=0
+      (kload_w is 11 on every aot point -> collinear with const).  Non-const features that are constant over
+      a cfg's points are unidentifiable and get coef 0.  off-cold is skipped when no DIR has it (one-DIR runs
+      on M1-L/kernels behave as before).
       Prints  LFIT cfg=<cfg> board=<b> n=<n> r2=%.3f maxrel=%.3f loo_maxrel=%.3f
       and writes a reproducible JSON (sort_keys, fixed decimals, no paths/timestamps).
   l_fit.py --check-unet CFG=LOG [...] [--params JSON]
       apppaltest UNet logs (no BOARD line): board/launches from 'CMP unet board=.. aie_launches=.. run_rc=0',
-      ctrlpkt from 'LAUNCH warm' (aot-kco prints aot), active [CTRLPKT_AOT] (table!=0) iff cfg!=off, split_words required.
+      ctrlpkt from 'LAUNCH warm' or 'LAUNCH cold' (aot-kco prints aot), active [CTRLPKT_AOT] (table!=0) iff
+      cfg is off/off-cold, split_words required, aie_launches == --unet-launches (258).
       Prediction uses only per-launch call counts and word counts.  Prints
       LGATE cfg=.. board=.. launches=.. pred_ms= meas_ms= abs_us= rel=%.3f  and
       LGATE ALL n=<n> maxrel=%.3f PASS|FAIL (<=0.200).
@@ -22,6 +28,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from aiegraph.costmodel.launch_split import lines  # noqa: E402
 from aiegraph.costmodel.launch_l import CFGS, FEATURES, feature_row, point, predict_l, load_params  # noqa: E402
 
 ND = 6
@@ -32,10 +39,40 @@ def _fit(X, y):
     return np.round(coef, ND)
 
 
-def fit_cfg(pts):
+SOURCES = {"off": ("off", "off-reload")}  # off-reload is a dir alias only, no LFIT line of its own
+FIXED0 = {"aot": ("kload_w", "rst"), "aot-kco": ("kload_w", "rst")}
+COLD_FREE = ("const", "kload_w")
+BASE_CFGS = ("off", "aot", "aot-kco")  # always reported (fa539124); others only when some DIR has them
+
+
+def free_idx(X, cfg):
+    fixed = set(FIXED0.get(cfg, ()))
+    if cfg == "off-cold":
+        fixed = set(FEATURES) - set(COLD_FREE)
+    idx = []
+    for i, k in enumerate(FEATURES):
+        if k in fixed:
+            continue
+        if k != "const" and np.ptp(X[:, i]) == 0:
+            continue  # constant over the points: carried by const, unidentifiable
+        idx.append(i)
+    return idx
+
+
+def _fit_free(X, y, idx, base):
+    coef = base.copy()
+    coef[idx] = 0.0
+    r = y - X @ coef
+    coef[idx] = _fit(X[:, idx], r)
+    return coef
+
+
+def fit_cfg(pts, cfg="off", base=None):
     X = np.array([feature_row(p["calls"], p["words"]) for p in pts])
     y = np.array([p["l_meas"] for p in pts])
-    coef = _fit(X, y)
+    base = np.zeros(len(FEATURES)) if base is None else np.asarray(base, float)
+    idx = free_idx(X, cfg)
+    coef = _fit_free(X, y, idx, base)
     pred = X @ coef
     ss_res = float(((y - pred) ** 2).sum())
     ss_tot = float(((y - y.mean()) ** 2).sum())
@@ -45,80 +82,103 @@ def fit_cfg(pts):
     for i in range(len(pts)):
         m = np.ones(len(pts), bool)
         m[i] = False
-        c = _fit(X[m], y[m])
+        c = _fit_free(X[m], y[m], idx, base)
         loo = max(loo, abs(float(X[i] @ c) - y[i]) / y[i])
     return coef, r2, maxrel, loo
 
 _CMP = re.compile(r"CMP unet board=(\S+) .*aie_launches=(\d+) .*run_rc=(-?\d+)")
-_WARM = re.compile(r"LAUNCH warm .*launches=(\d+).* ctrlpkt=(\S+)")
+_WARM = re.compile(r"LAUNCH (?:warm|cold) .*launches=(\d+).* ctrlpkt=(\S+)")
 
 
 def unet_meta(log):
-    """apppaltest UNet log: board/launches from the CMP line, ctrlpkt from LAUNCH warm."""
+    """apppaltest UNet log: board/launches from the CMP line, ctrlpkt from LAUNCH warm (or cold)."""
     u = {"board": None, "launches": None, "run_rc": None, "ctrlpkt": None, "warm_launches": None,
          "cp_lines": 0, "split_words": False}
-    with open(log, errors="replace") as f:
-        for line in f:
-            m = _CMP.search(line)
-            if m:
-                u["board"], u["launches"], u["run_rc"] = m.group(1), int(m.group(2)), int(m.group(3))
-            m = _WARM.search(line)
-            if m:
-                u["warm_launches"], u["ctrlpkt"] = int(m.group(1)), m.group(2)
-            if "[CTRLPKT_AOT]" in line and not re.search(r"\btable=0\b", line):
-                u["cp_lines"] += 1  # off prints an all-zero 'table=0' summary; count active tables only
-            if "LAUNCH split_words" in line:
-                u["split_words"] = True
+    for line in lines(log):
+        m = _CMP.search(line)
+        if m:
+            u["board"], u["launches"], u["run_rc"] = m.group(1), int(m.group(2)), int(m.group(3))
+        m = _WARM.search(line)
+        if m:
+            u["warm_launches"], u["ctrlpkt"] = int(m.group(1)), m.group(2)
+        if "[CTRLPKT_AOT]" in line and not re.search(r"\btable=0\b", line):
+            u["cp_lines"] += 1  # off prints an all-zero 'table=0' summary; count active tables only
+        if "LAUNCH split_words" in line:
+            u["split_words"] = True
     return u
 
 
-def unet_check(u, cfg):
+def unet_check(u, cfg, launches=258):
     if u["board"] is None:
         return "no 'CMP unet board=... aie_launches=... run_rc=' line"
     if u["run_rc"] != 0:
         return f"run_rc={u['run_rc']}"
+    if launches and u["launches"] != launches:
+        return f"aie_launches={u['launches']} != {launches}"
     if u["ctrlpkt"] is None:
-        return "no 'LAUNCH warm ... ctrlpkt=' line"
-    want = "off" if cfg == "off" else "aot"  # aot-kco prints ctrlpkt=aot (build_unet.py)
+        return "no 'LAUNCH warm|cold ... ctrlpkt=' line"
+    off = cfg in ("off", "off-cold")
+    want = "off" if off else "aot"  # aot-kco prints ctrlpkt=aot (build_unet.py)
     if u["ctrlpkt"] != want:
         return f"ctrlpkt={u['ctrlpkt']} but cfg={cfg}"
-    if (cfg == "off") != (u["cp_lines"] == 0):
+    if off != (u["cp_lines"] == 0):
         return f"[CTRLPKT_AOT] lines={u['cp_lines']} inconsistent with cfg={cfg}"
     if not u["split_words"]:
         return "no 'LAUNCH split_words' line"
     if u["warm_launches"] is not None and u["warm_launches"] != u["launches"]:
-        return f"LAUNCH warm launches={u['warm_launches']} != aie_launches={u['launches']}"
+        return f"LAUNCH warm|cold launches={u['warm_launches']} != aie_launches={u['launches']}"
     return None
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kernels")
+    ap.add_argument("--kernels", nargs="+", metavar="DIR")
     ap.add_argument("--board", default="palmyra213")
     ap.add_argument("--out")
     ap.add_argument("--check-unet", nargs="+", metavar="CFG=LOG")
     ap.add_argument("--params")
+    ap.add_argument("--unet-launches", type=int, default=258, help="required aie_launches (0 = any)")
     a = ap.parse_args()
     rc = 0
     if a.kernels:
         out = {"board": a.board, "features": list(FEATURES),
                "l_def": "kload+core_reset+coreen+rt_bdcfg+rt_startio (ms/launch)", "cfg": {}}
+        coefs = {}
         for cfg in CFGS:
-            logs = sorted((Path(a.kernels) / cfg).glob("*.log"))
-            pts = [point(str(p)) for p in logs]
+            logs = []  # (src, path), union over all DIRs
+            for d in a.kernels:
+                for src in SOURCES.get(cfg, (cfg,)):
+                    logs += [(src, lg) for lg in sorted((Path(d) / src).glob("*.log"))]
+            if not logs and cfg not in BASE_CFGS:
+                continue
+            names = [f"{src}/{lg.stem}" for src, lg in logs]
+            if len(set(names)) != len(names):
+                print(f"LFIT cfg={cfg} board={a.board} duplicate kernel logs across DIRs: {sorted(names)}")
+                rc = 1
+                continue
+            pts = [point(str(lg)) for _, lg in logs]
+            base = None
+            if cfg == "off-cold":
+                if "off" not in coefs:
+                    print(f"LFIT cfg={cfg} board={a.board} n={len(pts)} needs the off fit")
+                    rc = 1
+                    continue
+                base = coefs["off"]
             if len(pts) < 2:
                 print(f"LFIT cfg={cfg} board={a.board} n={len(pts)} too few points")
                 rc = 1
                 continue
-            coef, r2, maxrel, loo = fit_cfg(pts)
-            for p, lg in zip(pts, logs):
+            coef, r2, maxrel, loo = fit_cfg(pts, cfg, base)
+            coefs[cfg] = coef
+            for p, nm in zip(pts, names):
                 pr = float(np.dot(feature_row(p["calls"], p["words"]), coef))
-                print(f"  {cfg:8s} {lg.stem:24s} meas={p['l_meas']:.4f} pred={pr:.4f} rel={abs(pr - p['l_meas']) / p['l_meas']:.3f}")
+                print(f"  {cfg:8s} {nm:35s} kload_w={p['words']['kload_w']:7.1f} rst={p['calls']['core_reset']:5.2f} "
+                      f"meas={p['l_meas']:.4f} pred={pr:.4f} rel={abs(pr - p['l_meas']) / p['l_meas']:.3f}")
             print(f"LFIT cfg={cfg} board={a.board} n={len(pts)} r2={r2:.3f} maxrel={maxrel:.3f} loo_maxrel={loo:.3f}")
             out["cfg"][cfg] = {"coef": {k: float(f"{v:.{ND}f}") for k, v in zip(FEATURES, coef)},
                                "n": len(pts), "r2": float(f"{r2:.3f}"), "maxrel": float(f"{maxrel:.3f}"),
                                "loo_maxrel": float(f"{loo:.3f}"),
-                               "kernels": [lg.stem for lg in logs]}
+                               "kernels": names}
         if a.out:
             Path(a.out).parent.mkdir(parents=True, exist_ok=True)
             with open(a.out, "w") as f:
@@ -139,7 +199,7 @@ def main():
             except Exception as e:  # noqa: BLE001
                 err, u = f"parse error {e!r}", {}
             if err is None:
-                err = unet_check(u, cfg)
+                err = unet_check(u, cfg, a.unet_launches)
             if err:
                 print(f"LGATE cfg={cfg} FAIL {err}")
                 worst = max(worst, 9.999)
@@ -150,7 +210,8 @@ def main():
             worst = max(worst, rel)
             n_ok += 1
             print(f"  LDET cfg={cfg} calls/launch bdcfg={p['calls']['bdcfg']:.3f} startio={p['calls']['startio']:.3f} "
-                  f"kload={p['calls']['kload']:.3f} words bdcfg_w={p['words']['bdcfg_w']:.1f} cp_w={p['words']['cp_w']:.1f} "
+                  f"kload={p['calls']['kload']:.3f} rst={p['calls']['core_reset']:.3f} words bdcfg_w={p['words']['bdcfg_w']:.1f} "
+                  f"cp_w={p['words']['cp_w']:.1f} kload_w={p['words']['kload_w']:.1f} "
                   f"ctrlpkt={u['ctrlpkt']} cp_aot_lines={u['cp_lines']}")
             print(f"LGATE cfg={cfg} board={u['board']} launches={u['launches']} pred_ms={pr:.4f} meas_ms={meas:.4f} "
                   f"abs_us={abs(pr - meas) * 1000:.1f} rel={rel:.3f}")

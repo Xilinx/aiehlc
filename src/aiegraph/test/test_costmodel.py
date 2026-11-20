@@ -245,3 +245,32 @@ def test_l_params_committed():
     for c in launch_l.CFGS:
         assert prm["cfg"][c]["r2"] >= 0.9 and prm["cfg"][c]["maxrel"] <= 0.20
         assert set(prm["cfg"][c]["coef"]) == set(launch_l.FEATURES)
+
+
+# ---- L segment M1.2.1: kload_w / rst features, off-cold cfg, interleaved console lines ----
+def test_l_kload_w_rst_hand():
+    prm = {"cfg": {"off": {"coef": {"const": 0.3, "bdcfg_calls": 0.002, "startio_calls": 0.001, "bdcfg_w": 0.0,
+                                    "cp_w": 0.0, "kload_w": 0.0002, "rst": 0.01}}}}
+    ms = launch_l.predict_l({"bdcfg": 100, "startio": 50, "kload": 1, "core_reset": 33},
+                            {"bdcfg_w": 576, "cp_w": 0, "kload_w": 5000}, "off", prm)
+    assert ms == pytest.approx(0.3 + 0.2 + 0.05 + 1.0 + 0.33)
+    assert "off-cold" in launch_l.CFGS and launch_l.FEATURES[-2:] == ("kload_w", "rst")
+    # pre-M1.2.1 params (no kload_w/rst keys) still predict
+    old = {"cfg": {"off": {"coef": {"const": 0.3, "bdcfg_calls": 0.0, "startio_calls": 0.0, "bdcfg_w": 0.0, "cp_w": 0.0}}}}
+    assert launch_l.predict_l({}, {"kload_w": 5000}, "off", old) == pytest.approx(0.3)
+
+
+def test_l_interleaved_host_line(tmp_path):
+    # a host '[hh:mm:ss DEBUG] ...' message cut the board's LAUNCH lines (M1-2 off-reload/u_lin_1024x320x960.log:560)
+    log = tmp_path / "x.log"
+    log.write_text(
+        "LAUNCH split klo[20:27:39 DEBUG] main: program_done detected, draining trailing output...\n"
+        "ad=1.872 bdcfg=2.534 startio=0.280 coreen=0.023 wait_io=0.733 core_reset=0.000 ms_per_launch=5.441\n"
+        "LAUNCH split_detail calls kload=16 bdcfg=7296 startio=3648 coreen=16 wait_io=2880 core_reset=528 "
+        "rt_bdcfg=0.9875 rt_startio=0.0237 rt_wait_io=0.6525 launches=16\n"
+        "LAUNCH split_words mmio_w=10784.0 cp_w=0.0 bd_n=456.0 rst_n=33.0 kload_w=97[16:59:44 DEBUG] main: x\n"
+        "28.0 bdcfg_w=576.0 startio_w=228.0 coreen_w=16.0\n")
+    p = launch_l.point(str(log))
+    assert p["l_meas"] == pytest.approx(1.872 + 0.0 + 0.023 + 0.9875 + 0.0237)
+    assert p["words"]["kload_w"] == 9728.0 and p["words"]["bdcfg_w"] == 576.0
+    assert p["calls"]["core_reset"] == 33.0 and p["calls"]["bdcfg"] == 456.0

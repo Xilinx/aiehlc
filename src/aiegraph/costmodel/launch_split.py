@@ -87,6 +87,28 @@ def _finish_perf(p: Dict[str, Any]) -> Dict[str, Any]:
     return p
 
 
+# Host-side console messages ("[16:59:44 DEBUG] main: ...") can land in the middle of a board
+# 'LAUNCH ...' line; the line's tail then continues on the next console line.
+_HOSTMSG = re.compile(r"\[\d{2}:\d{2}:\d{2} [A-Z]+\] .*$")
+
+
+def lines(path: str):
+    """Console lines with 'LAUNCH ...' lines rejoined when a host message was interleaved into them."""
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        pend = None
+        for line in f:
+            line = line.rstrip("\r\n")
+            if pend is not None:
+                line, pend = pend + line, None
+            m = _HOSTMSG.search(line) if "LAUNCH " in line else None
+            if m and m.start() > line.find("LAUNCH "):
+                pend = line[:m.start()]
+                continue
+            yield line
+        if pend is not None:
+            yield pend
+
+
 def parse(path: str) -> Dict[str, Any]:
     splits: List[Dict[str, Any]] = []
     prof: List[Dict[str, Any]] = []
@@ -95,62 +117,60 @@ def parse(path: str) -> Dict[str, Any]:
     perf: List[Dict[str, Any]] = []
     cur = None  # current perf block (one per [PERF] tag run)
 
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.rstrip("\r\n")
-            if "LAUNCH split" in line:
-                m = _DETAIL.search(line)
-                if m:
-                    if splits and splits[-1]["split_detail"] is None:
-                        splits[-1]["split_detail"] = _parse_detail(m.group(1))
-                    else:
-                        splits.append({"split": None, "split_detail": _parse_detail(m.group(1))})
-                    continue
-                m = _SPLIT.search(line)
-                if m:
-                    splits.append({"split": _parse_split(m.group(1)), "split_detail": None})
-                continue
-            if "PROF " in line:
-                m = _PROF_HS.search(line)
-                if m:
-                    d = {"part": int(m.group(1)), "kind": m.group(2)}
-                    d.update(_kv(m.group(3)))
-                    host_split.append(d)
-                    continue
-                m = _PROF_PART.search(line)
-                if m:
-                    d = {"part": int(m.group(1)), "op": m.group(2)}
-                    d.update(_kv(m.group(3)))
-                    prof.append(d)
-                    continue
-                m = _PROF_TOT.search(line)
-                if m:
-                    prof_total = _kv("total_nonaie_ms=" + m.group(1))
-                continue
-            if "[PERF" not in line:
-                continue
-            m = _PERF.search(line)
+    for line in lines(path):
+        if "LAUNCH split" in line:
+            m = _DETAIL.search(line)
             if m:
-                tag = int(m.group(1))
-                if cur is None or cur["tag"] != tag or cur["perfsum"] is not None:
-                    if cur is not None:
-                        perf.append(_finish_perf(cur))
-                    cur = _new_perf(tag)
-                a, ss, ls = int(m.group(5)), int(m.group(7)), int(m.group(8))
-                cur["per_tile"].append({"col": int(m.group(2)), "row": int(m.group(3)), "rc": int(m.group(4)),
-                                        "active": a, "vec_instr": int(m.group(6)), "stream_stall": ss,
-                                        "lock_stall": ls, "compute": a - ls - ss})
+                if splits and splits[-1]["split_detail"] is None:
+                    splits[-1]["split_detail"] = _parse_detail(m.group(1))
+                else:
+                    splits.append({"split": None, "split_detail": _parse_detail(m.group(1))})
                 continue
-            m = _PERFIO.search(line)
-            if m and cur is not None and cur["tag"] == int(m.group(1)):
-                cur["io"].append({"col": int(m.group(2)), "row": int(m.group(3)),
-                                  "pre_io_active": int(m.group(4)), "pre_io_lock_stall": int(m.group(5)),
-                                  "io_active": int(m.group(6)), "io_lock_stall": int(m.group(7))})
+            m = _SPLIT.search(line)
+            if m:
+                splits.append({"split": _parse_split(m.group(1)), "split_detail": None})
+            continue
+        if "PROF " in line:
+            m = _PROF_HS.search(line)
+            if m:
+                d = {"part": int(m.group(1)), "kind": m.group(2)}
+                d.update(_kv(m.group(3)))
+                host_split.append(d)
                 continue
-            m = _PERFSUM.search(line)
-            if m and cur is not None and cur["tag"] == int(m.group(1)):
-                cur["perfsum"] = {"tiles": int(m.group(2)), "min": int(m.group(3)), "max": int(m.group(4)),
-                                  "mean": int(m.group(5))}
+            m = _PROF_PART.search(line)
+            if m:
+                d = {"part": int(m.group(1)), "op": m.group(2)}
+                d.update(_kv(m.group(3)))
+                prof.append(d)
+                continue
+            m = _PROF_TOT.search(line)
+            if m:
+                prof_total = _kv("total_nonaie_ms=" + m.group(1))
+            continue
+        if "[PERF" not in line:
+            continue
+        m = _PERF.search(line)
+        if m:
+            tag = int(m.group(1))
+            if cur is None or cur["tag"] != tag or cur["perfsum"] is not None:
+                if cur is not None:
+                    perf.append(_finish_perf(cur))
+                cur = _new_perf(tag)
+            a, ss, ls = int(m.group(5)), int(m.group(7)), int(m.group(8))
+            cur["per_tile"].append({"col": int(m.group(2)), "row": int(m.group(3)), "rc": int(m.group(4)),
+                                    "active": a, "vec_instr": int(m.group(6)), "stream_stall": ss,
+                                    "lock_stall": ls, "compute": a - ls - ss})
+            continue
+        m = _PERFIO.search(line)
+        if m and cur is not None and cur["tag"] == int(m.group(1)):
+            cur["io"].append({"col": int(m.group(2)), "row": int(m.group(3)),
+                              "pre_io_active": int(m.group(4)), "pre_io_lock_stall": int(m.group(5)),
+                              "io_active": int(m.group(6)), "io_lock_stall": int(m.group(7))})
+            continue
+        m = _PERFSUM.search(line)
+        if m and cur is not None and cur["tag"] == int(m.group(1)):
+            cur["perfsum"] = {"tiles": int(m.group(2)), "min": int(m.group(3)), "max": int(m.group(4)),
+                              "mean": int(m.group(5))}
     if cur is not None:
         perf.append(_finish_perf(cur))
 
