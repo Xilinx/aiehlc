@@ -495,6 +495,9 @@ int __Runtime_core_perf_last_launch(unsigned long long *io_act_cyc, unsigned lon
 int __Runtime_core_perf_last_launch_win(unsigned long long *io_act_cyc, unsigned long long *lock_stall_cyc,
                                         unsigned long long *stream_stall_cyc, unsigned long long *pre_io_act_cyc,
                                         unsigned long long *snap_gap_cyc);
+/* compute_cyc / ovl_cyc / dact_cyc of the tile the last successful _win call handed out (1 = valid) */
+int __Runtime_core_perf_last_launch_ovl(unsigned long long *compute_cyc, unsigned long long *ovl_cyc,
+                                        unsigned long long *dact_cyc);
 void __Runtime_core_perf_report(int tag);
 void __Runtime_core_perf_read_probe(uint32_t *active, uint32_t *vec_instr, uint32_t *stream_stall,
                                     uint32_t *lock_stall);

@@ -467,7 +467,10 @@ def test_glue_kacc_sources_wired():
 
 # ---------------------------------------------------------------- 5. M3.1 site-perf counter line
 PERF = re.compile(r"^PROF aie_site_perf part=(\d+) kind=(\w+) launches=(\d+) perf_n=(\d+) io_act_cyc=(\d+) "
-                  r"lock_stall_cyc=(\d+) stream_stall_cyc=(\d+) pre_io_act_cyc=(\d+) snap_gap_cyc=(\d+)$", re.M)
+                  r"lock_stall_cyc=(\d+) stream_stall_cyc=(\d+) pre_io_act_cyc=(\d+) snap_gap_cyc=(\d+)"
+                  r"(?= compute_cyc=\d+ ovl_cyc=\d+ dact_cyc=\d+$)", re.M)  # M3.1.2: ovl fields appended
+PERF_OVL = re.compile(r"^PROF aie_site_perf part=(\d+) .* snap_gap_cyc=\d+ compute_cyc=(\d+) ovl_cyc=(\d+) "
+                      r"dact_cyc=(\d+)$", re.M)
 OLD_SPLIT_END = re.compile(r"^PROF aie_host_split part=\d+ .*launches=(\d+)$", re.M)  # n_fit.py:71 / m3_site.py:61
 STUB = r"""
 #include <stdio.h>
@@ -481,6 +484,12 @@ int __Runtime_core_perf_last_launch_win(unsigned long long *ia, unsigned long lo
     const unsigned j = g_nl++;
     if (j == 3) { *ia = *ls = *ss = *pre = *gap = 0; return 0; }
     *ia = 1000ULL * (j + 1); *ls = 10ULL * (j + 1); *ss = j + 1; *pre = 7ULL * (j + 1); *gap = 2ULL * (j + 1);
+    return 1;
+}
+/* the same tile's overlap fields of the launch _win just handed out: (900, 100, 1000) * (j+1) */
+int __Runtime_core_perf_last_launch_ovl(unsigned long long *cc, unsigned long long *ov, unsigned long long *da) {
+    const unsigned j = g_nl - 1;
+    *cc = 900ULL * (j + 1); *ov = 100ULL * (j + 1); *da = 1000ULL * (j + 1);
     return 1;
 }
 """
@@ -527,6 +536,84 @@ def test_site_perf_line():
     out0 = _perf_drv(False)
     assert not PERF.search(out0) and "aie_site_perf" not in out0 and "DBG 0" in out0, out0
     assert {int(m.group(1)) for m in LINE.finditer(out0)} == {2, 3, 4}
+
+
+def test_site_perf_ovl_fields():
+    """M3.1.2: the site line carries compute_cyc/ovl_cyc/dact_cyc summed over the perf_n launches, from the tile
+    __Runtime_core_perf_last_launch_win chose (same tile/window as io_act_cyc and [PERFIO]); old fields first."""
+    hdr = (RT / "aie_host_split.h").read_text()
+    assert hdr.count('" compute_cyc=%llu ovl_cyc=%llu dact_cyc=%llu"') == 1
+    w = hdr[hdr.index("static inline void ahs_add_window("):]
+    w = w[:w.index("\n}\n")]
+    i = w.index("__Runtime_core_perf_last_launch_win(&ia, &ls, &ss, &pre, &gap)")
+    assert i < w.index("__Runtime_core_perf_last_launch_ovl(&cc, &ov, &da)")
+    out = _perf_drv(True)
+    ovl = {int(m.group(1)): m.groups()[1:] for m in PERF_OVL.finditer(out)}
+    # site 2: launches 0,1 -> (900+1800, 100+200, 1000+2000); site 4: launch 3 no reading, launch 4 only
+    assert ovl == {2: ("2700", "300", "3000"), 4: ("4500", "500", "5000")}, out
+    assert {int(m.group(1)) for m in PERF.finditer(out)} == set(ovl)
+    # runtime: _ovl returns the tile _win handed out (tile 0 here), 0 before / after re-arm
+    L = _lw_lib()
+    L.setup(1000000, 1)
+    L.arm(2)
+    o3 = (U * 3)()
+    assert L.get_ovl(o3) == 0 and list(o3) == [0, 0, 0]
+    L.set_ctr(0, 0, 0, 0)
+    L.set_ctr(1, 0, 0, 0)
+    L.snap(0)
+    t0 = L.now()
+    L.advance(50)
+    L.wait_done(t0, L.now())
+    L.set_ctr(0, 30000, 100, 200)
+    L.set_ctr(1, 90000, 0, 0)       # tile 1 has the most io -> chosen
+    o = (U * 5)()
+    assert L.get(o) == 1
+    b = 0 if o[0] == L.io(0) else 1
+    assert o[0] == L.io(b) and b == 1, (list(o), L.io(0), L.io(1))
+    assert L.get_ovl(o3) == 1
+    assert list(o3) == [L.compute(b), L.tovl(b), 90000], list(o3)
+    assert L.get_ovl(o3) == 1       # reads no counters, repeatable within the launch
+    L.arm(2)
+    assert L.get_ovl(o3) == 0 and list(o3) == [0, 0, 0]
+
+
+def test_site_perf_line_maxlen():
+    """the longest possible aie_site_perf line (every counter ULLONG_MAX, launches/perf_n UINT_MAX, longest kind)
+    fits site_prof.c's hs_ buffer: snprintf's return value < sizeof hs_"""
+    sp = (ROOT / "src/aiegraph/runtime/site_prof.c").read_text()
+    blk = sp[sp.index("if (is_aie) {"):]
+    m = re.search(r"char hs_\[(\d+)\];", blk)
+    assert m and "aiednn_aie_host_split_line((int)i + 0x10000, hs_, (int)sizeof hs_)" in blk[m.end():], blk[:400]
+    size = int(m.group(1))
+    src = r"""
+#define AIEHLC_SITE_PERF 1
+#include <limits.h>
+#include "aie_host_split.h"
+int __Runtime_core_perf_last_launch_win(unsigned long long *a, unsigned long long *b, unsigned long long *c,
+                                        unsigned long long *d, unsigned long long *e) { (void)a; (void)b; (void)c;
+    (void)d; (void)e; return 0; }
+int __Runtime_core_perf_last_launch_ovl(unsigned long long *a, unsigned long long *b, unsigned long long *c) {
+    (void)a; (void)b; (void)c; return 0; }
+static ahs_table T;
+int maxlen(int kind, char *buf, int n) {
+    const int site = AHS_MAX_SITES - 1;
+    ahs_site *s = &T.s[site];
+    s->calls = s->launches = s->perf_n = UINT_MAX;
+    s->kind = kind;
+    s->io_act = s->lock_stall = s->stream_stall = s->pre_io_act = s->snap_gap = ULLONG_MAX;
+    s->compute = s->ovl = s->dact = ULLONG_MAX;
+    return ahs_format(&T, AHS_PERF_LINE + site, 1e6, buf, (size_t)n);
+}
+"""
+    L = ctypes.CDLL(str(_cc(src, "maxlen")))
+    L.maxlen.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    for kind in range(5):
+        b = ctypes.create_string_buffer(size)
+        n = L.maxlen(kind, b, size)
+        line = b.value.decode()
+        assert 0 < n < size, (kind, n, size)
+        assert len(line) == n and line.endswith(f"dact_cyc={2**64 - 1}"), line
+        assert line.count(str(2**64 - 1)) == 8 and line.count(str(2**32 - 1)) == 2, line
 
 
 def test_site_perf_runtime_wired():
@@ -655,6 +742,8 @@ void wait_done(unsigned long long t0, unsigned long long t1) { rt_core_perf_wait
 unsigned long long now(void) { return g_now; }
 int reads(void) { return g_reads; }
 int get(unsigned long long *o) { return __Runtime_core_perf_last_launch_win(&o[0], &o[1], &o[2], &o[3], &o[4]); }
+int get_ovl(unsigned long long *o) { return __Runtime_core_perf_last_launch_ovl(&o[0], &o[1], &o[2]); }
+unsigned long long tovl(int i) { return s_klw_tovl[i]; }
 void report(int tag) { __Runtime_core_perf_report(tag); fflush(stdout); }
 unsigned long long compute(int i) { return s_klw_compute[i]; }
 unsigned long long io(int i) { return s_klw_io[i]; }
@@ -672,7 +761,7 @@ def _lw_lib(win=False):
     rep = _fn_body(rt, "void __Runtime_core_perf_report(int tag) {") + "\n}\n"
     src = f"#define AIEHLC_CORE_PERF_WIN {int(win)}\n" + LW_STUB + blk + rep + LW_API
     L = ctypes.CDLL(str(_cc(src, "lw_win" if win else "lw")))
-    for f in ("compute", "io", "ovl", "now", "tic"):
+    for f in ("compute", "io", "ovl", "now", "tic", "tovl"):
         getattr(L, f).restype = U
     L.setup.argtypes = [U, U]
     L.wait_done.argtypes = [U, U]

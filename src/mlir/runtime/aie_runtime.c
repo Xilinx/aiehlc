@@ -427,6 +427,7 @@ static unsigned long long s_klw_ta[RT_CORE_PERF_MAX_TILES];      /* ahs_now() ju
 static unsigned long long s_klw_tovl[RT_CORE_PERF_MAX_TILES];    /* per-tile ovl, AIE cycles */
 static int s_klw_state = 0;                     /* 0 idle, 1 A pending, 2 A taken, 3 B taken */
 static int s_klw_given = 0;                     /* this launch was handed out (__Runtime_core_perf_last_launch*) */
+static int s_klw_given_b = -1;                  /* tile _win handed out (the _ovl getter reads the same one) */
 static unsigned s_klw_nwait = 0;                /* waits between A and B */
 static unsigned long long s_klw_a_end_t = 0ULL; /* ahs_now() at the end of A */
 static unsigned long long s_klw_wait_t = 0ULL;  /* sum(wait) between A and B, host ticks */
@@ -494,6 +495,7 @@ static void rt_core_perf_site_read(void) {
 
 /* launch start (kernel group enabled, counters zeroed): A pending, sums cleared */
 static void rt_core_perf_launch_reset(void) {
+    s_klw_given_b = -1;
     for (int i = 0; i < RT_CORE_PERF_MAX_TILES; i++) {
         s_klw_ok[i] = 0;
         s_klw_compute[i] = s_klw_io[i] = s_klw_ls[i] = s_klw_ss[i] = s_klw_da[i] = s_klw_ta[i] = s_klw_tovl[i] = 0ULL;
@@ -608,8 +610,26 @@ int __Runtime_core_perf_last_launch_win(unsigned long long *io_act_cyc, unsigned
         *pre_io_act_cyc = v && (unsigned long long)s_klw_act[b] > s_klw_io[b] ? s_klw_act[b] - s_klw_io[b] : 0ULL;
     if (snap_gap_cyc)
         *snap_gap_cyc = v ? s_klw_gap_cyc : 0ULL;
-    if (v)
+    if (v) {
         s_klw_given = 1; /* handed out once per launch; [PERFIO] still sees the sums */
+        s_klw_given_b = b;
+    }
+    return v;
+}
+
+/* the overlap-model fields of the tile the last successful _win call handed out (same tile, same A->B window as
+ * its io_act and as [PERFIO]): compute_cyc = dACTIVE - dLOCK - dSTREAM, ovl_cyc = per-tile ovl, dact_cyc = dACTIVE.
+ * Returns 1 when that tile is valid, else 0 (all outputs 0). Reads no counters. */
+int __Runtime_core_perf_last_launch_ovl(unsigned long long *compute_cyc, unsigned long long *ovl_cyc,
+                                        unsigned long long *dact_cyc) {
+    const int b = s_klw_given_b;
+    const int v = b >= 0 && b < RT_CORE_PERF_MAX_TILES;
+    if (compute_cyc)
+        *compute_cyc = v ? s_klw_compute[b] : 0ULL;
+    if (ovl_cyc)
+        *ovl_cyc = v ? s_klw_tovl[b] : 0ULL;
+    if (dact_cyc)
+        *dact_cyc = v ? s_klw_da[b] : 0ULL;
     return v;
 }
 

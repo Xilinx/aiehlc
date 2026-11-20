@@ -39,6 +39,7 @@ typedef struct {
     unsigned perf_n;               /* M3.1 site-perf: launches with a core counter reading */
     unsigned long long io_act, lock_stall, stream_stall; /* slowest-core counter sums (core cycles) */
     unsigned long long pre_io_act, snap_gap; /* M3.1.1: ACTIVE outside the wait windows; snapshot->__wio_t0 gap */
+    unsigned long long compute, ovl, dact; /* M3.1.2: same tile/window as io_act (overlap model) */
 } ahs_site;
 
 typedef struct {
@@ -57,6 +58,8 @@ typedef struct {
 int __Runtime_core_perf_last_launch_win(unsigned long long *io_act_cyc, unsigned long long *lock_stall_cyc,
                                         unsigned long long *stream_stall_cyc, unsigned long long *pre_io_act_cyc,
                                         unsigned long long *snap_gap_cyc);
+int __Runtime_core_perf_last_launch_ovl(unsigned long long *compute_cyc, unsigned long long *ovl_cyc,
+                                        unsigned long long *dact_cyc);
 #endif
 
 /* aiednn_aie_host_split_line(AHS_PERF_LINE + part, ...) asks for the PROF aie_site_perf line of part
@@ -145,6 +148,12 @@ static inline void ahs_add_window(ahs_table *a, unsigned long long win, unsigned
             s->stream_stall += ss;
             s->pre_io_act += pre;
             s->snap_gap += gap;
+            unsigned long long cc = 0ULL, ov = 0ULL, da = 0ULL; /* same tile _win chose */
+            if (__Runtime_core_perf_last_launch_ovl(&cc, &ov, &da)) {
+                s->compute += cc;
+                s->ovl += ov;
+                s->dact += da;
+            }
         }
     }
 #endif
@@ -202,6 +211,7 @@ static inline int ahs_ms(const ahs_table *a, int site, double tick_hz, double *m
 /* M3.1: the counter line of one part, only for parts with launches > 0 (else 0, ""):
  *   PROF aie_site_perf part=<n> kind=<k> launches=<n> perf_n=<n> io_act_cyc=<sum> lock_stall_cyc=<sum>
  *        stream_stall_cyc=<sum> pre_io_act_cyc=<sum> snap_gap_cyc=<sum>   (M3.1.1: the last two appended)
+ *        compute_cyc=<sum> ovl_cyc=<sum> dact_cyc=<sum>   (M3.1.2: overlap model, perf_n launches, _win's tile)
  * A separate line: the aie_host_split line must keep ending in launches=<n> (n_fit.py / m3_site.py regexes). */
 static inline int ahs_format_perf(const ahs_table *a, int site, char *buf, size_t n) {
     if (n)
@@ -211,9 +221,10 @@ static inline int ahs_format_perf(const ahs_table *a, int site, char *buf, size_
     const ahs_site *s = &a->s[site];
     return snprintf(buf, n,
                     "PROF aie_site_perf part=%d kind=%s launches=%u perf_n=%u io_act_cyc=%llu lock_stall_cyc=%llu "
-                    "stream_stall_cyc=%llu pre_io_act_cyc=%llu snap_gap_cyc=%llu",
+                    "stream_stall_cyc=%llu pre_io_act_cyc=%llu snap_gap_cyc=%llu"
+                    " compute_cyc=%llu ovl_cyc=%llu dact_cyc=%llu",
                     site, ahs_kind_name(s->kind), s->launches, s->perf_n, s->io_act, s->lock_stall, s->stream_stall,
-                    s->pre_io_act, s->snap_gap);
+                    s->pre_io_act, s->snap_gap, s->compute, s->ovl, s->dact);
 }
 
 static inline int ahs_format(const ahs_table *a, int site, double tick_hz, char *buf, size_t n) {
