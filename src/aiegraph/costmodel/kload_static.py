@@ -38,7 +38,7 @@ CLI:
       alt points   : --alt-logs DIR -> DIR/*.log, cfg=off-alt, build R/k_off-alt/<pair>
   Prints per point
       KSTATIC cfg=<cfg> {k=<kernel>|target=unet} kload_w=<pred>/<meas> rst=<pred>/<meas> kload_w_rel=<rel> PASS|FAIL
-  and  KSTATIC ALL n=<n> maxrel=<max rel> PASS|FAIL   (rel = max of the kload_w and rst relative errors;
+  and  KSTATIC ALL [src=alt] n=<n> maxrel=<max rel> PASS|FAIL   (rel = max of the kload_w and rst relative errors;
   0/0 -> 0; measured <= 16 words -> absolute tolerance 16 words; PASS <= 0.050, UNet off kload_w <= 0.025).
 """
 from __future__ import annotations
@@ -172,6 +172,26 @@ def tile_words(segs, defs: dict) -> tuple:
 
 
 # ------------------------------------------------------------------ per-build prediction
+_ELFSYM = re.compile(r"__Runtime_set_kernel_elf\((_binary_\w+_start)\)")
+
+
+def _kload_alt(b: Path, sites, defs: dict, warm_skip: bool) -> dict:
+    """p0_one_kernel.sh --alt build: kernels A and B on the same tiles, timed launches A,B,A,B... -> every timed
+    launch loads the ELF the tiles do not hold (PM never warm-resident), mean over the two ELFs."""
+    objdir = b / "aout/worklocal/build"
+    blobs = list(dict.fromkeys(_ELFSYM.findall((objdir / "host_fixed.cc").read_text(errors="replace"))))
+    if len(blobs) != 2:
+        raise ValueError(f"{b}: alt build wants 2 kernel ELFs, found {len(blobs)}")
+    per = []
+    for (_, n_core), blob in zip(sites, blobs):
+        pm, other = tile_words(elf_segments(elf_from_obj(objdir / (blob[len("_binary_"):-len("_start")] + ".o"),
+                                                         blob)), defs)
+        per.append((n_core * (DMA_RESET_W + CORE_CTRL_W + other + pm), n_core, pm, other))
+    kw = sum(p[0] for p in per) / len(per)
+    return {"kload_w": float(kw), "why": "P0 alt A,B: " + " | ".join(
+        f"n_core={n} pm={pm} other={o}" for _, n, pm, o in per) + f" warm_skip={int(warm_skip)} (alternating: cold)"}
+
+
 def kload_static(build_dir) -> dict:
     b = Path(build_dir)
     defs = build_defs(b)
@@ -182,6 +202,8 @@ def kload_static(build_dir) -> dict:
         raise ValueError(f"{b}: mixed ctrl/mmio load sites")
     warm_skip = bool(defs.get("PM_WARM_SKIP"))
     if (b / "kacc_gemm.cc").is_file():  # P0 kernel host: one ELF, relaunched (all timed launches steady)
+        if len(sites) == 2 and (b / "p0_alt_host.cc").is_file():
+            return _kload_alt(b, sites, defs, warm_skip)
         if len(sites) != 1:
             raise ValueError(f"{b}: {len(sites)} load sites in a P0 kernel build")
         n_core = sites[0][1]
@@ -302,7 +324,8 @@ def main(argv=None) -> int:
               f"kload_w_rel={kr:.3f} {'PASS' if ok else 'FAIL'}")
         print(f"  why: {kp['why']}; build={b}")
     ok_all &= worst <= REL_TOL
-    print(f"KSTATIC ALL n={len(pts)} maxrel={worst:.3f} {'PASS' if ok_all else 'FAIL'}")
+    src = "src=alt " if all(c == "off-alt" for c, *_ in pts) else ""
+    print(f"KSTATIC ALL {src}n={len(pts)} maxrel={worst:.3f} {'PASS' if ok_all else 'FAIL'}")
     return 0 if ok_all else 1
 
 

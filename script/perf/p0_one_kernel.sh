@@ -450,7 +450,7 @@ END {
     meas = sprintf("%.3f", w); act = sa / n; cmp = sc / n; pred = cmp / (clk * 1000.0)
     if (L == "") L = n
     printf "[p0] perf_tags=%d perfsum=%d aie_clk_mhz=%s (assumed unless --aie-clk-mhz) %s\n", n, nps, clk, kcmp
-    printf "P0 board=%s machine=%s kernel=%s%s ctrlpkt=%s launch=%s launches=%d rt_wait_io_ms=%s core_src=perfctr active_cyc=%d compute_cyc=%d pred_ms=%.3f meas_ms=%s rel=%.3f\n",
-        name, mach, kern, (alt != "" ? " alt=" alt : ""), cp, lm, L, meas, act, cmp, pred, meas, (meas > 0 ? (pred > meas ? pred - meas : meas - pred) / meas : 0)
+    printf "P0 board=%s machine=%s kernel=%s ctrlpkt=%s launch=%s%s launches=%d rt_wait_io_ms=%s core_src=perfctr active_cyc=%d compute_cyc=%d pred_ms=%.3f meas_ms=%s rel=%.3f\n",
+        name, mach, kern, cp, lm, (alt != "" ? " alt=" alt : ""), L, meas, act, cmp, pred, meas, (meas > 0 ? (pred > meas ? pred - meas : meas - pred) / meas : 0)
 }' "$RUN"
 [ "$RRC" -eq 0 ] || { echo "[p0] apppaltest rc=$RRC"; exit "$RRC"; }
