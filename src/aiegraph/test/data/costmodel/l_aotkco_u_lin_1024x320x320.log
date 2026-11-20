@@ -1,0 +1,198 @@
+[p0] kernel=u_lin_1024x320x320 recipe=kacc_gemm_bf16 M=1024 K=320 N=320 ctrlpkt=aot-kco board=palmyra213 (10.23.224.213) out=/scratch/staff/huaj/tmp/costmodel_m1/k_aot-kco/u_lin_1024x320x320 commit=199fe290
+[kacc_gemm] M=1024 Mp=1024 K=320 N=320 split=none S=1 instance=(ch 320, k 320, px 1024) kch=16 kp=320 tr=1 ntile=16 sub=5 nkc=20 l1=16384 gmac=0.1049 bf16-gemm vs golden cos=0.999997 y_sha256=f00f80ee75c0
+[kacc_bench] data=op_golden/golden/c000 tag=c000-kacc-gemm kernel=gemm_kacc<320, 320, 1024, 160, 1024, 320, 8, 16, 20, 16, 5, 1> launches_per_pass=1
+[p0] BUILD_OK /scratch/staff/huaj/tmp/costmodel_m1/k_aot-kco/u_lin_1024x320x320/main.elf in 113 s
+Environment variables not set. Found envlocal.sh, sourcing it...
+[devlock] acquired 10.23.224.213 (/scratch/staff/huaj/tmp/board_locks/10.23.224.213_3121.lock)
+[hws] preflight (palmyra, netload) on 10.23.224.213
+[hws] netload: hw_server is checked only if the supervisor needs JTAG
+Using: /scratch/staff/huaj/tmp/costmodel_m1/k_aot-kco/u_lin_1024x320x320/main.elf
+
+============================================================
+Palboard ELF Test Script
+Board: palmyra, console com0
+Host: huaj@10.23.224.213
+ELF File: /scratch/staff/huaj/tmp/costmodel_m1/k_aot-kco/u_lin_1024x320x320/main.elf
+============================================================
+[netload] staged on 10.23.224.213: nothing (up to date)
+[netload] asking the supervisor at 10.10.70.50 to run main.elf (waits up to 1200 s if the board is busy)
+[18:42:37 DEBUG] console_reader thread started
+[netload] load rc=0 state=running runs=864 | 15.61 MB sent via huaj@10.23.224.213 in 0.572 s (27.3 MB/s), board rx 463 ms, place 6 ms, entry 0x0
+[netload] board: placed 13348936 bytes, zeroed 369324 bss bytes, entry 0x0, _exit -> park
+[netload] streamed /scratch/staff/huaj/tmp/costmodel_m1/k_aot-kco/u_lin_1024x320x320/main.elf through the proxy on 10.23.224.213 in 0.70s (no scp)
+
+>>> Waiting for console output (max 600s, no-output timeout 300s)...
+[netboot] LOAD_RUN 15610656 B received and placed in 463 ms (stream=1, staging copy kept), sha256 ok
+[netboot] run 864: placed 13348936 bytes, zeroed 369324 bss bytes, entry 0x0, _exit -> park, start app core at 0x0 (watchdog 60000 ms) stream=1 elf_size=15610656
+[netboot] app core was parked: released to 0x0 (no PLM call)
+BOARD machine=aarch64 midr=0x410fd423 board=palmyra213
+=== P0 gemm_kacc M=1024 (pad 1024) K=320 N=320: 1 launch(es) of gemm_kacc<320, 320, 1024, 160, 1024, 320, 8, 16, 20, 16, 5, 1> per pass x 8 timed passes, 4x4 mesh, core perf counters on ===
+[P0] warmup done launches=1
+[PERF] tag=0 tile=(1,3) rc=0 active_cyc=918195 vec_instr=25600 stream_stall=0 lock_stall=188121
+[PERF] tag=0 tile=(1,4) rc=0 active_cyc=918194 vec_instr=25600 stream_stall=0 lock_stall=188054
+[PERF] tag=0 tile=(1,5) rc=0 active_cyc=918193 vec_instr=25600 stream_stall=0 lock_stall=188022
+[PERF] tag=0 tile=(1,6) rc=0 active_cyc=918192 vec_instr=25600 stream_stall=0 lock_stall=188009
+[PERF] tag=0 tile=(2,3) rc=0 active_cyc=918872 vec_instr=25600 stream_stall=0 lock_stall=188939
+[PERF] tag=0 tile=(2,4) rc=0 active_cyc=918871 vec_instr=25600 stream_stall=0 lock_stall=188874
+[PERF] tag=0 tile=(2,5) rc=0 active_cyc=918870 vec_instr=25600 stream_stall=0 lock_stall=188811
+[PERF] tag=0 tile=(2,6) rc=0 active_cyc=918869 vec_instr=25600 stream_stall=0 lock_stall=188772
+[PERF] tag=0 tile=(3,3) rc=0 active_cyc=918838 vec_instr=25600 stream_stall=0 lock_stall=188556
+[PERF] tag=0 tile=(3,4) rc=0 active_cyc=918837 vec_instr=25600 stream_stall=0 lock_stall=188499
+[PERF] tag=0 tile=(3,5) rc=0 active_cyc=918836 vec_instr=25600 stream_stall=0 lock_stall=188462
+[PERF] tag=0 tile=(3,6) rc=0 active_cyc=918835 vec_instr=25600 stream_stall=0 lock_stall=188401
+[PERF] tag=0 tile=(4,3) rc=0 active_cyc=918827 vec_instr=25600 stream_stall=0 lock_stall=188794
+[PERF] tag=0 tile=(4,4) rc=0 active_cyc=918826 vec_instr=25600 stream_stall=0 lock_stall=188726
+[PERF] tag=0 tile=(4,5) rc=0 active_cyc=918825 vec_instr=25600 stream_stall=0 lock_stall=188695
+[PERF] tag=0 tile=(4,6) rc=0 active_cyc=918824 vec_instr=25600 stream_stall=0 lock_stall=188669
+[PERFSUM] tag=0 tiles=16 active_cyc min=918192 max=918872 mean=918681
+[PERF] tag=1 tile=(1,3) rc=0 active_cyc=912479 vec_instr=25600 stream_stall=0 lock_stall=182591
+[PERF] tag=1 tile=(1,4) rc=0 active_cyc=912478 vec_instr=25600 stream_stall=0 lock_stall=182572
+[PERF] tag=1 tile=(1,5) rc=0 active_cyc=912477 vec_instr=25600 stream_stall=0 lock_stall=182482
+[PERF] tag=1 tile=(1,6) rc=0 active_cyc=912476 vec_instr=25600 stream_stall=0 lock_stall=182454
+[PERF] tag=1 tile=(2,3) rc=0 active_cyc=912748 vec_instr=25600 stream_stall=0 lock_stall=182795
+[PERF] tag=1 tile=(2,4) rc=0 active_cyc=912747 vec_instr=25600 stream_stall=0 lock_stall=182730
+[PERF] tag=1 tile=(2,5) rc=0 active_cyc=912746 vec_instr=25600 stream_stall=0 lock_stall=182733
+[PERF] tag=1 tile=(2,6) rc=0 active_cyc=912745 vec_instr=25600 stream_stall=0 lock_stall=182602
+[PERF] tag=1 tile=(3,3) rc=0 active_cyc=913741 vec_instr=25600 stream_stall=0 lock_stall=183223
+[PERF] tag=1 tile=(3,4) rc=0 active_cyc=913740 vec_instr=25600 stream_stall=0 lock_stall=183169
+[PERF] tag=1 tile=(3,5) rc=0 active_cyc=913739 vec_instr=25600 stream_stall=0 lock_stall=183150
+[PERF] tag=1 tile=(3,6) rc=0 active_cyc=913738 vec_instr=25600 stream_stall=0 lock_stall=183045
+[PERF] tag=1 tile=(4,3) rc=0 active_cyc=913719 vec_instr=25600 stream_stall=0 lock_stall=183633
+[PERF] tag=1 tile=(4,4) rc=0 active_cyc=913718 vec_instr=25600 stream_stall=0 lock_stall=183596
+[PERF] tag=1 tile=(4,5) rc=0 active_cyc=913717 vec_instr=25600 stream_stall=0 lock_stall=183550
+[PERF] tag=1 tile=(4,6) rc=0 active_cyc=913716 vec_instr=25600 stream_stall=0 lock_stall=183480
+[PERFSUM] tag=1 tiles=16 active_cyc min=912476 max=913741 mean=913170
+[PERF] tag=2 tile=(1,3) rc=0 active_cyc=915851 vec_instr=25600 stream_stall=0 lock_stall=185908
+[PERF] tag=2 tile=(1,4) rc=0 active_cyc=915849 vec_instr=25600 stream_stall=0 lock_stall=185889
+[PERF] tag=2 tile=(1,5) rc=0 active_cyc=915848 vec_instr=25600 stream_stall=0 lock_stall=185800
+[PERF] tag=2 tile=(1,6) rc=0 active_cyc=915848 vec_instr=25600 stream_stall=0 lock_stall=185779
+[PERF] tag=2 tile=(2,3) rc=0 active_cyc=916132 vec_instr=25600 stream_stall=0 lock_stall=186190
+[PERF] tag=2 tile=(2,4) rc=0 active_cyc=916131 vec_instr=25600 stream_stall=0 lock_stall=186123
+[PERF] tag=2 tile=(2,5) rc=0 active_cyc=916130 vec_instr=25600 stream_stall=0 lock_stall=186125
+[PERF] tag=2 tile=(2,6) rc=0 active_cyc=916129 vec_instr=25600 stream_stall=0 lock_stall=186015
+[PERF] tag=2 tile=(3,3) rc=0 active_cyc=915893 vec_instr=25600 stream_stall=0 lock_stall=185623
+[PERF] tag=2 tile=(3,4) rc=0 active_cyc=915892 vec_instr=25600 stream_stall=0 lock_stall=185590
+[PERF] tag=2 tile=(3,5) rc=0 active_cyc=915891 vec_instr=25600 stream_stall=0 lock_stall=185529
+[PERF] tag=2 tile=(3,6) rc=0 active_cyc=915890 vec_instr=25600 stream_stall=0 lock_stall=185476
+[PERF] tag=2 tile=(4,3) rc=0 active_cyc=916097 vec_instr=25600 stream_stall=0 lock_stall=186275
+[PERF] tag=2 tile=(4,4) rc=0 active_cyc=916096 vec_instr=25600 stream_stall=0 lock_stall=186214
+[PERF] tag=2 tile=(4,5) rc=0 active_cyc=916095 vec_instr=25600 stream_stall=0 lock_stall=186208
+[PERF] tag=2 tile=(4,6) rc=0 active_cyc=916094 vec_instr=25600 stream_stall=0 lock_stall=186131
+[PERFSUM] tag=2 tiles=16 active_cyc min=915848 max=916132 mean=915991
+[PERF] tag=3 tile=(1,3) rc=0 active_cyc=916424 vec_instr=25600 stream_stall=0 lock_stall=186531
+[PERF] tag=3 tile=(1,4) rc=0 active_cyc=916424 vec_instr=25600 stream_stall=0 lock_stall=186408
+[PERF] tag=3 tile=(1,5) rc=0 active_cyc=916423 vec_instr=25600 stream_stall=0 lock_stall=186401
+[PERF] tag=3 tile=(1,6) rc=0 active_cyc=916421 vec_instr=25600 stream_stall=0 lock_stall=186342
+[PERF] tag=3 tile=(2,3) rc=0 active_cyc=916304 vec_instr=25600 stream_stall=0 lock_stall=186409
+[PERF] tag=3 tile=(2,4) rc=0 active_cyc=916303 vec_instr=25600 stream_stall=0 lock_stall=186352
+[PERF] tag=3 tile=(2,5) rc=0 active_cyc=916302 vec_instr=25600 stream_stall=0 lock_stall=186328
+[PERF] tag=3 tile=(2,6) rc=0 active_cyc=916301 vec_instr=25600 stream_stall=0 lock_stall=186258
+[PERF] tag=3 tile=(3,3) rc=0 active_cyc=916825 vec_instr=25600 stream_stall=0 lock_stall=186626
+[PERF] tag=3 tile=(3,4) rc=0 active_cyc=916824 vec_instr=25600 stream_stall=0 lock_stall=186580
+[PERF] tag=3 tile=(3,5) rc=0 active_cyc=916823 vec_instr=25600 stream_stall=0 lock_stall=186543
+[PERF] tag=3 tile=(3,6) rc=0 active_cyc=916822 vec_instr=25600 stream_stall=0 lock_stall=186466
+[PERF] tag=3 tile=(4,3) rc=0 active_cyc=916383 vec_instr=25600 stream_stall=0 lock_stall=186366
+[PERF] tag=3 tile=(4,4) rc=0 active_cyc=916382 vec_instr=25600 stream_stall=0 lock_stall=186250
+[PERF] tag=3 tile=(4,5) rc=0 active_cyc=916381 vec_instr=25600 stream_stall=0 lock_stall=186244
+[PERF] tag=3 tile=(4,6) rc=0 active_cyc=916380 vec_instr=25600 stream_stall=0 lock_stall=186181
+[PERFSUM] tag=3 tiles=16 active_cyc min=916301 max=916825 mean=916482
+[PERF] tag=4 tile=(1,3) rc=0 active_cyc=913781 vec_instr=25600 stream_stall=0 lock_stall=183634
+[PERF] tag=4 tile=(1,4) rc=0 active_cyc=913780 vec_instr=25600 stream_stall=0 lock_stall=183553
+[PERF] tag=4 tile=(1,5) rc=0 active_cyc=913779 vec_instr=25600 stream_stall=0 lock_stall=183498
+[PERF] tag=4 tile=(1,6) rc=0 active_cyc=913778 vec_instr=25600 stream_stall=0 lock_stall=183468
+[PERF] tag=4 tile=(2,3) rc=0 active_cyc=913538 vec_instr=25600 stream_stall=0 lock_stall=183589
+[PERF] tag=4 tile=(2,4) rc=0 active_cyc=913537 vec_instr=25600 stream_stall=0 lock_stall=183625
+[PERF] tag=4 tile=(2,5) rc=0 active_cyc=913536 vec_instr=25600 stream_stall=0 lock_stall=183604
+[PERF] tag=4 tile=(2,6) rc=0 active_cyc=913535 vec_instr=25600 stream_stall=0 lock_stall=183450
+[PERF] tag=4 tile=(3,3) rc=0 active_cyc=913913 vec_instr=25600 stream_stall=0 lock_stall=183514
+[PERF] tag=4 tile=(3,4) rc=0 active_cyc=913912 vec_instr=25600 stream_stall=0 lock_stall=183439
+[PERF] tag=4 tile=(3,5) rc=0 active_cyc=913911 vec_instr=25600 stream_stall=0 lock_stall=183394
+[PERF] tag=4 tile=(3,6) rc=0 active_cyc=913910 vec_instr=25600 stream_stall=0 lock_stall=183368
+[PERF] tag=4 tile=(4,3) rc=0 active_cyc=913885 vec_instr=25600 stream_stall=0 lock_stall=183408
+[PERF] tag=4 tile=(4,4) rc=0 active_cyc=913884 vec_instr=25600 stream_stall=0 lock_stall=183388
+[PERF] tag=4 tile=(4,5) rc=0 active_cyc=913883 vec_instr=25600 stream_stall=0 lock_stall=183385
+[PERF] tag=4 tile=(4,6) rc=0 active_cyc=913882 vec_instr=25600 stream_stall=0 lock_stall=183241
+[PERFSUM] tag=4 tiles=16 active_cyc min=913535 max=913913 mean=913777
+[PERF] tag=5 tile=(1,3) rc=0 active_cyc=917138 vec_instr=25600 stream_stall=0 lock_stall=187026
+[PERF] tag=5 tile=(1,4) rc=0 active_cyc=917144 vec_instr=25600 stream_stall=0 lock_stall=187034
+[PERF] tag=5 tile=(1,5) rc=0 active_cyc=917143 vec_instr=25600 stream_stall=0 lock_stall=186960
+[PERF] tag=5 tile=(1,6) rc=0 active_cyc=917135 vec_instr=25600 stream_stall=0 lock_stall=186912
+[PERF] tag=5 tile=(2,3) rc=0 active_cyc=917136 vec_instr=25600 stream_stall=0 lock_stall=186988
+[PERF] tag=5 tile=(2,4) rc=0 active_cyc=917135 vec_instr=25600 stream_stall=0 lock_stall=186921
+[PERF] tag=5 tile=(2,5) rc=0 active_cyc=917134 vec_instr=25600 stream_stall=0 lock_stall=186876
+[PERF] tag=5 tile=(2,6) rc=0 active_cyc=917133 vec_instr=25600 stream_stall=0 lock_stall=186858
+[PERF] tag=5 tile=(3,3) rc=0 active_cyc=918015 vec_instr=25600 stream_stall=0 lock_stall=187844
+[PERF] tag=5 tile=(3,4) rc=0 active_cyc=918014 vec_instr=25600 stream_stall=0 lock_stall=187771
+[PERF] tag=5 tile=(3,5) rc=0 active_cyc=918013 vec_instr=25600 stream_stall=0 lock_stall=187734
+[PERF] tag=5 tile=(3,6) rc=0 active_cyc=918012 vec_instr=25600 stream_stall=0 lock_stall=187688
+[PERF] tag=5 tile=(4,3) rc=0 active_cyc=917847 vec_instr=25600 stream_stall=0 lock_stall=187860
+[PERF] tag=5 tile=(4,4) rc=0 active_cyc=917846 vec_instr=25600 stream_stall=0 lock_stall=187774
+[PERF] tag=5 tile=(4,5) rc=0 active_cyc=917845 vec_instr=25600 stream_stall=0 lock_stall=187739
+[PERF] tag=5 tile=(4,6) rc=0 active_cyc=917844 vec_instr=25600 stream_stall=0 lock_stall=187707
+[PERFSUM] tag=5 tiles=16 active_cyc min=917133 max=918015 mean=917533
+[PERF] tag=6 tile=(1,3) rc=0 active_cyc=916561 vec_instr=25600 stream_stall=0 lock_stall=186471
+[PERF] tag=6 tile=(1,4) rc=0 active_cyc=916561 vec_instr=25600 stream_stall=0 lock_stall=186428
+[PERF] tag=6 tile=(1,5) rc=0 active_cyc=916560 vec_instr=25600 stream_stall=0 lock_stall=186336
+[PERF] tag=6 tile=(1,6) rc=0 active_cyc=916558 vec_instr=25600 stream_stall=0 lock_stall=186328
+[PERF] tag=6 tile=(2,3) rc=0 active_cyc=915934 vec_instr=25600 stream_stall=0 lock_stall=185731
+[PERF] tag=6 tile=(2,4) rc=0 active_cyc=915933 vec_instr=25600 stream_stall=0 lock_stall=185719
+[PERF] tag=6 tile=(2,5) rc=0 active_cyc=915932 vec_instr=25600 stream_stall=0 lock_stall=185715
+[PERF] tag=6 tile=(2,6) rc=0 active_cyc=915931 vec_instr=25600 stream_stall=0 lock_stall=185535
+[PERF] tag=6 tile=(3,3) rc=0 active_cyc=916269 vec_instr=25600 stream_stall=0 lock_stall=186577
+[PERF] tag=6 tile=(3,4) rc=0 active_cyc=916268 vec_instr=25600 stream_stall=0 lock_stall=186467
+[PERF] tag=6 tile=(3,5) rc=0 active_cyc=916267 vec_instr=25600 stream_stall=0 lock_stall=186423
+[PERF] tag=6 tile=(3,6) rc=0 active_cyc=916266 vec_instr=25600 stream_stall=0 lock_stall=186424
+[PERF] tag=6 tile=(4,3) rc=0 active_cyc=916633 vec_instr=25600 stream_stall=0 lock_stall=186479
+[PERF] tag=6 tile=(4,4) rc=0 active_cyc=916632 vec_instr=25600 stream_stall=0 lock_stall=186416
+[PERF] tag=6 tile=(4,5) rc=0 active_cyc=916631 vec_instr=25600 stream_stall=0 lock_stall=186389
+[PERF] tag=6 tile=(4,6) rc=0 active_cyc=916630 vec_instr=25600 stream_stall=0 lock_stall=186286
+[PERFSUM] tag=6 tiles=16 active_cyc min=915931 max=916633 mean=916347
+[PERF] tag=7 tile=(1,3) rc=0 active_cyc=913309 vec_instr=25600 stream_stall=0 lock_stall=183360
+[PERF] tag=7 tile=(1,4) rc=0 active_cyc=913308 vec_instr=25600 stream_stall=0 lock_stall=183302
+[PERF] tag=7 tile=(1,5) rc=0 active_cyc=913307 vec_instr=25600 stream_stall=0 lock_stall=183250
+[PERF] tag=7 tile=(1,6) rc=0 active_cyc=913306 vec_instr=25600 stream_stall=0 lock_stall=183258
+[PERF] tag=7 tile=(2,3) rc=0 active_cyc=912545 vec_instr=25600 stream_stall=0 lock_stall=182235
+[PERF] tag=7 tile=(2,4) rc=0 active_cyc=912544 vec_instr=25600 stream_stall=0 lock_stall=182158
+[PERF] tag=7 tile=(2,5) rc=0 active_cyc=912543 vec_instr=25600 stream_stall=0 lock_stall=182121
+[PERF] tag=7 tile=(2,6) rc=0 active_cyc=912542 vec_instr=25600 stream_stall=0 lock_stall=182096
+[PERF] tag=7 tile=(3,3) rc=0 active_cyc=913242 vec_instr=25600 stream_stall=0 lock_stall=183041
+[PERF] tag=7 tile=(3,4) rc=0 active_cyc=913241 vec_instr=25600 stream_stall=0 lock_stall=182991
+[PERF] tag=7 tile=(3,5) rc=0 active_cyc=913240 vec_instr=25600 stream_stall=0 lock_stall=182949
+[PERF] tag=7 tile=(3,6) rc=0 active_cyc=913239 vec_instr=25600 stream_stall=0 lock_stall=182926
+[PERF] tag=7 tile=(4,3) rc=0 active_cyc=913213 vec_instr=25600 stream_stall=0 lock_stall=183206
+[PERF] tag=7 tile=(4,4) rc=0 active_cyc=913212 vec_instr=25600 stream_stall=0 lock_stall=183143
+[PERF] tag=7 tile=(4,5) rc=0 active_cyc=913211 vec_instr=25600 stream_stall=0 lock_stall=183083
+[PERF] tag=7 tile=(4,6) rc=0 active_cyc=913210 vec_instr=25600 stream_stall=0 lock_stall=183081
+[PERFSUM] tag=7 tiles=16 active_cyc min=912542 max=913309 mean=913075
+[BENCH] aie_wall_ms=10.804 launches=8 gmac=0.8389
+LAUNCH split kload=0.024 bdcfg=0.452 startio=0.183 coreen=0.013 wait_io=0.678 core_reset=0.000 ms_per_launch=1.351 pmu_hz=1316652588 sum_vs_aie_wall=1.000
+LAUNCH split_detail calls kload=8 bdcfg=384 startio=0 coreen=8 wait_io=1536 core_reset=0 rt_bdcfg=0.1084 rt_startio=0.0000 rt_wait_io=0.6251 host_glue_bdcfg=0.3434 host_flush_startio=0.1828 host_inval_wait_io=0.0534 gemm_call=1.1143 rt_phase_sum_ms=6.167 phase_sum_ms=10.804 aie_wall_ms=10.804 unattributed_ms_per_launch=0.0000 pmc_delta=1483895945 xtime_s=1.127 launches=8
+LAUNCH split_words mmio_w=240.0 cp_w=6432.0 bd_n=384.0 rst_n=0.0 kload_w=11.0 bdcfg_w=6528.0 startio_w=0.0 coreen_w=5.0
+[P0] split_words_miss=128
+[PDK] maxabs_vs_ref=0.0117579 nonfinite=0 M=1024 N=320 K=320
+KCMP c000-kacc-gemm data=op_golden/golden/c000 y_sha256=f00f80ee75c0 cos=0.999997 PASS
+[18:42:40 DEBUG] main: program_done detected, draining trailing output...
+[18:42:40 DEBUG] 
+main: signaling console_reader thread to stop...
+[18:42:40 DEBUG] main: joining console_reader thread (timeout=5)...
+[18:42:40 DEBUG] console_reader thread exiting
+[18:42:40 DEBUG] main: console_reader thread joined
+[18:42:40 DEBUG] main finally: stopping console thread...
+[18:42:40 DEBUG] main finally: all cleanup done
+
+[Program completed after 2s]
+
+============================================================
+CONSOLE OUTPUT SUMMARY:
+============================================================
+
+>>> --netload: board left powered on, netboot supervisor stays resident
+
+============================================================
+Test complete!
+============================================================
+
+Connections closed.
+[p0] apppaltest rc=0 log=/scratch/staff/huaj/tmp/costmodel_m1/k_aot-kco/u_lin_1024x320x320/run.log
+[p0] perf_tags=8 perfsum=8 aie_clk_mhz=1000 (assumed unless --aie-clk-mhz) KCMP c000-kacc-gemm data=op_golden/golden/c000 y_sha256=f00f80ee75c0 cos=0.999997 PASS
+P0 board=palmyra213 machine=aarch64 kernel=u_lin_1024x320x320 ctrlpkt=aot-kco launches=8 rt_wait_io_ms=0.625 core_src=perfctr active_cyc=915930 compute_cyc=730158 pred_ms=0.730 meas_ms=0.625 rel=0.168

@@ -209,3 +209,38 @@ def test_des_ddr_model_select():
     op = {"instance": _inst(), "host": {"bd_us": 5.0}}
     d = des.predict_launch(op, dict(p, ddr_model="bytes"), {"core_cyc": 1000})
     assert d["wait_ms"] == pytest.approx(des.predict_launch(op, dict(_HAND_PARAMS), {"core_cyc": 1000})["wait_ms"])
+
+
+# ---- L segment (launch overhead), M1.1 P4 ----
+from aiegraph.costmodel import launch_l  # noqa: E402
+
+
+def test_l_hand_one_launch():
+    # const + a*bdcfg + b*startio + c*bdcfg_w + d*cp_w, hand-computed
+    prm = {"cfg": {"aot": {"coef": {"const": 0.05, "bdcfg_calls": 0.002, "startio_calls": 0.001,
+                                    "bdcfg_w": 0.0001, "cp_w": 0.00002}}}}
+    ms = launch_l.predict_l({"bdcfg": 100, "startio": 50, "kload": 1}, {"bdcfg_w": 1000, "cp_w": 2000}, "aot", prm)
+    assert ms == pytest.approx(0.05 + 0.2 + 0.05 + 0.1 + 0.04)
+    with pytest.raises(ValueError):
+        launch_l.predict_l({}, {}, "mmio", prm)
+
+
+@pytest.mark.parametrize("log,cfg,l_hand", [
+    # kload + core_reset + coreen + rt_bdcfg + rt_startio from the LAUNCH split / split_detail lines
+    ("l_aotkco_u_lin_1024x320x320.log", "aot-kco", 0.024 + 0.0 + 0.013 + 0.1084 + 0.0),
+    ("l_off_y_conv_1600x64x64.log", "off", 0.387 + 0.0 + 0.023 + 0.1870 + 0.0104),
+])
+def test_l_board_log(log, cfg, l_hand):
+    p = launch_l.point(str(DATA / log))
+    assert p["l_meas"] == pytest.approx(l_hand, abs=1e-9)
+    assert p["calls"]["kload"] == 1.0 and p["launches"] == 8
+    pred = launch_l.predict_l(p["calls"], p["words"], cfg)  # committed params/l_palmyra213.json
+    assert abs(pred - p["l_meas"]) / p["l_meas"] <= 0.20
+
+
+def test_l_params_committed():
+    prm = launch_l.load_params()
+    assert prm["board"] == "palmyra213" and set(prm["cfg"]) == set(launch_l.CFGS)
+    for c in launch_l.CFGS:
+        assert prm["cfg"][c]["r2"] >= 0.9 and prm["cfg"][c]["maxrel"] <= 0.20
+        assert set(prm["cfg"][c]["coef"]) == set(launch_l.FEATURES)
