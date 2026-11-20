@@ -3,6 +3,7 @@
 #   p0_one_kernel.sh --board <ip> [--kernel <name>] [--kernels <kernels.tsv>] [--name palmyra213] [--out <dir>]
 #                    [--reps 8] [--aie-clk-mhz 1000] [--rebuild] [--ctrlpkt off|aot|aot-kco] [--build-only]
 #                    [--launch warm|reload|cold] [--alt <k2>]
+#   p0_one_kernel.sh --parse-log <run.log> --kernel <k> --ctrlpkt <m> --launch <l>   (offline replay of a board run.log)
 # --alt <k2> (M1.2.2 P0b, core_reset probe): a multi-kernel build of two gemm_kacc instances, <kernel> (A) and <k2> (B),
 # both on the same 4x4 mesh (the same 16 tiles), launched A,B,A,B... so every launch loads the other kernel's ELF
 # (UNet LAUNCH_OPTS_WARM core_reset_unreset_per_launch, boardmain.py:33; use with --ctrlpkt off --launch warm). The
@@ -30,7 +31,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 PY="${KACC_PY:-/scratch/staff/huaj/aiehlc/.venv/bin/python3}"
-BOARD="" KERNEL="u_lin_1024x320x320" NAME="" OUT="" REPS=8 CLK=1000 REBUILD=0 CTRLPKT=aot BUILD_ONLY=0 LAUNCH=warm ALT=""
+PARSE_LOG="" BOARD="" KERNEL="u_lin_1024x320x320" NAME="" OUT="" REPS=8 CLK=1000 REBUILD=0 CTRLPKT=aot BUILD_ONLY=0 LAUNCH=warm ALT=""
 KTSV=/scratch/staff/huaj/aiengineers/arthur/tasks/2026-11-19_costmodel/kernels.tsv
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -46,7 +47,8 @@ while [ $# -gt 0 ]; do
     --build-only) BUILD_ONLY=1; shift ;;
     --launch) LAUNCH="${2:-}"; shift 2 ;;
     --alt) ALT="${2:-}"; shift 2 ;;
-    *) echo "usage: $0 --board <ip> [--kernel <name>] [--kernels <tsv>] [--name <board>] [--out <dir>] [--reps N] [--rebuild] [--ctrlpkt off|aot|aot-kco] [--build-only] [--launch warm|reload|cold] [--alt <k2>]" >&2; exit 2 ;;
+    --parse-log) PARSE_LOG="${2:-}"; shift 2 ;;
+    *) echo "usage: $0 --board <ip> [--kernel <name>] [--kernels <tsv>] [--name <board>] [--out <dir>] [--reps N] [--rebuild] [--ctrlpkt off|aot|aot-kco] [--build-only] [--launch warm|reload|cold] [--alt <k2>] [--parse-log <run.log>]" >&2; exit 2 ;;
     esac
 done
 case "$CTRLPKT" in
@@ -61,6 +63,75 @@ reload) LAUNCH_DEFS="-DAIEHLC_ZFILL_WIDE=1 -DAIEHLC_PMLOAD_WIDE=1 -DAIEHLC_SKIP_
 cold) LAUNCH_DEFS="" ;;
 *) echo "p0_one_kernel: --launch warm|reload|cold (got '$LAUNCH')" >&2; exit 2 ;;
 esac
+# [PERF]/[PERFIO]/LAUNCH lines of $RUN -> P0, PERFCHK, KWIN, KOVL (also used by --parse-log)
+parse_run() {
+    awk -v name="$NAME" -v kern="$KERNEL" -v alt="$ALT" -v cp="$CTRLPKT" -v lm="$LAUNCH" -v clk="$CLK" '
+/^BOARD machine=/ { split($2, a, "="); mach = a[2] }
+/^\[PERF\] tag=[0-9]+ tile=/ {
+    t = ""; ac = ls = ss = 0
+    for (i = 2; i <= NF; i++) { split($i, f, "=")
+        if (f[1] == "tag") t = f[2]; if (f[1] == "active_cyc") ac = f[2] + 0
+        if (f[1] == "lock_stall") ls = f[2] + 0; if (f[1] == "stream_stall") ss = f[2] + 0 }
+    if (!(t in A) || ac > A[t]) { A[t] = ac; C[t] = ac - ls - ss }
+}
+/^\[PERFIO\] tag=[0-9]+ tile=/ {
+    t = ""; io = 0; pio = 0; gp = 0; cc = -1; oc = -1
+    for (i = 2; i <= NF; i++) { split($i, f, "="); if (f[1] == "tag") t = f[2]; if (f[1] == "io_active") io = f[2] + 0
+        if (f[1] == "pre_io_active") pio = f[2] + 0; if (f[1] == "snap_gap_cyc") gp = f[2] + 0
+        if (f[1] == "compute_cyc") cc = f[2] + 0; if (f[1] == "ovl_cyc") oc = f[2] + 0 }
+    if (!(t in IO) || io > IO[t]) { IO[t] = io; PIO[t] = pio }
+    if (!(t in GP) || gp > GP[t]) GP[t] = gp
+    # KOVL: compute_cyc / ovl_cyc per launch = the slowest tile (max); -1 when the field is missing (pre-KOVL logs)
+    if (!(t in CC) || cc > CC[t]) CC[t] = cc
+    if (!(t in OC) || oc > OC[t]) OC[t] = oc
+}
+/^\[PERFSUM\] tag=/ { nps++ }
+/^LAUNCH split_detail calls/ { for (i = 1; i <= NF; i++) { split($i, f, "=")
+        if (f[1] == "rt_wait_io") w = f[2]; if (f[1] == "launches") L = f[2] } }
+/^KCMP / { kcmp = $0 }
+END {
+    n = 0; sa = sc = 0
+    for (t in A) { n++; sa += A[t]; sc += C[t] }
+    if (w == "" || n == 0 || mach == "") { printf "P0 FAIL board=%s kernel=%s perf_tags=%d perfsum=%d rt_wait_io=%s machine=%s\n", name, kern, n, nps, w, mach; exit 1 }
+    meas = sprintf("%.3f", w); act = sa / n; cmp = sc / n; pred = cmp / (clk * 1000.0)
+    if (L == "") L = n
+    printf "[p0] perf_tags=%d perfsum=%d aie_clk_mhz=%s (assumed unless --aie-clk-mhz) %s\n", n, nps, clk, kcmp
+    printf "P0 board=%s machine=%s kernel=%s ctrlpkt=%s launch=%s%s launches=%d rt_wait_io_ms=%s core_src=perfctr active_cyc=%d compute_cyc=%d pred_ms=%.3f meas_ms=%s rel=%.3f\n",
+        name, mach, kern, cp, lm, (alt != "" ? " alt=" alt : ""), L, meas, act, cmp, pred, meas, (meas > 0 ? (pred > meas ? pred - meas : meas - pred) / meas : 0)
+    # PERFCHK (M3.1.1 PC): io_active = core counter 0 summed over the wait windows only (rt_core_perf_wait_snap
+    # after rt_sb_ack_wait, next to __wio_t0, read after the window; [PERFIO] io_active after PA), per launch the
+    # slowest core tile (max io_active), mean over launches; snap_gap = host snapshot -> __wio_t0 gap per launch
+    # (counters already running), mean over launches; wait_cyc = rt_wait_io_ms x 1e6 x clk/1000.
+    # io_le_wait=1 when io <= wait + gap.  KWIN: ratio = io/(wait+gap); ok=1 iff perfio_n==launches, ratio<=1.02 and
+    # (io>0 or wait<1e4 cyc): admin rule "io_act=0 is allowed when wait<1e4 cyc" (M3.1.1 PB) -- a launch whose wait
+    # window is that short can legitimately see no core activity (PD.verify.2.log:29, y_conv off wait=4600, io=0).
+    ni = 0; si = 0; spi = 0; sg = 0
+    for (t in IO) { ni++; si += IO[t]; spi += PIO[t]; sg += GP[t] }
+    io_m = (ni > 0 ? si / ni : -1); pio_m = (ni > 0 ? spi / ni : -1); gp_m = (ni > 0 ? sg / ni : 0); wc = w * clk * 1000.0
+    printf "PERFCHK cfg=%s kernel=%s active_cyc=%d io_active_cyc=%d wait_cyc=%d io_le_wait=%d\n",
+        cp, kern, act, io_m, wc, (ni > 0 && io_m <= wc + gp_m ? 1 : 0)
+    den = wc + gp_m; ratio = (den > 0 ? io_m / den : -1)
+    printf "KWIN cfg=%s kernel=%s launches=%d perfio_n=%d io_active_cyc=%d pre_io_active_cyc=%d wait_cyc=%d snap_gap_cyc=%d ratio=%.3f ok=%d\n",
+        cp, kern, L, ni, io_m, pio_m, wc, gp_m, ratio, (ni == L + 0 && ratio >= 0 && ratio <= 1.02 && (io_m > 0 || wc < 10000) ? 1 : 0)
+    # KOVL (M3.1.1 PB): compute_cyc / ovl_cyc = [PERFIO] fields, slowest tile per launch, mean over launches (-1 if any
+    # launch lacks them); io_unhidden_cyc = wait_cyc - ovl_cyc (>= 0), the wait not hidden behind compute; -1 w/o ovl.
+    nc = 0; scc = 0; soc = 0; cmiss = 0; omiss = 0
+    for (t in CC) { nc++; if (CC[t] < 0) cmiss = 1; else scc += CC[t]; if (OC[t] < 0) omiss = 1; else soc += OC[t] }
+    cc_m = (nc > 0 && !cmiss ? scc / nc : -1); oc_m = (nc > 0 && !omiss ? soc / nc : -1)
+    iu = (oc_m >= 0 ? (wc > oc_m ? wc - oc_m : 0) : -1)
+    printf "KOVL cfg=%s kernel=%s compute_cyc=%d ovl_cyc=%d io_unhidden_cyc=%d\n", cp, kern, cc_m, oc_m, iu
+}' "$RUN"
+}
+if [ -n "$PARSE_LOG" ]; then
+    # --parse-log <run.log> (M3.1.1 PB): offline replay of a board run.log -- no kmat lookup, no build, no board;
+    # machine and board name come from the log's BOARD line.
+    [ -f "$PARSE_LOG" ] || { echo "p0_one_kernel: --parse-log $PARSE_LOG: no such file" >&2; exit 2; }
+    RUN="$PARSE_LOG"
+    NAME="$(sed -n 's/^BOARD machine=.* board=\(\S*\).*/\1/p' "$RUN" | head -1)"; NAME="${NAME:-${BOARD:-unknown}}"
+    echo "[p0] --parse-log $RUN kernel=$KERNEL ctrlpkt=$CTRLPKT launch=$LAUNCH board=$NAME"
+    parse_run
+    exit $?
+fi
 [ -n "$BOARD" ] || [ "$BUILD_ONLY" = 1 ] || { echo "p0_one_kernel: --board <ip> required (or --build-only)" >&2; exit 2; }
 case "$BOARD" in 10.23.224.213) NAME="${NAME:-palmyra213}"; BKIND=palmyra ;; *) NAME="${NAME:-$BOARD}"; BKIND="${BOARD_KIND:-palmyra}" ;; esac
 read -r M K N RECIPE < <(awk -F'\t' -v k="$KERNEL" 'NR>1 && $1==k {print $3, $4, $5, $2}' "$KTSV")
@@ -432,47 +503,5 @@ set -e
 cat "$RUN"
 echo "[p0] apppaltest rc=$RRC log=$RUN"
 
-awk -v name="$NAME" -v kern="$KERNEL" -v alt="$ALT" -v cp="$CTRLPKT" -v lm="$LAUNCH" -v clk="$CLK" '
-/^BOARD machine=/ { split($2, a, "="); mach = a[2] }
-/^\[PERF\] tag=[0-9]+ tile=/ {
-    t = ""; ac = ls = ss = 0
-    for (i = 2; i <= NF; i++) { split($i, f, "=")
-        if (f[1] == "tag") t = f[2]; if (f[1] == "active_cyc") ac = f[2] + 0
-        if (f[1] == "lock_stall") ls = f[2] + 0; if (f[1] == "stream_stall") ss = f[2] + 0 }
-    if (!(t in A) || ac > A[t]) { A[t] = ac; C[t] = ac - ls - ss }
-}
-/^\[PERFIO\] tag=[0-9]+ tile=/ {
-    t = ""; io = 0; pio = 0; gp = 0
-    for (i = 2; i <= NF; i++) { split($i, f, "="); if (f[1] == "tag") t = f[2]; if (f[1] == "io_active") io = f[2] + 0
-        if (f[1] == "pre_io_active") pio = f[2] + 0; if (f[1] == "snap_gap_cyc") gp = f[2] + 0 }
-    if (!(t in IO) || io > IO[t]) { IO[t] = io; PIO[t] = pio }
-    if (!(t in GP) || gp > GP[t]) GP[t] = gp
-}
-/^\[PERFSUM\] tag=/ { nps++ }
-/^LAUNCH split_detail calls/ { for (i = 1; i <= NF; i++) { split($i, f, "=")
-        if (f[1] == "rt_wait_io") w = f[2]; if (f[1] == "launches") L = f[2] } }
-/^KCMP / { kcmp = $0 }
-END {
-    n = 0; sa = sc = 0
-    for (t in A) { n++; sa += A[t]; sc += C[t] }
-    if (w == "" || n == 0 || mach == "") { printf "P0 FAIL board=%s kernel=%s perf_tags=%d perfsum=%d rt_wait_io=%s machine=%s\n", name, kern, n, nps, w, mach; exit 1 }
-    meas = sprintf("%.3f", w); act = sa / n; cmp = sc / n; pred = cmp / (clk * 1000.0)
-    if (L == "") L = n
-    printf "[p0] perf_tags=%d perfsum=%d aie_clk_mhz=%s (assumed unless --aie-clk-mhz) %s\n", n, nps, clk, kcmp
-    printf "P0 board=%s machine=%s kernel=%s ctrlpkt=%s launch=%s%s launches=%d rt_wait_io_ms=%s core_src=perfctr active_cyc=%d compute_cyc=%d pred_ms=%.3f meas_ms=%s rel=%.3f\n",
-        name, mach, kern, cp, lm, (alt != "" ? " alt=" alt : ""), L, meas, act, cmp, pred, meas, (meas > 0 ? (pred > meas ? pred - meas : meas - pred) / meas : 0)
-    # PERFCHK (M3.1.1 PC): io_active = core counter 0 summed over the wait windows only (rt_core_perf_wait_snap
-    # after rt_sb_ack_wait, next to __wio_t0, read after the window; [PERFIO] io_active after PA), per launch the
-    # slowest core tile (max io_active), mean over launches; snap_gap = host snapshot -> __wio_t0 gap per launch
-    # (counters already running), mean over launches; wait_cyc = rt_wait_io_ms x 1e6 x clk/1000.
-    # io_le_wait=1 when io <= wait + gap.  KWIN: ratio = io/(wait+gap); ok=1 iff perfio_n==launches, io>0, ratio<=1.02.
-    ni = 0; si = 0; spi = 0; sg = 0
-    for (t in IO) { ni++; si += IO[t]; spi += PIO[t]; sg += GP[t] }
-    io_m = (ni > 0 ? si / ni : -1); pio_m = (ni > 0 ? spi / ni : -1); gp_m = (ni > 0 ? sg / ni : 0); wc = w * clk * 1000.0
-    printf "PERFCHK cfg=%s kernel=%s active_cyc=%d io_active_cyc=%d wait_cyc=%d io_le_wait=%d\n",
-        cp, kern, act, io_m, wc, (ni > 0 && io_m <= wc + gp_m ? 1 : 0)
-    den = wc + gp_m; ratio = (den > 0 ? io_m / den : -1)
-    printf "KWIN cfg=%s kernel=%s launches=%d perfio_n=%d io_active_cyc=%d pre_io_active_cyc=%d wait_cyc=%d snap_gap_cyc=%d ratio=%.3f ok=%d\n",
-        cp, kern, L, ni, io_m, pio_m, wc, gp_m, ratio, (ni == L + 0 && io_m > 0 && ratio >= 0 && ratio <= 1.02 ? 1 : 0)
-}' "$RUN"
+parse_run
 [ "$RRC" -eq 0 ] || { echo "[p0] apppaltest rc=$RRC"; exit "$RRC"; }
