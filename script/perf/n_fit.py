@@ -4,17 +4,23 @@
   n_fit.py --build-root DIR --fit CFG=LOG [...] --out JSON --check CFG=LOG [...]
   n_fit.py --build-root DIR --params JSON --check CFG=LOG [...]          (no fit)
   n_fit.py --build-root DIR --lower-bound --check CFG=LOG [...]          (fit-free lower bound, no fit)
+  n_fit.py --build-root DIR --ab CFG=A,B [...] [--ab-ref CFG=A,B [...] --ref-build-root R0]   (run-to-run glue)
+  n_fit.py --build-root DIR --floor --fit CFG=LOG [...] --check CFG=LOG [...]   (all-FEATS NNLS floor)
+--ab: NSRC + NSUM for every log, then per cfg
+  NAB cfg=.. sites=.. glue_ab_max=.. glue_ab_p95=.. ref_p95=.. smaller=0|1   (|glue_a-glue_b|/mean, launches>0)
+  NAB ALL cfgs=.. nsum_pass=.. smaller=.. PASS|FAIL                    (PASS = all NSRC ok and all NSUM PASS)
+--floor: NNLS with all FEATS, no subset cap, fitted on the --fit log, max relative error on the --check log:
+  NFLOOR cfg=.. kind=.. n=.. floor=..
+  NFLOOR ALL cfgs=.. maxfloor=.. PASS|FAIL                             (maxfloor<=0.150)
 
 Per site (n_feat.sites of DIR/unet_<cfg>, aligned with the log's 'PROF part=<i> op=aie_host_*' lines):
   N = (site_ms - aie_ms) + glue_ms + flush_ms + inval_ms
   site_ms - aie_ms is the PROF part 'ms'; glue/flush/inval come from 'PROF aie_host_split part=<i>'.
   aie_ms (in launch: kload, rt_*) belongs to K+L, not N.
 Features (all static, n_feat.sites = base sites + static_feat launch features + n_layout layout features):
-  FEATS below; Mw/Kw/Nw = gemm dims (words), ucs_b = console bytes of the '[UCS]' printf+fflush that sits inside the
-  glue window (sp1..sp2), ucs_b2b = previous launch's console bytes when it printed too (UART backlog),
-  krep = launches - kswitch, in_arm / out_arm = pack / scatter bytes whose producer / reader is an ARM call.
+  FEATS below (= the b6450ac9 list, incl. kfirst); n_feat also yields Mw/Kw/Nw/ucs_b/... which are not used here.
 Model per (cfg, kind in conv|linear|fa), sites with launches>0 only:
-  N = sum_f coef_f * f + d    (NNLS on relative error, weight 1/N, coef >= 0, d >= 0; <= MAX_FEATS active features,
+  N = sum_f coef_f * f + d    (NNLS on relative error, weight 1/N, coef >= 0, d >= 0; <= MAX_FEATS[kind] active features,
                                subset = exhaustive search, see fit_kind)
   NLOO  cfg=.. run=a|b kind=.. loo_maxrel=..                           (LOO with the subset frozen from run a;
                                                                        run b = the --check log of that cfg)
@@ -48,12 +54,13 @@ from aiegraph.costmodel.n_feat import sites as n_sites  # noqa: E402
 from aiegraph.costmodel.unet_seq import read  # noqa: E402
 
 KINDS = ("conv", "linear", "fa")
-FEATS = ("MK", "MN", "Mw", "Kw", "Nw", "launches", "krep", "wbytes", "cp_w", "bdcfg_w", "rr", "rr_pair", "kswitch",
-         "kfirst", "in_pack_bytes", "in_arm", "out_scatter_bytes", "out_arm", "relayout", "ucs_b", "ucs_b2b")
-MAX_FEATS = 5  # active features per (cfg, kind): fa has n=18
+FEATS = ("MK", "MN", "launches", "wbytes", "cp_w", "bdcfg_w", "rr", "rr_pair", "kswitch", "kfirst",
+         "in_pack_bytes", "out_scatter_bytes", "relayout")  # = b6450ac9
+MAX_FEATS = {"conv": 7, "linear": 5, "fa": 5}  # active features per kind (fa has n=18; off conv 7 feats -> 0.164)
 TOP_LOO = 40   # in-sample best subsets re-ranked by leave-one-out max relative error
 GATE = 0.200
 LB_GATE = 0.150
+FLOOR_GATE = 0.150
 SUM_TOL = 0.02
 
 _PROF = re.compile(r"^PROF part=(\d+) op=aie_host_(conv|linear|attn)(\d+) ms=([\d.]+) .*site_ms=([\d.]+) "
@@ -138,7 +145,7 @@ def maxrel(p, rows):
     return max(abs(predict(p, r) - r["N"]) / r["N"] for r in rows)
 
 
-def fit_kind(rows, sub=None):
+def fit_kind(rows, sub=None, kind="conv"):
     """{'coef': {feat: v>0}, 'd': v>=0} by NNLS on relative error. sub=None: every subset of <= MAX_FEATS
     non-constant FEATS; the TOP_LOO with the smallest in-sample max relative error are re-ranked by
     max(in-sample, leave-one-out) max relative error on the same rows (ties: fewer features, FEATS order);
@@ -150,7 +157,7 @@ def fit_kind(rows, sub=None):
         return _params(sub, _nnls(X[:, cols], y))
     var = [j for j in range(len(FEATS)) if np.ptp(X[:, j]) > 0]
     cand = []
-    for k in range(MAX_FEATS + 1):
+    for k in range(MAX_FEATS[kind] + 1):
         for cmb in itertools.combinations(var, k):
             cols = list(cmb) + [len(FEATS)]
             c = _nnls(X[:, cols], y)
@@ -217,17 +224,99 @@ def pairs(items):
     return out
 
 
+def _glue_ab(rows_a, rows_b):
+    """|glue_a - glue_b| / mean over sites with launches>0 (rows aligned by part)"""
+    out = []
+    for ra, rb in zip(rows_a, rows_b):
+        if ra["launches"] > 0 and ra["part"] == rb["part"]:
+            m = 0.5 * (ra["glue"] + rb["glue"])
+            out.append(abs(ra["glue"] - rb["glue"]) / m if m > 0 else 0.0)
+    return np.array(out)
+
+
+def ab_mode(a, root):
+    """--ab: per cfg NSRC/NSUM for both logs, then NAB cfg=.. and NAB ALL (no NGATE)"""
+    rroot = (a.ref_build_root or a.build_root).rstrip("/")
+    ref = {}
+    for cfg, lg in pairs(a.ab_ref):
+        la, _, lb = lg.partition(",")
+        ra = measure("%s/unet_%s" % (rroot, cfg), la)[0]
+        rb = measure("%s/unet_%s" % (rroot, cfg), lb)[0]
+        g = _glue_ab(ra, rb)
+        ref[cfg] = float(np.percentile(g, 95)) if len(g) else float("nan")
+    ncfg, npass, nsmall, ok = 0, 0, 0, True
+    for cfg, lg in pairs(a.ab):
+        la, _, lb = lg.partition(",")
+        rows = []
+        for log in (la, lb):
+            r, txt = measure("%s/unet_%s" % (root, cfg), log)
+            ok &= src_line(cfg, log, txt)
+            s = sum_line(cfg, r, txt)
+            npass += int(s)
+            rows.append(r)
+        g = _glue_ab(rows[0], rows[1])
+        mx = float(g.max()) if len(g) else float("nan")
+        p95 = float(np.percentile(g, 95)) if len(g) else float("nan")
+        rp = ref.get(cfg, float("nan"))
+        small = int(p95 < rp)
+        nsmall += small
+        print("NAB cfg=%s sites=%d glue_ab_max=%.3f glue_ab_p95=%.3f ref_p95=%.3f smaller=%d"
+              % (cfg, len(g), mx, p95, rp, small))
+        ncfg += 1
+    ok &= ncfg > 0 and npass == 2 * ncfg
+    print("NAB ALL cfgs=%d nsum_pass=%d smaller=%d %s" % (ncfg, npass, nsmall, "PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
+def floor_mode(a, root):
+    """--floor: NNLS on all FEATS (no cap) per (cfg, kind) fitted on --fit, max relative error on --check"""
+    checks = dict(pairs(a.check))
+    worst, ncfg, ok = 0.0, 0, True
+    for cfg, log in pairs(a.fit):
+        if cfg not in checks:
+            print("NFLOOR cfg=%s no --check log FAIL" % cfg)
+            ok = False
+            continue
+        rows, txt = measure("%s/unet_%s" % (root, cfg), log)
+        ok &= src_line(cfg, log, txt)
+        rows_b, txt_b = measure("%s/unet_%s" % (root, cfg), checks[cfg])
+        ok &= src_line(cfg, checks[cfg], txt_b)
+        for kind in KINDS:
+            ka = [r for r in rows if r["kind"] == kind and r["launches"] > 0]
+            kb = [r for r in rows_b if r["kind"] == kind and r["launches"] > 0]
+            p = fit_kind(ka, list(FEATS))
+            fl = maxrel(p, kb) if kb else 0.0
+            worst = max(worst, fl)
+            print("NFLOOR cfg=%s kind=%s n=%d floor=%.3f" % (cfg, kind, len(kb), fl))
+        ncfg += 1
+    ok &= ncfg > 0 and worst <= FLOOR_GATE
+    print("NFLOOR ALL cfgs=%d maxfloor=%.3f %s" % (ncfg, worst, "PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-root", required=True)
     ap.add_argument("--fit", nargs="*")
     ap.add_argument("--out")
     ap.add_argument("--params")
-    ap.add_argument("--check", nargs="+", required=True)
+    ap.add_argument("--check", nargs="+")
     ap.add_argument("--lower-bound", action="store_true")
+    ap.add_argument("--ab", nargs="+", metavar="CFG=A.log,B.log", help="run-to-run glue spread of two logs per cfg")
+    ap.add_argument("--ab-ref", nargs="+", metavar="CFG=A.log,B.log", help="reference pairs for --ab (ref_p95)")
+    ap.add_argument("--ref-build-root", help="build root of the --ab-ref logs (default --build-root)")
+    ap.add_argument("--floor", action="store_true", help="NNLS on all FEATS, no cap: fit on --fit, error on --check")
     a = ap.parse_args(argv)
     root = a.build_root.rstrip("/")
     ok = True
+    if a.ab:
+        return ab_mode(a, root)
+    if a.floor:
+        if not a.fit or not a.check:
+            ap.error("--floor needs --fit and --check")
+        return floor_mode(a, root)
+    if not a.check:
+        ap.error("--check is required with --fit/--params/--lower-bound")
     if a.lower_bound:
         worst, ncfg = 0.0, 0
         for cfg, log in pairs(a.check):
@@ -241,8 +330,8 @@ def main(argv=None):
     if a.params:
         prm = json.load(open(a.params))
     else:
-        if not a.fit or not a.out:
-            ap.error("--fit and --out are required without --params")
+        if not a.fit:
+            ap.error("--fit is required without --params")
         prm, looruns = {}, []
         checks = dict(pairs(a.check))
         for cfg, log in pairs(a.fit):
@@ -252,7 +341,7 @@ def main(argv=None):
             kinds = {}
             for kind in KINDS:
                 kr = [r for r in rows if r["kind"] == kind and r["launches"] > 0]
-                p = fit_kind(kr)
+                p = fit_kind(kr, kind=kind)
                 p["n"] = len(kr)
                 kinds[kind] = p
                 print("NFIT cfg=%s kind=%s n=%d %s d=%.6g" % (cfg, kind, len(kr), " ".join(
@@ -271,13 +360,15 @@ def main(argv=None):
                 looruns.append(worst_run)
             host = sig(sum(r["N"] for r in rows if r["launches"] == 0))
             prm[cfg] = {"kinds": kinds, "attn_host_ms": host,
-                        "model": "N=sum(coef[f]*f)+d (ms), nnls on relative error, <=%d features per kind" % MAX_FEATS}
+                        "model": "N=sum(coef[f]*f)+d (ms), nnls on relative error, <=%s features per kind"
+                                 % json.dumps(MAX_FEATS, sort_keys=True)}
         mloo = max(looruns) if looruns else float("inf")
         print("NLOO ALL cfgs=%d runs=%d maxloo=%.3f %s" % (len(prm), len(looruns) // max(len(prm), 1), mloo,
                                                            "PASS" if looruns and mloo <= GATE else "FAIL"))
-        with open(a.out, "w") as f:
-            json.dump(prm, f, sort_keys=True, indent=1)
-            f.write("\n")
+        if a.out:
+            with open(a.out, "w") as f:
+                json.dump(prm, f, sort_keys=True, indent=1)
+                f.write("\n")
     allsites, r2s, worst, ncfg = 0, [], 0.0, 0
     for cfg, log in pairs(a.check):
         rows, txt = measure("%s/unet_%s" % (root, cfg), log)
