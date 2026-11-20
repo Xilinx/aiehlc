@@ -131,17 +131,15 @@ def des_bytes(kernel):
     return g["R"] * g["ddr_rd_round_b"], g["R"] * g["ddr_wr_round_b"], g["run_b"]
 
 
-def bd_shape(build, log, build_log, cfg):
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from m3_site import site_rows
-    rows, _ = site_rows(build, log)
+def bd_shape_rows(build, rows, build_log):
+    """per-site static shim-BD shape of the launches>0 sites in rows (m3_site.site_rows):
+    ([dict(kind, cid, bd_n, num_dims, run_b, des_run_b, burst_b, ddr_in_b, ddr_out_b, ok)], kacc bytes-vs-des rels)"""
     want = {(r["kind"], r["cid"]) for r in rows}
     st = n_sites(build, build_log)
     seq = unet_site_feat(build)
     ks = kernel_shapes(build)
     i = 0
     out = []
-    missing = 0
     rels = []
     for s in st:
         lk = [d["kernel"] for d in seq[i:i + s["launches"]]]
@@ -169,18 +167,27 @@ def bd_shape(build, log, build_log, cfg):
                 din += db[0]
                 dout += db[1]
                 drun = db[2] if drun is None else min(drun, db[2])
-        if not ok:
-            missing += 1
-        elif s["kind"] != "fa":
+        if ok and s["kind"] != "fa":
             rels.append(max(abs(f["ddr_in_b"] - din) / din, abs(f["ddr_out_b"] - dout) / dout))
         f["run_b"] = f["run_b"] or 0
         f["burst_b"] = min(f["run_b"], BURST_MAX_B)
-        print("BDSITE cfg=%s %s%d bd_n=%d num_dims=%d run_b=%d des_run_b=%s burst_b=%d ddr_in_b=%d ddr_out_b=%d"
-              % (cfg, s["kind"], s["cid"], f["bd_n"], f["num_dims"], f["run_b"],
-                 "-" if drun is None else "%d" % drun, f["burst_b"], f["ddr_in_b"], f["ddr_out_b"]))
-        out.append(s)
+        out.append(dict(f, kind=s["kind"], cid=s["cid"], des_run_b=drun, ok=ok))
     if i != len(seq):
         raise ValueError("%d site launches vs %d in the launch sequence" % (i, len(seq)))
+    return out, rels
+
+
+def bd_shape(build, log, build_log, cfg):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from m3_site import site_rows
+    rows, _ = site_rows(build, log)
+    out, rels = bd_shape_rows(build, rows, build_log)
+    missing = sum(not f["ok"] for f in out)
+    for f in out:
+        print("BDSITE cfg=%s %s%d bd_n=%d num_dims=%d run_b=%d des_run_b=%s burst_b=%d ddr_in_b=%d ddr_out_b=%d"
+              % (cfg, f["kind"], f["cid"], f["bd_n"], f["num_dims"], f["run_b"],
+                 "-" if f["des_run_b"] is None else "%d" % f["des_run_b"], f["burst_b"], f["ddr_in_b"],
+                 f["ddr_out_b"]))
     nk = sum(s["kind"] in ("conv", "linear") for s in out)
     nf = sum(s["kind"] == "fa" for s in out)
     rel = max(rels) if rels else float("inf")

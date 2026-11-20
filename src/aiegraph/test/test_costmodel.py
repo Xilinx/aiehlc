@@ -369,3 +369,14 @@ def test_n_feat_pack_slow_m77():
     assert pack_slow_elems(77, 1) == 56
     # M=64: Mp=64, all rows in full 8-row groups -> no slow path
     assert pack_slow_elems(64, K) == 0
+
+
+def test_k_diag_selftest():
+    """k_diag.py (M3.1 K anchor): split, bound, class, bucket and the K-floor fit on synthetic known-answer data"""
+    import re
+    import subprocess
+    k_diag = SRC.parent / "script" / "perf" / "k_diag.py"
+    r = subprocess.run([sys.executable, "-I", str(k_diag), "--selftest"], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+    m = re.search(r"^KDIAG SELFTEST PASS \((\d+)/(\d+)\)$", r.stdout, re.M)
+    assert m and m.group(1) == m.group(2) and int(m.group(1)) >= 16, r.stdout
