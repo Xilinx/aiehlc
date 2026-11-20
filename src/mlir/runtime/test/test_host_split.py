@@ -1,5 +1,5 @@
 """GAP-RT1 x86 tests of the aie_host split (src/mlir/runtime/aie_host_split.h) and its UNet wiring
-(example/aiegraph/unet_bk_sdm_tiny/unet_aie.py):
+(src/aiegraph: attnsite / boardmain / cnn / kincore since #32 removed example unet_aie.py):
 1. the header alone: site selection, phase accumulation, window split dma + wait == window, PROF line format;
 2. the generated attention host code (unet_aie.ATTN_HOST, verbatim) with a counting XTime / wait counter:
    pack/scatter/dma/wait land on the site, dma + wait == g_uc_aie_ticks (the aie_ms window is split, not moved);
@@ -19,9 +19,18 @@ import numpy as np
 
 RT = Path(__file__).resolve().parents[1]
 ROOT = RT.parents[2]
-UNET = ROOT / "example/aiegraph/unet_bk_sdm_tiny"
-sys.path.insert(0, str(UNET))
-import unet_aie as ua  # noqa: E402
+sys.path.insert(0, str(ROOT / "src"))
+import aiednn  # noqa: E402
+from aiegraph import attnsite, boardmain, cnn, cnn_chunk, kincore  # noqa: E402
+
+
+class ua:  # noqa: N801 -- the names the deleted example unet_aie.py exported; #32 moved them into src/aiegraph
+    HOST_CC = (aiednn.template("conv2d/tile64_conv_host.cc") + aiednn.template("elementwise/epilogue_bias_residual.cc")
+               + aiednn.template("conv2d/tile64_conv_entry.cc"))
+    ATTN_HOST = attnsite.ATTN_HOST
+    PROF_C = boardmain.prof_c()
+    bmm_geom = staticmethod(attnsite.bmm_geom)
+    prof_c_attn = staticmethod(attnsite.prof_c_attn)
 
 LINE = re.compile(r"^PROF aie_host_split part=(\d+) kind=(attn|conv|linear) pack_ms=([\d.]+) scatter_ms=([\d.]+) "
                   r"dma_ms=([\d.]+) wait_ms=([\d.]+)$", re.M)
@@ -296,7 +305,6 @@ def test_no_aie_sites_total_zero():
 def test_kernel_sources_wired():
     assert ua.HOST_CC.count('extern "C" void aiednn_aie_host_split_site(int site)') == 1
     assert ua.HOST_CC.count('extern "C" int aiednn_aie_host_split_line(int site') == 1
-    import aiednn   # the kacc conv / linear host glue aiegraph.kincore assembles
     kacc_host = "".join(aiednn.template(t) for t in ("conv2d/kacc_conv_host_head.cc", "layout/neon_tr4_f32.cc",
                                                      "conv2d/kacc_conv_host.cc"))
     for host, kind in ((kacc_host, "AHS_KIND_CONV"), (aiednn.template("gemm/kacc_linear_host.cc"), "AHS_KIND_LINEAR"),
@@ -311,8 +319,10 @@ def test_kernel_sources_wired():
     assert "__Runtime_host_split_wait_ticks" in ua.HOST_CC
     rt = (RT / "aie_runtime.c").read_text()
     assert "void __Runtime_host_split_wait_ticks(" in rt and "g_hs_wait_ticks += ahs_now() - __hs_t0;" in rt
-    src = Path(ua.__file__).read_text()     # the 64x64 writer (unet_aie.write_kernel) + the kacc one (aiegraph.kincore)
-    assert src.count('"export    aiednn_aie_host_split_site\\\\n"') == 1
-    assert src.count('"export    aiednn_aie_host_split_line\\\\n"') == 1
-    from aiegraph import kincore
+    # the kernel writers now live in src/aiegraph: the 64x64 host glue's entries are found by cnn._EXPORT_RE,
+    # the chunked writer adds them in cnn_chunk._spec_exports, the kacc one lists them in kincore.EXPORTS_TAIL
+    assert {"aiednn_aie_host_split_site", "aiednn_aie_host_split_line"} <= set(cnn._EXPORT_RE.findall(ua.HOST_CC))
+    spec = cnn_chunk._spec_exports('"out y\\n"', "aiednn")
+    assert spec.count('"export    aiednn_aie_host_split_site\\n"') == 1
+    assert spec.count('"export    aiednn_aie_host_split_line\\n"') == 1
     assert {"aiednn_aie_host_split_site", "aiednn_aie_host_split_line"} <= set(kincore.EXPORTS_TAIL)
