@@ -1,9 +1,24 @@
 #!/usr/bin/env python3
-"""Static L-segment features per launch from a kernel BUILD directory only (M1.2.2 P1).
+"""Static L-segment features per launch from a kernel BUILD directory only (M1.2.2 P1, UNet P3).
 
-  static_feat.py --build-root <root with k_<cfg>/<kernel>/> --kernel-logs <dir with <cfg>/<kernel>.log>
+  static_feat.py --build-root <root with k_<cfg>/<kernel>/ and unet_<cfg>/>
+                 [--kernel-logs <dir with <cfg>/<kernel>.log>]
+                 [--unet cfg=LOG [cfg=LOG ...]]      UNet ELF builds <build-root>/unet_<cfg>, LOG = board log
                  [--params script/perf/params/palmyra213.json] [--kcal script/perf/params/palmyra213_kcal.json]
-                 [--cycles <aie2ps_kernel_cycles.json>] [--unet cfg=PATH ...]
+                 [--cycles <aie2ps_kernel_cycles.json>]
+
+UNet (--unet, P3): the launch sequence (258 launches: 48 uc_conv, 78 uc_linear, 132 fa_run_o over 44 kernels) and
+site geometry come from graph_driver.c + aiek_unetconv.cc via unet_seq.py (copied from maxwell kswitch.py); every
+launch takes its kernel's single-launch value from the same formulas below applied to host_canonicalized_<kernel>
+(host.cc) and host_ctrlpkt_<kernel>.h; per launch = sum / launches. Two terms the 27 kernel points never exercise:
+  - FA kernels issue 8 plain __Runtime_dma_bd_config on shim tiles (row 0): PH_BDCFG calls, 0 MMIO words
+    (shim BD RunOp path), so tile BD words = 6 x non-shim __Runtime_dma_bd_config only.
+  - rt_sb_begin (aie_runtime.c:6714) re-prepares the shim-BD window when the control fabric changes
+    (kernel switch, 119 of 258 launches): that window also resends the shim-row return-route prefix (54 words
+    for every UNet kernel) -> +24.9 cp_w (and bdcfg_w) per launch in aot / aot-kco.
+  aot vs off, +2.0 bdcfg calls per launch: every aot kernel's host function has one __Runtime_ctrl_shim_bd_begin
+  and one __Runtime_ctrl_shim_bd_commit -> one effective window per launch, charged as 2 PH_BDCFG phases
+  (rt_sb_kick + rt_sb_ack_wait); the BD calls themselves are the same 369.4 as off.
 
 Predicted per launch (no board counter, no log enters the prediction):
   bdcfg_calls  PH_BDCFG phases (aie_runtime.c RT_PROF_PHASE(PH_BDCFG, ...)):
@@ -27,7 +42,8 @@ Predicted per launch (no board counter, no log enters the prediction):
 Measured (only for the comparison): LAUNCH split_detail calls / launches and LAUNCH split_words of
 <kernel-logs>/<cfg>/<kernel>.log (launch_split.lines() rejoin).  Rule: rel = |pred-meas|/meas, 0/0 -> 0;
 word features with meas <= 16 use the absolute tolerance |pred-meas| <= 16 (rel recorded 0 if inside).
-Any missing build/log or parse failure prints FAIL for the point; the ALL line needs n=27 and maxrel <= 0.05.
+Any missing build/log or parse failure prints FAIL for the point; the ALL line needs n=27 and maxrel <= 0.05
+(src=kernel), n=4 UNet cfgs, 258 launches each and maxrel <= 0.05 (src=unet; launches from 'LAUNCH warm|cold').
 
 SFEAT_CCYC (report only, no PASS/FAIL): static compute cycles = des.compute_cycles() with the instance taken from
 the build's gemm_kacc<...> template arguments (kacc_gemm.cc), core_cyc = the ISS cycle count of that kernel
@@ -48,6 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from aiegraph.costmodel import des  # noqa: E402
 from aiegraph.costmodel.launch_split import lines, parse  # noqa: E402
+from aiegraph.costmodel.unet_seq import unet_launches  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
 CYCLES = "/scratch/staff/huaj/aiengineers/maxwell/tasks/2026-11-19_kernel-cycles/aie2ps_kernel_cycles.json"
@@ -58,20 +75,27 @@ WINDOW_PHASES = 3        # __Runtime_ctrl_aot_window + rt_sb_kick + rt_sb_ack_wa
 WORD_ABS_TOL = 16
 REL_GATE = 0.05
 N_EXPECT = 27
+N_UNET = 4
+UNET_LAUNCHES = 258
+UNET_WL = os.path.join("ag_work", "aiek", "aiek_unetconv", "worklocal")
 
 _FOR = re.compile(r"for \(size_t (v\d+) = (\w+); \1 < (\w+); \1 \+= (\w+)\)")
 _CONST = re.compile(r"^\s*size_t (v\d+) = (\d+);")
 _CALL = re.compile(r"\b(__Runtime_[A-Za-z0-9_]+)\(")
+_LOC = re.compile(r"XAie_LocType (v\d+) = XAie_TileLoc\((\d+), (\d+)\);")
+_BDCFG_TILE = re.compile(r"\b__Runtime_dma_bd_config\(\w+, (v\d+),")
+SHIM_BD = "__Runtime_dma_bd_config@shim"   # host_counts key: __Runtime_dma_bd_config on a row-0 (shim) tile
 _TARGS = re.compile(r"gemm_kacc<\s*(\d+(?:\s*,\s*\d+){11})\s*>")
 
 
-def host_counts(host_cc):
-    """{runtime API name: executed calls per launch} of host_canonicalized."""
-    txt = open(host_cc).read()
-    m = re.search(r"^void host_canonicalized\(.*?\{\n(.*?)^\}", txt, re.S | re.M)
+def host_counts(host_cc, fn="host_canonicalized", txt=None):
+    """{runtime API name: executed calls per launch} of host function fn (host_canonicalized[_<kernel>])."""
+    if txt is None:
+        txt = open(host_cc).read()
+    m = re.search(r"^void %s\(.*?\{\n(.*?)^\}" % re.escape(fn), txt, re.S | re.M)
     if not m:
-        raise ValueError("no host_canonicalized in %s" % host_cc)
-    consts, counts = {}, {}
+        raise ValueError("no %s in %s" % (fn, host_cc))
+    consts, counts, locs = {}, {}, {}
     stack = []  # [(depth at loop open, trip)]
     depth = 0
     for line in m.group(1).split("\n"):
@@ -79,6 +103,8 @@ def host_counts(host_cc):
         cm = _CONST.match(code)
         if cm:
             consts[cm.group(1)] = int(cm.group(2))
+        for v, _col, row in _LOC.findall(code):
+            locs[v] = int(row)
         mult = 1
         for _d, t in stack:
             mult *= t
@@ -94,20 +120,26 @@ def host_counts(host_cc):
             continue
         for c in _CALL.findall(code):
             counts[c] = counts.get(c, 0) + mult
+        # a plain __Runtime_dma_bd_config on a shim tile (row 0) takes the XAIE_BACKEND_OP_CONFIG_SHIMDMABD RunOp
+        # path like the multidim shim BDs: a PH_BDCFG call but 0 counted MMIO words (UNet FA kernels, 8/launch)
+        for v in _BDCFG_TILE.findall(code):
+            if locs.get(v) == 0:
+                counts[SHIM_BD] = counts.get(SHIM_BD, 0) + mult
         depth += code.count("{") - code.count("}")
         while stack and depth <= stack[-1][0]:
             stack.pop()
     return counts
 
 
-def window_cp_words(ctrlpkt_h):
-    """cp words of one shim-BD window: segment words minus the leading return-route words."""
+def window_cp_words(ctrlpkt_h, return_route=False):
+    """cp words of one shim-BD window: segment words minus the leading return-route words
+    (return_route=True: the return-route words alone)."""
     txt = open(ctrlpkt_h).read()
     segs = re.findall(r"segment, stream id 0x[0-9a-f]+, (\d+) words \*/\nstatic const uint32_t \w+\[\] = \{(.*?)\n\};",
                       txt, re.S)
     if not segs:
         raise ValueError("no shim-BD segments in %s" % ctrlpkt_h)
-    total = 0
+    total = rr_total = 0
     for n, body in segs:
         seg_w = rr_w = 0
         for blk in re.split(r"\n\s*\n", body):
@@ -118,27 +150,76 @@ def window_cp_words(ctrlpkt_h):
         if seg_w != int(n):
             raise ValueError("segment word count %d != header %s in %s" % (seg_w, n, ctrlpkt_h))
         total += seg_w - rr_w
-    return total
+        rr_total += rr_w
+    return rr_total if return_route else total
 
 
 def static_feat(kdir):
     wl = os.path.join(kdir, "aout", "worklocal")
-    c = host_counts(os.path.join(wl, "host.cc"))
-    tile_bd = c.get("__Runtime_dma_bd_config", 0)
-    bd = tile_bd + c.get("__Runtime_dma_bd_config_multidim", 0) + c.get("__Runtime_dma_bd_config_multidim_ooo", 0)
+    return feat_of_counts(host_counts(os.path.join(wl, "host.cc")), os.path.join(wl, "host_ctrlpkt.h"))
+
+
+def feat_of_counts(c, ctrlpkt_h):
+    """single-launch features of one kernel from its host function's executed call counts (P1 formulas)."""
+    tile_bd = c.get("__Runtime_dma_bd_config", 0) - c.get(SHIM_BD, 0)
+    bd = c.get("__Runtime_dma_bd_config", 0) + c.get("__Runtime_dma_bd_config_multidim", 0) + c.get("__Runtime_dma_bd_config_multidim_ooo", 0)
     # rt_sb_commit only kicks while a window is active (set by __Runtime_ctrl_shim_bd_begin, cleared by the commit):
     # a begin before the round loop + a commit inside it sends ONE window per launch
     commits = min(c.get("__Runtime_ctrl_shim_bd_begin", 0), c.get("__Runtime_ctrl_shim_bd_commit", 0))
     windows = c.get("__Runtime_ctrl_aot_window", 0)
     kicks = commits + windows
-    cp_win = window_cp_words(os.path.join(wl, "host_ctrlpkt.h")) if kicks else 0
+    cp_win = window_cp_words(ctrlpkt_h) if kicks else 0
     cp_w = kicks * cp_win
     return {
         "bdcfg_calls": float(bd + COMMIT_PHASES * commits + WINDOW_PHASES * windows),
         "startio_calls": float(c.get("__Runtime_startio", 0)),
         "bdcfg_w": TILE_BD_WORDS * tile_bd + cp_w + SB_KICK_MMIO * kicks,
         "cp_w": cp_w,
+        "kicks": kicks,
     }
+
+
+def unet_static_feat(build):
+    """per-launch features of a UNet aiegraph build dir: each site's single-launch value (P1 kernel formulas on
+    host_canonicalized_<kernel> + host_ctrlpkt_<kernel>.h) summed over the graph_run launch sequence
+    (graph_driver.c x aiek_unetconv.cc, unet_seq / maxwell kswitch.py) and divided by the launch count.
+
+    One UNet-only term: rt_sb_begin (aie_runtime.c:6714) re-runs rt_sb_prepare when the control fabric differs
+    from the last armed one (g_sb.f != f), i.e. on every kernel switch, and that window resends the shim-row
+    return-route prefix that the kernel benchmarks (one kernel, re-armed once) amortise to 0."""
+    wl = os.path.join(build, UNET_WL)
+    host = os.path.join(wl, "host.cc")
+    txt = open(host).read()
+    seq = unet_launches(build)
+    if not seq:
+        raise ValueError("no launches in %s" % build)
+    per, tot = {}, {"bdcfg_calls": 0.0, "startio_calls": 0.0, "bdcfg_w": 0.0, "cp_w": 0.0}
+    info = {"launches": len(seq), "kernels": 0, "switches": 0, "rr_w": 0, "kicks": 0, "shim_bd": 0, "tile_bd": 0}
+    prev = None
+    for k, _site, _desc in seq:
+        if k not in per:
+            c = host_counts(host, "host_canonicalized_" + k, txt)
+            h = os.path.join(wl, "host_ctrlpkt_%s.h" % k)
+            f = feat_of_counts(c, h)
+            f["rr"] = window_cp_words(h, return_route=True) if f["kicks"] else 0
+            f["shim_bd"] = c.get(SHIM_BD, 0)
+            f["tile_bd"] = c.get("__Runtime_dma_bd_config", 0) - f["shim_bd"]
+            per[k] = f
+        f = per[k]
+        for x in tot:
+            tot[x] += f[x]
+        if k != prev and f["kicks"]:
+            tot["cp_w"] += f["rr"]
+            tot["bdcfg_w"] += f["rr"]
+            info["rr_w"] += f["rr"]
+        info["switches"] += k != prev
+        info["kicks"] += f["kicks"]
+        info["shim_bd"] += f["shim_bd"]
+        info["tile_bd"] += f["tile_bd"]
+        prev = k
+    info["kernels"] = len(per)
+    n = float(len(seq))
+    return {x: v / n for x, v in tot.items()}, info
 
 
 def measured(log):
@@ -158,6 +239,22 @@ def measured(log):
         raise ValueError("no launches/split_words in %s" % log)
     return {"bdcfg_calls": sd["calls"]["bdcfg"] / n, "startio_calls": sd["calls"]["startio"] / n,
             "bdcfg_w": words["bdcfg_w"], "cp_w": words["cp_w"], "compute_cyc": ccyc}
+
+
+def unet_measured(log):
+    """UNet board log: split_detail calls / launches of the 'LAUNCH warm|cold ... launches=N' line, split_words."""
+    sd = parse(log)["split_detail"]
+    n = words = None
+    for ln in lines(log):
+        lm = re.match(r"LAUNCH (?:warm|cold) .*?\blaunches=(\d+)", ln)
+        if lm:
+            n = int(lm.group(1))
+        if "LAUNCH split_words " in ln:
+            words = {k: float(v) for k, v in re.findall(r"(\w+)=(-?[\d.]+)", ln.split("split_words", 1)[1])}
+    if not n or words is None:
+        raise ValueError("no LAUNCH warm|cold launches= / split_words in %s" % log)
+    return {"bdcfg_calls": sd["calls"]["bdcfg"] / n, "startio_calls": sd["calls"]["startio"] / n,
+            "bdcfg_w": words["bdcfg_w"], "cp_w": words["cp_w"], "launches": n}
 
 
 def rel_of(p, m, word):
@@ -182,13 +279,65 @@ def static_ccyc(kdir, kname, params, cyc_by_kernel):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-root", required=True)
-    ap.add_argument("--kernel-logs", required=True)
+    ap.add_argument("--kernel-logs")
     ap.add_argument("--params", default=str(ROOT / "script/perf/params/palmyra213.json"))
     ap.add_argument("--kcal", default=str(ROOT / "script/perf/params/palmyra213_kcal.json"))
     ap.add_argument("--cycles", default=CYCLES)
-    ap.add_argument("--unet", action="append", default=[], metavar="cfg=PATH",
-                    help="reserved for P3 (UNet ELF builds)")
+    ap.add_argument("--unet", action="extend", nargs="+", default=[], metavar="cfg=PATH",
+                    help="UNet board log of cfg; build = <build-root>/unet_<cfg> (P3)")
     a = ap.parse_args()
+    if not a.kernel_logs and not a.unet:
+        ap.error("need --kernel-logs and/or --unet")
+    rc = 0
+    if a.unet:
+        rc |= unet_main(a)
+    if a.kernel_logs:
+        rc |= kernel_main(a)
+    return rc
+
+
+def unet_main(a):
+    n = fails = 0
+    maxrel = 0.0
+    seen = set()
+    for spec in a.unet:
+        cfg, _, log = spec.partition("=")
+        if not log or cfg in seen:
+            print("SFEAT cfg=%s target=unet FAIL error=bad or duplicate --unet %s" % (cfg, spec))
+            fails += 1
+            continue
+        seen.add(cfg)
+        build = os.path.join(a.build_root, "unet_" + cfg)
+        try:
+            p, info = unet_static_feat(build)
+            m = unet_measured(log)
+            mlaunch = m["launches"]
+        except Exception as e:  # noqa: BLE001 -- a point that cannot be computed is a FAIL, never skipped
+            print("SFEAT cfg=%s target=unet FAIL error=%s" % (cfg, e))
+            fails += 1
+            continue
+        rels = {f: rel_of(p[f], m[f], f.endswith("_w")) for f in ("bdcfg_calls", "startio_calls", "bdcfg_w", "cp_w")}
+        r = max(rels.values())
+        ok = r <= REL_GATE and info["launches"] == mlaunch == UNET_LAUNCHES
+        n += 1
+        fails += not ok
+        maxrel = max(maxrel, r)
+        print("SFEAT_UNET_INFO cfg=%s launches=%d/%d kernels=%d switches=%d tile_bd=%.1f shim_bd=%.1f kicks=%.1f "
+              "rr_w=%.1f (per launch)" % (cfg, info["launches"], mlaunch, info["kernels"], info["switches"],
+                                          info["tile_bd"] / info["launches"], info["shim_bd"] / info["launches"],
+                                          info["kicks"] / info["launches"], info["rr_w"] / info["launches"]))
+        print("SFEAT cfg=%s target=unet bdcfg_calls=%.1f/%.1f startio_calls=%.1f/%.1f bdcfg_w=%d/%d cp_w=%d/%d "
+              "rel_bdcfg=%.3f rel_startio=%.3f rel_bdcfg_w=%.3f rel_cp_w=%.3f maxrel=%.3f %s"
+              % (cfg, p["bdcfg_calls"], m["bdcfg_calls"], p["startio_calls"], m["startio_calls"],
+                 round(p["bdcfg_w"]), round(m["bdcfg_w"]), round(p["cp_w"]), round(m["cp_w"]),
+                 rels["bdcfg_calls"], rels["startio_calls"], rels["bdcfg_w"], rels["cp_w"], r,
+                 "PASS" if ok else "FAIL"))
+    allok = fails == 0 and n == N_UNET and maxrel <= REL_GATE
+    print("SFEAT ALL src=unet n=%d maxrel=%.3f %s" % (n, maxrel, "PASS" if allok else "FAIL"))
+    return 0 if allok else 1
+
+
+def kernel_main(a):
 
     params = dict(json.load(open(a.params)))
     params.update({k: v for k, v in json.load(open(a.kcal)).items() if k in des.CAL_DEFAULTS})
@@ -240,8 +389,6 @@ def main():
             cc_n += 1
             cc_max = max(cc_max, cr)
             print("SFEAT_CCYC cfg=%s k=%s ccyc=%d/%d rel=%.3f" % (cfg, k, round(sc), mc, cr))
-    for u in a.unet:
-        print("SFEAT_UNET %s reserved (P3), not evaluated" % u)
     print("SFEAT_CCYC ALL n=%d skipped_neg=%d maxrel=%.3f REPORT" % (cc_n, cc_neg, cc_max))
     allok = fails == 0 and n == N_EXPECT and maxrel <= REL_GATE
     print("SFEAT ALL src=kernel n=%d maxrel=%.3f %s" % (n, maxrel, "PASS" if allok else "FAIL"))
