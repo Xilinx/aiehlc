@@ -8,6 +8,7 @@
   n_fit.py --build-root DIR --floor --fit CFG=LOG [...] --check CFG=LOG [...]   (all-FEATS NNLS floor)
 --ab: NSRC + NSUM for every log, then per cfg
   NAB cfg=.. sites=.. glue_ab_max=.. glue_ab_p95=.. ref_p95=.. smaller=0|1   (|glue_a-glue_b|/mean, launches>0)
+  --ab-metric abs: NAB cfg=.. metric=abs_ms sites=.. ... (|glue_a-glue_b| in ms, ref_p95 same metric)
   NAB ALL cfgs=.. nsum_pass=.. smaller=.. PASS|FAIL                    (PASS = all NSRC ok and all NSUM PASS)
 --floor: NNLS with all FEATS, no subset cap, fitted on the --fit log, max relative error on the --check log:
   NFLOOR cfg=.. kind=.. n=.. floor=..
@@ -224,13 +225,17 @@ def pairs(items):
     return out
 
 
-def _glue_ab(rows_a, rows_b):
-    """|glue_a - glue_b| / mean over sites with launches>0 (rows aligned by part)"""
+def _glue_ab(rows_a, rows_b, metric="rel"):
+    """over sites with launches>0 (rows aligned by part): rel = |glue_a - glue_b| / mean, abs = |glue_a - glue_b| in ms"""
     out = []
     for ra, rb in zip(rows_a, rows_b):
         if ra["launches"] > 0 and ra["part"] == rb["part"]:
+            d = abs(ra["glue"] - rb["glue"])
+            if metric == "abs":
+                out.append(d)
+                continue
             m = 0.5 * (ra["glue"] + rb["glue"])
-            out.append(abs(ra["glue"] - rb["glue"]) / m if m > 0 else 0.0)
+            out.append(d / m if m > 0 else 0.0)
     return np.array(out)
 
 
@@ -242,7 +247,7 @@ def ab_mode(a, root):
         la, _, lb = lg.partition(",")
         ra = measure("%s/unet_%s" % (rroot, cfg), la)[0]
         rb = measure("%s/unet_%s" % (rroot, cfg), lb)[0]
-        g = _glue_ab(ra, rb)
+        g = _glue_ab(ra, rb, a.ab_metric)
         ref[cfg] = float(np.percentile(g, 95)) if len(g) else float("nan")
     ncfg, npass, nsmall, ok = 0, 0, 0, True
     for cfg, lg in pairs(a.ab):
@@ -254,14 +259,18 @@ def ab_mode(a, root):
             s = sum_line(cfg, r, txt)
             npass += int(s)
             rows.append(r)
-        g = _glue_ab(rows[0], rows[1])
+        g = _glue_ab(rows[0], rows[1], a.ab_metric)
         mx = float(g.max()) if len(g) else float("nan")
         p95 = float(np.percentile(g, 95)) if len(g) else float("nan")
         rp = ref.get(cfg, float("nan"))
         small = int(p95 < rp)
         nsmall += small
-        print("NAB cfg=%s sites=%d glue_ab_max=%.3f glue_ab_p95=%.3f ref_p95=%.3f smaller=%d"
-              % (cfg, len(g), mx, p95, rp, small))
+        if a.ab_metric == "abs":
+            print("NAB cfg=%s metric=abs_ms sites=%d glue_ab_max=%.4f glue_ab_p95=%.4f ref_p95=%.4f smaller=%d"
+                  % (cfg, len(g), mx, p95, rp, small))
+        else:
+            print("NAB cfg=%s sites=%d glue_ab_max=%.3f glue_ab_p95=%.3f ref_p95=%.3f smaller=%d"
+                  % (cfg, len(g), mx, p95, rp, small))
         ncfg += 1
     ok &= ncfg > 0 and npass == 2 * ncfg
     print("NAB ALL cfgs=%d nsum_pass=%d smaller=%d %s" % (ncfg, npass, nsmall, "PASS" if ok else "FAIL"))
@@ -304,6 +313,8 @@ def main(argv=None):
     ap.add_argument("--lower-bound", action="store_true")
     ap.add_argument("--ab", nargs="+", metavar="CFG=A.log,B.log", help="run-to-run glue spread of two logs per cfg")
     ap.add_argument("--ab-ref", nargs="+", metavar="CFG=A.log,B.log", help="reference pairs for --ab (ref_p95)")
+    ap.add_argument("--ab-metric", choices=("rel", "abs"), default="rel",
+                    help="--ab spread: rel = |a-b|/mean (default), abs = |a-b| in ms")
     ap.add_argument("--ref-build-root", help="build root of the --ab-ref logs (default --build-root)")
     ap.add_argument("--floor", action="store_true", help="NNLS on all FEATS, no cap: fit on --fit, error on --check")
     a = ap.parse_args(argv)
