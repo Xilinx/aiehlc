@@ -353,6 +353,10 @@ CTRLPKT_PRAGMAS = (  # --ctrlpkt aot (P2a): spelled as aiehlc prints them (src/l
 CTRLPKT_KCO = os.environ.get("UNET_CTRLPKT_KCO", "0") == "1"
 if CTRLPKT_KCO:
     CTRLPKT_PRAGMAS += _tpl("gemm/ctrlpkt_kco_pragma.h")
+# UNET_CTRLPKT=off in the env (p0_one_kernel.sh --ctrlpkt off -> kacc_gemm.py): MMIO path, no control-packet pragmas
+# in the kacc bench sources; write_kernel*(ctrlpkt="off") of build_unet.py never prepend them anyway
+if os.environ.get("UNET_CTRLPKT", "") == "off":
+    CTRLPKT_PRAGMAS = ""
 CTRLPKT_NPRAGMAS = CTRLPKT_PRAGMAS.count("#pragma")
 
 
