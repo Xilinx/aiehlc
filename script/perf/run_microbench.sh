@@ -13,6 +13,8 @@
 # ddr_*_reps, ddr_burst_points [[bytes, aie cyc per burst]] (32..256 B at 4 KiB stride), ddr_burst_cyc0, then
 #   PARAMS <name>.json written (<len(merged json)> params) section=ddr
 # section all = aie then ddr.
+# section scatter (costmodel SCMB): builds example/perf/scatter_microbench.cc (host uc_scatter16, 24-point grid
+# N x yout align x cache), prints the console and the SCMB lines of script/perf/scmb_fit.py; writes nothing to params/.
 # section launch: stub for the later L sprint (MMIO / ctrlpkt / PM-load); not implemented here.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,13 +28,13 @@ while [ $# -gt 0 ]; do
     --section) SECTION="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --rebuild) REBUILD=1; shift ;;
-    *) echo "usage: $0 --board <ip> [--name palmyra213|vek385] [--section aie|ddr|launch|all] [--rebuild]" >&2; exit 2 ;;
+    *) echo "usage: $0 --board <ip> [--name palmyra213|vek385] [--section aie|ddr|scatter|launch|all] [--rebuild]" >&2; exit 2 ;;
     esac
 done
 [ -n "$BOARD" ] || { echo "run_microbench: --board <ip> required" >&2; exit 2; }
 case "$BOARD" in 10.23.224.213) NAME="${NAME:-palmyra213}"; BKIND=palmyra ;; *) NAME="${NAME:-$BOARD}"; BKIND="${BOARD_KIND:-palmyra}" ;; esac
 case "$SECTION" in
-aie|ddr|all) ;;
+aie|ddr|all|scatter) ;;
 launch) echo "run_microbench: --section launch is a stub (L sprint: MMIO / ctrlpkt / PM-load), nothing measured" >&2; exit 3 ;;
 *) echo "run_microbench: bad --section $SECTION" >&2; exit 2 ;;
 esac
@@ -43,6 +45,7 @@ local SEC="$1" SRC OUT
 case "$SEC" in
 aie) SRC="$ROOT/example/perf/aie_microbench.cc"; OUT="$OUTBASE" ;;
 ddr) SRC="$ROOT/example/perf/ddr_microbench.cc"; OUT="$OUTBASE/ddr" ;;
+scatter) SRC="$ROOT/example/perf/scatter_microbench.cc"; OUT="$OUTBASE/scatter" ;;
 esac
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 # stamp: source + last commit touching the build inputs (unrelated commits on the branch do not force a rebuild)
@@ -72,7 +75,11 @@ set -e
 cat "$RUN"
 echo "[mb] apppaltest rc=$RRC log=$RUN"
 [ "$RRC" -eq 0 ] || { echo "[mb] apppaltest rc=$RRC"; return "$RRC"; }
-"$PY" -I "$HERE/mb_fit.py" "$RUN" "$HERE/params/$NAME.json" "$NAME" "$SEC"
+if [ "$SEC" = scatter ]; then
+    "$PY" -I "$HERE/scmb_fit.py" "$RUN"   # SCMB: prints only, nothing written to params/
+else
+    "$PY" -I "$HERE/mb_fit.py" "$RUN" "$HERE/params/$NAME.json" "$NAME" "$SEC"
+fi
 }
 case "$SECTION" in
 all) run_section aie && run_section ddr ;;
