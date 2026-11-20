@@ -379,7 +379,9 @@ def test_k_diag_selftest():
     r = subprocess.run([sys.executable, "-I", str(k_diag), "--selftest"], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stdout + r.stderr
     m = re.search(r"^KDIAG SELFTEST PASS \((\d+)/(\d+)\)$", r.stdout, re.M)
-    assert m and m.group(1) == m.group(2) and int(m.group(1)) >= 16, r.stdout
+    assert m and m.group(1) == m.group(2) and int(m.group(1)) >= 22, r.stdout
+    for name in ("ovl_parse", "ovl_model_sum", "ovl_model_max", "ovl_missing_rc2"):
+        assert re.search(r"^KDIAG SELFTEST %s\s+ok" % name, r.stdout, re.M), name
 
 
 def test_k_diag_noscale():
@@ -409,3 +411,32 @@ def test_k_diag_noscale():
     # short part (io 2 ms over K 0.5 ms) excluded; part 2: 3 ms / (2.6 + 0.5 gap) ms
     assert abs(iok - 3.0 / 3.1) < 1e-12 and iok <= kd.IOK_MAX
     assert kd.kperf_line("t", "b", pf) == (2, 1)
+
+
+def test_k_diag_ovl_model():
+    """k_diag.py --model ovl (M3.1.2): compute/ovl tail parsed; sum / max overlap forms; old lines refused"""
+    import importlib.util
+    path = SRC.parent / "script" / "perf" / "k_diag.py"
+    spec = importlib.util.spec_from_file_location("k_diag_ovl", path)
+    kd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kd)
+    txt = ("PROF aie_site_perf part=1 kind=conv launches=8 perf_n=8 io_act_cyc=5466554 lock_stall_cyc=0 "
+           "stream_stall_cyc=0 pre_io_act_cyc=4136485 snap_gap_cyc=14171 compute_cyc=1176402 ovl_cyc=2842704 "
+           "dact_cyc=5400000\n"
+           "PROF aie_site_perf part=2 kind=fa launches=3 perf_n=3 io_act_cyc=3000000 lock_stall_cyc=0 "
+           "stream_stall_cyc=0 pre_io_act_cyc=77 snap_gap_cyc=500000\n"
+           "PROF aie_site_perf part=3 kind=fa launches=3 perf_n=1 io_act_cyc=1 lock_stall_cyc=0 stream_stall_cyc=0\n")
+    pf = kd.parse_perf(txt)
+    assert pf[1]["has_ovl"] and pf[1]["compute_cyc"] == 1176402 and pf[1]["ovl_cyc"] == 2842704
+    assert pf[1]["dact_cyc"] == 5400000 and pf[1]["gap"] == 14171
+    assert not pf[2]["has_ovl"] and kd.ovl_missing(pf) == 1   # part 3 is short: not counted
+    d = kd.split_site(5.49, 0.0, pf[1])
+    assert abs(d["oc"] - 1.176402) < 1e-12 and abs(d["ovl"] - 2.842704) < 1e-12
+    s = dict(d, ddr_b=4e6, bucket=1, launches=8)
+    p = dict(inv={1: 1e-6}, t0=0.01)  # dma = 4 ms, t0 * L = 0.08 ms
+    assert abs(kd.k_hat(dict(p, form="sum"), s) - (1.176402 + 4.0 - 2.842704 + 0.08)) < 1e-12
+    assert abs(kd.k_hat(dict(p, form="max"), s) - (4.0 - 2.842704 + 0.08)) < 1e-12
+    for form in ("sum", "max"):
+        A = kd._synth(21, 30, (1 / 2.0e6, 1 / 6.0e6, 1 / 9.0e6), 0.02, form=form)
+        q = kd.fit(A, form)
+        assert q["form"] == form and max(kd.rels(q, A)) < 1e-9

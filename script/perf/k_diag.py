@@ -23,8 +23,14 @@ Per site (ms; AIE clock AIE_MHZ = 1e3 MHz):
   bound   = core  if compute >= dma and compute >= lock + stream stalls
             sync  elif lock_stall >= stream_stall
             dma   else
-K floor: K_hat = max(compute, ddr_b / BW_j) + t0 * launches, j = run_b bucket (RUNB_EDGES, <= 3 buckets),
-  params per cfg: BW_j of the buckets present + t0 (<= 4). Fit on LOG_A (minimax-polished NNLS over the
+K floor (--model ovl, default; M3.1.2 overlap model, needs the ' compute_cyc= ovl_cyc= dact_cyc=' tail):
+  per site compute = compute_cyc / 1e6 ms, ovl = ovl_cyc / 1e6 ms, dma = ddr_b / BW_j  (j = run_b bucket)
+    sum form: K_hat = max(0, compute + dma - ovl) + t0 * launches
+    max form: K_hat = max(0, max(compute, dma) - ovl) + t0 * launches
+  the form is chosen per cfg by the LOO max-rel on LOG_A only (KMODEL); a non-short part without the ovl fields
+  -> rc=2 (an old log).  --model add (the M3.1 floor, kept for comparison):
+    K_hat = max(compute, ddr_b / BW_j) + t0 * launches   (compute = io_act - stalls)
+  j = run_b bucket (RUNB_EDGES, <= 3 buckets), params per cfg: BW_j of the buckets present + t0 (<= 4). Fit on LOG_A (minimax-polished NNLS over the
   max() branch assignment), check on LOG_B (never fitted), LOO = leave-one-site-out refit on LOG_A.
 Sanity: io_act / (K_meas + snap_gap) <= IOK_MAX on every non-short site (core counters cannot exceed the wait
   window; snap_gap = snap_gap_cyc / AIE_MHZ / 1e3 ms, the counter-snapshot to wait-timer offset).
@@ -34,7 +40,8 @@ Output:
   KSITE   cfg run site part launches K_meas core compute tail lock stream dma bound K_hat rel
   KCLS    cfg run cls sites K_ms core_ms compute_ms tail_ms dma_ms bound=core:n/dma:n/sync:n
   KFA     cfg fa128/fa134 meas_ratio run fa128_K_ms fa134_K_ms
-  KPERF   cfg=<c> run=<r> parts=<parts with launches>0> short=<n> scaled=0   (one per log; short = perf_n < launches)
+  KPERF   cfg=<c> run=<r> parts=<parts with launches>0> short=<n> scaled=0 ovl_fields=<parts with the ovl tail>
+  KMODEL  cfg=<c> form=<sum|max> loo_sum=<x> loo_max=<x>   (--model ovl: the form with the smaller LOO on LOG_A)
   KSANITY cfg run io_act_over_K_max PASS|FAIL   (max io_act/(K_meas+snap_gap) over non-short sites; FAIL -> rc=1)
   KFIT    cfg log=A bw_<bucket>_GBps.. t0_ms params r2 maxrel loo_maxrel
   KCHK    cfg log=B r2 maxrel
@@ -44,7 +51,7 @@ Output:
 --map-only (no counter lines needed):
   KDMAP   cfg site part kind launches bd_n num_dims run_b bucket ddr_b ;  KDMAP cfg=.. sites bd_missing PASS|FAIL
   KDMAP ALL logs= sites= bd_missing= PASS|FAIL   (always the last line)
-rc=1 on FAIL.
+rc=1 on FAIL; rc=2 when --model ovl meets a non-short part without the ovl fields.
 """
 import argparse
 import math
@@ -67,7 +74,8 @@ SITES_PER_CFG = {"linear": 72, "conv": 48, "fa": 18}
 GATE = dict(r2=0.9, maxrel=0.15, loo=0.20, drift=0.05)
 
 _PERF = re.compile(r"^PROF aie_site_perf part=(\d+) kind=(\w+) launches=(\d+) perf_n=(\d+) io_act_cyc=(\d+) "
-                   r"lock_stall_cyc=(\d+) stream_stall_cyc=(\d+)(?: pre_io_act_cyc=(\d+) snap_gap_cyc=(\d+))?$", re.M)
+                   r"lock_stall_cyc=(\d+) stream_stall_cyc=(\d+)(?: pre_io_act_cyc=(\d+) snap_gap_cyc=(\d+))?"
+                   r"(?: compute_cyc=(\d+) ovl_cyc=(\d+)(?: dact_cyc=(\d+))?)?$", re.M)
 _SPLIT = re.compile(r"^PROF aie_host_split part=(\d+) kind=(\w+) .*wait_ms=([\d.]+) .*inval_ms=([\d.]+) "
                     r"launches=(\d+)$", re.M)
 _FA_D = re.compile(r"_d(\d+)_")
@@ -77,13 +85,20 @@ _CMP = re.compile(r"^CMP unet board=(\S+) .*aie_launches=(\d+) .*run_rc=(-?\d+)"
 # ------------------------------------------------------------------ parsing / per-site split
 def parse_perf(txt):
     """{part: dict(kind, launches, perf_n, io_act, lock, stream, pre_io_act, gap, short)} -- raw counter sums over
-    the perf_n launches, never scaled; short = perf_n < launches (excluded from KSANITY / KFLOOR)"""
+    the perf_n launches, never scaled; short = perf_n < launches (excluded from KSANITY / KFLOOR);
+    M3.1.2 tail compute_cyc / ovl_cyc / dact_cyc (sums, same tile as the launch window) -> has_ovl"""
     out = {}
-    for p, k, n, pn, ia, ls, ss, pre, gap in _PERF.findall(txt):
+    for p, k, n, pn, ia, ls, ss, pre, gap, cc, oc, da in _PERF.findall(txt):
         n, pn = int(n), int(pn)
         out[int(p)] = dict(kind=k, launches=n, perf_n=pn, io_act=int(ia), lock=int(ls), stream=int(ss),
-                           pre_io_act=int(pre or 0), gap=int(gap or 0), short=pn < n)
+                           pre_io_act=int(pre or 0), gap=int(gap or 0), short=pn < n, has_ovl=cc != "",
+                           compute_cyc=int(cc or 0), ovl_cyc=int(oc or 0), dact_cyc=int(da or 0))
     return out
+
+
+def ovl_missing(pf):
+    """non-short parts (launches > 0) without the ovl tail -- --model ovl refuses them (rc=2)"""
+    return sum(1 for v in pf.values() if v["launches"] > 0 and not v["short"] and not v.get("has_ovl"))
 
 
 def perf_ok(s):
@@ -95,7 +110,8 @@ def kperf_line(cfg, run, pf):
     """KPERF of one log: parts with launches > 0, short parts; returns (parts, short)"""
     parts = [v for v in pf.values() if v["launches"] > 0]
     sh = sum(v["short"] for v in parts)
-    print("KPERF cfg=%s run=%s parts=%d short=%d scaled=0" % (cfg, run, len(parts), sh))
+    print("KPERF cfg=%s run=%s parts=%d short=%d scaled=0 ovl_fields=%d"
+          % (cfg, run, len(parts), sh, sum(bool(v.get("has_ovl")) for v in parts)))
     return len(parts), sh
 
 
@@ -134,6 +150,8 @@ def split_site(wait, inval, perf):
     d.update(core=perf["io_act"] * cyc_ms, compute=(perf["io_act"] - perf["lock"] - perf["stream"]) * cyc_ms,
              lock=perf["lock"] * cyc_ms, stream=perf["stream"] * cyc_ms, gap=perf.get("gap", 0) * cyc_ms)
     d["tail"] = d["K"] - d["core"]
+    if perf.get("has_ovl"):  # overlap model terms (ms): compute_cyc / 1e6, ovl_cyc / 1e6
+        d.update(oc=perf["compute_cyc"] * cyc_ms, ovl=perf["ovl_cyc"] * cyc_ms)
     return d
 
 
@@ -168,9 +186,27 @@ def load(cfg, log, build_root, need_perf=True):
 
 
 # ------------------------------------------------------------------ K floor fit
+MODELS = ("ovl", "add")
+FORMS = ("sum", "max")
+
+
+def _ab(s, form):
+    """K_hat = max(base, dma + B) + t0 * launches; returns (base, B) of one site for the form
+    add: max(compute, dma) | max: max(0, c - ovl, dma - ovl) | sum: max(0, dma + c - ovl)   (c = oc, ovl ms)"""
+    if form in (None, "add"):
+        return s["compute"], 0.0
+    c, o = s["oc"], s["ovl"]
+    if form == "max":
+        return max(0.0, c - o), -o
+    if form == "sum":
+        return 0.0, c - o
+    raise ValueError("form " + str(form))
+
+
 def k_hat(p, s):
-    """p = dict(inv={bucket: ms per byte}, t0=ms per launch)"""
-    return max(s["compute"], s["ddr_b"] * p["inv"].get(s["bucket"], 0.0)) + p["t0"] * s["launches"]
+    """p = dict(inv={bucket: ms per byte}, t0=ms per launch, form=add|sum|max)"""
+    base, b = _ab(s, p.get("form"))
+    return max(base, s["ddr_b"] * p["inv"].get(s["bucket"], 0.0) + b) + p["t0"] * s["launches"]
 
 
 def rels(p, sites):
@@ -184,35 +220,38 @@ def r2(p, sites):
     return 1.0 - float((e ** 2).sum()) / tot if tot > 0 else float("nan")
 
 
-def _nnls_assign(sites, bks, dma_set):
+def _nnls_assign(sites, bks, dma_set, form=None):
     """weighted (1/K) NNLS of (inv_j, t0) with the max() branch fixed: dma_set sites use the dma term"""
     nb = len(bks)
     X = np.zeros((len(sites), nb + 1))
     y = np.zeros(len(sites))
     for i, s in enumerate(sites):
         w = 1.0 / s["K"]
+        base, b = _ab(s, form)
         if i in dma_set:
             X[i, bks.index(s["bucket"])] = s["ddr_b"] * w
-            y[i] = 1.0
+            y[i] = (s["K"] - b) * w
         else:
-            y[i] = (s["K"] - s["compute"]) * w
+            y[i] = (s["K"] - base) * w
         X[i, nb] = s["launches"] * w
     sc = np.maximum(np.abs(X).max(axis=0), 1e-300)
     c, _ = nnls(X / sc, y)
     c = c / sc
-    return dict(inv={b: float(c[j]) for j, b in enumerate(bks)}, t0=float(c[nb]))
+    return dict(inv={b: float(c[j]) for j, b in enumerate(bks)}, t0=float(c[nb]), form=form)
 
 
-def fit(sites):
-    """minimax-relative fit of the K floor; params: inv per present bucket + t0"""
+def fit(sites, form=None):
+    """minimax-relative fit of the K floor (form: add|sum|max); params: inv per present bucket + t0"""
     bks = sorted({s["bucket"] for s in sites})
     best = None
+    ab = [_ab(s, form) for s in sites]
     starts = [set(range(len(sites))), set(),
-              {i for i, s in enumerate(sites) if s["compute"] < 0.5 * s["K"]}]
+              {i for i, s in enumerate(sites) if ab[i][0] < 0.5 * s["K"]}]
     for d in starts:
         for _ in range(50):
-            p = _nnls_assign(sites, bks, d)
-            nd = {i for i, s in enumerate(sites) if s["ddr_b"] * p["inv"].get(s["bucket"], 0.0) > s["compute"]}
+            p = _nnls_assign(sites, bks, d, form)
+            nd = {i for i, s in enumerate(sites)
+                  if s["ddr_b"] * p["inv"].get(s["bucket"], 0.0) + ab[i][1] > ab[i][0]}
             if nd == d:
                 break
             d = nd
@@ -225,7 +264,8 @@ def fit(sites):
         x0 = np.log(np.maximum([p0["inv"][b] for b in keys] + [p0["t0"]], 1e-30))
 
         def unpack(x):
-            return dict(inv={b: float(math.exp(x[j])) for j, b in enumerate(keys)}, t0=float(math.exp(x[-1])))
+            return dict(inv={b: float(math.exp(x[j])) for j, b in enumerate(keys)}, t0=float(math.exp(x[-1])),
+                        form=form)
 
         def obj(x):
             return max(rels(unpack(x), sites))
@@ -235,12 +275,19 @@ def fit(sites):
     return p0
 
 
-def loo(sites):
+def loo(sites, form=None):
     out = 0.0
     for i in range(len(sites)):
-        p = fit(sites[:i] + sites[i + 1:])
+        p = fit(sites[:i] + sites[i + 1:], form)
         out = max(out, rels(p, [sites[i]])[0])
     return out
+
+
+def choose_form(sites):
+    """--model ovl: fit sum and max on run a, keep the smaller LOO max-rel; returns (p, loo, {form: loo})"""
+    res = {f: (fit(sites, f), loo(sites, f)) for f in FORMS}
+    best = min(FORMS, key=lambda f: res[f][1])
+    return res[best][0], res[best][1], {f: res[f][1] for f in FORMS}
 
 
 def nparams(p):
@@ -250,7 +297,7 @@ def nparams(p):
 def fmt_p(p):
     bw = " ".join("bw_%s_GBps=%.4g" % (BUCKETS[b], (1.0 / v / 1e6) if v > 0 else float("inf"))
                   for b, v in sorted(p["inv"].items()))
-    return "%s t0_ms=%.5g params=%d" % (bw, p["t0"], nparams(p))
+    return "%s t0_ms=%.5g params=%d form=%s" % (bw, p["t0"], nparams(p), p.get("form") or "add")
 
 
 # ------------------------------------------------------------------ reporting
@@ -264,9 +311,10 @@ def diag_lines(cfg, run, sites, p=None):
         s["bound"] = bound(s["compute"], s["dma"], s["lock"], s["stream"])
         kh = k_hat(p, s) if p else float("nan")
         print("KSITE cfg=%s run=%s %s part=%d launches=%d K_meas=%.3f core=%.3f compute=%.3f tail=%.3f lock=%.3f "
-              "stream=%.3f dma=%.3f bound=%s K_hat=%.3f rel=%.3f"
+              "stream=%.3f dma=%.3f bound=%s K_hat=%.3f rel=%.3f%s"
               % (cfg, run, s["site"], s["part"], s["launches"], s["K"], s["core"], s["compute"], s["tail"],
-                 s["lock"], s["stream"], s["dma"], s["bound"], kh, abs(kh - s["K"]) / s["K"]))
+                 s["lock"], s["stream"], s["dma"], s["bound"], kh, abs(kh - s["K"]) / s["K"],
+                 " oc=%.3f ovl=%.3f" % (s["oc"], s["ovl"]) if "ovl" in s else ""))
     ps = [s for s in sites if perf_ok(s)]
     for c in ("conv_big", "conv_tkw4", "fa16", "fa_d160", "linear"):
         g = [s for s in ps if s["cls"] == c]
@@ -315,6 +363,8 @@ def map_only(a):
 
 
 def full(a):
+    """rc: 0 PASS, 1 FAIL, 2 --model ovl on a log without the ovl fields"""
+    model = getattr(a, "model", "ovl") or "ovl"
     refs = dict(x.split("=", 1) for x in (a.ref or []))
     ok_all = True
     agg = dict(cfgs=0, sites=0, perf=0, r2=float("inf"), maxrel=0.0, loo=0.0, drift=0.0, iok=0.0)
@@ -327,9 +377,16 @@ def full(a):
         sb, tb = load(cfg, lb, a.build_root) if lb else (sa, ta)
         pa = [s for s in sa if perf_ok(s) and s["bd_ok"] and s["K"] > 0]
         pb = [s for s in sb if perf_ok(s) and s["bd_ok"] and s["K"] > 0]
-        kperf_line(cfg, "a", parse_perf(ta))
-        if lb:
-            kperf_line(cfg, "b", parse_perf(tb))
+        miss = 0
+        for run, lg, tx in (("a", la, ta), ("b", lb, tb)) if lb else (("a", la, ta),):
+            pf = parse_perf(tx)
+            kperf_line(cfg, run, pf)
+            if model == "ovl" and ovl_missing(pf):
+                print("KDIAG ERROR cfg=%s run=%s log=%s: %d non-short parts without compute_cyc/ovl_cyc "
+                      "(pre-M3.1.2 log; --model ovl needs them, --model add does not)" % (cfg, run, lg, ovl_missing(pf)))
+                miss += 1
+        if miss:
+            return 2
         for lg, ss, ps, tx in ((la, sa, pa, ta), (lb, sb, pb, tb)) if lb else ((la, sa, pa, ta),):
             m = _CMP.findall(tx)
             bd, nl, rc = m[-1] if m else ("?", "0", "-1")
@@ -340,8 +397,13 @@ def full(a):
             print("KFLOOR cfg=%s sites=%d perf_sites=%d FAIL (no counter lines)" % (cfg, len(sb), len(pb)))
             ok_all = False
             continue
-        p = fit(pa)
-        r2a, mra, lo = r2(p, pa), max(rels(p, pa)), loo(pa)
+        if model == "ovl":
+            p, lo, lf = choose_form(pa)
+            print("KMODEL cfg=%s form=%s loo_sum=%.4f loo_max=%.4f" % (cfg, p["form"], lf["sum"], lf["max"]))
+        else:
+            p = fit(pa)
+            lo = loo(pa)
+        r2a, mra = r2(p, pa), max(rels(p, pa))
         print("KFIT cfg=%s log=%s %s r2=%.4f maxrel=%.4f loo_maxrel=%.4f" % (cfg, la, fmt_p(p), r2a, mra, lo))
         ioka = diag_lines(cfg, "a", sa, p)
         iokb = diag_lines(cfg, "b", sb, p) if lb else ioka
@@ -376,12 +438,13 @@ def full(a):
           "act_over_k_max=%.3f %s"
           % ("board" if src_ok else "nonboard", agg["cfgs"], agg["sites"], agg["perf"], agg["r2"], agg["maxrel"],
              agg["loo"], agg["iok"], "PASS" if ok_all else "FAIL"))
-    return ok_all
+    return 0 if ok_all else 1
 
 
 # ------------------------------------------------------------------ selftest (synthetic, known answer)
-def _synth(seed, n, inv, t0, noise=0.0):
-    """synthetic sites with known K = max(compute, ddr_b*inv_j) + t0*launches (x (1+noise_i))"""
+def _synth(seed, n, inv, t0, noise=0.0, form=None):
+    """synthetic sites with known K = max(compute, ddr_b*inv_j) + t0*launches (x (1+noise_i));
+    form sum|max: oc / ovl terms, ovl = u * min(oc, dma), K by that form (no clip at 0 reached)"""
     rng = np.random.default_rng(seed)
     out = []
     for i in range(n):
@@ -391,9 +454,17 @@ def _synth(seed, n, inv, t0, noise=0.0):
         ddr_b = float(rng.integers(1, 40)) * 1e6
         dma = ddr_b * inv[j]
         compute = dma * (0.4 if i % 2 else 1.6) * float(rng.uniform(0.9, 1.1))
-        K = (max(compute, dma) + t0 * L) * (1.0 + noise * math.sin(7.0 * i + seed))
+        ovl = float(rng.uniform(0.2, 0.8)) * min(compute, dma)
+        if form == "sum":
+            k0 = compute + dma - ovl
+        elif form == "max":
+            k0 = max(compute, dma) - ovl
+        else:
+            k0 = max(compute, dma)
+        K = (k0 + t0 * L) * (1.0 + noise * math.sin(7.0 * i + seed))
         out.append(dict(site="s%d" % i, part=i, kind="linear", launches=L, run_b=run_b, bucket=bucket(run_b),
-                        ddr_b=ddr_b, compute=compute, K=K, core=compute, lock=0.0, stream=0.0, perf={}, cls="linear"))
+                        ddr_b=ddr_b, compute=compute, K=K, core=compute, lock=0.0, stream=0.0, perf={}, cls="linear",
+                        oc=compute, ovl=ovl))
     return out
 
 
@@ -482,6 +553,67 @@ def selftest():
     iok3 = diag_lines("synth", "g", [e])
     chk("gap_denominator", p3["gap"] == 150000 and p3["pre_io_act"] == 1234 and abs(e["gap"] - 0.15) < 1e-12
         and abs(iok3 - 5.15 / 5.15) < 1e-12 and 5.15 / 5.0 > IOK_MAX, "iok=%.3f" % iok3)
+    # 10 M3.1.2 overlap model: parse the compute_cyc / ovl_cyc / dact_cyc tail (old lines -> has_ovl False)
+    t4 = ("PROF aie_site_perf part=4 kind=conv launches=8 perf_n=8 io_act_cyc=5466554 lock_stall_cyc=10 "
+          "stream_stall_cyc=20 pre_io_act_cyc=4136485 snap_gap_cyc=14171 compute_cyc=1176402 ovl_cyc=2842704 "
+          "dact_cyc=5400000\n"
+          "PROF aie_site_perf part=6 kind=fa launches=2 perf_n=2 io_act_cyc=1000 lock_stall_cyc=0 stream_stall_cyc=0 "
+          "pre_io_act_cyc=1 snap_gap_cyc=2\n")
+    p4 = parse_perf(t4)
+    e4 = split_site(5.49, 0.0, p4[4])
+    chk("ovl_parse", p4[4]["has_ovl"] and p4[4]["compute_cyc"] == 1176402 and p4[4]["ovl_cyc"] == 2842704
+        and p4[4]["dact_cyc"] == 5400000 and p4[4]["gap"] == 14171 and p4[4]["io_act"] == 5466554
+        and not p4[6]["has_ovl"] and p4[6]["gap"] == 2 and ovl_missing(p4) == 1
+        and abs(e4["oc"] - 1.176402) < 1e-12 and abs(e4["ovl"] - 2.842704) < 1e-12
+        and "ovl" not in split_site(1.0, 0.0, p4[6]), "oc=%.3f ovl=%.3f" % (e4["oc"], e4["ovl"]))
+    # 11 sum / max forms: hand values, exact recovery on synthetic data, KMODEL picks the generating form by LOO
+    hs = dict(oc=3.0, ovl=2.0, compute=9.9, ddr_b=1e6, bucket=0, launches=10)
+    hp = dict(inv={0: 1e-6}, t0=0.01)    # dma = 1 ms
+    kh = {f: k_hat(dict(hp, form=f), hs) for f in ("sum", "max", "add")}
+    hz = dict(hs, oc=0.5, ovl=4.0)        # c + dma - ovl < 0 -> clipped to 0
+    ok_hand = (abs(kh["sum"] - (3 + 1 - 2 + 0.1)) < 1e-12 and abs(kh["max"] - (3 - 2 + 0.1)) < 1e-12
+               and abs(kh["add"] - (9.9 + 0.1)) < 1e-12 and abs(k_hat(dict(hp, form="sum"), hz) - 0.1) < 1e-12
+               and abs(k_hat(dict(hp, form="max"), hz) - 0.1) < 1e-12)
+    for form in FORMS:
+        Af, Bf = _synth(11, 60, inv, t0, form=form), _synth(12, 45, inv, t0, form=form)
+        pf_ = fit(Af, form)
+        perr = max([abs(pf_["inv"][j] - inv[j]) / inv[j] for j in range(3)] + [abs(pf_["t0"] - t0) / t0])
+        pc, lo_c, lf = choose_form(_synth(13, 24, inv, t0, 0.01, form=form))
+        other = [f for f in FORMS if f != form][0]
+        chk("ovl_model_" + form, ok_hand and perr < 1e-6 and nparams(pf_) == 4 and pf_["form"] == form
+            and max(rels(pf_, Af)) < 1e-9 and max(rels(pf_, Bf)) < 1e-9 and pc["form"] == form
+            and lo_c < lf[other], "param_maxrel=%.2e loo_%s=%.4f loo_%s=%.4f" % (perr, form, lf[form], other, lf[other]))
+    # 12 --model ovl refuses a log whose non-short parts lack the ovl fields: rc=2 (end to end through main);
+    #    --model add on the same log does not stop there
+    old = ("PROF aie_site_perf part=1 kind=linear launches=2 perf_n=2 io_act_cyc=1000000 lock_stall_cyc=0 "
+           "stream_stall_cyc=0 pre_io_act_cyc=1 snap_gap_cyc=2\n"
+           "PROF aie_site_perf part=2 kind=linear launches=2 perf_n=1 io_act_cyc=1000000 lock_stall_cyc=0 "
+           "stream_stall_cyc=0\n"
+           "PROF aie_site_perf part=3 kind=linear launches=3 perf_n=3 io_act_cyc=2500000 lock_stall_cyc=0 "
+           "stream_stall_cyc=0\n")
+    seen = []
+
+    def _stub_load(cfg, log, build_root, need_perf=True):
+        seen.append(log)
+        pf0 = parse_perf(old)
+        ss = []
+        for prt in (1, 2, 3):
+            s = dict(cfg=cfg, site="linear%d" % prt, part=prt, kind="linear", launches=pf0[prt]["launches"], cls="linear", bd_ok=True,
+                     run_b=32, ddr_b=1e6, bd_n=1, num_dims=1, perf=pf0[prt], bucket=0)
+            s.update(split_site(1.0 + prt, 0.0, pf0[prt]))
+            ss.append(s)
+        return ss, old
+    g = globals()
+    real_load = g["load"]
+    g["load"] = _stub_load
+    try:
+        rc_ovl = main(["--build-root", "/nonexistent", "synth=a.log,b.log"])
+        rc_add = main(["--model", "add", "--build-root", "/nonexistent", "synth=a.log,b.log"])
+    finally:
+        g["load"] = real_load
+    chk("ovl_missing_rc2", rc_ovl == 2 and rc_add == 1 and ovl_missing(parse_perf(old)) == 2
+        and seen == ["a.log", "b.log"] * 2,
+        "rc_ovl=%d rc_add=%d" % (rc_ovl, rc_add))
     n = sum(res)
     ok = n == len(res)
     print("KDIAG SELFTEST %s (%d/%d)" % ("PASS" if ok else "FAIL", n, len(res)))
@@ -493,6 +625,8 @@ def main(argv=None):
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--map-only", action="store_true")
     ap.add_argument("--build-root")
+    ap.add_argument("--model", choices=MODELS, default="ovl",
+                    help="ovl (default): overlap K floor (sum|max form by LOO); add: M3.1 max(compute, dma) floor")
     ap.add_argument("--ref", nargs="+", metavar="CFG=LOG")
     ap.add_argument("--fit", nargs="+", metavar="CFG=LOG_A", help="logs the K floor is fitted on (run a)")
     ap.add_argument("--check", nargs="+", metavar="CFG=LOG_B", help="held-out logs (run b, never fitted)")
@@ -510,7 +644,7 @@ def main(argv=None):
         ap.error("--build-root and CFG=LOG runs are required")
     if a.map_only:
         return 0 if map_only(a) else 1
-    return 0 if full(a) else 1
+    return full(a)
 
 
 if __name__ == "__main__":
