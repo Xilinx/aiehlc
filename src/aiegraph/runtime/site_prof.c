@@ -6,6 +6,12 @@
 int aiednn_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles);
 void aiednn_aie_host_split_site(int site);                   /* GAP-RT1: kernel archive (aie_host_split.h) */
 int aiednn_aie_host_split_line(int site, char *buf, int n);
+#if defined(AIEHLC_SITE_PERF) && AIEHLC_SITE_PERF
+/* M3.1 site-perf build (diagnostic only, not for L): the runtime arms the core perf counters only under
+ * AIEHLC_PROFILING + debug flag 0x100 (AIE_DEBUG_FLAG_CORE_PERF_COUNTER); this strong definition overrides
+ * aie_runtime.c's weak 0, so the board run needs no arguments. */
+int g_runtime_debug_level = 0x100;
+#endif
 #define UP_MAX 1024
 static unsigned long long up_ticks[UP_MAX], up_exp_ticks[UP_MAX], up_pending_exp;
 static double up_aie_ms[UP_MAX];
@@ -43,6 +49,9 @@ void aiednn_prof_print(double graph_run_ms, double aie_wall_ms) {
         if (is_aie) { /* GAP-RT1: PROF aie_host_split part=<i> kind=<attn|conv|linear> pack_ms= scatter_ms= ... */
             char hs_[192];
             if (aiednn_aie_host_split_line((int)i, hs_, (int)sizeof hs_) > 0)
+                printf("%s\n", hs_);
+            /* M3.1: PROF aie_site_perf part=<i> ... (launches > 0, site-perf archives only; 0x10000 = AHS_PERF_LINE) */
+            if (aiednn_aie_host_split_line((int)i + 0x10000, hs_, (int)sizeof hs_) > 0)
                 printf("%s\n", hs_);
         }
         tot += a78 + e;

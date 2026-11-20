@@ -463,3 +463,76 @@ def test_glue_kacc_sources_wired():
         for a in ("ahs_add(&g_ahs, AHS_FLUSH, sp1 - sp0);", "ahs_add(&g_ahs, AHS_INVAL, sp3 - sp2);",
                   "ahs_launch(&g_ahs);", "ahs_cal(&g_ahs, sp0, (unsigned long long)lt0);"):
             assert host.count(a) == 1, a
+
+
+# ---------------------------------------------------------------- 5. M3.1 site-perf counter line
+PERF = re.compile(r"^PROF aie_site_perf part=(\d+) kind=(\w+) launches=(\d+) perf_n=(\d+) io_act_cyc=(\d+) "
+                  r"lock_stall_cyc=(\d+) stream_stall_cyc=(\d+)$", re.M)
+OLD_SPLIT_END = re.compile(r"^PROF aie_host_split part=\d+ .*launches=(\d+)$", re.M)  # n_fit.py:71 / m3_site.py:61
+STUB = r"""
+#include <stdio.h>
+#include <string.h>
+#include "aie_host_split.h"
+/* stub of the runtime getter: launch j reads (1000*(j+1), 10*(j+1), j+1); window 3 has no reading */
+static unsigned g_nl;
+int __Runtime_core_perf_last_launch(unsigned long long *ia, unsigned long long *ls, unsigned long long *ss) {
+    const unsigned j = g_nl++;
+    if (j == 3) { *ia = *ls = *ss = 0; return 0; }
+    *ia = 1000ULL * (j + 1); *ls = 10ULL * (j + 1); *ss = j + 1;
+    return 1;
+}
+"""
+
+
+def _perf_drv(site_perf: bool) -> str:
+    src = DRV.replace("@PROF@", ua.PROF_C.replace('#include "aie_timer.h"\n', "")).replace("@ATTNSITE@", "")
+    # sites 2 (conv): 2 launches, 3 (linear): 0 launches, 4 (linear): 2 launches
+    src = src.replace("aie_site(1, 2000, 500, 4000, 1000);",
+                      "aie_site(1, 2000, 500, 4000, 1000); ahs_launch(&g_ahs); aie_site(1, 0, 0, 10, 5); "
+                      "ahs_launch(&g_ahs);")
+    src = src.replace("int main(void) {", "int main(void) {\n    printf(\"DBG %d\\n\", g_runtime_debug_level);")
+    src = src.replace('GRAPH_PROF_END(3, "aie aiednn_aie_lin 9"); }',
+                      'GRAPH_PROF_END(3, "aie aiednn_aie_lin 9"); }\n'
+                      '    { GRAPH_PROF_BEGIN(4); UP_AIE_BEGIN(4); aie_site(2, 1, 1, 5, 1); ahs_launch(&g_ahs);'
+                      ' aie_site(2, 1, 1, 5, 1); ahs_launch(&g_ahs); UP_AIE_END(4);\n'
+                      '      GRAPH_PROF_END(4, "aie aiednn_aie_lin 7"); }')
+    if site_perf:
+        src = "#define AIEHLC_SITE_PERF 1\n" + STUB + src
+    else:
+        src = "int g_runtime_debug_level = 0;\n" + src
+    return subprocess.run([str(_cc(src, "drvp" if site_perf else "drvn", shared=False))], check=True,
+                          capture_output=True, text=True).stdout
+
+
+def test_site_perf_line():
+    out = _perf_drv(True)
+    assert "DBG 256" in out, out  # site_prof.c: strong g_runtime_debug_level = 0x100 under AIEHLC_SITE_PERF
+    rows = {int(m.group(1)): m.groups()[1:] for m in PERF.finditer(out)}
+    # windows 0,1 -> site 2 (both read); window 2 -> site 3 (launches=0: no line); 3 (no reading), 4 -> site 4
+    assert rows == {2: ("conv", "2", "2", "3000", "30", "3"), 4: ("linear", "2", "1", "5000", "50", "5")}, out
+    # one perf line per launches>0 part, right after that part's aie_host_split line, same part=
+    split = {int(m.group(0).split("part=")[1].split()[0]): int(m.group(1)) for m in OLD_SPLIT_END.finditer(out)}
+    assert split == {2: 2, 3: 0, 4: 2}, out
+    assert {p for p, n in split.items() if n > 0} == set(rows)
+    for p in rows:
+        a = out.index(f"PROF aie_host_split part={p} ")
+        b = out.index(f"PROF aie_site_perf part={p} ")
+        assert a < b and "PROF " not in out[a + 1:b].replace(f"PROF aie_host_split part={p} ", "", 1)
+    # the old parsers' view is unchanged: the split lines still end in launches=<n> and match LINE
+    assert {int(m.group(1)) for m in LINE.finditer(out)} == {2, 3, 4}
+    # without AIEHLC_SITE_PERF: no perf lines, debug level untouched
+    out0 = _perf_drv(False)
+    assert not PERF.search(out0) and "aie_site_perf" not in out0 and "DBG 0" in out0, out0
+    assert {int(m.group(1)) for m in LINE.finditer(out0)} == {2, 3, 4}
+
+
+def test_site_perf_runtime_wired():
+    rt = (RT / "aie_runtime.c").read_text()
+    assert rt.count("int __Runtime_core_perf_last_launch(") == 1
+    w = rt[rt.index("void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {"):]
+    w = w[:w.index("\n}\n")]
+    # the counter read sits after the timed wait window (WINLINT), never inside it
+    assert w.index("g_hs_wait_ticks += ahs_now() - __hs_t0;") < w.index("rt_core_perf_site_read();")
+    assert w.index("RT_PROF_ADD(g_wait_io_cycles") < w.index("rt_core_perf_site_read();")
+    hdr = (RT / "aie_host_split.h").read_text()
+    assert "__Runtime_core_perf_last_launch(&ia, &ls, &ss)" in hdr

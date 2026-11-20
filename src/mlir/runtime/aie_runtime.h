@@ -487,6 +487,10 @@ AieRC __Runtime_core_perf_setup(XAie_DevInst *dev, XAie_LocType tile);
 AieRC __Runtime_core_perf_read(XAie_DevInst *dev, XAie_LocType tile, uint32_t *active, uint32_t *vec_instr,
                                uint32_t *stream_stall, uint32_t *lock_stall);
 int __Runtime_core_perf_probe_valid(void);
+/* M3.1 site-perf: slowest core's io_active / lock_stall / stream_stall of the last launch (counters 0/3/2 minus
+ * the startio snapshot, read after wait_io under AIEHLC_SITE_PERF); returns 1 once per fresh reading, else 0. */
+int __Runtime_core_perf_last_launch(unsigned long long *io_act_cyc, unsigned long long *lock_stall_cyc,
+                                    unsigned long long *stream_stall_cyc);
 void __Runtime_core_perf_report(int tag);
 void __Runtime_core_perf_read_probe(uint32_t *active, uint32_t *vec_instr, uint32_t *stream_stall,
                                     uint32_t *lock_stall);

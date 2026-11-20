@@ -398,6 +398,7 @@ static int s_core_perf_ntiles = 0;
  * on-array run (the kernel group is enabled before the host writes BDs and starts IO). */
 static uint32_t s_core_perf_snap_a[RT_CORE_PERF_MAX_TILES];
 static uint32_t s_core_perf_snap_ls[RT_CORE_PERF_MAX_TILES];
+static uint32_t s_core_perf_snap_ss[RT_CORE_PERF_MAX_TILES];
 static int s_core_perf_snap_pending = 0;
 static int s_core_perf_snap_valid = 0;
 __attribute__((unused)) static void rt_core_perf_snap_at_startio(void) {
@@ -409,8 +410,54 @@ __attribute__((unused)) static void rt_core_perf_snap_at_startio(void) {
         s_core_perf_snap_ls[i] = 0;
         (void)XAie_PerfCounterGet(s_core_perf_probe_dev, s_core_perf_tiles[i], XAIE_CORE_MOD, 0, &s_core_perf_snap_a[i]);
         (void)XAie_PerfCounterGet(s_core_perf_probe_dev, s_core_perf_tiles[i], XAIE_CORE_MOD, 3, &s_core_perf_snap_ls[i]);
+        s_core_perf_snap_ss[i] = 0;
+        (void)XAie_PerfCounterGet(s_core_perf_probe_dev, s_core_perf_tiles[i], XAIE_CORE_MOD, 2, &s_core_perf_snap_ss[i]);
     }
     s_core_perf_snap_valid = 1;
+}
+
+/* M3.1 site-perf (AIEHLC_SITE_PERF, needs AIEHLC_PROFILING + debug flag 0x100): after every wait_io (outside
+ * its timed window) read counters 0 ACTIVE / 2 STREAM_STALL / 3 LOCK_STALL of every armed core tile, minus
+ * the startio snapshot, and keep the slowest core (max io_active). The last wait_io of a launch wins;
+ * __Runtime_core_perf_last_launch() hands it out once (aie_host_split.h ahs_add_window, per part). */
+static unsigned long long s_site_perf_io_act = 0ULL, s_site_perf_lock = 0ULL, s_site_perf_stream = 0ULL;
+static int s_site_perf_valid = 0;
+__attribute__((unused)) static void rt_core_perf_site_read(void) {
+    if (!s_core_perf_snap_valid || s_core_perf_probe_dev == NULL || s_core_perf_ntiles == 0)
+        return;
+    uint32_t best_a = 0, best_ls = 0, best_ss = 0;
+    int have = 0;
+    for (int i = 0; i < s_core_perf_ntiles; i++) {
+        uint32_t a = 0, ss = 0, ls = 0;
+        if (__Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, NULL, &ss, &ls) != XAIE_OK)
+            continue;
+        const uint32_t da = a - s_core_perf_snap_a[i];
+        if (!have || da > best_a) {
+            best_a = da;
+            best_ls = ls - s_core_perf_snap_ls[i];
+            best_ss = ss - s_core_perf_snap_ss[i];
+            have = 1;
+        }
+    }
+    if (!have)
+        return;
+    s_site_perf_io_act = best_a;
+    s_site_perf_lock = best_ls;
+    s_site_perf_stream = best_ss;
+    s_site_perf_valid = 1;
+}
+
+int __Runtime_core_perf_last_launch(unsigned long long *io_act_cyc, unsigned long long *lock_stall_cyc,
+                                    unsigned long long *stream_stall_cyc) {
+    const int v = s_site_perf_valid;
+    if (io_act_cyc)
+        *io_act_cyc = v ? s_site_perf_io_act : 0ULL;
+    if (lock_stall_cyc)
+        *lock_stall_cyc = v ? s_site_perf_lock : 0ULL;
+    if (stream_stall_cyc)
+        *stream_stall_cyc = v ? s_site_perf_stream : 0ULL;
+    s_site_perf_valid = 0;
+    return v;
 }
 
 /* Core perf counter 0 is not free when aie-rt ECC is on (DevInst->EccStatus, the XAie_CfgInitialize default):
@@ -8765,6 +8812,9 @@ void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
     g_hs_wait_ticks += ahs_now() - __hs_t0;
     g_hs_wait_calls++;
     RT_PROF_ADD(g_wait_io_cycles, g_wait_io_calls, __wio_t0);
+#if AIEHLC_PROFILING && defined(AIEHLC_SITE_PERF) && AIEHLC_SITE_PERF
+    rt_core_perf_site_read(); /* after the timed wait window (WINLINT: no printf inside it) */
+#endif
 }
 
 /**

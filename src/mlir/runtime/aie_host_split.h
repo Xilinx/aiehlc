@@ -36,6 +36,8 @@ typedef struct {
     unsigned calls;                /* site entries (graph_run calls) */
     unsigned launches;             /* AIE launches inside the site */
     int kind;                      /* AHS_KIND_* of the last entry */
+    unsigned perf_n;               /* M3.1 site-perf: launches with a core counter reading */
+    unsigned long long io_act, lock_stall, stream_stall; /* slowest-core counter sums (core cycles) */
 } ahs_site;
 
 typedef struct {
@@ -45,6 +47,17 @@ typedef struct {
     unsigned long long cal_c0, cal_t0, cal_c1, cal_t1; /* first / last (cycles, ticks) pair of ahs_cal */
     unsigned cal_n;
 } ahs_table;
+
+/* M3.1 site-perf (-DAIEHLC_SITE_PERF=1): the runtime's slowest-core counter reading of the last launch
+ * (aie_runtime.c; the x86 test links a stub). Returns 1 for a fresh reading, 0 for none. */
+#if defined(AIEHLC_SITE_PERF) && AIEHLC_SITE_PERF
+int __Runtime_core_perf_last_launch(unsigned long long *io_act_cyc, unsigned long long *lock_stall_cyc,
+                                    unsigned long long *stream_stall_cyc);
+#endif
+
+/* aiednn_aie_host_split_line(AHS_PERF_LINE + part, ...) asks for the PROF aie_site_perf line of part
+ * (same exported entry point; archives built without AIEHLC_SITE_PERF return 0 for it) */
+#define AHS_PERF_LINE 0x10000
 
 /* free-running tick counter of the runtime side (A78 generic timer = XTime's counter); 0 where there is none */
 static inline unsigned long long ahs_now(void) {
@@ -117,6 +130,18 @@ static inline void ahs_add_window(ahs_table *a, unsigned long long win, unsigned
         wait = win;
     ahs_add(a, AHS_WAIT, wait);
     ahs_add(a, AHS_DMA, win - wait);
+#if defined(AIEHLC_SITE_PERF) && AIEHLC_SITE_PERF
+    {
+        unsigned long long ia = 0ULL, ls = 0ULL, ss = 0ULL;
+        ahs_site *s = ahs_cur(a);
+        if (__Runtime_core_perf_last_launch(&ia, &ls, &ss) && s) {
+            s->perf_n++;
+            s->io_act += ia;
+            s->lock_stall += ls;
+            s->stream_stall += ss;
+        }
+    }
+#endif
 }
 
 static inline const char *ahs_kind_name(int k) {
@@ -168,8 +193,28 @@ static inline int ahs_ms(const ahs_table *a, int site, double tick_hz, double *m
  *        inval_ms= launches=
  * site < 0: PROF aie_host_split_total host_split_n=<sites> pack_ms= scatter_ms= dma_ms= wait_ms= glue_ms= ...
  * returns snprintf's length, 0 when the site has no data (nothing written but "") */
+/* M3.1: the counter line of one part, only for parts with launches > 0 (else 0, ""):
+ *   PROF aie_site_perf part=<n> kind=<k> launches=<n> perf_n=<n> io_act_cyc=<sum> lock_stall_cyc=<sum>
+ *        stream_stall_cyc=<sum>
+ * A separate line: the aie_host_split line must keep ending in launches=<n> (n_fit.py / m3_site.py regexes). */
+static inline int ahs_format_perf(const ahs_table *a, int site, char *buf, size_t n) {
+    if (n)
+        buf[0] = 0;
+    if (site < 0 || site >= AHS_MAX_SITES || !a->s[site].calls || !a->s[site].launches)
+        return 0;
+    const ahs_site *s = &a->s[site];
+    return snprintf(buf, n,
+                    "PROF aie_site_perf part=%d kind=%s launches=%u perf_n=%u io_act_cyc=%llu lock_stall_cyc=%llu "
+                    "stream_stall_cyc=%llu",
+                    site, ahs_kind_name(s->kind), s->launches, s->perf_n, s->io_act, s->lock_stall, s->stream_stall);
+}
+
 static inline int ahs_format(const ahs_table *a, int site, double tick_hz, char *buf, size_t n) {
     double ms[AHS_NPH];
+#if defined(AIEHLC_SITE_PERF) && AIEHLC_SITE_PERF
+    if (site >= AHS_PERF_LINE) /* only site-perf builds print the counter line (else: "" below) */
+        return ahs_format_perf(a, site - AHS_PERF_LINE, buf, n);
+#endif
     if (n)
         buf[0] = 0;
     if (site >= AHS_MAX_SITES)
