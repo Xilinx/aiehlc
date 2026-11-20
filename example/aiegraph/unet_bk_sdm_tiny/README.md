@@ -12,13 +12,16 @@ states 77×768) built with aiegraph → TVM C for the A78, with the conv layers 
 | `partition.json` | The 37 conv layers on the AIE, 86,600 planned launches, aie_flop_frac 0.417 |
 | `p5_board.log` | The board run (P5) these files produced |
 
-No C text lives in this directory (except `build_unet.py`'s `MAIN_C`): every kernel and host-glue
+UNet-only C text lives in this directory: `build_unet.py`'s `MAIN_C`, the bench text in `bench/`, and
+`bf16_gemm_convin.cc` (`gemm_bf16`, one 64×64×64 bf16 tile per launch), its `--ktimer` variant
+`bf16_gemm_convin_ktimer.cc`, the TU head `tile64_conv_head.cc`, the x86 rounding-mode probe `softfloat_rm_reset.cc`
+and the x86 test harness `kacc_bmm_host_x86_harness.cc` (used by `test_attn_sites.py`). Every generic kernel and host-glue
 template is read from the aiednn library, the board compare tool from the aiegraph runtime:
 
 | Template | What |
 |---|---|
-| [`src/aiednn/conv2d/`](../../../src/aiednn/conv2d/) | `bf16_gemm_convin.cc` (`gemm_bf16`, one 64×64×64 bf16 tile per launch), `kacc_conv_host*.cc` (im2col / scatter glue of the K-in-core conv), `tile64_conv_*.cc`, `conv_bf16_carrier_ref.c` |
-| [`src/aiednn/gemm/`](../../../src/aiednn/gemm/) | `bf16_gemm_kacc.cc`, `gemm_kacc_kernel.cc` (one instance per layer shape), `kacc_linear_host.cc`, control-packet pragmas, `kacc_bench_*` |
+| [`src/aiednn/conv2d/`](../../../src/aiednn/conv2d/) | `kacc_conv_host*.cc` (im2col / scatter glue of the K-in-core conv), `tile64_conv_*.cc`, `conv_bf16_carrier_ref.c` |
+| [`src/aiednn/gemm/`](../../../src/aiednn/gemm/) | `gemm_kacc_kernel.cc` (one instance per layer shape), `kacc_linear_host.cc`, control-packet pragmas |
 | [`src/aiednn/attention/`](../../../src/aiednn/attention/) | flash attention (`fa_*.cc`), the bmm host glue `kacc_bmm_host.cc` |
 | [`src/aiednn/norm/`](../../../src/aiednn/norm/) | `fa_online_softmax.cc` (online softmax + 1/l rescale) |
 | [`src/aiednn/elementwise/`](../../../src/aiednn/elementwise/) | `epilogue_bias_residual.cc` (bias / temb / residual adds) |
@@ -27,6 +30,10 @@ template is read from the aiednn library, the board compare tool from the aiegra
 
 Lookup: `aiednn.template("<category>/<file>")` (verbatim text), `aiednn.params(...)` (its `@NAME@`
 parameters), `aiednn.render(..., NAME=value)`.
+
+The kacc micro-bench text (`kacc_bench.sh` / `kacc_gemm.py` only, not model-generic) lives in
+[`bench/`](bench/): `kacc_bench_data_{conv,gemm,bmm}.h`, `kacc_bench_prelude_{gemm,bmm}.cc`,
+`kacc_bench_{gemm,bmm}_host.cc` and `bf16_gemm_kacc.cc`; the bench scripts load it by path.
 
 ## Build and run
 ```sh

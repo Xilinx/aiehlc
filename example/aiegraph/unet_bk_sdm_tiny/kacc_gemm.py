@@ -14,6 +14,7 @@ no bias; KCMP cos is against the fp32 golden y.npy.
 """
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -23,7 +24,26 @@ import sys as _sys  # noqa: E402
 _SRC = _os.path.normpath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "../../../src"))
 if _SRC not in _sys.path:  # C text lives in src/aiednn/<cat>/ (kernels) and src/aiegraph/runtime/
     _sys.path.insert(0, _SRC)
-from aiednn import render as _render, runtime_source as _rt, template as _tpl  # noqa: E402
+from aiednn import runtime_source as _rt  # noqa: E402
+
+BENCH = Path(__file__).resolve().parent / "bench"   # bench-only text (kacc_bench_*), loaded by path, not aiednn templates
+
+
+def _bench(name: str) -> str:
+    """bench/<name> text, verbatim"""
+    with open(BENCH / name, encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+def _bench_render(name: str, **kv) -> str:
+    """bench/<name> with every @NAME@ filled; missing or unknown parameters are errors (as aiednn.render)"""
+    t = _bench(name)
+    want = set(re.findall(r"@([A-Z][A-Z0-9_]*)@", t))
+    if set(kv) != want:
+        raise SystemExit(f"[kacc_gemm] bench/{name}: missing {sorted(want - set(kv))} unknown {sorted(set(kv) - want)}")
+    for k, v in kv.items():
+        t = t.replace(f"@{k}@", str(v))
+    return t
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -101,16 +121,16 @@ def main():
     data = "op_golden/" + "/".join(str(g).rstrip("/").split("/")[-2:])
     data = data[:data.rindex("/") + 5]  # op_golden/<set>/cNNN
     tag = data.split("/")[-1] + "-kacc-gemm"
-    (out / "kacc_data.h").write_text(_render("gemm/kacc_bench_data_gemm.h", CHS=chs, DATA=data, GMAC=f"{gmac:.6f}", GOLDEN=g, K=K, KP=kp, M=M, MP=Mp, N=N, OUT=out, PXS=pxs, S=S, SPLIT_PX=int(mode == 'px'), TAG=tag, TR=tr, Y_SHA=ysha))
+    (out / "kacc_data.h").write_text(_bench_render("kacc_bench_data_gemm.h", CHS=chs, DATA=data, GMAC=f"{gmac:.6f}", GOLDEN=g, K=K, KP=kp, M=M, MP=Mp, N=N, OUT=out, PXS=pxs, S=S, SPLIT_PX=int(mode == 'px'), TAG=tag, TR=tr, Y_SHA=ysha))
     name = ua.kacc_name(chs, K, pxs)
     args = "Xs, Ws, Ys" if tr else "Ws, Xs, Ys"
-    src = (ua.CTRLPKT_PRAGMAS + _tpl("gemm/kacc_bench_prelude_gemm.cc") + ua.KACC_KERNEL + "\n" +
+    src = (ua.CTRLPKT_PRAGMAS + _bench("kacc_bench_prelude_gemm.cc") + ua.KACC_KERNEL + "\n" +
            HOST.replace("@NAME@", name).replace("@ARGS@", args))
     (out / "kacc_gemm.cc").write_text(src)
     print(f"[kacc_bench] data={data} tag={tag} kernel={name} launches_per_pass={S}")
 
 
-HOST = _tpl("gemm/kacc_bench_gemm_host.cc")
+HOST = _bench("kacc_bench_gemm_host.cc")
 
 def main_bmm(g, out):
     """PBK: attention bmm (a.npy [1,H,M,K], b.npy [1,H,K,N]) -- B and A packed by the HOST at run time
@@ -168,16 +188,16 @@ def main_bmm(g, out):
     y.astype("<f4").reshape(-1).tofile(out / "kacc_y.bin")
     data = "op_golden/" + "/".join(str(g).rstrip("/").split("/")[-2:])
     tag = data.split("/")[-1][:4] + "-kacc-bmm"
-    (out / "kacc_data.h").write_text(_render("gemm/kacc_bench_data_bmm.h", CHP=CHP, CHR=CHR, CHS=chs, DATA=data, GMAC=f"{gmac:.6f}", GOLDEN=g, H=H, K=K, KCH=kch, KP=kp, M=M, N=N, OUT=out, PXP=PXP, PXR=PXR, PXS=pxs, S=S, SPLIT_PX=int(mode == 'px'), SWAP=swap, TAG=tag, TR=tr, Y_SHA=ysha))
+    (out / "kacc_data.h").write_text(_bench_render("kacc_bench_data_bmm.h", CHP=CHP, CHR=CHR, CHS=chs, DATA=data, GMAC=f"{gmac:.6f}", GOLDEN=g, H=H, K=K, KCH=kch, KP=kp, M=M, N=N, OUT=out, PXP=PXP, PXR=PXR, PXS=pxs, S=S, SPLIT_PX=int(mode == 'px'), SWAP=swap, TAG=tag, TR=tr, Y_SHA=ysha))
     name = ua.kacc_name(chs, Kp, pxs)
     args = "Xs, Ws, Ys" if tr else "Ws, Xs, Ys"
-    src = (ua.CTRLPKT_PRAGMAS + _tpl("gemm/kacc_bench_prelude_bmm.cc") +
+    src = (ua.CTRLPKT_PRAGMAS + _bench("kacc_bench_prelude_bmm.cc") +
            ua.KACC_KERNEL + "\n" + HOST_BMM.replace("@NAME@", name).replace("@ARGS@", args))
     (out / "kacc_gemm.cc").write_text(src)
     print(f"[kacc_bench] data={data} tag={tag} kernel={name} launches_per_pass={H * S}")
 
 
-HOST_BMM = _tpl("gemm/kacc_bench_bmm_host.cc")
+HOST_BMM = _bench("kacc_bench_bmm_host.cc")
 
 
 if __name__ == "__main__":

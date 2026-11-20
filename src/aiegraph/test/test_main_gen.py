@@ -33,6 +33,11 @@ def _old_module(rel: str, name: str):
     src = (src.replace(f'"aie {OLD_K}_aie_lin ", 17', '"aie aiednn_aie_lin ", 19')
            .replace(f"{OLD_K}_aie_", "aiednn_aie_").replace(f"{OLD_K}_prof_print", "aiednn_prof_print")
            .replace('"gemm/bf16_gemm_kacc.cc"', '"gemm/gemm_kacc_kernel.cc"'))
+    # aiednn-reorg P3: the UNet-only C text left src/aiednn for the example directory (loaded next to unet_aie.py)
+    for f in ("bf16_gemm_convin.cc", "bf16_gemm_convin_ktimer.cc"):
+        src = src.replace(f'_tplpath("conv2d/{f}")', f'(Path(__file__).resolve().parent / "{f}")')
+    for f in ("softfloat_rm_reset.cc", "tile64_conv_head.cc"):
+        src = src.replace(f'_tpl("conv2d/{f}")', f'open(Path(__file__).resolve().parent / "{f}", encoding="utf-8", newline="").read()')
     mod = types.ModuleType(name)
     mod.__file__ = str(ROOT / rel)   # the old module resolves its templates relative to its own path
     if str(EX) not in sys.path:

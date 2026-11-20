@@ -34,8 +34,16 @@ if _SRC not in _sys.path:  # C text lives in src/aiednn/<cat>/ (kernels) and src
     _sys.path.insert(0, _SRC)
 from aiednn import path as _tplpath, runtime_source as _rt, template as _tpl  # noqa: E402
 
-P2K = _tplpath("conv2d/bf16_gemm_convin.cc")  # 64x64 ports (8e7254d, board PASS p0_board.log)
-P2K_KT = _tplpath("conv2d/bf16_gemm_convin_ktimer.cc")  # --ktimer: core timer tail, b 80x64 / c 64x80
+_HERE = Path(__file__).resolve().parent  # UNet-only C text lives next to this file
+
+
+def _local(fn):
+    with open(_HERE / fn, encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+P2K = _HERE / "bf16_gemm_convin.cc"  # 64x64 ports (8e7254d, board PASS p0_board.log)
+P2K_KT = _HERE / "bf16_gemm_convin_ktimer.cc"  # --ktimer: core timer tail, b 80x64 / c 64x80
 ENTRY = "aiek_unetconv"
 
 
@@ -343,7 +351,7 @@ def kernel_text(ktimer: bool = False) -> str:
     return m.group(1)
 
 
-SOFTFLOAT_RM = _tpl("conv2d/softfloat_rm_reset.cc")
+SOFTFLOAT_RM = _local("softfloat_rm_reset.cc")
 
 
 CTRLPKT_PRAGMAS = (  # --ctrlpkt aot (P2a): spelled as aiehlc prints them (src/llvm/aiehlc.cc); no KERNELCONFIGOFFLOAD (P3)
@@ -376,7 +384,7 @@ def write_kernel(kdst: Path, spec: str, maxacc: int, warm: bool = False, ctrlpkt
     assert "export    aiednn_aie_conv" in spec, spec
     kdst.mkdir(parents=True, exist_ok=True)
     kcc = kdst / f"{ENTRY}.cc"
-    head = _tpl("conv2d/tile64_conv_head.cc").replace("@E@", ENTRY).replace("@SRC@", str(P2K_KT if ktimer else P2K))
+    head = _local("tile64_conv_head.cc").replace("@E@", ENTRY).replace("@SRC@", str(P2K_KT if ktimer else P2K))
     if ctrlpkt == "aot":
         head = CTRLPKT_PRAGMAS + head
     ktext = kernel_text(ktimer)

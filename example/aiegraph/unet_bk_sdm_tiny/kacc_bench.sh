@@ -57,8 +57,7 @@ fi
 "$PY" -I - "$GOLDEN" "$OUT" "$ROOT" <<'EOF'
 import sys, json, hashlib, numpy as np
 g, out = sys.argv[1], sys.argv[2]
-sys.path.append(sys.argv[3] + "/src")
-import aiednn  # kacc_data.h text: src/aiednn/gemm/kacc_bench_data_conv.h
+import re  # kacc_data.h text: bench/kacc_bench_data_conv.h (loaded by path)
 meta = json.load(open(f"{g}/meta.json"))
 x = np.load(f"{g}/a.npy").astype(np.float32); w = np.load(f"{g}/b.npy").astype(np.float32)
 bias = np.load(f"{g}/c.npy").astype(np.float32); y = np.load(f"{g}/y.npy")
@@ -72,6 +71,13 @@ assert (M, K, N) == (64, 23040, 1280), (M, K, N)   # shapes compiled into bf16_g
 xp = np.pad(x[0], ((0, 0), (1, 1), (1, 1)))
 A = np.stack([xp[:, i:i + H, j:j + W_] for i in range(3) for j in range(3)], 1).reshape(C * 9, M).T  # [M][c*9+kh*3+kw]
 B = w.reshape(O, K)
+def render(p, **kv):  # fill every @NAME@; missing or unknown parameters are errors
+    t = open(p, encoding="utf-8", newline="").read()
+    want = set(re.findall(r"@([A-Z][A-Z0-9_]*)@", t))
+    assert set(kv) == want, (p, sorted(want - set(kv)), sorted(set(kv) - want))
+    for k, v in kv.items():
+        t = t.replace(f"@{k}@", str(v))
+    return t
 def bf16(a):  # round to nearest even
     u = np.ascontiguousarray(a, np.float32).view(np.uint32).astype(np.uint64)
     return ((u + 0x7fff + ((u >> 16) & 1)) >> 16).astype(np.uint16)
@@ -97,7 +103,7 @@ data = "op_golden/" + "/".join(g.rstrip("/").split("/")[-2:])
 data = data[:data.rindex("/") + 5]  # op_golden/<set>/cNNN
 tag = data.split("/")[-1] + "-kacc"
 with open(f"{out}/kacc_data.h", "w") as f:
-    f.write(aiednn.render("gemm/kacc_bench_data_conv.h", GOLDEN=g, M=M, K=K, N=N, DATA=data, TAG=tag, Y_SHA=ysha,
+    f.write(render(sys.argv[3] + "/example/aiegraph/unet_bk_sdm_tiny/bench/kacc_bench_data_conv.h", GOLDEN=g, M=M, K=K, N=N, DATA=data, TAG=tag, Y_SHA=ysha,
                           OUT=out))
 print(f"[kacc_bench] data={data} tag={tag}")
 EOF

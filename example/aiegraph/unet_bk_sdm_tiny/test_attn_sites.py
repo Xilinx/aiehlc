@@ -40,7 +40,7 @@ PALL = Path(os.environ.get("GATT_PART_ALL", "/scratch/staff/huaj/tmp/unet_m2/s6/
 ONNX = Path(os.environ.get("GATT_ONNX", "/scratch/staff/huaj/modelzoo/artifacts/bk-sdm-tiny/unet_sim.onnx"))
 BASE = os.environ.get("GATT_BASE", "85ec4ff")
 
-HARNESS = aiednn.template("attention/kacc_bmm_host_x86_harness.cc")  # x86 stubs around ATTN_HOST
+HARNESS = (HERE / "kacc_bmm_host_x86_harness.cc").read_text(encoding="utf-8")  # x86 stubs around ATTN_HOST
 
 
 class DLT(ctypes.Structure):
