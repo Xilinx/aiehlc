@@ -73,9 +73,14 @@ int main() {
     aieMesh mesh = device.partition({2, 6, 0, 6}, 4, 4);
     const size_t wbytes = (size_t)KACC_N * KACC_KP * 2, xbytes = (size_t)KACC_MP * KACC_KP * 2;
     const size_t ybytes = (size_t)KACC_N * KACC_MP * 4;
-    int32_t *Wd = (int32_t *)__Runtime_Alloc(wbytes);
-    int32_t *Xd = (int32_t *)__Runtime_Alloc(xbytes);
+#ifndef P0_BASE_OFF
+#define P0_BASE_OFF 0 /* bytes added to the W and X base addresses (DDR address-mapping probe; multiple of 64) */
+#endif
+    char *Wraw = (char *)__Runtime_Alloc(wbytes + P0_BASE_OFF), *Xraw = (char *)__Runtime_Alloc(xbytes + P0_BASE_OFF);
+    int32_t *Wd = Wraw ? (int32_t *)(Wraw + P0_BASE_OFF) : 0;
+    int32_t *Xd = Xraw ? (int32_t *)(Xraw + P0_BASE_OFF) : 0;
     int32_t *Yd = (int32_t *)__Runtime_Alloc(ybytes);
+    printf("[P0] base W=%p X=%p Y=%p off=%d\n", (void *)Wd, (void *)Xd, (void *)Yd, (int)P0_BASE_OFF);
     if (!Wd || !Xd || !Yd) {
         printf("KCMP %s data=%s y_sha256=%s cos=0.000000 FAIL (alloc)\n", KACC_TAG, KACC_DATA, KACC_Y_SHA);
         return 1;
