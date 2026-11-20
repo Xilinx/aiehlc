@@ -73,6 +73,51 @@ def test_split_perf_counters_board_c2():
     assert io03["pre_io_active"] + io03["io_active"] == t03["active"]
 
 
+# ---- P0b: L / N partition of the LAUNCH split (no overlap between rt_* and host_*) ----
+SPLIT_LOGS = ["c16.log", "p7_yboard0.log.excerpt", "u_lin_1024x320x320.log"]
+
+
+@pytest.mark.parametrize("name", SPLIT_LOGS)
+def test_split_partition(name):
+    """Board logs (palmyra213 / yboard0): each split column is exactly rt_* + host_* (main_launch_line.c:31-32).
+
+    L (M1) = kload (incl. core_reset) + coreen + rt_bdcfg + rt_startio; N (M2) = host_glue_bdcfg +
+    host_flush_startio + host_inval_wait_io; K = rt_wait_io. Split fields are 3-decimal, rt/host are
+    4-decimal, so the identity holds to <= 0.002 ms.
+
+    sp_call (printed as gemm_call) goes into NO split column (main_launch_line.c:29-34: c_kl/c_bd/c_si/
+    c_ce/c_wi use ph[*], wio, sp_pre, sp_glue, sp_post only) and must never be added to L or N.
+    It IS a superset of ph[*]: sp_call = gemm_bf16 call = sp_glue + the ph[0..3] cycles accrued in
+    the call + the part of wait_io accrued inside the call (tile64_conv_host.cc:273-275), so
+      kload + coreen + bdcfg + rt_startio <= gemm_call <= that + rt_wait_io.
+    c16: gemm_call=2.6463 vs bdcfg+startio+coreen+kload=1.492 (lower bound 1.3456, upper 2.7139);
+    u_lin and p7 sit on the upper bound (all of wait_io happens inside the call).
+    """
+    r = parse(DATA / name)
+    s, d = r["split"], r["split_detail"]
+    rt, host = d["rt"], d["host"]
+    tol = 2e-3
+    assert s["bdcfg"] == pytest.approx(rt["bdcfg"] + host["glue_bdcfg"], abs=tol)
+    assert s["startio"] == pytest.approx(rt["startio"] + host["flush_startio"], abs=tol)
+    assert s["wait_io"] == pytest.approx(rt["wait_io"] + host["inval_wait_io"], abs=tol)
+    # sp_call is not one of the summed columns: the five columns alone give sum_vs_aie_wall
+    five = s["kload"] + s["bdcfg"] + s["startio"] + s["coreen"] + s["wait_io"]
+    assert five == pytest.approx(s["ms_per_launch"] * s["sum_vs_aie_wall"], abs=6e-3)
+    call = d["other"]["gemm_call"]
+    assert five + call > s["ms_per_launch"] * s["sum_vs_aie_wall"] + 1.0  # adding it would double count
+    # sp_call is a superset of ph[*] (L phases + glue), bounded above by adding all of rt_wait_io
+    lo = s["kload"] + s["coreen"] + s["bdcfg"] + rt["startio"]
+    assert lo - tol <= call <= lo + rt["wait_io"] + tol
+    assert call > s["kload"] + s["coreen"] + s["bdcfg"] + s["startio"]  # c16: 2.6463 > 1.492
+
+
+def test_split_partition_c16_sp_call_numbers():
+    d = parse(DATA / "c16.log")["split_detail"]
+    s = parse(DATA / "c16.log")["split"]
+    assert d["other"]["gemm_call"] == 2.6463
+    assert s["bdcfg"] + s["startio"] + s["coreen"] + s["kload"] == pytest.approx(1.492, abs=1e-9)
+
+
 # ---- DES (segment K): src/aiegraph/costmodel/des.py ----
 from aiegraph.costmodel import des  # noqa: E402
 
