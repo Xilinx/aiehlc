@@ -212,16 +212,19 @@ def _interp_cols(points: List[List[float]], n: int) -> float:
 # 6.5-9.5 us (issue blocks when DMA per config is slower); see xiaojiang/tasks/2026-11-20_ddr-floor-vs-meas.
 BD_US_FIT = {"palmyra213": 5.67}
 
-# Short-DDR-run penalty, per board: {run_b: {"issue": f, "dma": f}} -- launch ~ issue + floor x f(run_b, regime),
-# regime "dma" when ddr_floor > host issue, else "issue" (part of the slow DMA runs under BD configuration).
-# A plain number applies to both regimes; run_b not listed -> factor 1.
-# palmyra213, six 32 B-run kernels (launch - issue) / floor (xiaojiang/tasks/2026-11-20_runb-p4h):
-#   DMA-bound   u_conv_1024x2880x320 1.95, u_lin_1024x5760x320 2.00            -> mean 1.98
-#   issue-bound u_lin_1024x{1280x320, 320x2560, 320x320, 320x960} 1.50/1.45/1.35/1.38 -> mean 1.42
-# leave-one-out within regime: max |rel| 3.4%, mean 1.7% (P4g max(issue+floor, 2.67 floor): 14.2% max).
+# Short-DDR-run penalty, per board: {run_b: {"issue": f, "dma": f}, "r_switch": r} -- launch ~ issue + floor x
+# f(run_b, regime), regime "dma" when ddr_floor > r_switch x host issue (default r_switch 1), else "issue" (part of
+# the slow DMA runs under BD configuration).  A plain number applies to both regimes; run_b not listed -> factor 1.
+# palmyra213, nine 32 B-run kernels, f_eff = (launch - issue) / floor, sorted by r = floor / issue
+# (xiaojiang/tasks/2026-11-20_runb-p4h, loo2.py):
+#   issue  u_lin_1024x320x320 r.15 1.35, 1024x320x960 r.23 1.38, 1024x320x2560 r.27 1.45, 1024x1280x320 r.62 1.50
+#   dma    u_lin_1024x1600x320 r.77 1.96, 1024x1920x320 r.93 1.97, 1024x2560x320 r1.24 2.06,
+#          u_conv_1024x2880x320 r1.40 1.95, u_lin_1024x5760x320 r2.78 2.00
+# The switch is a step between r .62 and .77 (P4i r_switch .70, dma mean 1.99; P4h used 1.0 and missed u_lin_1024x1920x320 by -18%).
+# Leave-one-out within regime: max |rel| 3.4%, mean 1.7% (P4g max(issue+floor, 2.67 floor): 14.2% max).
 # Same-tree TKW 8 -> 16 A/B (32 -> 64 B runs) confirms the cause on the DMA-bound pair (-32%, -32%).
-# Caveats: n=2 DMA-bound; a step at floor == issue (no kernel measured near r = floor/issue 0.6..1.4).
-RUN_B_FACTOR_FIT = {"palmyra213": {32: {"issue": 1.42, "dma": 1.98}}}
+# Caveat: only one issue-regime kernel above r .3; the step may depend on shape, not r alone.
+RUN_B_FACTOR_FIT = {"palmyra213": {32: {"issue": 1.42, "dma": 1.99}, "r_switch": 0.70}}
 
 
 def _runb_factor(v: Any, regime: str) -> float:
@@ -234,8 +237,9 @@ def _runb_factor(v: Any, regime: str) -> float:
 
 def ddr_runb(floor: Optional[Dict[str, Any]], ddr: Optional[Dict[str, Any]],
              factors: Optional[Dict[int, Any]], issue_ms: Optional[float] = None) -> Optional[Dict[str, Any]]:
-    """Run-length-adjusted DDR time (P4h): ms = floor x the MM2S-byte-weighted factor of each read channel's head-BD
-    run_b, the factor picked by regime ("dma" when floor > issue_ms, else "issue"; "dma" without issue_ms).
+    """Run-length-adjusted DDR time (P4h; P4i adds r_switch): ms = floor x the MM2S-byte-weighted factor of each read channel's head-BD
+    run_b, the factor picked by regime ("dma" when floor > factors["r_switch"] (default 1) x issue_ms, else "issue";
+    "dma" without issue_ms).
     With ``issue_ms`` also launch_ms = issue + ms.  An estimate, not a bound -- report only, like ddr_floor."""
     if floor is None or ddr is None or not factors:
         return None
@@ -243,7 +247,8 @@ def ddr_runb(floor: Optional[Dict[str, Any]], ddr: Optional[Dict[str, Any]],
     tot = sum(c["bytes"] for c in rd)
     if not tot:
         return None
-    regime = "dma" if issue_ms is None or floor["ms"] > float(issue_ms) else "issue"
+    r_switch = float(factors.get("r_switch", 1.0))
+    regime = "dma" if issue_ms is None or floor["ms"] > r_switch * float(issue_ms) else "issue"
     fac = sum(c["bytes"] * _runb_factor(factors.get(c.get("run_b")), regime) for c in rd) / tot
     out = {"ms": floor["ms"] * fac, "factor": fac, "regime": regime}
     if issue_ms is not None:

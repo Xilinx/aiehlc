@@ -295,6 +295,23 @@ def test_given_an_issue_bound_32b_launch_then_run_size_is_hidden_under_issue():
         assert r["regime"] == "issue" and r["launch_ms"] == pytest.approx(meas, rel=0.04)
 
 
+def test_given_a_32b_launch_between_the_old_and_new_switch_then_it_is_dma_bound():
+    # P4i: palmyra213 u_lin_1024x{1600,1920,2560}x320 (r = floor/issue .77/.93/1.24) measured 6.879/7.719/9.711 ms;
+    # P4h (switch at r 1) put r .77 and .93 in the issue regime and missed u_lin_1024x1920x320 by -18%
+    ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=32)]}
+    for floor, meas in ((2.114, 6.879), (2.537, 7.719), (3.382, 9.711)):
+        r = bdgraph.ddr_runb({"ms": floor}, ddr, bdgraph.RUN_B_FACTOR_FIT["palmyra213"], issue_ms=2.733)
+        assert r["regime"] == "dma" and r["launch_ms"] == pytest.approx(meas, rel=0.03)
+
+
+def test_given_factors_without_r_switch_then_the_regime_switches_at_floor_equal_issue():
+    ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=32)]}
+    fac = {32: {"issue": 1.4, "dma": 2.0}}
+    assert bdgraph.ddr_runb({"ms": 0.9}, ddr, fac, issue_ms=1.0)["regime"] == "issue"
+    assert bdgraph.ddr_runb({"ms": 1.1}, ddr, fac, issue_ms=1.0)["regime"] == "dma"
+    assert bdgraph.ddr_runb({"ms": 0.9}, ddr, {**fac, "r_switch": 0.7}, issue_ms=1.0)["regime"] == "dma"
+
+
 def test_given_a_run_b_without_a_fit_then_its_factor_is_1_in_both_regimes():
     ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=64)]}
     for issue in (0.5, 5.0):
