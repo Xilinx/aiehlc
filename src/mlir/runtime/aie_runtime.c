@@ -8730,6 +8730,12 @@ static void rt_wait_io_timeout_dump(XAie_DevInst *dev) {
  * Reference: aeg_runtime_api.cpp waitDMAChannelTaskQueue / waitDMAChannelDone
  */
 void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
+#if AIEHLC_PROFILING
+    /* KCO launches issue startio from the control packet (no __Runtime_startio), so take the io snapshot at
+     * the first wait_io of the launch instead; no-op unless pending (off path already snapped at startio).
+     * Outside the timed window below (WINLINT: no MMIO/printf inside it). */
+    rt_core_perf_snap_at_startio();
+#endif
     rt_sb_commit();
     (void)rt_sb_ack_wait();
     unsigned long long __wio_t0 = RT_PROF_TIC();

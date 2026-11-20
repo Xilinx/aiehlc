@@ -536,3 +536,18 @@ def test_site_perf_runtime_wired():
     assert w.index("RT_PROF_ADD(g_wait_io_cycles") < w.index("rt_core_perf_site_read();")
     hdr = (RT / "aie_host_split.h").read_text()
     assert "__Runtime_core_perf_last_launch(&ia, &ls, &ss)" in hdr
+
+
+def test_site_perf_kco_snapshot():
+    # aot-kco: startio comes from KCO, so the io snapshot is also taken at the first wait_io of a launch,
+    # before the timed window (RT_PROF_TIC / ahs_now) -- GAP-aie_runtime-io-snapshot
+    rt = (RT / "aie_runtime.c").read_text()
+    w = rt[rt.index("void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {"):]
+    w = w[:w.index("\n}\n")]
+    i = w.index("rt_core_perf_snap_at_startio();")
+    assert i < w.index("RT_PROF_TIC()") and i < w.index("ahs_now()")
+    s = rt[rt.index("static void rt_core_perf_snap_at_startio(void) {"):]
+    s = s[:s.index("\n}\n")]
+    assert "if (!s_core_perf_snap_pending" in s and "s_core_perf_snap_pending = 0;" in s
+    st = rt[rt.index("struct_ioevent __Runtime_startio(XAie_DevInst *dev"):]
+    assert st.index("rt_core_perf_snap_at_startio();") < st.index("RT_PROF_TIC()")
