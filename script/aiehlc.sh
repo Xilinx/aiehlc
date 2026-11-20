@@ -604,7 +604,13 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
     # Copy the built ELF to the standard output location
     TILING_BUILD_DIR="${WORKLOCAL_DIR}/build"
     if [ -f "${TILING_BUILD_DIR}/host" ]; then
-        cp -f "${TILING_BUILD_DIR}/host" "${HOST_BUILD_DIR}/main.elf"
+        # hostcompile.sh already published main.elf (stripped unless
+        # DEBUG_SYMS=1) + main.debug.elf. Copying the unstripped host over it
+        # here undid the strip. Only copy if nothing newer was published.
+        if [ ! -f "${HOST_BUILD_DIR}/main.elf" ] || \
+           [ "${TILING_BUILD_DIR}/host" -nt "${HOST_BUILD_DIR}/main.elf" ]; then
+            cp -f "${TILING_BUILD_DIR}/host" "${HOST_BUILD_DIR}/main.elf"
+        fi
         echo "Build complete (tiling mode)."
         echo "    ${HOST_BUILD_DIR}/main.elf"
     else
