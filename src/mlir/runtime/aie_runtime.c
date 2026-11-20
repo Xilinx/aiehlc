@@ -724,14 +724,15 @@ void __Runtime_core_perf_report(int tag) {
                (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row, (int)rc, a, v, ss, ls);
         /* launch window A->B: io_active = max(0, dACTIVE - ovl), compute = dACTIVE - dLOCK - dSTREAM,
          * ovl = this tile's A->B read-to-read host time outside the waits; pre_io_* = the rest since kernel-group enable;
-         * snap_gap_cyc = last wait end -> B. compute_cyc/ovl_cyc appended (old fields unchanged). */
+         * snap_gap_cyc = last wait end -> B. compute_cyc/ovl_cyc, then dact_cyc (= A->B counter-0 change of this tile,
+         * M3.1.1 PD: KWIN done=1 when ovl - dact - snap_gap >= wait) appended (old fields unchanged). */
         if (s_klw_state == 3 && s_klw_nwait > 0 && s_klw_ok[i] && rc == XAIE_OK)
             printf("[PERFIO] tag=%d tile=(%u,%u) pre_io_active=%llu pre_io_lock_stall=%llu io_active=%llu "
-                   "io_lock_stall=%llu snap_gap_cyc=%llu compute_cyc=%llu ovl_cyc=%llu\n",
+                   "io_lock_stall=%llu snap_gap_cyc=%llu compute_cyc=%llu ovl_cyc=%llu dact_cyc=%llu\n",
                    tag, (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row,
                    (unsigned long long)a > s_klw_io[i] ? (unsigned long long)a - s_klw_io[i] : 0ULL,
                    (unsigned long long)ls > s_klw_ls[i] ? (unsigned long long)ls - s_klw_ls[i] : 0ULL, s_klw_io[i],
-                   s_klw_ls[i], s_klw_gap_cyc, s_klw_compute[i], s_klw_tovl[i]);
+                   s_klw_ls[i], s_klw_gap_cyc, s_klw_compute[i], s_klw_tovl[i], s_klw_da[i]);
         asum += a;
         if (a > amax)
             amax = a;

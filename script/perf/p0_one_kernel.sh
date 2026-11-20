@@ -75,10 +75,13 @@ parse_run() {
     if (!(t in A) || ac > A[t]) { A[t] = ac; C[t] = ac - ls - ss }
 }
 /^\[PERFIO\] tag=[0-9]+ tile=/ {
-    t = ""; io = 0; pio = 0; gp = 0; cc = -1; oc = -1
+    t = ""; io = 0; pio = 0; gp = 0; cc = -1; oc = -1; da = -1; hgp = 0
     for (i = 2; i <= NF; i++) { split($i, f, "="); if (f[1] == "tag") t = f[2]; if (f[1] == "io_active") io = f[2] + 0
-        if (f[1] == "pre_io_active") pio = f[2] + 0; if (f[1] == "snap_gap_cyc") gp = f[2] + 0
-        if (f[1] == "compute_cyc") cc = f[2] + 0; if (f[1] == "ovl_cyc") oc = f[2] + 0 }
+        if (f[1] == "pre_io_active") pio = f[2] + 0; if (f[1] == "snap_gap_cyc") { gp = f[2] + 0; hgp = 1 }
+        if (f[1] == "compute_cyc") cc = f[2] + 0; if (f[1] == "ovl_cyc") oc = f[2] + 0; if (f[1] == "dact_cyc") da = f[2] + 0 }
+    # done (M3.1.1 PD): slack = ovl - dact - snap_gap per tile and launch; min over all [PERFIO] lines; a line
+    # without dact_cyc/ovl_cyc/snap_gap_cyc (pre-PD log) makes done=0
+    if (da < 0 || oc < 0 || !hgp) dmiss = 1; else { sl = oc - da - gp; if (!hsl || sl < slmin) { slmin = sl; hsl = 1 } }
     if (!(t in IO) || io > IO[t]) { IO[t] = io; PIO[t] = pio }
     if (!(t in GP) || gp > GP[t]) GP[t] = gp
     # KOVL: compute_cyc / ovl_cyc per launch = the slowest tile (max); -1 when the field is missing (pre-KOVL logs)
@@ -111,8 +114,12 @@ END {
     printf "PERFCHK cfg=%s kernel=%s active_cyc=%d io_active_cyc=%d wait_cyc=%d io_le_wait=%d\n",
         cp, kern, act, io_m, wc, (ni > 0 && io_m <= wc + gp_m ? 1 : 0)
     den = wc + gp_m; ratio = (den > 0 ? io_m / den : -1)
-    printf "KWIN cfg=%s kernel=%s launches=%d perfio_n=%d io_active_cyc=%d pre_io_active_cyc=%d wait_cyc=%d snap_gap_cyc=%d ratio=%.3f ok=%d\n",
-        cp, kern, L, ni, io_m, pio_m, wc, gp_m, ratio, (ni == L + 0 && ratio >= 0 && ratio <= 1.02 && (io_m > 0 || wc < 10000) ? 1 : 0)
+    # done=1 (M3.1.1 PD): every [PERFIO] tile and launch has ovl_cyc - dact_cyc - snap_gap_cyc >= wait_cyc, i.e. the
+    # whole A->B core counter-0 change fits outside the waits (and outside the last-wait -> B gap): the core was
+    # done before the waits, so io=0 is a real zero. ok also accepts io=0 && done=1 (any wait length).
+    done = (ni > 0 && ni == L + 0 && !dmiss && hsl && slmin >= wc ? 1 : 0)
+    printf "KWIN cfg=%s kernel=%s launches=%d perfio_n=%d io_active_cyc=%d pre_io_active_cyc=%d wait_cyc=%d snap_gap_cyc=%d ratio=%.3f done=%d slack_min_cyc=%d ok=%d\n",
+        cp, kern, L, ni, io_m, pio_m, wc, gp_m, ratio, done, (hsl ? slmin : -1), (ni == L + 0 && ratio >= 0 && ratio <= 1.02 && (io_m > 0 || wc < 10000 || (io_m == 0 && done)) ? 1 : 0)
     # KOVL (M3.1.1 PB): compute_cyc / ovl_cyc = [PERFIO] fields, slowest tile per launch, mean over launches (-1 if any
     # launch lacks them); io_unhidden_cyc = wait_cyc - ovl_cyc (>= 0), the wait not hidden behind compute; -1 w/o ovl.
     nc = 0; scc = 0; soc = 0; cmiss = 0; omiss = 0
