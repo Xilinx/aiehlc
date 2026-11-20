@@ -413,8 +413,23 @@ __attribute__((unused)) static void rt_core_perf_snap_at_startio(void) {
     s_core_perf_snap_valid = 1;
 }
 
+/* Core perf counter 0 is not free when aie-rt ECC is on (DevInst->EccStatus, the XAie_CfgInitialize default):
+ * XAie_LoadElf -> _XAie_EccOnPM/_XAie_EccOnDM -> _XAie_EccPerfCntConfig (aie-rt pm/xaie_ecc.c:58) programs core
+ * counter 0 as the ECC-scrub period timer: Counter0_Event_Value = 1000000, Performance_Control2.Cnt0_Reset_Event =
+ * PERF_CNT_0 (event 5), start/stop = TRUE. Re-arming only start/stop (ACTIVE_CORE) leaves the self-reset in place,
+ * so counter 0 counted ACTIVE modulo 1e6 (palmyra213 resident: perfctl2=0x00000005, every read < 1e6, non-monotonic
+ * across launches; GAP-aie_runtime-core-perf-co-2da35c). Arming counter 0 for profiling therefore takes full
+ * ownership: reset event -> NONE (no self-reset; the scrub trigger then fires once at 1e6 instead of every 1e6
+ * cycles for the rest of the profiled run) before the counter is zeroed. */
+static AieRC rt_core_perf_claim_ctr0(XAie_DevInst *dev, XAie_LocType tile) {
+    return XAie_PerfCounterResetControlSet(dev, tile, XAIE_CORE_MOD, 0, XAIE_EVENT_NONE_CORE);
+}
+
 AieRC __Runtime_core_perf_setup(XAie_DevInst *dev, XAie_LocType tile) {
     AieRC rc;
+    rc = rt_core_perf_claim_ctr0(dev, tile);
+    if (rc != XAIE_OK)
+        return rc;
     rc = XAie_PerfCounterSet(dev, tile, XAIE_CORE_MOD, 0, 0);
     if (rc != XAIE_OK)
         return rc;
