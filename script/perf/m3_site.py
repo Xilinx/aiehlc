@@ -15,12 +15,12 @@ Per site (from 'PROF aie_host_split part=<i> ... dma_ms wait_ms glue_ms flush_ms
   give off K/L sum rel 0.020/0.013, these give 0.001/0.001.
 Mapped site = kind in conv|linear|fa, geometry Mw/Kw/Nw > 0, >= 1 kernel name, launches > 0.
 Sums vs 'LAUNCH split' / 'LAUNCH split_detail' (per-launch ms x launches):
-  K: rt_wait_io x launches; L: (kload + rt_bdcfg + rt_startio + coreen) x launches; tolerance SUM_TOL.
+  K: rt_wait_io x launches; L: (kload + rt_bdcfg + rt_startio + coreen) x launches; tolerances SUM_TOL (K), L_TOL (L / rt_phase_sum_ms), KL_TOL (K+L vs rt_phase_sum_ms).
 Output:
   M3SITE  cfg=.. log=.. board=.. launches=.. run_rc=.. sites=.. kacc_sites=.. fa_sites=..
-  M3SPLIT cfg=.. log=.. K_sum_rel=.. L_sum_rel=..
+  M3SPLIT cfg=.. log=.. K_sum_rel=.. L_sum_rel=.. KL_rel=.. L_raw_rel=..   (L_raw_rel printed only)
   M3SUM   cfg=.. log=.. K_site_ms=.. K_split_ms=.. L_site_ms=.. L_split_ms=.. N_site_ms=.. KL_vs_rt_phase_sum_rel=..
-          site_launches=.. unmapped=.. PASS|FAIL   (KL_vs_rt_phase_sum_rel printed only)
+          site_launches=.. unmapped=.. PASS|FAIL
   M3PROBE ALL logs=.. sites=.. unmapped=.. PASS|FAIL      (rc=1 on FAIL)
 """
 import argparse
@@ -32,7 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from n_fit import measure  # noqa: E402
 
 SITES_PER_CFG = {"linear": 72, "conv": 48, "fa": 18}
-SUM_TOL = 0.03
+SUM_TOL = 0.03       # K_sum_rel = |K_site-K_split|/K_split
+L_TOL = 0.01         # L_sum_rel = |L_site-L_split|/rt_phase_sum_ms
+KL_TOL = 0.01        # KL_rel = |K_site+L_site-rt_phase_sum_ms|/rt_phase_sum_ms
 
 _SPLIT = re.compile(r"^PROF aie_host_split part=(\d+) kind=(\w+) .*dma_ms=([\d.]+) wait_ms=([\d.]+) "
                     r"glue_ms=([\d.]+) flush_ms=([\d.]+) inval_ms=([\d.]+) launches=(\d+)$", re.M)
@@ -76,14 +78,20 @@ def probe(cfg, log, build):
     k_site = sum(r["K"] for r in rows)
     l_site = sum(r["L"] for r in rows)
     n_site = sum(r["N"] for r in rows)
-    k_rel = abs(k_site - k_split) / k_split if k_split > 0 else float("inf")
-    l_rel = abs(l_site - l_split) / l_split if l_split > 0 else float("inf")
-    print("M3SPLIT cfg=%s log=%s K_sum_rel=%.3f L_sum_rel=%.3f" % (cfg, log, k_rel, l_rel))
-    kl_rel = abs(k_site + l_site - rps) / rps if rps > 0 else float("inf")
+    inf = float("inf")
+    k_rel = abs(k_site - k_split) / k_split if k_split > 0 else inf
+    # L normalised by the whole-run phase sum (rps is already the run total, not per launch):
+    # the site wait uses the cntpct hs window (aie_runtime.c:8674/8750), ~2.09 ms (aot-kco) shorter
+    # than rt_wait_io's pmccntr window, so that time moves K->L; L_raw_rel shows it, printed only.
+    l_rel = abs(l_site - l_split) / rps if rps > 0 else inf
+    kl_rel = abs(k_site + l_site - rps) / rps if rps > 0 else inf
+    l_raw = abs(l_site - l_split) / l_split if l_split > 0 else inf
+    print("M3SPLIT cfg=%s log=%s K_sum_rel=%.3f L_sum_rel=%.3f KL_rel=%.3f L_raw_rel=%.3f"
+          % (cfg, log, k_rel, l_rel, kl_rel, l_raw))
     unmapped = sum(not r["mapped"] for r in rows)
     site_launches = sum(r["launches"] for r in rows)
     ok = (rc == "0" and int(launches) == n == site_launches and kind == SITES_PER_CFG and unmapped == 0
-          and k_rel <= SUM_TOL and l_rel <= SUM_TOL)
+          and k_rel <= SUM_TOL and l_rel <= L_TOL and kl_rel <= KL_TOL)
     print("M3SUM cfg=%s log=%s K_site_ms=%.3f K_split_ms=%.3f L_site_ms=%.3f L_split_ms=%.3f N_site_ms=%.3f "
           "KL_vs_rt_phase_sum_rel=%.4f site_launches=%d unmapped=%d %s"
           % (cfg, log, k_site, k_split, l_site, l_split, n_site, kl_rel, site_launches, unmapped, "PASS" if ok else "FAIL"))
