@@ -2,6 +2,9 @@
 # Cost-model P0 / K1a: one gemm_kacc kernel from kernels.tsv on the board, with per-launch AIE core perf counters.
 #   p0_one_kernel.sh --board <ip> [--kernel <name>] [--kernels <kernels.tsv>] [--name palmyra213] [--out <dir>]
 #                    [--reps 8] [--aie-clk-mhz 1000] [--rebuild] [--ctrlpkt off|aot|aot-kco] [--build-only]
+#                    [--launch warm|reload|cold]
+# --launch (M1.2.1): warm (default) = WARM_DEFS (ZFILL_WIDE PMLOAD_WIDE PM_WARM_SKIP SKIP_BSS_DEFAULT); reload = warm
+# minus PM_WARM_SKIP (program memory reloaded every launch, PMLOAD_WIDE kept); cold = no WARM_DEFS (runtime defaults).
 # --ctrlpkt (M1.1): off = MMIO (UNET_CTRLPKT=off, no control-packet pragmas), aot (default, the 5 aot pragmas),
 # aot-kco (UNET_CTRLPKT_KCO=1, + KERNELCONFIGOFFLOAD; as build_unet.py --ctrlpkt aot-kco). --build-only: stop after
 # BUILD_OK (no --board needed). The stamp carries the ctrlpkt mode + md5 of unet_aie.py / gemm/ctrlpkt_*.h.
@@ -18,7 +21,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 PY="${KACC_PY:-/scratch/staff/huaj/aiehlc/.venv/bin/python3}"
-BOARD="" KERNEL="u_lin_1024x320x320" NAME="" OUT="" REPS=8 CLK=1000 REBUILD=0 CTRLPKT=aot BUILD_ONLY=0
+BOARD="" KERNEL="u_lin_1024x320x320" NAME="" OUT="" REPS=8 CLK=1000 REBUILD=0 CTRLPKT=aot BUILD_ONLY=0 LAUNCH=warm
 KTSV=/scratch/staff/huaj/aiengineers/arthur/tasks/2026-11-19_costmodel/kernels.tsv
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -32,7 +35,8 @@ while [ $# -gt 0 ]; do
     --rebuild) REBUILD=1; shift ;;
     --ctrlpkt) CTRLPKT="${2:-}"; shift 2 ;;
     --build-only) BUILD_ONLY=1; shift ;;
-    *) echo "usage: $0 --board <ip> [--kernel <name>] [--kernels <tsv>] [--name <board>] [--out <dir>] [--reps N] [--rebuild] [--ctrlpkt off|aot|aot-kco] [--build-only]" >&2; exit 2 ;;
+    --launch) LAUNCH="${2:-}"; shift 2 ;;
+    *) echo "usage: $0 --board <ip> [--kernel <name>] [--kernels <tsv>] [--name <board>] [--out <dir>] [--reps N] [--rebuild] [--ctrlpkt off|aot|aot-kco] [--build-only] [--launch warm|reload|cold]" >&2; exit 2 ;;
     esac
 done
 case "$CTRLPKT" in
@@ -40,6 +44,12 @@ off) export UNET_CTRLPKT=off; unset UNET_CTRLPKT_KCO ;;
 aot) unset UNET_CTRLPKT UNET_CTRLPKT_KCO ;;
 aot-kco) export UNET_CTRLPKT_KCO=1; unset UNET_CTRLPKT ;;
 *) echo "p0_one_kernel: --ctrlpkt off|aot|aot-kco (got '$CTRLPKT')" >&2; exit 2 ;;
+esac
+case "$LAUNCH" in
+warm) LAUNCH_DEFS="-DAIEHLC_ZFILL_WIDE=1 -DAIEHLC_PMLOAD_WIDE=1 -DAIEHLC_PM_WARM_SKIP=1 -DAIEHLC_SKIP_BSS_DEFAULT=1" ;;
+reload) LAUNCH_DEFS="-DAIEHLC_ZFILL_WIDE=1 -DAIEHLC_PMLOAD_WIDE=1 -DAIEHLC_SKIP_BSS_DEFAULT=1" ;;
+cold) LAUNCH_DEFS="" ;;
+*) echo "p0_one_kernel: --launch warm|reload|cold (got '$LAUNCH')" >&2; exit 2 ;;
 esac
 [ -n "$BOARD" ] || [ "$BUILD_ONLY" = 1 ] || { echo "p0_one_kernel: --board <ip> required (or --build-only)" >&2; exit 2; }
 case "$BOARD" in 10.23.224.213) NAME="${NAME:-palmyra213}"; BKIND=palmyra ;; *) NAME="${NAME:-$BOARD}"; BKIND="${BOARD_KIND:-palmyra}" ;; esac
@@ -60,10 +70,10 @@ OUT="${OUT:-/scratch/staff/huaj/tmp/costmodel_p0/$KERNEL}"
 mkdir -p "$OUT/golden"
 OUT="$(cd "$OUT" && pwd)"
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
-STAMP="$M $K $N reps=$REPS ctrlpkt=$CTRLPKT $(cat "$HERE/p0_kacc_host.cc" "$ROOT/example/aiegraph/unet_bk_sdm_tiny/kacc_gemm.py" \
+STAMP="$M $K $N reps=$REPS ctrlpkt=$CTRLPKT launch=$LAUNCH $(cat "$HERE/p0_kacc_host.cc" "$ROOT/example/aiegraph/unet_bk_sdm_tiny/kacc_gemm.py" \
     "$ROOT/example/aiegraph/unet_bk_sdm_tiny/unet_aie.py" "$ROOT"/src/aiednn/gemm/ctrlpkt_aot_pragmas.h \
     "$ROOT"/src/aiednn/gemm/ctrlpkt_kco_pragma.h | md5sum | cut -c1-12) $COMMIT"
-echo "[p0] kernel=$KERNEL recipe=$RECIPE M=$M K=$K N=$N ctrlpkt=$CTRLPKT board=$NAME ($BOARD) out=$OUT commit=$COMMIT"
+echo "[p0] kernel=$KERNEL recipe=$RECIPE M=$M K=$K N=$N ctrlpkt=$CTRLPKT launch=$LAUNCH board=$NAME ($BOARD) out=$OUT commit=$COMMIT"
 
 if [ "$REBUILD" = 1 ] || [ ! -f "$OUT/main.elf" ] || [ "$(cat "$OUT/stamp" 2>/dev/null)" != "$STAMP" ]; then
     T0=$(date +%s)
@@ -87,8 +97,8 @@ EOF
     (
         cd "$OUT"
         export AIEHLC_ROOT="$ROOT"
-        # same launch options as kacc_bench.sh --gemm (build_unet.py --launch-opt warm), plus --profiling
-        export EXTRA_DEFS="${EXTRA_DEFS:-} -DAIEHLC_ZFILL_WIDE=1 -DAIEHLC_PMLOAD_WIDE=1 -DAIEHLC_PM_WARM_SKIP=1 -DAIEHLC_SKIP_BSS_DEFAULT=1"
+        # --launch warm = kacc_bench.sh --gemm (build_unet.py --launch-opt warm); reload / cold see header; plus --profiling
+        export EXTRA_DEFS="${EXTRA_DEFS:-} $LAUNCH_DEFS"
         set +eu
         # shellcheck disable=SC1091
         source "$ROOT/script/aiehlc.sh" --aie-version 5 --skip-bss --profiling --runtime-source-file "$OUT/kacc_gemm.cc"
@@ -103,7 +113,7 @@ EOF
 else
     echo "[p0] reuse $OUT/main.elf (stamp $STAMP)"
 fi
-[ "$BUILD_ONLY" = 1 ] && { echo "[p0] --build-only ctrlpkt=$CTRLPKT: $OUT/main.elf"; exit 0; }
+[ "$BUILD_ONLY" = 1 ] && { echo "[p0] --build-only ctrlpkt=$CTRLPKT launch=$LAUNCH: $OUT/main.elf"; exit 0; }
 
 LOCK=/scratch/staff/huaj/tmp/board_locks/${BOARD}_3121.lock
 if [ -e "$LOCK" ] && ! flock -n "$LOCK" true; then echo "[p0] board lock $LOCK held: apppaltest waits for it"; fi
@@ -117,7 +127,7 @@ set -e
 cat "$RUN"
 echo "[p0] apppaltest rc=$RRC log=$RUN"
 
-awk -v name="$NAME" -v kern="$KERNEL" -v cp="$CTRLPKT" -v clk="$CLK" '
+awk -v name="$NAME" -v kern="$KERNEL" -v cp="$CTRLPKT" -v lm="$LAUNCH" -v clk="$CLK" '
 /^BOARD machine=/ { split($2, a, "="); mach = a[2] }
 /^\[PERF\] tag=[0-9]+ tile=/ {
     t = ""; ac = ls = ss = 0
@@ -137,7 +147,7 @@ END {
     meas = sprintf("%.3f", w); act = sa / n; cmp = sc / n; pred = cmp / (clk * 1000.0)
     if (L == "") L = n
     printf "[p0] perf_tags=%d perfsum=%d aie_clk_mhz=%s (assumed unless --aie-clk-mhz) %s\n", n, nps, clk, kcmp
-    printf "P0 board=%s machine=%s kernel=%s ctrlpkt=%s launches=%d rt_wait_io_ms=%s core_src=perfctr active_cyc=%d compute_cyc=%d pred_ms=%.3f meas_ms=%s rel=%.3f\n",
-        name, mach, kern, cp, L, meas, act, cmp, pred, meas, (meas > 0 ? (pred > meas ? pred - meas : meas - pred) / meas : 0)
+    printf "P0 board=%s machine=%s kernel=%s ctrlpkt=%s launch=%s launches=%d rt_wait_io_ms=%s core_src=perfctr active_cyc=%d compute_cyc=%d pred_ms=%.3f meas_ms=%s rel=%.3f\n",
+        name, mach, kern, cp, lm, L, meas, act, cmp, pred, meas, (meas > 0 ? (pred > meas ? pred - meas : meas - pred) / meas : 0)
 }' "$RUN"
 [ "$RRC" -eq 0 ] || { echo "[p0] apppaltest rc=$RRC"; exit "$RRC"; }
