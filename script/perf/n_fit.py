@@ -3,13 +3,21 @@
 
   n_fit.py --build-root DIR --fit CFG=LOG [...] --out JSON --check CFG=LOG [...]
   n_fit.py --build-root DIR --params JSON --check CFG=LOG [...]          (no fit)
+  n_fit.py --build-root DIR --lower-bound --check CFG=LOG [...]          (fit-free lower bound, no fit)
 
 Per site (n_feat.sites of DIR/unet_<cfg>, aligned with the log's 'PROF part=<i> op=aie_host_*' lines):
   N = (site_ms - aie_ms) + glue_ms + flush_ms + inval_ms
   site_ms - aie_ms is the PROF part 'ms'; glue/flush/inval come from 'PROF aie_host_split part=<i>'.
   aie_ms (in launch: kload, rt_*) belongs to K+L, not N.
+Features (all static, n_feat.sites = base sites + static_feat launch features + n_layout layout features):
+  MK MN launches wbytes cp_w bdcfg_w rr rr_pair kswitch kfirst in_pack_bytes out_scatter_bytes relayout
 Model per (cfg, kind in conv|linear|fa), sites with launches>0 only:
-  N = a*MK + b*MN + c*launches + d       (least squares on relative error, weight 1/N; a feature constant over the kind's sites -> coef 0)
+  N = sum_f coef_f * f + d    (least squares on relative error, weight 1/N; a feature constant over the kind's sites
+                               or linearly dependent on the others -> coef 0)
+--lower-bound: sites with identical (kind, launches, all FEATS) get the same prediction p from ANY such model, so
+per-site maxrel >= (hi-lo)/(hi+lo) over each group; prints the worst group per cfg and the max over cfgs:
+  NLB cfg=.. groups=.. top=<kind cid>/<kind cid> maxlb=..
+  NLB ALL cfgs=.. maxlb=.. PASS|FAIL                                   (maxlb<=0.150)
 Host-only sites (attn roles with 0 launches) are not fitted: their summed fit-run ms is frozen as attn_host_ms
 and only enters total_rel.
   NSRC  cfg=.. log=.. board=.. launches=.. run_rc=..                  (from 'CMP unet board=..')
@@ -33,8 +41,10 @@ from aiegraph.costmodel.n_feat import sites as n_sites  # noqa: E402
 from aiegraph.costmodel.unet_seq import read  # noqa: E402
 
 KINDS = ("conv", "linear", "fa")
-FEATS = ("MK", "MN", "launches")
+FEATS = ("MK", "MN", "launches", "wbytes", "cp_w", "bdcfg_w", "rr", "rr_pair", "kswitch", "kfirst",
+         "in_pack_bytes", "out_scatter_bytes", "relayout")
 GATE = 0.200
+LB_GATE = 0.150
 SUM_TOL = 0.02
 
 _PROF = re.compile(r"^PROF part=(\d+) op=aie_host_(conv|linear|attn)(\d+) ms=([\d.]+) .*site_ms=([\d.]+) "
@@ -100,22 +110,55 @@ def design(rows, active):
 
 
 def fit_kind(rows):
-    """coef dict a,b,c,d; features constant over rows get 0"""
+    """{'coef': {feat: v}, 'd': v}; a feature constant over rows, or dependent on the ones before it, gets 0"""
     X = np.array([[float(r[f]) for f in FEATS] for r in rows])
-    active = [bool(np.ptp(X[:, j]) > 0) for j in range(len(FEATS))]
+    active = []
+    for j in range(len(FEATS)):
+        on = bool(np.ptp(X[:, j]) > 0)
+        if on:
+            trial = design(rows, active + [True] + [False] * (len(FEATS) - j - 1))
+            on = np.linalg.matrix_rank(trial / np.maximum(np.abs(trial).max(axis=0), 1e-300)) == trial.shape[1]
+        active.append(on)
     y = np.array([r["N"] for r in rows])
     w = 1.0 / y  # relative-error least squares: the gate is per-site maxrel, not absolute ms
-    coef, *_ = np.linalg.lstsq(design(rows, active) * w[:, None], y * w, rcond=None)
-    full, k = [], 0
-    for on in active:
-        full.append(float(coef[k]) if on else 0.0)
+    A = design(rows, active)
+    scale = np.maximum(np.abs(A).max(axis=0), 1e-300)
+    coef, *_ = np.linalg.lstsq(A / scale * w[:, None], y * w, rcond=None)
+    coef = coef / scale
+    full, k = {}, 0
+    for f, on in zip(FEATS, active):
+        full[f] = sig(float(coef[k])) if on else 0.0
         k += on
-    full.append(float(coef[-1]))
-    return {n: sig(v) for n, v in zip("abcd", full)}
+    return {"coef": full, "d": sig(float(coef[-1]))}
 
 
 def predict(p, r):
-    return p["a"] * r["MK"] + p["b"] * r["MN"] + p["c"] * r["launches"] + p["d"]
+    if "coef" not in p:  # M2-P2 params: N = a*MK + b*MN + c*launches + d
+        return p["a"] * r["MK"] + p["b"] * r["MN"] + p["c"] * r["launches"] + p["d"]
+    return sum(v * r[f] for f, v in p["coef"].items()) + p["d"]
+
+
+def lower_bound(cfg, rows):
+    """worst identical-feature group of one cfg: (maxlb, groups, lo row, hi row)"""
+    g = {}
+    for r in rows:
+        if r["launches"] > 0:
+            g.setdefault((r["kind"], r["launches"]) + tuple(r[f] for f in FEATS), []).append(r)
+    best = (0.0, None, None)
+    for rs in g.values():
+        lo = min(rs, key=lambda r: r["N"])
+        hi = max(rs, key=lambda r: r["N"])
+        lb = (hi["N"] - lo["N"]) / (hi["N"] + lo["N"])
+        if lb > best[0] or best[1] is None:
+            best = (lb, lo, hi)
+    lb, lo, hi = best
+    top = "%s%d/%s%d" % (lo["kind"], lo["cid"], hi["kind"], hi["cid"]) if lo else "-"
+    print("NLB cfg=%s groups=%d top=%s maxlb=%.3f" % (cfg, len(g), top, lb))
+    if lo and lb > LB_GATE:
+        for r in (lo, hi):
+            print("NLB_WORST cfg=%s %s%d part=%d N=%.3f %s" % (cfg, r["kind"], r["cid"], r["part"], r["N"],
+                                                              " ".join("%s=%s" % (f, r[f]) for f in FEATS)))
+    return lb
 
 
 def loo(rows):
@@ -141,9 +184,20 @@ def main(argv=None):
     ap.add_argument("--out")
     ap.add_argument("--params")
     ap.add_argument("--check", nargs="+", required=True)
+    ap.add_argument("--lower-bound", action="store_true")
     a = ap.parse_args(argv)
     root = a.build_root.rstrip("/")
     ok = True
+    if a.lower_bound:
+        worst, ncfg = 0.0, 0
+        for cfg, log in pairs(a.check):
+            rows, txt = measure("%s/unet_%s" % (root, cfg), log)
+            ok &= src_line(cfg, log, txt)
+            worst = max(worst, lower_bound(cfg, rows))
+            ncfg += 1
+        ok &= ncfg > 0 and worst <= LB_GATE
+        print("NLB ALL cfgs=%d maxlb=%.3f %s" % (ncfg, worst, "PASS" if ok else "FAIL"))
+        return 0 if ok else 1
     if a.params:
         prm = json.load(open(a.params))
     else:
@@ -160,11 +214,11 @@ def main(argv=None):
                 p = fit_kind(kr)
                 p["n"] = len(kr)
                 kinds[kind] = p
-                print("NFIT cfg=%s kind=%s n=%d a=%.6g b=%.6g c=%.6g d=%.6g" % (cfg, kind, len(kr), p["a"], p["b"],
-                                                                                  p["c"], p["d"]))
+                print("NFIT cfg=%s kind=%s n=%d %s d=%.6g" % (cfg, kind, len(kr), " ".join(
+                    "%s=%.6g" % (f, v) for f, v in p["coef"].items() if v), p["d"]))
                 print("NLOO cfg=%s kind=%s loo_maxrel=%.3f" % (cfg, kind, loo(kr)))
             host = sig(sum(r["N"] for r in rows if r["launches"] == 0))
-            prm[cfg] = {"kinds": kinds, "attn_host_ms": host, "model": "N=a*MK+b*MN+c*launches+d (ms)"}
+            prm[cfg] = {"kinds": kinds, "attn_host_ms": host, "model": "N=sum(coef[f]*f)+d (ms)"}
         with open(a.out, "w") as f:
             json.dump(prm, f, sort_keys=True, indent=1)
             f.write("\n")

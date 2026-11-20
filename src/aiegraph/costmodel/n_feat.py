@@ -26,7 +26,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # python -I: no implicit src on sys.path
 
+from aiegraph.costmodel.n_layout import layout_sites  # noqa: E402
+from aiegraph.costmodel.static_feat import unet_site_feat  # noqa: E402
 from aiegraph.costmodel.unet_seq import launches_of, parse_aiek, parse_driver, read  # noqa: E402
+
+LAUNCH_FEATS = ("cp_w", "bdcfg_w", "shim_bd", "tile_bd", "wbytes", "kswitch", "kfirst", "rr", "rr_pair")
+LAYOUT_FEATS = ("in_pack_bytes", "out_scatter_bytes", "relayout", "up", "down")
+_GEMM_W = re.compile(r"^gemm_kacc__(\d+)_(\d+)_(\d+)_")
 
 _GFA = re.compile(r"GFA class (\d+) fa_h(\d+)_n(\d+)_m(\d+)_d(\d+) .*launches/site=(\d+)")
 _PROF = re.compile(r"^PROF part=(\d+) op=aie_host_(conv|linear|attn)(\d+) ms=([\d.]+) .*site_ms=([\d.]+) aie_ms=([\d.]+)",
@@ -44,7 +50,8 @@ def gfa_classes(build_log):
     return cls
 
 
-def sites(build, build_log):
+def base_sites(build, build_log):
+    """kind/cid/launches/kernels/MK/MN per site (graph_driver.c order), no launch or layout features"""
     gemm, fa, fa_launches, _ = parse_aiek(read(os.path.join(build, "aiek_src", "aiek_unetconv.cc")))
     seq = parse_driver(read(os.path.join(build, "ag_work", "arm_build", "graph_driver.c")))
     gfa = gfa_classes(build_log)
@@ -72,6 +79,62 @@ def sites(build, build_log):
         s.update(cid=c[1], launches=len(ls), kernels=sorted({k for k, _s, _d in ls}))
         out.append(s)
     return out
+
+
+def wbytes(kernel):
+    """bf16 weight bytes K*N*2 of one gemm_kacc__N_K_M_... launch, 0 for other kernels"""
+    m = _GEMM_W.match(kernel)
+    return int(m.group(2)) * int(m.group(1)) * 2 if m else 0
+
+
+def add_launch_feats(st, seq):
+    """sum the per-launch static_feat.unet_site_feat records over each site's launches (in order):
+    cp_w/bdcfg_w (+ rr on a kernel-switch launch), shim_bd, tile_bd, wbytes, kswitch, kfirst (first launch of
+    that kernel in graph_run), rr, rr_pair (cur's return-route words on shim tiles prev's window does not route)"""
+    i = 0
+    tiles, seen = {}, set()
+    for d in seq:
+        tiles.setdefault(d["kernel"], d["rr_tiles"])
+    for s in st:
+        f = dict.fromkeys(LAUNCH_FEATS, 0)
+        ks = set()
+        for d in seq[i:i + s["launches"]]:
+            ks.add(d["kernel"])
+            f["cp_w"] += d["cp_w"] + d["rr"]
+            f["bdcfg_w"] += d["bdcfg_w"] + d["rr"]
+            f["shim_bd"] += d["shim_bd"]
+            f["tile_bd"] += d["tile_bd"]
+            f["wbytes"] += wbytes(d["kernel"])
+            f["kswitch"] += d["kswitch"]
+            f["kfirst"] += d["kernel"] not in seen
+            seen.add(d["kernel"])
+            f["rr"] += d["rr"]
+            if d["kswitch"]:
+                prev_t = set(tiles.get(d["prev"], {})) if d["prev"] else set()
+                f["rr_pair"] += sum(w for t, w in d["rr_tiles"].items() if t not in prev_t)
+        if len(seq[i:i + s["launches"]]) != s["launches"] or sorted(ks) != s["kernels"]:
+            raise ValueError("site %s%d: launches/kernels do not match the launch sequence" % (s["kind"], s["cid"]))
+        i += s["launches"]
+        s.update(f)
+    if i != len(seq):
+        raise ValueError("%d site launches vs %d in the launch sequence" % (i, len(seq)))
+    return st
+
+
+def sites(build, build_log):
+    """base_sites + per-site launch features (static_feat.unet_site_feat) + host layout features
+    (n_layout.layout_sites), aligned by (kind, cid) in graph_run order; any mismatch raises"""
+    st = add_launch_feats(base_sites(build, build_log), unet_site_feat(build))
+    ly = layout_sites(build)
+    if len(ly) != len(st):
+        raise ValueError("%s: %d n_feat sites vs %d layout sites" % (build, len(st), len(ly)))
+    for i, (s, l) in enumerate(zip(st, ly)):
+        lk = "attn" if s["kind"] == "fa" else s["kind"]
+        if (lk, s["cid"]) != (l["kind"], l["cid"]):
+            raise ValueError("site %d: n_feat %s%d vs layout %s%d" % (i, s["kind"], s["cid"], l["kind"], l["cid"]))
+        s.update({x: l[x] for x in LAYOUT_FEATS})
+        s["lpart"] = l["part"]
+    return st
 
 
 def check(st, log):
