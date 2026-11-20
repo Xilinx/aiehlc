@@ -393,70 +393,136 @@ static XAie_DevInst *s_core_perf_probe_dev = NULL;
 #define RT_CORE_PERF_MAX_TILES 64
 static XAie_LocType s_core_perf_tiles[RT_CORE_PERF_MAX_TILES];
 static int s_core_perf_ntiles = 0;
-/* Snapshot of ACTIVE / LOCK_STALL taken right before the first DMA start of a launch, so the
- * report can separate "core enabled, host still configuring BDs / flushing inputs" from the
- * on-array run (the kernel group is enabled before the host writes BDs and starts IO). */
-static uint32_t s_core_perf_snap_a[RT_CORE_PERF_MAX_TILES];
-static uint32_t s_core_perf_snap_ls[RT_CORE_PERF_MAX_TILES];
-static uint32_t s_core_perf_snap_ss[RT_CORE_PERF_MAX_TILES];
-static int s_core_perf_snap_pending = 0;
-static int s_core_perf_snap_valid = 0;
-__attribute__((unused)) static void rt_core_perf_snap_at_startio(void) {
-    if (!s_core_perf_snap_pending || s_core_perf_probe_dev == NULL)
-        return;
-    s_core_perf_snap_pending = 0;
-    for (int i = 0; i < s_core_perf_ntiles; i++) {
-        s_core_perf_snap_a[i] = 0;
-        s_core_perf_snap_ls[i] = 0;
-        (void)XAie_PerfCounterGet(s_core_perf_probe_dev, s_core_perf_tiles[i], XAIE_CORE_MOD, 0, &s_core_perf_snap_a[i]);
-        (void)XAie_PerfCounterGet(s_core_perf_probe_dev, s_core_perf_tiles[i], XAIE_CORE_MOD, 3, &s_core_perf_snap_ls[i]);
-        s_core_perf_snap_ss[i] = 0;
-        (void)XAie_PerfCounterGet(s_core_perf_probe_dev, s_core_perf_tiles[i], XAIE_CORE_MOD, 2, &s_core_perf_snap_ss[i]);
-    }
-    s_core_perf_snap_valid = 1;
+/* M3.1.1 counter window. The core counters (0 ACTIVE / 2 STREAM_STALL / 3 LOCK_STALL, armed and zeroed by
+ * rt_kernel_profile_setup when the kernel group is enabled) are only credited to io inside the timed wait
+ * window: __Runtime_wait_io snapshots them right after rt_sb_ack_wait() and right before __wio_t0
+ * (rt_core_perf_wait_snap), and reads them again after RT_PROF_ADD (rt_core_perf_site_read); the per-wait
+ * difference is summed per tile over the whole launch (zeroed at launch start, no last-launch scaling).
+ * Everything the counters saw outside those windows (L, host glue, startio, launch gaps) is pre_io.
+ * snap_gap = host time from the start of the snapshot to __wio_t0, summed per launch, in AIE cycles at
+ * RT_CORE_PERF_AIE_MHZ: the counters were already running for it, so io_act <= wait + snap_gap.
+ * Both the snapshot and the read stay outside __wio_t0..RT_PROF_ADD (WINLINT). Active only with core tiles
+ * armed (AIEHLC_PROFILING + debug flag 0x100, i.e. CORE_PERF / AIEHLC_SITE_PERF builds): ~48 MMIO reads per
+ * wait, a diagnostic build -- never used to measure L/N. */
+#ifndef RT_CORE_PERF_AIE_MHZ
+#define RT_CORE_PERF_AIE_MHZ 1000ULL /* p0_one_kernel.sh --aie-clk-mhz default */
+#endif
+static uint32_t s_kwin_snap_a[RT_CORE_PERF_MAX_TILES];
+static uint32_t s_kwin_snap_ls[RT_CORE_PERF_MAX_TILES];
+static uint32_t s_kwin_snap_ss[RT_CORE_PERF_MAX_TILES];
+static unsigned char s_kwin_snap_ok[RT_CORE_PERF_MAX_TILES];
+static unsigned long long s_kwin_a[RT_CORE_PERF_MAX_TILES];  /* in-window ACTIVE, this launch */
+static unsigned long long s_kwin_ls[RT_CORE_PERF_MAX_TILES]; /* in-window LOCK_STALL */
+static unsigned long long s_kwin_ss[RT_CORE_PERF_MAX_TILES]; /* in-window STREAM_STALL */
+static uint32_t s_kwin_last_a[RT_CORE_PERF_MAX_TILES];       /* ACTIVE total at the last window read */
+static int s_kwin_snap_valid = 0;     /* a wait snapshot is waiting for its read */
+static unsigned s_kwin_n = 0;         /* windows read this launch */
+static int s_kwin_given = 0;          /* this launch's sums were handed out (__Runtime_core_perf_last_launch*) */
+static unsigned long long s_kwin_snap_t = 0ULL;   /* ahs_now() at the start of the snapshot */
+static unsigned long long s_kwin_wio_t = 0ULL;    /* ahs_now() at __wio_t0 of that wait */
+static unsigned long long s_kwin_gap_cyc = 0ULL;  /* sum(snap -> __wio_t0) this launch, AIE cycles */
+
+/* host generic-timer ticks (ahs_now's counter) -> AIE cycles; 0 where there is no counter (x86) */
+static unsigned long long rt_core_perf_ticks_to_cyc(unsigned long long t) {
+    unsigned long long f = 0ULL;
+#if defined(__aarch64__) && !defined(__AIESIM__) && !defined(__chess__)
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+#endif
+    if (f == 0ULL)
+        return 0ULL;
+    return (unsigned long long)((double)t * ((double)RT_CORE_PERF_AIE_MHZ * 1e6) / (double)f);
 }
 
-/* M3.1 site-perf (AIEHLC_SITE_PERF, needs AIEHLC_PROFILING + debug flag 0x100): after every wait_io (outside
- * its timed window) read counters 0 ACTIVE / 2 STREAM_STALL / 3 LOCK_STALL of every armed core tile, minus
- * the startio snapshot, and keep the slowest core (max io_active). The last wait_io of a launch wins;
- * __Runtime_core_perf_last_launch() hands it out once (aie_host_split.h ahs_add_window, per part). */
-static unsigned long long s_site_perf_io_act = 0ULL, s_site_perf_lock = 0ULL, s_site_perf_stream = 0ULL;
-static int s_site_perf_valid = 0;
-__attribute__((unused)) static void rt_core_perf_site_read(void) {
-    if (!s_core_perf_snap_valid || s_core_perf_probe_dev == NULL || s_core_perf_ntiles == 0)
+/* launch start (kernel group enabled, counters zeroed): clear the window accumulators */
+static void rt_core_perf_launch_reset(void) {
+    for (int i = 0; i < RT_CORE_PERF_MAX_TILES; i++) {
+        s_kwin_a[i] = s_kwin_ls[i] = s_kwin_ss[i] = 0ULL;
+        s_kwin_last_a[i] = 0;
+        s_kwin_snap_ok[i] = 0;
+    }
+    s_kwin_snap_valid = 0;
+    s_kwin_n = 0;
+    s_kwin_given = 0;
+    s_kwin_gap_cyc = 0ULL;
+}
+
+/* __Runtime_wait_io: after rt_sb_ack_wait(), before __wio_t0. Host time first, then the counters. */
+__attribute__((unused)) static void rt_core_perf_wait_snap(void) {
+    if (s_core_perf_probe_dev == NULL || s_core_perf_ntiles == 0)
         return;
-    uint32_t best_a = 0, best_ls = 0, best_ss = 0;
-    int have = 0;
+    s_kwin_snap_t = ahs_now();
     for (int i = 0; i < s_core_perf_ntiles; i++) {
         uint32_t a = 0, ss = 0, ls = 0;
-        if (__Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, NULL, &ss, &ls) != XAIE_OK)
-            continue;
-        const uint32_t da = a - s_core_perf_snap_a[i];
-        if (!have || da > best_a) {
-            best_a = da;
-            best_ls = ls - s_core_perf_snap_ls[i];
-            best_ss = ss - s_core_perf_snap_ss[i];
-            have = 1;
-        }
+        s_kwin_snap_ok[i] = __Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, NULL, &ss,
+                                                     &ls) == XAIE_OK;
+        s_kwin_snap_a[i] = a;
+        s_kwin_snap_ss[i] = ss;
+        s_kwin_snap_ls[i] = ls;
     }
-    if (!have)
+    s_kwin_snap_valid = 1;
+}
+
+/* __Runtime_wait_io: right before __wio_t0's partner ahs_now(); a plain store, no MMIO */
+static inline void rt_core_perf_wio_mark(unsigned long long hs_t0) { s_kwin_wio_t = hs_t0; }
+
+/* M3.1 site-perf: after every wait_io (after RT_PROF_ADD, outside the timed window) read the counters again and
+ * add (read - wait snapshot) of every armed core tile to this launch's window sums, plus the snapshot gap.
+ * __Runtime_core_perf_last_launch() hands out the slowest core (max window io_active) once per launch
+ * (aie_host_split.h ahs_add_window, per part). */
+__attribute__((unused)) static void rt_core_perf_site_read(void) {
+    if (!s_kwin_snap_valid || s_core_perf_probe_dev == NULL || s_core_perf_ntiles == 0)
         return;
-    s_site_perf_io_act = best_a;
-    s_site_perf_lock = best_ls;
-    s_site_perf_stream = best_ss;
-    s_site_perf_valid = 1;
+    s_kwin_snap_valid = 0;
+    for (int i = 0; i < s_core_perf_ntiles; i++) {
+        uint32_t a = 0, ss = 0, ls = 0;
+        if (!s_kwin_snap_ok[i] ||
+            __Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, NULL, &ss, &ls) != XAIE_OK)
+            continue;
+        s_kwin_a[i] += (uint32_t)(a - s_kwin_snap_a[i]);
+        s_kwin_ls[i] += (uint32_t)(ls - s_kwin_snap_ls[i]);
+        s_kwin_ss[i] += (uint32_t)(ss - s_kwin_snap_ss[i]);
+        s_kwin_last_a[i] = a;
+    }
+    if (s_kwin_wio_t > s_kwin_snap_t)
+        s_kwin_gap_cyc += rt_core_perf_ticks_to_cyc(s_kwin_wio_t - s_kwin_snap_t);
+    s_kwin_n++;
+}
+
+/* slowest core of this launch's windows: index into s_core_perf_tiles, -1 if no window was read */
+static int rt_core_perf_kwin_best(void) {
+    int b = -1;
+    if (s_kwin_n == 0)
+        return -1;
+    for (int i = 0; i < s_core_perf_ntiles; i++)
+        if (b < 0 || s_kwin_a[i] > s_kwin_a[b])
+            b = i;
+    return b;
 }
 
 int __Runtime_core_perf_last_launch(unsigned long long *io_act_cyc, unsigned long long *lock_stall_cyc,
                                     unsigned long long *stream_stall_cyc) {
-    const int v = s_site_perf_valid;
+    return __Runtime_core_perf_last_launch_win(io_act_cyc, lock_stall_cyc, stream_stall_cyc, NULL, NULL);
+}
+
+/* + pre_io_act_cyc (slowest core's ACTIVE outside the windows, up to its last window read) and snap_gap_cyc */
+int __Runtime_core_perf_last_launch_win(unsigned long long *io_act_cyc, unsigned long long *lock_stall_cyc,
+                                        unsigned long long *stream_stall_cyc, unsigned long long *pre_io_act_cyc,
+                                        unsigned long long *snap_gap_cyc) {
+    const int b = s_kwin_given ? -1 : rt_core_perf_kwin_best();
+    const int v = b >= 0;
     if (io_act_cyc)
-        *io_act_cyc = v ? s_site_perf_io_act : 0ULL;
+        *io_act_cyc = v ? s_kwin_a[b] : 0ULL;
     if (lock_stall_cyc)
-        *lock_stall_cyc = v ? s_site_perf_lock : 0ULL;
+        *lock_stall_cyc = v ? s_kwin_ls[b] : 0ULL;
     if (stream_stall_cyc)
-        *stream_stall_cyc = v ? s_site_perf_stream : 0ULL;
-    s_site_perf_valid = 0;
+        *stream_stall_cyc = v ? s_kwin_ss[b] : 0ULL;
+    if (pre_io_act_cyc)
+        *pre_io_act_cyc = v && (unsigned long long)s_kwin_last_a[b] > s_kwin_a[b] ? s_kwin_last_a[b] - s_kwin_a[b]
+                                                                                  : 0ULL;
+    if (snap_gap_cyc)
+        *snap_gap_cyc = v ? s_kwin_gap_cyc : 0ULL;
+    if (v)
+        s_kwin_given = 1; /* handed out once per launch; [PERFIO] still sees the sums */
     return v;
 }
 
@@ -568,10 +634,15 @@ void __Runtime_core_perf_report(int tag) {
         AieRC rc = __Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, &v, &ss, &ls);
         printf("[PERF] tag=%d tile=(%u,%u) rc=%d active_cyc=%u vec_instr=%u stream_stall=%u lock_stall=%u\n", tag,
                (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row, (int)rc, a, v, ss, ls);
-        if (s_core_perf_snap_valid)
-            printf("[PERFIO] tag=%d tile=(%u,%u) pre_io_active=%u pre_io_lock_stall=%u io_active=%u io_lock_stall=%u\n",
-                   tag, (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row, s_core_perf_snap_a[i],
-                   s_core_perf_snap_ls[i], a - s_core_perf_snap_a[i], ls - s_core_perf_snap_ls[i]);
+        /* io_* = core cycles inside this launch's wait windows (summed per wait), pre_io_* = everything else
+         * from kernel-group enable to this report; snap_gap_cyc = summed snapshot -> __wio_t0 host gap */
+        if (s_kwin_n > 0 && rc == XAIE_OK)
+            printf("[PERFIO] tag=%d tile=(%u,%u) pre_io_active=%llu pre_io_lock_stall=%llu io_active=%llu "
+                   "io_lock_stall=%llu snap_gap_cyc=%llu\n",
+                   tag, (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row,
+                   (unsigned long long)a > s_kwin_a[i] ? (unsigned long long)a - s_kwin_a[i] : 0ULL,
+                   (unsigned long long)ls > s_kwin_ls[i] ? (unsigned long long)ls - s_kwin_ls[i] : 0ULL, s_kwin_a[i],
+                   s_kwin_ls[i], s_kwin_gap_cyc);
         asum += a;
         if (a > amax)
             amax = a;
@@ -7095,9 +7166,6 @@ void __Runtime_dma_channel_enable_ooo(XAie_DevInst *dev, XAie_LocType tile, int3
  */
 struct_ioevent __Runtime_startio(XAie_DevInst *dev, struct_io io, int32_t bd_id, int32_t repeat) {
     rt_dsync_drain_inputs(); /* CPU-written launch args clean before any DMA starts */
-#if AIEHLC_PROFILING
-    rt_core_perf_snap_at_startio();
-#endif
     unsigned long long __sio_t0 = RT_PROF_TIC();
     struct_ioevent evt;
     evt.io = io;
@@ -8560,8 +8628,7 @@ static void rt_kernel_profile_setup(XAie_DevInst *dev, struct_kernel_group kg) {
     if (AIE_DEBUG_HAS_FLAG(g_runtime_debug_level, AIE_DEBUG_FLAG_CORE_PERF_COUNTER)) {
         int chosen = 0;
         s_core_perf_ntiles = 0;
-        s_core_perf_snap_pending = 1;
-        s_core_perf_snap_valid = 0;
+        rt_core_perf_launch_reset();
         for (uint32_t i = 0; i < kg.num_tiles; i++) {
             if (__Runtime_is_aie_core_tile(kg.tiles[i])) {
                 __Runtime_core_perf_setup(dev, kg.tiles[i]);
@@ -8730,14 +8797,13 @@ static void rt_wait_io_timeout_dump(XAie_DevInst *dev) {
  * Reference: aeg_runtime_api.cpp waitDMAChannelTaskQueue / waitDMAChannelDone
  */
 void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
-#if AIEHLC_PROFILING
-    /* KCO launches issue startio from the control packet (no __Runtime_startio), so take the io snapshot at
-     * the first wait_io of the launch instead; no-op unless pending (off path already snapped at startio).
-     * Outside the timed window below (WINLINT: no MMIO/printf inside it). */
-    rt_core_perf_snap_at_startio();
-#endif
     rt_sb_commit();
     (void)rt_sb_ack_wait();
+#if AIEHLC_PROFILING
+    /* M3.1.1 counter window: core counters snapshotted after the shim-BD ack, right before the timed window
+     * (off and aot-kco alike); read again after RT_PROF_ADD. WINLINT: no MMIO/printf inside the window. */
+    rt_core_perf_wait_snap();
+#endif
     unsigned long long __wio_t0 = RT_PROF_TIC();
     const unsigned long long __hs_t0 = ahs_now();
     XAie_LocType tile = io_event.io.tile_loc;
@@ -8818,7 +8884,8 @@ void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
     g_hs_wait_ticks += ahs_now() - __hs_t0;
     g_hs_wait_calls++;
     RT_PROF_ADD(g_wait_io_cycles, g_wait_io_calls, __wio_t0);
-#if AIEHLC_PROFILING && defined(AIEHLC_SITE_PERF) && AIEHLC_SITE_PERF
+#if AIEHLC_PROFILING
+    rt_core_perf_wio_mark(__hs_t0);
     rt_core_perf_site_read(); /* after the timed wait window (WINLINT: no printf inside it) */
 #endif
 }
