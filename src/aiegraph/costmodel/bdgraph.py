@@ -192,7 +192,8 @@ def _ddr_bytes(dfs: Dict[str, Any], sv: Dict[str, Any], ovr: Optional[int], roun
             d = "mm2s" if str(key[2]).upper() == "MM2S" else "s2mm"
             hb = next((x for x in dc.get("bd_chain", []) if x.get("bd_id") == head), None)
             rows.append({"tile": loc, "dir": key[2], "ch": key[3], "head_bd": head, "run_bytes": per_run,
-                         "runs": n, "bytes": b, "run_b": run_bytes(hb) if hb is not None else None})
+                         "runs": n, "bytes": b, "run_b": run_bytes(hb) if hb is not None else None,
+                         "row_stride_b": row_stride(hb)})
             tot[d] = None if (b is None or tot[d] is None) else tot[d] + b
     return {"mm2s": tot["mm2s"], "s2mm": tot["s2mm"], "channels": rows}
 
@@ -234,7 +235,18 @@ RUN_B_FACTOR_FIT_P4I = {"palmyra213": {32: {"issue": 1.42, "dma": 1.99}, "r_swit
 #   16 B: u_lin_1024x1280x640 only (n=1, in-sample) 2.53.
 # Known miss: M=1024 N=320 K<=1280 waits only ~1.37 x floor (u_lin_1024x320x320 +7%, u_lin_1024x1280x320 +16%).
 # Over the 10 TKW=8 kernels: |rel| <= 2.4% on 7, +6.8% / +15.8% (low-wait pair), -5.9% (u_lin_512x2560x320).
-RUN_B_FACTOR_FIT = {"palmyra213": {32: 1.87, 16: 2.53}}
+RUN_B_FACTOR_FIT_P4J = {"palmyra213": {32: 1.87, 16: 2.53}}
+
+# P4k (2026-11-20, xiaojiang/tasks/2026-11-20_runb-stride RESULT7-9): at 32 B runs the factor follows the DDR row
+# stride of the read BD (dim_strides[1] in bytes = kp x 2 for the W/X tensor) and nothing else measured -- not M
+# (512/1024/2048), not the buffer base address, not rows per stream.  palmyra213 TKW=8, wait_io / floor_rd:
+#   fast strides 640 / 1312 / 2560 B (kp 320/656/1280): 1.13..1.41, mean 1.33
+#   other strides 1920, 3200, 3840, 5120, 5760, 11520 B: 1.74..2.02, mean 1.87
+# EMPIRICAL: the cause is unknown (single-stream and 8-stream open-page bank models and the base offset were all
+# rejected), so a stride not in the table takes the conservative slow factor.  Form: {"by_stride": {B: f},
+# "default": f} per run_b; plain numbers and {"issue", "dma"} dicts keep working.
+RUN_B_FACTOR_FIT = {"palmyra213": {32: {"by_stride": {640: 1.33, 1312: 1.33, 2560: 1.33}, "default": 1.87},
+                                   16: 2.53}}
 
 # Host issue time per launch, per board (P4j): issue_ms = bd_ms x bd_configs_per_launch + rd_frac x ddr_floor rd term
 # (ms) + c_ms.  palmyra213: least squares over nine 32 B-run kernels in three BD-count families (216/480/864 configs
@@ -252,17 +264,29 @@ def issue_fit_ms(fit: Dict[str, Any], bd_configs: int, floor: Optional[Dict[str,
     return float(fit["bd_ms"]) * bd_configs + float(fit["rd_frac"]) * rd_ms + float(fit["c_ms"])
 
 
-def _runb_factor(v: Any, regime: str) -> float:
+def row_stride(bd: Optional[Dict[str, Any]]) -> Optional[int]:
+    """DDR row stride (bytes) of a strided BD = its second dim stride; None for a plain contiguous BD."""
+    if bd is None:
+        return None
+    st, wr = list(bd.get("dim_strides") or []), list(bd.get("dim_wraps") or [])
+    if len(st) < 2 or len(wr) < 2 or wr[1] <= 1 or run_bytes(bd) >= int(bd.get("len", 0)):
+        return None
+    return int(st[1])
+
+
+def _runb_factor(v: Any, regime: str, stride: Optional[int] = None) -> float:
     if v is None:
         return 1.0
     if isinstance(v, dict):
+        if "by_stride" in v:
+            return float(v["by_stride"].get(stride, v.get("default", 1.0)))
         return float(v.get(regime, 1.0))
     return float(v)
 
 
 def ddr_runb(floor: Optional[Dict[str, Any]], ddr: Optional[Dict[str, Any]],
              factors: Optional[Dict[int, Any]], issue_ms: Optional[float] = None) -> Optional[Dict[str, Any]]:
-    """Run-length-adjusted DDR time (P4h; P4i adds r_switch): ms = floor x the MM2S-byte-weighted factor of each read channel's head-BD
+    """Run-length-adjusted DDR time (P4h; P4i adds r_switch; P4k picks a factor by the channel's row_stride_b): ms = floor x the MM2S-byte-weighted factor of each read channel's head-BD
     run_b, the factor picked by regime ("dma" when floor > factors["r_switch"] (default 1) x issue_ms, else "issue";
     "dma" without issue_ms).
     With ``issue_ms`` also launch_ms = issue + ms.  An estimate, not a bound -- report only, like ddr_floor."""
@@ -274,7 +298,7 @@ def ddr_runb(floor: Optional[Dict[str, Any]], ddr: Optional[Dict[str, Any]],
         return None
     r_switch = float(factors.get("r_switch", 1.0))
     regime = "dma" if issue_ms is None or floor["ms"] > r_switch * float(issue_ms) else "issue"
-    fac = sum(c["bytes"] * _runb_factor(factors.get(c.get("run_b")), regime) for c in rd) / tot
+    fac = sum(c["bytes"] * _runb_factor(factors.get(c.get("run_b")), regime, c.get("row_stride_b")) for c in rd) / tot
     out = {"ms": floor["ms"] * fac, "factor": fac, "regime": regime}
     if issue_ms is not None:
         out["launch_ms"] = float(issue_ms) + out["ms"]

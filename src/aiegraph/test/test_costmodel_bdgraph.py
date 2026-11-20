@@ -274,7 +274,8 @@ def test_given_a_32b_run_shim_read_on_palmyra213_then_ddr_runb_uses_the_board_fi
     op = r["ops"][0]
     assert op["bdgraph"]["ddr_bytes"]["channels"][0]["run_b"] == 32
     rb = op["ddr_runb"]
-    assert rb["factor"] == pytest.approx(bdgraph.RUN_B_FACTOR_FIT["palmyra213"][32])
+    assert op["bdgraph"]["ddr_bytes"]["channels"][0]["row_stride_b"] == 64
+    assert rb["factor"] == pytest.approx(bdgraph.RUN_B_FACTOR_FIT["palmyra213"][32]["default"])   # 64 B stride: not a fast one
     assert rb["ms"] == pytest.approx(op["ddr"] * rb["factor"]) and r["total_ms"] == r["issue_ms"]
     assert rb["launch_ms"] == pytest.approx(op["issue_ms"] + rb["ms"])
 
@@ -384,3 +385,44 @@ def test_given_palmyra213_32b_builds_then_p4j_launch_ms_is_within_3pct(build, me
         pytest.skip("real build dir not present")
     op = estimate([{"kernel": build, "bdgraph": {"worklocal": str(wl), "bd_write_path": "jit_mmio"}}])["ops"][0]
     assert op["ddr_runb"]["launch_ms"] == pytest.approx(meas, rel=0.03)    # P4i: -11.5% on u_lin_2048x960x320
+
+
+# --- P4k: at 32 B runs the factor follows the DDR row stride (empirical, palmyra213) ---
+
+def test_given_a_strided_bd_then_row_stride_is_its_second_dim_stride_and_a_plain_bd_has_none():
+    assert bdgraph.row_stride({"len": 40960, "dim_strides": [4, 2560, 32], "dim_wraps": [8, 16, 80]}) == 2560
+    assert bdgraph.row_stride({"len": 4096, "dim_strides": [4], "dim_wraps": [1024]}) is None
+    assert bdgraph.row_stride({"len": 4096}) is None and bdgraph.row_stride(None) is None
+
+
+@pytest.mark.parametrize("stride,f", [(640, 1.33), (1312, 1.33), (2560, 1.33),
+                                      (1920, 1.87), (3200, 1.87), (5120, 1.87), (None, 1.87), (2576, 1.87)])
+def test_given_palmyra213_p4k_then_a_32b_read_takes_the_fast_factor_only_at_a_fast_stride(stride, f):
+    ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=32, row_stride_b=stride)]}
+    r = bdgraph.ddr_runb({"ms": 1.0}, ddr, bdgraph.RUN_B_FACTOR_FIT["palmyra213"], issue_ms=2.0)
+    assert r["factor"] == f and r["launch_ms"] == pytest.approx(2.0 + f)
+
+
+def test_given_a_by_stride_fit_then_the_factor_is_byte_weighted_over_channels_with_different_strides():
+    fac = {32: {"by_stride": {640: 1.0}, "default": 2.0}}
+    chs = [dict(_ch(0, "MM2S", 3000), run_b=32, row_stride_b=640), dict(_ch(1, "MM2S", 1000), run_b=32, row_stride_b=1920)]
+    r = bdgraph.ddr_runb({"ms": 1.0}, {"mm2s": 4000, "s2mm": 0, "channels": chs}, fac)
+    assert r["factor"] == pytest.approx((3000 * 1.0 + 1000 * 2.0) / 4000)
+
+
+def test_given_a_16b_read_then_p4k_keeps_the_single_16b_factor():
+    ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=16, row_stride_b=2576)]}
+    assert bdgraph.ddr_runb({"ms": 1.0}, ddr, bdgraph.RUN_B_FACTOR_FIT["palmyra213"])["factor"] == 2.53
+
+
+@pytest.mark.parametrize("build,meas", [("costmodel_runb2/u_lin_1024x1280x320_tkw8", 5.259),     # P4j +15.9%
+                                        ("costmodel_runb7/u_lin_512x640x320_tkw8", 1.758),       # P4j +18.5%
+                                        ("costmodel_runb5/u_lin_2048x1280x320_tkw8", 9.941),     # P4j +16.3%
+                                        ("costmodel_runb7/u_lin_512x960x320_tkw8", 2.377)])      # slow stride
+def test_given_palmyra213_fast_and_slow_stride_builds_then_p4k_launch_ms_is_within_7pct(build, meas):
+    hit = sorted(RUNB.glob("costmodel_runb*/" + build.split("/", 1)[1] + "/aout/worklocal/schedule_view.json"))
+    if not hit:
+        pytest.skip("real build dir not present")
+    wl = hit[0].parent
+    op = estimate([{"kernel": build, "bdgraph": {"worklocal": str(wl), "bd_write_path": "jit_mmio"}}])["ops"][0]
+    assert op["ddr_runb"]["launch_ms"] == pytest.approx(meas, rel=0.07)
