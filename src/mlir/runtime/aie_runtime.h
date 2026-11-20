@@ -379,6 +379,10 @@ struct_event __Runtime_launch_kernel_group_ctrl(XAie_DevInst *dev, __Runtime_Ctr
                                                 struct_kernel_group kg, int32_t bd_id, int32_t mm2s_ch);
 
 void __Runtime_phase_cycles(unsigned long long *cyc, unsigned int *calls);
+// M1.1 cumulative launch words (AIEHLC_PROFILING, zeros otherwise): MMIO words, control-packet words,
+// words per phase [PH_KLOAD, PH_BDCFG, PH_COREEN, PH_STARTIO], BD configs, core resets, ring misses
+void __Runtime_launch_words(unsigned long long *mmio_w, unsigned long long *cp_w, unsigned long long *ph_w,
+                            unsigned int *bd_n, unsigned int *rst_n, unsigned long long *miss);
 void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls);
 // GAP-RT1: always-on wait_io time in generic-timer ticks (the XTime counter; aie_host_split.h ahs_now)
 void __Runtime_host_split_wait_ticks(unsigned long long *ticks, unsigned int *calls);

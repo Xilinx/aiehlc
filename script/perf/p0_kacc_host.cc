@@ -15,6 +15,8 @@ void __Runtime_ctrl_high_throughput_enable(int on); /* C++ linkage, as aie_runti
 void __Runtime_phase_cycles(unsigned long long *cyc, unsigned int *calls);
 void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls);
 void __Runtime_core_perf_report(int tag);
+void __Runtime_launch_words(unsigned long long *mmio_w, unsigned long long *cp_w, unsigned long long *ph_w,
+                            unsigned int *bd_n, unsigned int *rst_n, unsigned long long *miss);
 int g_runtime_debug_level = 0x100; /* AIE_DEBUG_FLAG_CORE_PERF_COUNTER (aie_runtime.h:69); overrides the weak 0 */
 
 static inline unsigned long long p0_pmc(void) {
@@ -99,6 +101,9 @@ int main() {
     unsigned long long sp_pre = 0, sp_call = 0, sp_glue = 0, sp_post = 0, ticks = 0;
     __Runtime_phase_cycles(ph0, phn0);
     __Runtime_wait_io_cycles(&wio0, &wion0);
+    unsigned long long wm0 = 0, wc0 = 0, wp0[4] = {0, 0, 0, 0}, wx0 = 0;
+    unsigned int wbd0 = 0, wrs0 = 0;
+    __Runtime_launch_words(&wm0, &wc0, wp0, &wbd0, &wrs0, &wx0);
     XTime g0, g1;
     XTime_GetTime(&g0);
     const unsigned long long pmc0 = p0_pmc();
@@ -136,6 +141,9 @@ int main() {
     XTime_GetTime(&g1);
     __Runtime_phase_cycles(ph1, phn1);
     __Runtime_wait_io_cycles(&wio1, &wion1);
+    unsigned long long wm1 = 0, wc1 = 0, wp1[4] = {0, 0, 0, 0}, wx1 = 0;
+    unsigned int wbd1 = 0, wrs1 = 0;
+    __Runtime_launch_words(&wm1, &wc1, wp1, &wbd1, &wrs1, &wx1);
     unsigned long long ph[4];
     unsigned int phn[4];
     for (int i = 0; i < 4; i++) {
@@ -166,6 +174,15 @@ int main() {
            phn[0], phn[1], phn[3], phn[2], wion, ph[1] * cms / nl, ph[3] * cms / nl, wio * cms / nl,
            sp_glue * cms / nl, sp_pre * cms / nl, sp_post * cms / nl, sp_call * cms / nl, rt_ms, sum_ms, aie_ms,
            (aie_ms - sum_ms) / nl, pmc1 - pmc0, g_s, launches);
+#if defined(AIEHLC_PROFILING) && AIEHLC_PROFILING
+    /* M1.1 launch words per launch over the timed pass (main_launch_line.c format; PH_KLOAD=0 PH_BDCFG=1
+     * PH_COREEN=2 PH_STARTIO=3) */
+    printf("LAUNCH split_words mmio_w=%.1f cp_w=%.1f bd_n=%.1f rst_n=%.1f kload_w=%.1f bdcfg_w=%.1f startio_w=%.1f coreen_w=%.1f\n",
+           (double)(wm1 - wm0) / nl, (double)(wc1 - wc0) / nl, (double)(wbd1 - wbd0) / nl, (double)(wrs1 - wrs0) / nl,
+           (double)(wp1[0] - wp0[0]) / nl, (double)(wp1[1] - wp0[1]) / nl, (double)(wp1[3] - wp0[3]) / nl,
+           (double)(wp1[2] - wp0[2]) / nl);
+    printf("[P0] split_words_miss=%llu\n", wx1 - wx0);
+#endif
     const float *ref = (const float *)kacc_y_bin; /* [M][N] */
     double dot = 0, na = 0, nr = 0, maxabs = 0;
     int nonfinite = 0;

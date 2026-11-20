@@ -105,7 +105,8 @@ static unsigned long long g_prof_excl_cyc = 0ULL;
 static inline unsigned long long __rt_prof_now(void) { return __rt_pmccntr() - g_prof_excl_cyc; }
 
 #if AIEHLC_PROFILING
-#define RT_PROF_TIC() __rt_prof_now()
+static inline unsigned long long __rt_prof_tic(void);
+#define RT_PROF_TIC() __rt_prof_tic()
 #define RT_PROF_ADD(cyc, n, t0)                                                                                        \
     do {                                                                                                               \
         (cyc) += (__rt_prof_now() - (t0));                                                                             \
@@ -144,6 +145,66 @@ static int g_ctrl_high_throughput_ready = 0;
 enum { PH_KLOAD = 0, PH_BDCFG = 1, PH_COREEN = 2, PH_STARTIO = 3, PH_N = 4 };
 static unsigned long long g_ph_cyc[PH_N] = {0, 0, 0, 0};
 static unsigned int g_ph_calls[PH_N] = {0, 0, 0, 0};
+/* M1.1 launch words (AIEHLC_PROFILING): device words the host writes per phase.
+ * g_wc_mmio = MMIO words that reach the real IO backend (Write32 / MaskWrite32 = 1, BlockWrite32 /
+ * BlockSet32 = n, wide PM writes = n; fa84 maxwell/mmio-count 021cbf8 backend wrap, cumulative, no
+ * LAUNCH_TL); writes the shim-BD control-packet window captures never reach it. g_wc_cp = control-packet
+ * words sent by that window ([SHIM_BD_CTRL] words). Every RT_PROF_TIC() snapshots (tic, total words,
+ * attributed words) in a ring; RT_PROF_PHASE(ph, t0) charges the words since its t0 not already charged to
+ * a nested phase to g_wc_ph[ph] (t0 not in the ring: g_wc_miss++). */
+static unsigned long long g_wc_mmio = 0ULL, g_wc_cp = 0ULL, g_wc_ph[PH_N] = {0, 0, 0, 0}, g_wc_attr = 0ULL,
+                          g_wc_miss = 0ULL;
+#if AIEHLC_PROFILING
+#define RT_WC_RING 256U
+static struct {
+    unsigned long long tic, tot, attr;
+} g_wc_ring[RT_WC_RING];
+static unsigned int g_wc_ring_n = 0U;
+static inline unsigned long long __rt_prof_tic(void) {
+    const unsigned long long t = __rt_prof_now();
+    const unsigned int i = (g_wc_ring_n++) & (RT_WC_RING - 1U);
+    g_wc_ring[i].tic = t;
+    g_wc_ring[i].tot = g_wc_mmio + g_wc_cp;
+    g_wc_ring[i].attr = g_wc_attr;
+    return t;
+}
+static inline void __rt_wc_phase(int ph, unsigned long long t0) {
+    const unsigned int n = g_wc_ring_n < RT_WC_RING ? g_wc_ring_n : RT_WC_RING;
+    for (unsigned int k = 1U; k <= n; k++) {
+        const unsigned int i = (g_wc_ring_n - k) & (RT_WC_RING - 1U);
+        if (g_wc_ring[i].tic == t0) {
+            const unsigned long long d = (g_wc_mmio + g_wc_cp - g_wc_ring[i].tot) - (g_wc_attr - g_wc_ring[i].attr);
+            g_wc_ph[ph] += d;
+            g_wc_attr += d;
+            return;
+        }
+    }
+    g_wc_miss++;
+}
+#define RT_WC_MMIO(n) (g_wc_mmio += (n))
+#define RT_WC_CP(n) (g_wc_cp += (n))
+static XAie_Backend s_wc_be;
+static const XAie_Backend *s_wc_real;
+static AieRC rt_wc_w32(void *io, u64 off, u32 v) { g_wc_mmio++; return s_wc_real->Ops.Write32(io, off, v); }
+static AieRC rt_wc_mw32(void *io, u64 off, u32 m, u32 v) { g_wc_mmio++; return s_wc_real->Ops.MaskWrite32(io, off, m, v); }
+static AieRC rt_wc_bw32(void *io, u64 off, const u32 *d, u32 n) { g_wc_mmio += n; return s_wc_real->Ops.BlockWrite32(io, off, d, n); }
+static AieRC rt_wc_bset(void *io, u64 off, u32 d, u32 n) { g_wc_mmio += n; return s_wc_real->Ops.BlockSet32(io, off, d, n); }
+static void rt_wc_install(XAie_DevInst *dev) {
+    if (dev->Backend == &s_wc_be)
+        return;
+    s_wc_real = dev->Backend;
+    s_wc_be = *dev->Backend;
+    s_wc_be.Ops.Write32 = rt_wc_w32;
+    s_wc_be.Ops.MaskWrite32 = rt_wc_mw32;
+    s_wc_be.Ops.BlockWrite32 = rt_wc_bw32;
+    s_wc_be.Ops.BlockSet32 = rt_wc_bset;
+    dev->Backend = &s_wc_be;
+}
+#else
+#define RT_WC_MMIO(n) ((void)0)
+#define RT_WC_CP(n) ((void)0)
+static inline void rt_wc_install(XAie_DevInst *dev) { (void)dev; }
+#endif
 
 static unsigned long long g_bd_init_cyc = 0ULL, g_bd_write_cyc = 0ULL;
 static unsigned int g_bd_init_n = 0U, g_bd_write_n = 0U;
@@ -199,6 +260,7 @@ static unsigned int g_pmap_print_n = 0U;
 static inline void __rt_ph_add(int ph, unsigned long long t0) {
     g_ph_cyc[ph] += (__rt_prof_now() - t0);
     g_ph_calls[ph]++;
+    __rt_wc_phase(ph, t0);
 }
 #endif
 
@@ -279,6 +341,24 @@ void __Runtime_kload_split_cycles(unsigned long long *elf_cyc, unsigned int *elf
         *rst_cyc = g_kl_rst_cyc;
     if (rst_n)
         *rst_n = g_kl_rst_n;
+}
+/* M1.1: cumulative launch words since boot (AIEHLC_PROFILING; zeros otherwise): MMIO words, control-packet
+ * words, words per phase (PH_KLOAD/PH_BDCFG/PH_COREEN/PH_STARTIO), BD configs issued (bd_n, incl. AOT window
+ * calls), core resets (rst_n), phase ends whose t0 left the snapshot ring (miss). */
+void __Runtime_launch_words(unsigned long long *mmio_w, unsigned long long *cp_w, unsigned long long *ph_w,
+                            unsigned int *bd_n, unsigned int *rst_n, unsigned long long *miss) {
+    if (mmio_w)
+        *mmio_w = g_wc_mmio;
+    if (cp_w)
+        *cp_w = g_wc_cp;
+    for (int i = 0; ph_w && i < PH_N; i++)
+        ph_w[i] = g_wc_ph[i];
+    if (bd_n)
+        *bd_n = g_bd_write_n;
+    if (rst_n)
+        *rst_n = g_kl_rst_n;
+    if (miss)
+        *miss = g_wc_miss;
 }
 void __Runtime_kload_fill_cycles(unsigned long long *fill_cyc, unsigned int *fill_n, int *aot) {
     if (fill_cyc)
@@ -3329,6 +3409,7 @@ XAie_DevInst *__Runtime_explicit_init(void) {
 #else
     XAie_SetIOBackend(dev, XAIE_IO_BACKEND_BAREMETAL);
 #endif
+    rt_wc_install(dev);
 
 #if AIE_GEN >= 2
 #ifndef __AIESIM__
@@ -3406,6 +3487,7 @@ XAie_DevInst *__Runtime_explicit_init_partition(int startCol, int numCols) {
 #else
     XAie_SetIOBackend(dev, XAIE_IO_BACKEND_BAREMETAL);
 #endif
+    rt_wc_install(dev);
 
 #if AIE_GEN >= 2
 #ifndef __AIESIM__
@@ -3654,6 +3736,8 @@ XAie_DmaDesc __Runtime_dma_bd_config(XAie_DevInst *dev, XAie_LocType tile, void 
                                                 out_of_order_bd_id, 1, 4, len / 4, 0, 0, 0, 0, 0, 0);
 
     unsigned long long __bd_t0 = RT_PROF_TIC();
+    RT_PROF_INC(g_bd_write_n);
+    RT_PROF_INC(g_bd_init_n);
     XAie_DmaDesc DmaInst;
     XAie_DmaDescInit(dev, &DmaInst, tile);
     uint8_t tile_type = XAie_GetTileTypefromLoc(dev, tile);
@@ -6324,6 +6408,7 @@ static AieRC rt_sb_kick(void) {
     g_sb_stats.sync += t_kick - t_sync;
     g_sb_stats.kick += RT_PROF_TIC() - t_kick;
     g_sb_stats.words += words;
+    RT_WC_CP(words);
     g_sb_stats.segs += nseg;
     g_sb_stats.flushes++;
     if (rc != XAIE_OK)
@@ -6677,6 +6762,8 @@ XAie_DmaDesc __Runtime_dma_bd_config_multidim(XAie_DevInst *dev, XAie_LocType ti
                                               int32_t dim_wrap3) {
 
     unsigned long long __bd_t0 = RT_PROF_TIC();
+    RT_PROF_INC(g_bd_write_n);
+    RT_PROF_INC(g_bd_init_n);
     const int32_t aot_args[19] = {bd_id,           len,         next_bd,          enable_packet,   packet_id,
                                   acquire_lock_id, acquire_lock_val, release_lock_id, release_lock_val,
                                   out_of_order_bd_id, num_dims, dim_stride0, dim_wrap0, dim_stride1, dim_wrap1,
@@ -6778,6 +6865,8 @@ XAie_DmaDesc __Runtime_dma_bd_config_multidim_ooo(XAie_DevInst *dev, XAie_LocTyp
                                                   int32_t iter_wrap) {
 
     unsigned long long __bd_t0 = RT_PROF_TIC();
+    RT_PROF_INC(g_bd_write_n);
+    RT_PROF_INC(g_bd_init_n);
     const int32_t aot_args[19] = {bd_id,           len,         next_bd,          enable_packet,   packet_id,
                                   acquire_lock_id, acquire_lock_val, release_lock_id, release_lock_val,
                                   out_of_order_bd_id, num_dims, dim_stride0, dim_wrap0, dim_stride1, dim_wrap1,
@@ -7058,6 +7147,10 @@ static int rt_aot_window_fast(XAie_DevInst *dev, const rt_aot_window *w, void *c
     (void)bufs;
     g_sb.aot_i = w->ncalls;
     g_sb_stats.aot_calls += w->ncalls;
+#if AIEHLC_PROFILING
+    for (uint32_t i = 0U; i < w->ncalls; i++) /* AOT-encoded BDs: issued (bd_n) without a descriptor init */
+        g_bd_write_n += w->calls[i].kind == RT_AOT_CALL_BD || w->calls[i].kind == RT_AOT_CALL_BD_OOO;
+#endif
     g_sb_win = w;
     g_sb_win_bufs = bufs;
     return 1;
@@ -7238,6 +7331,7 @@ static int __Runtime_pm_write_wide(XAie_DevInst *dev, XAie_LocType loc, const un
     const u64 tile = dev->BaseAddr + ((u64)loc.Col << dev->DevProp.ColShift) + ((u64)loc.Row << dev->DevProp.RowShift);
     const uintptr_t base = (uintptr_t)(tile + cm->ProgMemHostOffset + phdr->p_paddr);
     const u32 nwords = (phdr->p_memsz + 3U) / 4U;
+    RT_WC_MMIO(nwords);
     u32 w = 0;
     for (; w + 4U <= nwords; w += 4U) {
         __asm__ volatile("ldr q30, [%0]\n\tstr q30, [%1]" ::"r"(src + 4U * w), "r"(base + 4U * w) : "v30", "memory");
