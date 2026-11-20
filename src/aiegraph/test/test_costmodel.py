@@ -380,3 +380,32 @@ def test_k_diag_selftest():
     assert r.returncode == 0, r.stdout + r.stderr
     m = re.search(r"^KDIAG SELFTEST PASS \((\d+)/(\d+)\)$", r.stdout, re.M)
     assert m and m.group(1) == m.group(2) and int(m.group(1)) >= 16, r.stdout
+
+
+def test_k_diag_noscale():
+    """k_diag.py (M3.1.1 counter window): perf_n < launches is short (never scaled, out of KSANITY);
+    optional pre_io_act_cyc/snap_gap_cyc tail; KSANITY denominator is K_meas + snap_gap"""
+    import importlib.util
+    path = SRC.parent / "script" / "perf" / "k_diag.py"
+    spec = importlib.util.spec_from_file_location("k_diag_noscale", path)
+    kd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kd)
+    txt = ("PROF aie_site_perf part=1 kind=conv launches=4 perf_n=1 io_act_cyc=2000000 lock_stall_cyc=10 "
+           "stream_stall_cyc=20\n"
+           "PROF aie_site_perf part=2 kind=fa launches=3 perf_n=3 io_act_cyc=3000000 lock_stall_cyc=0 "
+           "stream_stall_cyc=0 pre_io_act_cyc=77 snap_gap_cyc=500000\n")
+    pf = kd.parse_perf(txt)
+    assert pf[1]["io_act"] == 2000000 and pf[1]["lock"] == 10 and pf[1]["stream"] == 20  # not x4
+    assert pf[1]["short"] and pf[1]["gap"] == 0
+    assert not pf[2]["short"] and pf[2]["gap"] == 500000 and pf[2]["pre_io_act"] == 77
+    assert "scale" not in path.read_text().split("def parse_perf", 1)[1].split("def ", 1)[0].replace("scaled", "")
+    sites = []
+    for prt, K in ((1, 0.5), (2, 2.6)):
+        s = dict(site="x%d" % prt, part=prt, launches=pf[prt]["launches"], cls="linear", ddr_b=0.0, bucket=2,
+                 perf=pf[prt])
+        s.update(kd.split_site(K, 0.0, pf[prt]))
+        sites.append(s)
+    iok = kd.diag_lines("t", "b", sites)
+    # short part (io 2 ms over K 0.5 ms) excluded; part 2: 3 ms / (2.6 + 0.5 gap) ms
+    assert abs(iok - 3.0 / 3.1) < 1e-12 and iok <= kd.IOK_MAX
+    assert kd.kperf_line("t", "b", pf) == (2, 1)

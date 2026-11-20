@@ -9,7 +9,9 @@
 Site table: m3_site.site_rows(DIR/unet_<cfg>, LOG) -- the launches>0 sites (72 linear + 48 conv + 18 fa = 138
 per cfg, one host_split part each); NOT a count of host_split parts. Each site's
 'PROF aie_site_perf part=<p> ... perf_n io_act_cyc lock_stall_cyc stream_stall_cyc' line is joined by part=
-(sums over the perf_n launches that gave a reading, scaled by launches/perf_n when perf_n < launches).
+(sums over the perf_n launches that gave a reading; NEVER scaled -- M3.1.1). A part with perf_n < launches
+is 'short': kept in KSITE but excluded from KSANITY / KFLOOR. Optional tail ' pre_io_act_cyc=N snap_gap_cyc=G'
+(counter window, M3.1.1); without it snap_gap = 0.
 Static BD shape: site_feat.bd_shape_rows (= site_feat --bd-shape), joined by (kind, cid).
 
 Per site (ms; AIE clock AIE_MHZ = 1e3 MHz):
@@ -24,14 +26,16 @@ Per site (ms; AIE clock AIE_MHZ = 1e3 MHz):
 K floor: K_hat = max(compute, ddr_b / BW_j) + t0 * launches, j = run_b bucket (RUNB_EDGES, <= 3 buckets),
   params per cfg: BW_j of the buckets present + t0 (<= 4). Fit on LOG_A (minimax-polished NNLS over the
   max() branch assignment), check on LOG_B (never fitted), LOO = leave-one-site-out refit on LOG_A.
-Sanity: io_act / K_meas <= IOK_MAX on every site (core counters cannot exceed the wait window).
+Sanity: io_act / (K_meas + snap_gap) <= IOK_MAX on every non-short site (core counters cannot exceed the wait
+  window; snap_gap = snap_gap_cyc / AIE_MHZ / 1e3 ms, the counter-snapshot to wait-timer offset).
 Classes (KCLS): conv_tkw4 (conv, kacc tkw == 4), conv_big (other conv), fa_d160 (fa, d160), fa16 (other fa),
   linear.
 Output:
   KSITE   cfg run site part launches K_meas core compute tail lock stream dma bound K_hat rel
   KCLS    cfg run cls sites K_ms core_ms compute_ms tail_ms dma_ms bound=core:n/dma:n/sync:n
   KFA     cfg fa128/fa134 meas_ratio run fa128_K_ms fa134_K_ms
-  KSANITY cfg run io_act_over_K_max PASS|FAIL
+  KPERF   cfg=<c> run=<r> parts=<parts with launches>0> short=<n> scaled=0   (one per log; short = perf_n < launches)
+  KSANITY cfg run io_act_over_K_max PASS|FAIL   (max io_act/(K_meas+snap_gap) over non-short sites; FAIL -> rc=1)
   KFIT    cfg log=A bw_<bucket>_GBps.. t0_ms params r2 maxrel loo_maxrel
   KCHK    cfg log=B r2 maxrel
   KDRIFT  cfg=<c> wait_sum_rel_vs_ref=<%.3f>   (--ref: M2c b log, built without counters)
@@ -63,7 +67,7 @@ SITES_PER_CFG = {"linear": 72, "conv": 48, "fa": 18}
 GATE = dict(r2=0.9, maxrel=0.15, loo=0.20, drift=0.05)
 
 _PERF = re.compile(r"^PROF aie_site_perf part=(\d+) kind=(\w+) launches=(\d+) perf_n=(\d+) io_act_cyc=(\d+) "
-                   r"lock_stall_cyc=(\d+) stream_stall_cyc=(\d+)$", re.M)
+                   r"lock_stall_cyc=(\d+) stream_stall_cyc=(\d+)(?: pre_io_act_cyc=(\d+) snap_gap_cyc=(\d+))?$", re.M)
 _SPLIT = re.compile(r"^PROF aie_host_split part=(\d+) kind=(\w+) .*wait_ms=([\d.]+) .*inval_ms=([\d.]+) "
                     r"launches=(\d+)$", re.M)
 _FA_D = re.compile(r"_d(\d+)_")
@@ -72,14 +76,27 @@ _CMP = re.compile(r"^CMP unet board=(\S+) .*aie_launches=(\d+) .*run_rc=(-?\d+)"
 
 # ------------------------------------------------------------------ parsing / per-site split
 def parse_perf(txt):
-    """{part: dict(kind, launches, perf_n, io_act, lock, stream)} -- counter sums scaled to all launches"""
+    """{part: dict(kind, launches, perf_n, io_act, lock, stream, pre_io_act, gap, short)} -- raw counter sums over
+    the perf_n launches, never scaled; short = perf_n < launches (excluded from KSANITY / KFLOOR)"""
     out = {}
-    for p, k, n, pn, ia, ls, ss in _PERF.findall(txt):
+    for p, k, n, pn, ia, ls, ss, pre, gap in _PERF.findall(txt):
         n, pn = int(n), int(pn)
-        sc = n / pn if pn > 0 else float("nan")
-        out[int(p)] = dict(kind=k, launches=n, perf_n=pn, io_act=int(ia) * sc, lock=int(ls) * sc,
-                           stream=int(ss) * sc)
+        out[int(p)] = dict(kind=k, launches=n, perf_n=pn, io_act=int(ia), lock=int(ls), stream=int(ss),
+                           pre_io_act=int(pre or 0), gap=int(gap or 0), short=pn < n)
     return out
+
+
+def perf_ok(s):
+    """site has a full (non-short) counter reading"""
+    return s.get("perf") is not None and not s["perf"].get("short", False)
+
+
+def kperf_line(cfg, run, pf):
+    """KPERF of one log: parts with launches > 0, short parts; returns (parts, short)"""
+    parts = [v for v in pf.values() if v["launches"] > 0]
+    sh = sum(v["short"] for v in parts)
+    print("KPERF cfg=%s run=%s parts=%d short=%d scaled=0" % (cfg, run, len(parts), sh))
+    return len(parts), sh
 
 
 def parse_split(txt):
@@ -115,7 +132,7 @@ def split_site(wait, inval, perf):
         return d
     cyc_ms = 1.0 / (AIE_MHZ * 1e3)
     d.update(core=perf["io_act"] * cyc_ms, compute=(perf["io_act"] - perf["lock"] - perf["stream"]) * cyc_ms,
-             lock=perf["lock"] * cyc_ms, stream=perf["stream"] * cyc_ms)
+             lock=perf["lock"] * cyc_ms, stream=perf["stream"] * cyc_ms, gap=perf.get("gap", 0) * cyc_ms)
     d["tail"] = d["K"] - d["core"]
     return d
 
@@ -242,6 +259,7 @@ def diag_lines(cfg, run, sites, p=None):
     for s in sites:
         if s.get("perf") is None:
             continue
+        s.setdefault("gap", 0.0)
         s["dma"] = s["ddr_b"] * p["inv"].get(s["bucket"], 0.0) if p else 0.0
         s["bound"] = bound(s["compute"], s["dma"], s["lock"], s["stream"])
         kh = k_hat(p, s) if p else float("nan")
@@ -249,7 +267,7 @@ def diag_lines(cfg, run, sites, p=None):
               "stream=%.3f dma=%.3f bound=%s K_hat=%.3f rel=%.3f"
               % (cfg, run, s["site"], s["part"], s["launches"], s["K"], s["core"], s["compute"], s["tail"],
                  s["lock"], s["stream"], s["dma"], s["bound"], kh, abs(kh - s["K"]) / s["K"]))
-    ps = [s for s in sites if s.get("perf") is not None]
+    ps = [s for s in sites if perf_ok(s)]
     for c in ("conv_big", "conv_tkw4", "fa16", "fa_d160", "linear"):
         g = [s for s in ps if s["cls"] == c]
         print("KCLS cfg=%s run=%s cls=%s sites=%d K_ms=%.3f core_ms=%.3f compute_ms=%.3f tail_ms=%.3f dma_ms=%.3f "
@@ -261,7 +279,7 @@ def diag_lines(cfg, run, sites, p=None):
         a, b = by["fa128"]["K"], by["fa134"]["K"]
         print("KFA cfg=%s fa128/fa134 meas_ratio=%.3f run=%s fa128_K_ms=%.3f fa134_K_ms=%.3f"
               % (cfg, a / b if b else float("inf"), run, a, b))
-    iok = max((s["core"] / s["K"] for s in ps), default=float("inf"))
+    iok = max((s["core"] / (s["K"] + s.get("gap", 0.0)) for s in ps), default=float("inf"))
     print("KSANITY cfg=%s run=%s io_act_over_K_max=%.3f %s" % (cfg, run, iok, "PASS" if iok <= IOK_MAX else "FAIL"))
     return iok
 
@@ -301,13 +319,17 @@ def full(a):
     ok_all = True
     agg = dict(cfgs=0, sites=0, perf=0, r2=float("inf"), maxrel=0.0, loo=0.0, drift=0.0, iok=0.0)
     src_ok = True
+    ksan_ok = True
     for spec in a.runs:
         cfg, logs = spec.split("=", 1)
         la, lb = (logs.split(",") + [None])[:2]
         sa, ta = load(cfg, la, a.build_root)
         sb, tb = load(cfg, lb, a.build_root) if lb else (sa, ta)
-        pa = [s for s in sa if s["perf"] is not None and s["bd_ok"] and s["K"] > 0]
-        pb = [s for s in sb if s["perf"] is not None and s["bd_ok"] and s["K"] > 0]
+        pa = [s for s in sa if perf_ok(s) and s["bd_ok"] and s["K"] > 0]
+        pb = [s for s in sb if perf_ok(s) and s["bd_ok"] and s["K"] > 0]
+        kperf_line(cfg, "a", parse_perf(ta))
+        if lb:
+            kperf_line(cfg, "b", parse_perf(tb))
         for lg, ss, ps, tx in ((la, sa, pa, ta), (lb, sb, pb, tb)) if lb else ((la, sa, pa, ta),):
             m = _CMP.findall(tx)
             bd, nl, rc = m[-1] if m else ("?", "0", "-1")
@@ -323,6 +345,7 @@ def full(a):
         print("KFIT cfg=%s log=%s %s r2=%.4f maxrel=%.4f loo_maxrel=%.4f" % (cfg, la, fmt_p(p), r2a, mra, lo))
         ioka = diag_lines(cfg, "a", sa, p)
         iokb = diag_lines(cfg, "b", sb, p) if lb else ioka
+        ksan_ok &= max(ioka, iokb) <= IOK_MAX
         r2b, mrb = r2(p, pb), max(rels(p, pb))
         print("KCHK cfg=%s log=%s r2=%.4f maxrel=%.4f" % (cfg, lb or la, r2b, mrb))
         dr = 0.0
@@ -348,7 +371,7 @@ def full(a):
         agg["loo"] = max(agg["loo"], lo)
         agg["drift"] = max(agg["drift"], dr)
         agg["iok"] = max(agg["iok"], ioka, iokb)
-    ok_all = ok_all and src_ok and agg["cfgs"] > 0
+    ok_all = ok_all and src_ok and ksan_ok and agg["cfgs"] > 0
     print("KFLOOR ALL src=%s cfgs=%d sites=%d perf_sites=%d r2_min=%.3f maxrel=%.3f loo_maxrel=%.3f "
           "act_over_k_max=%.3f %s"
           % ("board" if src_ok else "nonboard", agg["cfgs"], agg["sites"], agg["perf"], agg["r2"], agg["maxrel"],
@@ -381,7 +404,7 @@ def selftest():
         res.append(bool(ok))
         print("KDIAG SELFTEST %-28s %s %s" % (name, "ok" if ok else "FAIL", info))
 
-    # 1 parser: perf + split lines, perf_n < launches scaled, launches=0 parts and other lines ignored
+    # 1 parser: perf + split lines, perf_n < launches NOT scaled (short), launches=0 parts and other lines ignored
     txt = ("PROF aie_host_split part=7 kind=conv pack_ms=1.000 scatter_ms=0.5 dma_ms=2.000 wait_ms=9.500 glue_ms=0.1 "
            "flush_ms=0.2 inval_ms=0.500 launches=4\n"
            "PROF aie_site_perf part=7 kind=conv launches=4 perf_n=3 io_act_cyc=6000000 lock_stall_cyc=300000 "
@@ -389,13 +412,13 @@ def selftest():
            "PROF aie_host_split part=8 kind=linear pack_ms=0 scatter_ms=0 dma_ms=0 wait_ms=0 glue_ms=0 flush_ms=0 "
            "inval_ms=0 launches=0\nPROF aie_site_perf part=9 kind=fa launches=2 perf_n=2 io_act_cyc=1 x\n")
     pf, sp = parse_perf(txt), parse_split(txt)
-    chk("parse_perf", set(pf) == {7} and pf[7]["io_act"] == 8e6 and pf[7]["lock"] == 4e5
-        and pf[7]["stream"] == 1.2e6 and pf[7]["perf_n"] == 3, pf)
+    chk("parse_perf", set(pf) == {7} and pf[7]["io_act"] == 6e6 and pf[7]["lock"] == 3e5
+        and pf[7]["stream"] == 9e5 and pf[7]["perf_n"] == 3 and pf[7]["short"] and pf[7]["gap"] == 0, pf)
     chk("parse_split", sp == {7: (9.5, 0.5, 4), 8: (0.0, 0.0, 0)}, sp)
     # 2 split: K=wait-inval=9.0, core=8e6 cyc @1 GHz=8 ms, compute=(8e6-4e5-1.2e6)=6.4 ms, tail=1.0
-    d = split_site(9.5, 0.5, pf[7])
+    d = split_site(9.5, 0.5, dict(io_act=8e6, lock=4e5, stream=1.2e6))
     chk("split", all(abs(d[k] - v) < 1e-12 for k, v in dict(K=9.0, core=8.0, compute=6.4, tail=1.0, lock=0.4,
-                                                           stream=1.2).items()), d)
+                                                           stream=1.2, gap=0.0).items()), d)
     chk("split_no_perf", split_site(3.0, 1.0, None) == dict(K=2.0))
     # 3 bound / bucket / class
     chk("bound", (bound(6.4, 2.0, 0.4, 1.2), bound(1.0, 2.0, 0.4, 1.2), bound(1.0, 2.0, 1.5, 0.2),
@@ -436,6 +459,29 @@ def selftest():
     iok = diag_lines("synth", "a", S, dict(inv={2: 1e-6}, t0=0.0))
     chk("sanity_iok", abs(iok - 1.05) < 1e-12 and iok > IOK_MAX)
     chk("bound_labels", [s["bound"] for s in S] == ["core", "sync"])
+    # 8 M3.1.1 no scaling: a short part (perf_n < launches) is reported but excluded from KSANITY
+    t2 = ("PROF aie_site_perf part=1 kind=fa launches=4 perf_n=4 io_act_cyc=3000000 lock_stall_cyc=0 stream_stall_cyc=0\n"
+          "PROF aie_site_perf part=2 kind=fa launches=4 perf_n=1 io_act_cyc=1000000 lock_stall_cyc=0 stream_stall_cyc=0\n"
+          "PROF aie_site_perf part=3 kind=fa launches=0 perf_n=0 io_act_cyc=0 lock_stall_cyc=0 stream_stall_cyc=0\n")
+    p2f = parse_perf(t2)
+    Ss = []
+    for prt, K in ((1, 4.0), (2, 0.5)):
+        e = dict(site="fa%d" % prt, part=prt, launches=4, cls="fa16", ddr_b=0.0, bucket=2, perf=p2f[prt])
+        e.update(split_site(K, 0.0, p2f[prt]))
+        Ss.append(e)
+    iok2 = diag_lines("synth", "s", Ss)
+    chk("short_noscale", p2f[2]["io_act"] == 1e6 and p2f[2]["short"] and not p2f[1]["short"]
+        and kperf_line("synth", "s", p2f) == (2, 1) and abs(iok2 - 0.75) < 1e-12 and perf_ok(Ss[0])
+        and not perf_ok(Ss[1]), "iok=%.3f (short part 2.0 excluded)" % iok2)
+    # 9 snap gap: io_act/(K+gap): 5.15e6 cyc vs K=5.0 ms is 1.03 (> IOK_MAX) w/o gap; + gap 0.15 ms -> 1.000
+    t3 = ("PROF aie_site_perf part=5 kind=linear launches=2 perf_n=2 io_act_cyc=5150000 lock_stall_cyc=0 "
+          "stream_stall_cyc=0 pre_io_act_cyc=1234 snap_gap_cyc=150000\n")
+    p3 = parse_perf(t3)[5]
+    e = dict(site="linear5", part=5, launches=2, cls="linear", ddr_b=0.0, bucket=2, perf=p3)
+    e.update(split_site(5.0, 0.0, p3))
+    iok3 = diag_lines("synth", "g", [e])
+    chk("gap_denominator", p3["gap"] == 150000 and p3["pre_io_act"] == 1234 and abs(e["gap"] - 0.15) < 1e-12
+        and abs(iok3 - 5.15 / 5.15) < 1e-12 and 5.15 / 5.0 > IOK_MAX, "iok=%.3f" % iok3)
     n = sum(res)
     ok = n == len(res)
     print("KDIAG SELFTEST %s (%d/%d)" % ("PASS" if ok else "FAIL", n, len(res)))
