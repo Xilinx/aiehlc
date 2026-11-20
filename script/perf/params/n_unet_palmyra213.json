@@ -27,9 +27,9 @@
    "fa": {
     "coef": {
      "MN": 1.11939375e-07,
-     "bdcfg_w": 0.000213868195
+     "bdcfg_w": 0.000148998221
     },
-    "d": 0.297970058,
+    "d": 0.301473036,
     "feats": [
      "MN",
      "bdcfg_w"
@@ -62,18 +62,22 @@
   "kinds": {
    "conv": {
     "coef": {
-     "MK": 6.65171908e-07,
-     "MN": 3.43837661e-06,
-     "in_pack_bytes": 4.31273374e-07,
-     "relayout": 0.543514084,
-     "wbytes": 1.42873523e-07
+     "MK": 7.96853439e-07,
+     "MN": 1.41129882e-06,
+     "bdcfg_w": 0.000400689329,
+     "in_pack_bytes": 4.11409774e-07,
+     "out_scatter_bytes": 2.49243512e-07,
+     "relayout": 0.533783548,
+     "wbytes": 1.19297761e-07
     },
-    "d": 1.12748413,
+    "d": 0.0,
     "feats": [
      "MK",
      "MN",
      "wbytes",
+     "bdcfg_w",
      "in_pack_bytes",
+     "out_scatter_bytes",
      "relayout"
     ],
     "n": 48
@@ -90,15 +94,19 @@
    },
    "linear": {
     "coef": {
-     "MN": 6.12597027e-06,
-     "kswitch": 0.0229546125,
-     "wbytes": 3.02999773e-07
+     "MK": 4.94209315e-07,
+     "bdcfg_w": 0.000378710165,
+     "launches": 0.350387032,
+     "out_scatter_bytes": 8.11460882e-07,
+     "wbytes": 9.04233376e-08
     },
-    "d": 0.88532444,
+    "d": 0.0,
     "feats": [
-     "MN",
+     "MK",
+     "launches",
      "wbytes",
-     "kswitch"
+     "bdcfg_w",
+     "out_scatter_bytes"
     ],
     "n": 72
    }

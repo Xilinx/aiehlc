@@ -33,6 +33,11 @@ from aiegraph.costmodel.unet_seq import launches_of, parse_aiek, parse_driver, r
 LAUNCH_FEATS = ("cp_w", "bdcfg_w", "shim_bd", "tile_bd", "wbytes", "kswitch", "kfirst", "rr", "rr_pair", "ucs_b",
                 "ucs_b2b")
 LAYOUT_FEATS = ("in_pack_bytes", "out_scatter_bytes", "relayout", "up", "down")
+# AIE2PS shim DMA BD = 8 registers. off writes them per round through XAIE_BACKEND_OP_CONFIG_SHIMDMABD (RunOp):
+# static_feat's bdcfg_w (the L-segment PH_BDCFG Write32 count) gives them 0 words, but the host CPU still writes
+# them inside the launch call -> N-side bdcfg_w adds SHIM_MD_WORDS per executed __Runtime_dma_bd_config_multidim[_ooo]
+# (aot / aot-kco: none, the BDs are in the control-packet words already in bdcfg_w).
+SHIM_MD_WORDS = 8
 _GEMM_W = re.compile(r"^gemm_kacc__(\d+)_(\d+)_(\d+)_")
 
 _GFA = re.compile(r"GFA class (\d+) fa_h(\d+)_n(\d+)_m(\d+)_d(\d+) .*launches/site=(\d+)")
@@ -117,7 +122,7 @@ def add_launch_feats(st, seq):
         for d in seq[i:i + s["launches"]]:
             ks.add(d["kernel"])
             f["cp_w"] += d["cp_w"] + d["rr"]
-            f["bdcfg_w"] += d["bdcfg_w"] + d["rr"]
+            f["bdcfg_w"] += d["bdcfg_w"] + d["rr"] + SHIM_MD_WORDS * d.get("shim_md", 0)
             f["shim_bd"] += d["shim_bd"]
             f["tile_bd"] += d["tile_bd"]
             f["wbytes"] += wbytes(d["kernel"])

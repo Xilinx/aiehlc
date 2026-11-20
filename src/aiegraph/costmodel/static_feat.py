@@ -220,10 +220,12 @@ def unet_site_feat(build):
             f["rr_tiles"] = window_rr_tiles(h) if f["kicks"] else {}
             f["shim_bd"] = c.get(SHIM_BD, 0)
             f["tile_bd"] = c.get("__Runtime_dma_bd_config", 0) - f["shim_bd"]
+            # shim multidim BDs (RunOp path, 0 counted Write32 words in bdcfg_w; n_feat charges them for N)
+            f["shim_md"] = c.get("__Runtime_dma_bd_config_multidim", 0) + c.get("__Runtime_dma_bd_config_multidim_ooo", 0)
             per[k] = f
         f = per[k]
         sw = k != prev
-        d = {x: f[x] for x in UNET_TOT + ("kicks", "shim_bd", "tile_bd")}
+        d = {x: f[x] for x in UNET_TOT + ("kicks", "shim_bd", "tile_bd", "shim_md")}
         d.update(kernel=k, site_fn=site, desc=desc, kswitch=int(sw), rr=f["rr"] if sw and f["kicks"] else 0,
                  rr_tiles=f["rr_tiles"], prev=prev)
         out.append(d)

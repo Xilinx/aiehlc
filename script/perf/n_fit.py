@@ -20,6 +20,7 @@ Per site (n_feat.sites of DIR/unet_<cfg>, aligned with the log's 'PROF part=<i> 
   aie_ms (in launch: kload, rt_*) belongs to K+L, not N.
 Features (all static, n_feat.sites = base sites + static_feat launch features + n_layout layout features):
   FEATS below (= the b6450ac9 list, incl. kfirst); n_feat also yields Mw/Kw/Nw/ucs_b/... which are not used here.
+  bdcfg_w (n_feat) = PH_BDCFG words + 8 words per shim multidim BD (off's RunOp shim BDs, host-written per round).
 Model per (cfg, kind in conv|linear|fa), sites with launches>0 only:
   N = sum_f coef_f * f + d    (NNLS on relative error, weight 1/N, coef >= 0, d >= 0; <= MAX_FEATS[kind] active features,
                                subset = exhaustive search, see fit_kind)
