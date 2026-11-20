@@ -326,3 +326,46 @@ def test_l_static_ignores_log_counts(tmp_path):
     s = lf.pred_static(KBUILD, "off", prm)
     assert s == lf.pred_static(KBUILD, "off", prm)
     assert s == pytest.approx(launch_l.predict_l(p0["calls"], p0["words"], "off", prm), abs=1e-12)
+
+
+# N (host glue) segment, costmodel M2/N-P2: frozen params vs the M2c b board run (palmyra213, off + aot-kco).
+# Excerpts = PROF / [UCL] / LAUNCH (warm + split*) / CMP / BOARD lines of
+# shuhua/clones/cost/tasks/2026-11-20_M2c/unet_{off,aot-kco}.b.log ('LAUNCH warm' carries launches= for NSUM).
+# The site features come from the UNet build dirs (~10 MB of host.cc / graph_driver.c / aiek_unetconv.cc read
+# out of 31 GB), not committed: N_BUILD_ROOT overrides the default M2c build root.
+NPARAMS = PERF / "params" / "n_unet_palmyra213.json"
+NBUILD = Path(__import__("os").environ.get("N_BUILD_ROOT", "/scratch/staff/huaj/tmp/costmodel_m2c"))
+
+
+def test_n_fit_frozen_unet(capsys):
+    if not (NBUILD / "unet_off").is_dir() or not (NBUILD / "unet_aot-kco").is_dir():
+        pytest.skip("M2c UNet build root %s missing (set N_BUILD_ROOT)" % NBUILD)
+    nf = _script("n_fit")
+    rc = nf.main(["--build-root", str(NBUILD), "--params", str(NPARAMS), "--check",
+                  "off=%s" % (DATA / "n_unet_off.b.excerpt"), "aot-kco=%s" % (DATA / "n_unet_aot-kco.b.excerpt")])
+    out = capsys.readouterr().out
+    print(out)
+    assert rc == 0
+    assert "NGATE ALL src=board cfgs=2" in out
+    import re
+    m = re.search(r"^NGATE ALL src=board cfgs=2 sites=(\d+) r2_min=\S+ maxrel=([\d.]+) (PASS|FAIL)$", out, re.M)
+    assert m, out
+    assert int(m.group(1)) == 276            # 138 launch sites per cfg
+    assert float(m.group(2)) <= 0.2
+    assert m.group(3) == "PASS"
+    for cfg in ("off", "aot-kco"):
+        assert re.search(r"^NSRC cfg=%s .*board=palmyra213 launches=258 run_rc=0$" % cfg, out, re.M)
+        assert re.search(r"^NSUM cfg=%s .* PASS$" % cfg, out, re.M)
+        assert re.search(r"^NGATE cfg=%s sites=138 .* PASS$" % cfg, out, re.M)
+    assert "NSITE_BAD" not in out
+
+
+def test_n_feat_pack_slow_m77():
+    from aiegraph.costmodel.n_feat import pack_slow_elems
+    K = 768
+    # M=77: Mp=(77+63)&~63=128, NEON path takes 8*floor(77/8)=72 rows, scalar slow path 128-72=56 rows x K
+    assert ((77 + 63) & ~63) == 128 and 8 * (77 // 8) == 72
+    assert pack_slow_elems(77, K) == 56 * K
+    assert pack_slow_elems(77, 1) == 56
+    # M=64: Mp=64, all rows in full 8-row groups -> no slow path
+    assert pack_slow_elems(64, K) == 0
