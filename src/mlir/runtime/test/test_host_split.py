@@ -698,7 +698,8 @@ def _capture(fn):
 
 def test_core_perf_launch_window():
     """M3.1.1 launch window: counters 0/2/3 read once at A and once at B per launch (never per wait);
-    compute = dACTIVE - dLOCK - dSTREAM, ovl = (B start - A end) - sum(wait), io_active = max(0, compute - ovl),
+    compute = dACTIVE - dLOCK - dSTREAM, per-tile ovl = (this tile's B read - its A read) - sum(wait),
+    io_active = max(0, dACTIVE - ovl) (counter 0 inside the waits, lower bound),
     snap_gap = last wait end -> B; [PERFIO] old fields unchanged + compute_cyc/ovl_cyc appended."""
     rt = (RT / "aie_runtime.c").read_text()
     assert rt.count("static void rt_core_perf_launch_snap(int end)") == 1
@@ -745,10 +746,11 @@ def test_core_perf_launch_window():
     assert L.get(o) == 1            # the getter takes B
     assert L.reads() == 4 and L.tic(1) > L.tic(0)
     assert L.compute(0) == 67000 and L.compute(1) == 1000          # dA - dLOCK - dSTREAM
-    assert L.ovl() == 13000                                         # (85 - 12) - 60 ticks
-    # io = 67000 - 13000; lock, stream; pre_io = ACTIVE total - io; snap_gap = 85 - 79 ticks
-    assert list(o) == [54000, 1000, 2000, 70100 - 54000, 6000], list(o)
-    assert L.io(1) == 0             # max(0, 1000 - 13000)
+    assert L.ovl() == 13000                                         # launch-wide host: (85 - 12) - 60 ticks
+    # per tile: tile 0 read at 10 (A) and 85 (B), tile 1 at 11 and 86 -> ovl = 75 - 60 ticks = 15000 each
+    # io = dACTIVE 70000 - 15000; lock, stream; pre_io = ACTIVE total - io; snap_gap = 85 - 79 ticks
+    assert list(o) == [55000, 1000, 2000, 70100 - 55000, 6000], list(o)
+    assert L.io(1) == 0             # max(0, 1000 - 15000)
     assert L.get(o) == 0            # handed out once per launch
     L.snap(1)
     assert L.reads() == 4           # B once per launch
@@ -756,8 +758,8 @@ def test_core_perf_launch_window():
     rows = re.findall(r"^\[PERFIO\] tag=3 tile=\((\d+),2\) pre_io_active=(\d+) pre_io_lock_stall=(\d+) "
                       r"io_active=(\d+) io_lock_stall=(\d+) snap_gap_cyc=(\d+) compute_cyc=(\d+) ovl_cyc=(\d+)$",
                       out, re.M)
-    assert rows == [("0", str(70100 - 54000), "7", "54000", "1000", "6000", "67000", "13000"),
-                    ("1", "1050", "0", "0", "0", "6000", "1000", "13000")], out
+    assert rows == [("0", str(70100 - 55000), "7", "55000", "1000", "6000", "67000", "15000"),
+                    ("1", "1050", "0", "0", "0", "6000", "1000", "15000")], out
     assert L.reads() == 6           # [PERF] totals only; B not re-taken
     # next launch: re-armed, report also takes B; io bounded by the waits (io <= compute - host time)
     L.arm(2)
@@ -768,9 +770,9 @@ def test_core_perf_launch_window():
     t0 = L.now()
     L.advance(50)
     L.wait_done(t0, L.now())
-    L.set_ctr(0, 150000, 0, 0)      # busy all 150 ticks; only the 50-tick wait is io
+    L.set_ctr(0, 152000, 0, 0)      # busy all 152 ticks of tile 0's read-to-read window; only the 50-tick wait is io
     out = _capture(lambda: L.report(4))
-    assert re.search(r"^\[PERFIO\] tag=4 tile=\(0,2\) .* io_active=50000 .* snap_gap_cyc=0 compute_cyc=150000 "
-                     r"ovl_cyc=100000$", out, re.M), out
+    assert re.search(r"^\[PERFIO\] tag=4 tile=\(0,2\) .* io_active=50000 .* snap_gap_cyc=0 compute_cyc=152000 "
+                     r"ovl_cyc=102000$", out, re.M), out
     # AIEHLC_CORE_PERF_WIN=1 still compiles (diagnostic per-wait path)
     _lw_lib(win=True)

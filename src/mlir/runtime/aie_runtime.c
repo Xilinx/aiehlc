@@ -403,8 +403,10 @@ static int s_core_perf_ntiles = 0;
  * rt_sb_commit) and ONCE at B (rt_core_perf_launch_snap(1): after the launch's last wait RT_PROF_ADD, before
  * [PERFIO] / the site-perf getter). Per tile, A->B:
  *   compute   = dACTIVE - dLOCK_STALL - dSTREAM_STALL
- *   ovl       = (B start - A end host time) - sum(wait of this launch), in AIE cycles at RT_CORE_PERF_AIE_MHZ
- *   io_active = max(0, compute - ovl)
+ *   ovl       = (host time of this tile's B read - its A read) - sum(wait of this launch), AIE cycles at
+ *               RT_CORE_PERF_AIE_MHZ (per tile: the A/B reads of 16 tiles take ~28 us, so a launch-wide host
+ *               window would be off by that much per tile)
+ *   io_active = max(0, dACTIVE - ovl) = counter 0 inside the waits, lower bound (ACTIVE outside the waits <= ovl)
  *   snap_gap  = last wait end -> B start, AIE cycles
  * Nothing of the counter path runs per wait: the wait path only stores ahs_now() and adds the wait ticks
  * after RT_PROF_ADD (plain stores, no MMIO, outside __wio_t0..RT_PROF_ADD -- WINLINT). The old per-wait
@@ -420,6 +422,9 @@ static unsigned long long s_klw_compute[RT_CORE_PERF_MAX_TILES]; /* A->B ACTIVE 
 static unsigned long long s_klw_io[RT_CORE_PERF_MAX_TILES];      /* max(0, compute - ovl) */
 static unsigned long long s_klw_ls[RT_CORE_PERF_MAX_TILES];      /* A->B LOCK_STALL */
 static unsigned long long s_klw_ss[RT_CORE_PERF_MAX_TILES];      /* A->B STREAM_STALL */
+static unsigned long long s_klw_da[RT_CORE_PERF_MAX_TILES];      /* A->B ACTIVE */
+static unsigned long long s_klw_ta[RT_CORE_PERF_MAX_TILES];      /* ahs_now() just before this tile's A read */
+static unsigned long long s_klw_tovl[RT_CORE_PERF_MAX_TILES];    /* per-tile ovl, AIE cycles */
 static int s_klw_state = 0;                     /* 0 idle, 1 A pending, 2 A taken, 3 B taken */
 static int s_klw_given = 0;                     /* this launch was handed out (__Runtime_core_perf_last_launch*) */
 static unsigned s_klw_nwait = 0;                /* waits between A and B */
@@ -491,7 +496,7 @@ static void rt_core_perf_site_read(void) {
 static void rt_core_perf_launch_reset(void) {
     for (int i = 0; i < RT_CORE_PERF_MAX_TILES; i++) {
         s_klw_ok[i] = 0;
-        s_klw_compute[i] = s_klw_io[i] = s_klw_ls[i] = s_klw_ss[i] = 0ULL;
+        s_klw_compute[i] = s_klw_io[i] = s_klw_ls[i] = s_klw_ss[i] = s_klw_da[i] = s_klw_ta[i] = s_klw_tovl[i] = 0ULL;
         s_klw_act[i] = 0;
 #if AIEHLC_CORE_PERF_WIN
         s_kwin_a[i] = 0ULL;
@@ -526,10 +531,12 @@ static void rt_core_perf_launch_snap(int end) {
     s_klw_tic[end ? 1 : 0] = RT_PROF_TIC();
     for (int i = 0; i < s_core_perf_ntiles; i++) {
         uint32_t a = 0, ss = 0, ls = 0;
+        const unsigned long long ti = ahs_now(); /* counter 0 (ACTIVE) is read first */
         const int ok = __Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, NULL, &ss, &ls) ==
                        XAIE_OK;
         if (!end) {
             s_klw_ok[i] = (unsigned char)ok;
+            s_klw_ta[i] = ti;
             s_klw_a0[i] = a;
             s_klw_ls0[i] = ls;
             s_klw_ss0[i] = ss;
@@ -543,7 +550,9 @@ static void rt_core_perf_launch_snap(int end) {
         s_klw_ls[i] = (uint32_t)(ls - s_klw_ls0[i]);
         s_klw_ss[i] = (uint32_t)(ss - s_klw_ss0[i]);
         s_klw_act[i] = a;
+        s_klw_da[i] = da;
         s_klw_compute[i] = da > s_klw_ls[i] + s_klw_ss[i] ? da - s_klw_ls[i] - s_klw_ss[i] : 0ULL;
+        s_klw_ta[i] = ti > s_klw_ta[i] ? ti - s_klw_ta[i] : 0ULL; /* now: this tile's A->B host window */
     }
     if (!end) {
         s_klw_a_end_t = ahs_now();
@@ -554,7 +563,8 @@ static void rt_core_perf_launch_snap(int end) {
     s_klw_ovl_cyc = rt_core_perf_ticks_to_cyc(host > s_klw_wait_t ? host - s_klw_wait_t : 0ULL);
     s_klw_gap_cyc = s_klw_nwait && t0 > s_klw_wend_t ? rt_core_perf_ticks_to_cyc(t0 - s_klw_wend_t) : 0ULL;
     for (int i = 0; i < s_core_perf_ntiles; i++) {
-        s_klw_io[i] = s_klw_compute[i] > s_klw_ovl_cyc ? s_klw_compute[i] - s_klw_ovl_cyc : 0ULL;
+        s_klw_tovl[i] = rt_core_perf_ticks_to_cyc(s_klw_ta[i] > s_klw_wait_t ? s_klw_ta[i] - s_klw_wait_t : 0ULL);
+        s_klw_io[i] = s_klw_da[i] > s_klw_tovl[i] ? s_klw_da[i] - s_klw_tovl[i] : 0ULL;
 #if AIEHLC_CORE_PERF_WIN
         s_klw_io[i] = s_kwin_a[i]; /* diagnostic: per-wait window sum */
 #endif
@@ -712,8 +722,8 @@ void __Runtime_core_perf_report(int tag) {
         AieRC rc = __Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, &v, &ss, &ls);
         printf("[PERF] tag=%d tile=(%u,%u) rc=%d active_cyc=%u vec_instr=%u stream_stall=%u lock_stall=%u\n", tag,
                (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row, (int)rc, a, v, ss, ls);
-        /* launch window A->B: io_active = max(0, compute - ovl), compute = dACTIVE - dLOCK - dSTREAM,
-         * ovl = host time A->B outside the waits; pre_io_* = the rest since kernel-group enable;
+        /* launch window A->B: io_active = max(0, dACTIVE - ovl), compute = dACTIVE - dLOCK - dSTREAM,
+         * ovl = this tile's A->B read-to-read host time outside the waits; pre_io_* = the rest since kernel-group enable;
          * snap_gap_cyc = last wait end -> B. compute_cyc/ovl_cyc appended (old fields unchanged). */
         if (s_klw_state == 3 && s_klw_nwait > 0 && s_klw_ok[i] && rc == XAIE_OK)
             printf("[PERFIO] tag=%d tile=(%u,%u) pre_io_active=%llu pre_io_lock_stall=%llu io_active=%llu "
@@ -721,7 +731,7 @@ void __Runtime_core_perf_report(int tag) {
                    tag, (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row,
                    (unsigned long long)a > s_klw_io[i] ? (unsigned long long)a - s_klw_io[i] : 0ULL,
                    (unsigned long long)ls > s_klw_ls[i] ? (unsigned long long)ls - s_klw_ls[i] : 0ULL, s_klw_io[i],
-                   s_klw_ls[i], s_klw_gap_cyc, s_klw_compute[i], s_klw_ovl_cyc);
+                   s_klw_ls[i], s_klw_gap_cyc, s_klw_compute[i], s_klw_tovl[i]);
         asum += a;
         if (a > amax)
             amax = a;
