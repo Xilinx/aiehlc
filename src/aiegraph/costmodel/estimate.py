@@ -18,7 +18,8 @@ Input schema (settled in the cost channel: Steve's form, field ``recipe`` not ``
              "bdgraph": {"worklocal": dir,            # build JSON dir (dfscheduleprovenancemap + schedule_view)
                          "bd_write_path": "jit_mmio|aot_window|uart_degraded",  # required to price issue_ms
                          "trip_count": int}}          # optional; else start_io.loop_range (see bdgraph.py)
-                                                      # -> counts only + issue_ms; K terms listed in "unpriced"
+                                                      # -> counts only + issue_ms + ddr floor (report only,
+                                                      #    bdgraph.ddr_floor); K terms listed in "unpriced"
 
 Output (ms per group execution; per-op rows in "ops"):
 
@@ -126,7 +127,10 @@ def estimate_bdgraph(op: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, An
     (bd_configs x bd_us) when the BD write path is known.  K-segment terms are not priced yet."""
     from . import bdgraph
     f = bdgraph.features(op["bdgraph"])
-    unpriced = ["glue", "l", "wait(bdgraph K model)", "dma_time(bytes counted)"]
+    unpriced = ["glue", "l", "wait(bdgraph K model)"]
+    floor = bdgraph.ddr_floor(f["ddr_bytes"], params)
+    if floor is None:
+        unpriced.append("dma_time(bytes counted)")
     issue = None
     bd_us = (op.get("host") or {}).get("bd_us", params.get("host_bd_us"))
     if f["bd_write_path"] is None:
@@ -141,8 +145,8 @@ def estimate_bdgraph(op: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, An
         unpriced.append("locks(AM020)")
     if f["runtime_bds_skipped"]:
         unpriced.append(f"runtime_bds({f['runtime_bds_skipped']})")
-    return {"kernel": op.get("kernel"), "recipe": op.get("recipe"), "wait": None, "compute": None, "ddr": None,
-            "l_ms": None, "issue_ms": issue, "bound": None, "rounds": f["rounds"], "bdgraph": f,
+    return {"kernel": op.get("kernel"), "recipe": op.get("recipe"), "wait": None, "compute": None,
+            "ddr": floor["ms"] if floor else None, "ddr_floor": floor, "l_ms": None, "issue_ms": issue, "bound": None, "rounds": f["rounds"], "bdgraph": f,
             "bytes_in": op.get("bytes_in"), "bytes_out": op.get("bytes_out"), "unpriced": unpriced}
 
 

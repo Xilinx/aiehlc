@@ -177,3 +177,48 @@ def test_given_the_maxwell_2k_mesh_build_then_shim_mm2s0_moves_4x4x4096_per_laun
     mm2s0 = [c for c in d["channels"] if c["tile"] == (0, 0) and c["dir"] == "MM2S" and c["ch"] == 0][0]
     assert mm2s0["bytes"] == 4 * 4 * 4096
     assert d["mm2s"] == 8 * 65536 and d["s2mm"] == 4 * 16 * 256 * 4
+
+
+# ---- DDR floor: bytes -> report-only lower bound from the board's stream + DDR column points
+
+PRM = {"aie_clk_mhz": 1000.0, "dma_b_per_cyc": 8.0,
+       "ddr_rd_cols_points": [[1, 4.0], [2, 8.0]], "ddr_wr_cols_points": [[1, 2.0], [4, 6.0]]}
+
+
+def _ch(col, d, b):
+    return {"tile": (col, 0), "dir": d, "ch": 0, "bytes": b}
+
+
+def test_given_one_column_then_the_slower_of_stream_and_ddr_bounds_the_launch():
+    # 8000 B in: stream 1000 cyc, rd 4 GB/s = 4 B/cyc -> 2000 cyc; 4000 B out: wr 2 B/cyc -> 2000 cyc
+    fl = bdgraph.ddr_floor({"mm2s": 8000, "s2mm": 4000, "channels": [_ch(0, "MM2S", 8000), _ch(0, "S2MM", 4000)]}, PRM)
+    assert fl["terms"] == {"stream": 1000.0, "rd": 2000.0, "wr": 2000.0}
+    assert fl["cyc"] == 2000.0 and fl["ms"] == pytest.approx(0.002)
+
+
+def test_given_more_active_columns_then_the_column_point_is_used_and_clamped():
+    chs = [_ch(c, "MM2S", 8000) for c in range(3)]   # 3 cols -> first point >= 3 is absent -> last (8 GB/s)
+    fl = bdgraph.ddr_floor({"mm2s": 24000, "s2mm": 0, "channels": chs}, PRM)
+    assert fl["terms"]["rd"] == 3000.0 and "wr" not in fl["terms"] and fl["bound"] == "rd"
+
+
+def test_given_unknown_bytes_or_missing_points_then_no_floor():
+    assert bdgraph.ddr_floor({"mm2s": None, "s2mm": 0, "channels": []}, PRM) is None
+    assert bdgraph.ddr_floor({"mm2s": 1, "s2mm": 0, "channels": [_ch(0, "MM2S", 1)]}, {"aie_clk_mhz": 1.0}) is None
+
+
+def test_given_a_bdgraph_op_then_ddr_is_the_floor_and_stays_out_of_total(tmp_path, cycles_file):
+    host = [{"line": 10, "kind": "createio", "bd_id": 0}, {"line": 11, "kind": "startio", "code": "__Runtime_startio(a, b, 0, 1);"}]
+    d = _write(tmp_path, [{"repeat_count": 1}], [_bd(0, 64)], host)
+    r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "jit_mmio"}, "host": {"bd_us": 1.0}}],
+                 params=PRM, cycles=cycles_file)
+    assert r["ddr"] == pytest.approx(4096 / 4.0 / 1e6)
+    assert "dma_time(bytes counted)" not in r["unpriced"] and r["total_ms"] == r["issue_ms"]
+
+
+@pytest.mark.skipif(not (REAL / "schedule_view.json").exists(), reason="real build dir not present")
+def test_given_the_maxwell_2k_mesh_build_on_palmyra213_then_the_floor_is_read_bound():
+    from aiegraph.costmodel.estimate import board_params
+    fl = bdgraph.ddr_floor(bdgraph.features(REAL)["ddr_bytes"], board_params("palmyra213"))
+    # 512 KiB read over 4 shim cols at the 4-col point 9.301 GB/s = 56.4 us; stream 8192 cyc, write 7.8k cyc
+    assert fl["bound"] == "rd" and fl["ms"] == pytest.approx(524288 / 9.301e6, rel=1e-3)

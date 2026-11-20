@@ -20,7 +20,8 @@ cost channel 2026-11-20).  This module only COUNTS; it does not price DMA bytes 
                BD chain R times and every run moves the full ``len`` (aie-rt XAie_DmaChannelSetStartQueue writes
                R-1 to RptCount; per Amit, peer:1120010346-95530d).  chain_bytes follows next_bd from the createio
                BD until -1 or a cycle.  The iter dim changes the address, not the byte count.
-               Counted only -- no bandwidth is applied, ``estimate`` still lists the DMA time under "unpriced".
+               ``ddr_floor`` turns these bytes into a report-only lower bound (board stream + DDR column points);
+               ``estimate`` reports it as "ddr" and keeps it out of total_ms, like the kacc form's DES ddr term.
 """
 from __future__ import annotations
 
@@ -193,3 +194,38 @@ def _ddr_bytes(dfs: Dict[str, Any], sv: Dict[str, Any], ovr: Optional[int], roun
                          "runs": n, "bytes": b})
             tot[d] = None if (b is None or tot[d] is None) else tot[d] + b
     return {"mm2s": tot["mm2s"], "s2mm": tot["s2mm"], "channels": rows}
+
+
+def _interp_cols(points: List[List[float]], n: int) -> float:
+    """GB/s at n active shim columns from the board's [[cols, GB/s], ...] points (clamped at both ends)."""
+    pts = sorted((int(c), float(g)) for c, g in points)
+    for c, g in pts:
+        if c >= n:
+            return g
+    return pts[-1][1]
+
+
+def ddr_floor(ddr: Optional[Dict[str, Any]], params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Lower bound in AIE cycles for moving one launch's shim bytes -- report only, never added to total_ms.
+
+    floor = max(stream, rd, wr):
+      stream = max over shim channels of bytes / dma_b_per_cyc            (one 64-bit stream port per channel)
+      rd     = MM2S bytes / (ddr_rd_cols_points at the number of active MM2S shim columns, GB/s -> B/cyc)
+      wr     = S2MM bytes / (ddr_wr_cols_points at the number of active S2MM shim columns)
+    It ignores the per-task host cost (Arthur vek385-3: ~14.7k cyc per DMA task, see bd issue / wait terms),
+    run-length effects (run_b) and overlap with compute, so the launch can only be slower than this.
+    None when bytes are unknown or the board params lack the points."""
+    need = ("aie_clk_mhz", "dma_b_per_cyc", "ddr_rd_cols_points", "ddr_wr_cols_points")
+    if ddr is None or ddr.get("mm2s") is None or ddr.get("s2mm") is None or any(k not in params for k in need):
+        return None
+    clk = float(params["aie_clk_mhz"])
+    stream = max([c["bytes"] for c in ddr["channels"] if c["bytes"]] or [0]) / float(params["dma_b_per_cyc"])
+    terms = {"stream": stream}
+    for d, key in (("mm2s", "ddr_rd_cols_points"), ("s2mm", "ddr_wr_cols_points")):
+        cols = {c["tile"][0] for c in ddr["channels"] if c["bytes"] and str(c["dir"]).lower() == d}
+        if ddr[d] and cols:
+            bpc = _interp_cols(params[key], len(cols)) * 1e3 / clk
+            terms["rd" if d == "mm2s" else "wr"] = ddr[d] / bpc
+    bound = max(terms, key=terms.get)
+    cyc = terms[bound]
+    return {"cyc": cyc, "ms": cyc / (clk * 1e3), "bound": bound, "terms": terms}
