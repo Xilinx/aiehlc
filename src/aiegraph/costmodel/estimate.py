@@ -144,6 +144,10 @@ def estimate_bdgraph(op: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, An
         unpriced.append("host_bd_us")
     else:
         issue = f["bd_configs_per_launch"] * float(bd_us) / 1e3
+        fit = params.get("bdgraph_issue_fit") if bd_us_src == "board_fit" else None
+        p4j = bdgraph.issue_fit_ms(fit, f["bd_configs_per_launch"], floor, params) if fit else None
+        if p4j is not None:
+            issue, bd_us_src = p4j, "board_fit_p4j"
     runb = bdgraph.ddr_runb(floor, f["ddr_bytes"], params.get("bdgraph_run_b_factor"), issue)
     if f["locked_bds"]:
         unpriced.append("locks(AM020)")
@@ -165,9 +169,11 @@ def estimate(group: Any, board: str = "palmyra213", params: Optional[Dict[str, A
     """Predicted ms of one execution of ``group`` (see module docstring for the schema)."""
     prm = params if params is not None else board_params(board)
     if "bdgraph_bd_us" not in prm:
-        from .bdgraph import BD_US_FIT
+        from .bdgraph import BD_US_FIT, ISSUE_FIT
         if board in BD_US_FIT:
             prm = {**prm, "bdgraph_bd_us": BD_US_FIT[board]}
+        if board in ISSUE_FIT and "bdgraph_issue_fit" not in prm:
+            prm = {**prm, "bdgraph_issue_fit": ISSUE_FIT[board]}
     if "bdgraph_run_b_factor" not in prm:
         from .bdgraph import RUN_B_FACTOR_FIT
         if board in RUN_B_FACTOR_FIT:

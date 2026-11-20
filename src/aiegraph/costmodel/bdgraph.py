@@ -224,7 +224,32 @@ BD_US_FIT = {"palmyra213": 5.67}
 # Leave-one-out within regime: max |rel| 3.4%, mean 1.7% (P4g max(issue+floor, 2.67 floor): 14.2% max).
 # Same-tree TKW 8 -> 16 A/B (32 -> 64 B runs) confirms the cause on the DMA-bound pair (-32%, -32%).
 # Caveat: only one issue-regime kernel above r .3; the step may depend on shape, not r alone.
-RUN_B_FACTOR_FIT = {"palmyra213": {32: {"issue": 1.42, "dma": 1.99}, "r_switch": 0.70}}
+# P4i (superseded by P4j below, kept for reference / explicit use):
+RUN_B_FACTOR_FIT_P4I = {"palmyra213": {32: {"issue": 1.42, "dma": 1.99}, "r_switch": 0.70}}
+
+# P4j (2026-11-20, xiaojiang/tasks/2026-11-20_runb-decomp RESULT5/RESULT6): the P4i "regime" was mostly an error in
+# the issue term.  Measured issue (kload+bdcfg+startio+coreen) grows with bytes (bdcfg host glue, startio cache
+# flush), so with the board's ISSUE_FIT below one factor per run_b, no regime switch:
+#   palmyra213 32 B: wait_io / floor_rd over the 7 kernels at >= 1.5 (mean 1.87; 1.77..2.02).
+#   16 B: u_lin_1024x1280x640 only (n=1, in-sample) 2.53.
+# Known miss: M=1024 N=320 K<=1280 waits only ~1.37 x floor (u_lin_1024x320x320 +7%, u_lin_1024x1280x320 +16%).
+# Over the 10 TKW=8 kernels: |rel| <= 2.4% on 7, +6.8% / +15.8% (low-wait pair), -5.9% (u_lin_512x2560x320).
+RUN_B_FACTOR_FIT = {"palmyra213": {32: 1.87, 16: 2.53}}
+
+# Host issue time per launch, per board (P4j): issue_ms = bd_ms x bd_configs_per_launch + rd_frac x ddr_floor rd term
+# (ms) + c_ms.  palmyra213: least squares over nine 32 B-run kernels in three BD-count families (216/480/864 configs
+# per launch), max residual 39 us; the bare (cfg+2) x 5.67 us form was 0.22-0.31 ms low at M=2048 / M=512.
+# Only used for the board fit (an op or params bd_us keeps the plain cfg x bd_us form).
+ISSUE_FIT = {"palmyra213": {"bd_ms": 5.31e-3, "rd_frac": 0.160, "c_ms": 0.111}}
+
+
+def issue_fit_ms(fit: Dict[str, Any], bd_configs: int, floor: Optional[Dict[str, Any]],
+                 params: Dict[str, Any]) -> Optional[float]:
+    """P4j host issue time: bd_ms x configs + rd_frac x floor rd (ms) + c_ms; None without a floor rd term."""
+    if floor is None or "rd" not in floor.get("terms", {}):
+        return None
+    rd_ms = floor["terms"]["rd"] / (float(params["aie_clk_mhz"]) * 1e3)
+    return float(fit["bd_ms"]) * bd_configs + float(fit["rd_frac"]) * rd_ms + float(fit["c_ms"])
 
 
 def _runb_factor(v: Any, regime: str) -> float:
