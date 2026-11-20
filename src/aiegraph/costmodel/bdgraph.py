@@ -212,35 +212,42 @@ def _interp_cols(points: List[List[float]], n: int) -> float:
 # 6.5-9.5 us (issue blocks when DMA per config is slower); see xiaojiang/tasks/2026-11-20_ddr-floor-vs-meas.
 BD_US_FIT = {"palmyra213": 5.67}
 
-# Short-DDR-run penalty, per board: {run_b: factor} = DMA-alone time / ddr_floor when the launch is DMA-bound.
-# palmyra213 A/B (same tree, only TKW changes; xiaojiang/tasks/2026-11-20_runb-ab):
-#   u_conv_1024x2880x320 (floor 3.80 > issue 2.74 ms)  32 B -> 64 B runs: 10.174 -> 6.919 ms (-32%)
-#   u_lin_1024x1280x320  (floor 1.69 < issue 2.88 ms)                     5.259 -> 5.074 ms (-3.5%)
-#   u_lin_1024x320x320   (floor 0.42 < issue 2.69 ms)                     3.295 -> 3.299 ms (0%)
-# so the 32 B penalty only shows when the DMA outlasts issue + floor: launch ~ max(issue + floor, floor x f).
-# f(32) = 10.174 / 3.80 = 2.67 from the ONE DMA-bound 32 B kernel (n=1; low confidence).  The P4f additive 1.45 fitted
-# the u_lin_1024 residual, which the A/B shows is not run size (xiaojiang/tasks/2026-11-20_runb-overlap/fit.txt).
-RUN_B_FACTOR_FIT = {"palmyra213": {32: 2.67}}
+# Short-DDR-run penalty, per board: {run_b: {"issue": f, "dma": f}} -- launch ~ issue + floor x f(run_b, regime),
+# regime "dma" when ddr_floor > host issue, else "issue" (part of the slow DMA runs under BD configuration).
+# A plain number applies to both regimes; run_b not listed -> factor 1.
+# palmyra213, six 32 B-run kernels (launch - issue) / floor (xiaojiang/tasks/2026-11-20_runb-p4h):
+#   DMA-bound   u_conv_1024x2880x320 1.95, u_lin_1024x5760x320 2.00            -> mean 1.98
+#   issue-bound u_lin_1024x{1280x320, 320x2560, 320x320, 320x960} 1.50/1.45/1.35/1.38 -> mean 1.42
+# leave-one-out within regime: max |rel| 3.4%, mean 1.7% (P4g max(issue+floor, 2.67 floor): 14.2% max).
+# Same-tree TKW 8 -> 16 A/B (32 -> 64 B runs) confirms the cause on the DMA-bound pair (-32%, -32%).
+# Caveats: n=2 DMA-bound; a step at floor == issue (no kernel measured near r = floor/issue 0.6..1.4).
+RUN_B_FACTOR_FIT = {"palmyra213": {32: {"issue": 1.42, "dma": 1.98}}}
+
+
+def _runb_factor(v: Any, regime: str) -> float:
+    if v is None:
+        return 1.0
+    if isinstance(v, dict):
+        return float(v.get(regime, 1.0))
+    return float(v)
 
 
 def ddr_runb(floor: Optional[Dict[str, Any]], ddr: Optional[Dict[str, Any]],
-             factors: Optional[Dict[int, float]], issue_ms: Optional[float] = None) -> Optional[Dict[str, Any]]:
-    """Run-length-adjusted DDR time: ms = floor x the MM2S-byte-weighted factor of each read channel's head-BD run_b
-    (factor 1 for run_b not in ``factors``) = the DMA-alone time.  With ``issue_ms`` also launch_ms =
-    max(issue + floor, ms) and regime "dma" when the run-limited DMA dominates, else "issue" (run size hidden).
-    An estimate, not a bound -- report only, like ddr_floor."""
+             factors: Optional[Dict[int, Any]], issue_ms: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Run-length-adjusted DDR time (P4h): ms = floor x the MM2S-byte-weighted factor of each read channel's head-BD
+    run_b, the factor picked by regime ("dma" when floor > issue_ms, else "issue"; "dma" without issue_ms).
+    With ``issue_ms`` also launch_ms = issue + ms.  An estimate, not a bound -- report only, like ddr_floor."""
     if floor is None or ddr is None or not factors:
         return None
     rd = [c for c in ddr["channels"] if c["bytes"] and str(c["dir"]).upper() == "MM2S"]
     tot = sum(c["bytes"] for c in rd)
     if not tot:
         return None
-    fac = sum(c["bytes"] * float(factors.get(c.get("run_b"), 1.0)) for c in rd) / tot
-    out = {"ms": floor["ms"] * fac, "factor": fac}
+    regime = "dma" if issue_ms is None or floor["ms"] > float(issue_ms) else "issue"
+    fac = sum(c["bytes"] * _runb_factor(factors.get(c.get("run_b")), regime) for c in rd) / tot
+    out = {"ms": floor["ms"] * fac, "factor": fac, "regime": regime}
     if issue_ms is not None:
-        base = float(issue_ms) + floor["ms"]
-        out["launch_ms"] = max(base, out["ms"])
-        out["regime"] = "dma" if out["ms"] > base else "issue"
+        out["launch_ms"] = float(issue_ms) + out["ms"]
     return out
 
 

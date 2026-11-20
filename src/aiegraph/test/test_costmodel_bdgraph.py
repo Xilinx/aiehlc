@@ -273,23 +273,33 @@ def test_given_a_32b_run_shim_read_on_palmyra213_then_ddr_runb_uses_the_board_fi
     r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "jit_mmio"}}], cycles=cycles_file)
     op = r["ops"][0]
     assert op["bdgraph"]["ddr_bytes"]["channels"][0]["run_b"] == 32
-    assert op["ddr_runb"]["factor"] == pytest.approx(bdgraph.RUN_B_FACTOR_FIT["palmyra213"][32])
-    assert op["ddr_runb"]["ms"] == pytest.approx(op["ddr"] * 2.67) and r["total_ms"] == r["issue_ms"]
-    assert op["ddr_runb"]["launch_ms"] == pytest.approx(max(op["issue_ms"] + op["ddr"], op["ddr_runb"]["ms"]))
+    rb = op["ddr_runb"]
+    assert rb["factor"] == pytest.approx(bdgraph.RUN_B_FACTOR_FIT["palmyra213"][32][rb["regime"]])
+    assert rb["ms"] == pytest.approx(op["ddr"] * rb["factor"]) and r["total_ms"] == r["issue_ms"]
+    assert rb["launch_ms"] == pytest.approx(op["issue_ms"] + rb["ms"])
 
 
 def test_given_a_dma_bound_32b_launch_then_the_run_penalty_sets_launch_ms():
-    # u_conv_1024x2880x320 on palmyra213: floor 3.80 > issue 2.74; measured 10.174 ms at 32 B runs
+    # palmyra213, measured at 32 B runs: u_conv_1024x2880x320 10.174 ms, u_lin_1024x5760x320 17.972 ms (both floor > issue)
     ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=32)]}
-    r = bdgraph.ddr_runb({"ms": 3.80}, ddr, bdgraph.RUN_B_FACTOR_FIT["palmyra213"], issue_ms=2.74)
-    assert r["regime"] == "dma" and r["launch_ms"] == pytest.approx(3.80 * 2.67)
+    for floor, issue, meas in ((3.81, 2.73, 10.174), (7.61, 2.733, 17.972)):
+        r = bdgraph.ddr_runb({"ms": floor}, ddr, bdgraph.RUN_B_FACTOR_FIT["palmyra213"], issue_ms=issue)
+        assert r["regime"] == "dma" and r["launch_ms"] == pytest.approx(meas, rel=0.03)
 
 
 def test_given_an_issue_bound_32b_launch_then_run_size_is_hidden_under_issue():
-    # u_lin_1024x320x320 on palmyra213: floor 0.42 << issue 2.69; TKW 8 -> 16 changed nothing (3.295 -> 3.299 ms)
+    # palmyra213 issue-bound 32 B kernels (floor < issue): u_lin_1024x{1280x320, 320x2560, 320x320, 320x960}
     ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=32)]}
-    r32 = bdgraph.ddr_runb({"ms": 0.42}, ddr, bdgraph.RUN_B_FACTOR_FIT["palmyra213"], issue_ms=2.69)
-    assert r32["regime"] == "issue" and r32["launch_ms"] == pytest.approx(2.69 + 0.42)
+    for floor, issue, meas in ((1.69, 2.73, 5.259), (1.59, 6.00, 8.310), (0.42, 2.73, 3.295), (0.59, 2.60, 3.413)):
+        r = bdgraph.ddr_runb({"ms": floor}, ddr, bdgraph.RUN_B_FACTOR_FIT["palmyra213"], issue_ms=issue)
+        assert r["regime"] == "issue" and r["launch_ms"] == pytest.approx(meas, rel=0.04)
+
+
+def test_given_a_run_b_without_a_fit_then_its_factor_is_1_in_both_regimes():
+    ddr = {"mm2s": 1, "s2mm": 0, "channels": [dict(_ch(0, "MM2S", 1), run_b=64)]}
+    for issue in (0.5, 5.0):
+        r = bdgraph.ddr_runb({"ms": 1.0}, ddr, bdgraph.RUN_B_FACTOR_FIT["palmyra213"], issue_ms=issue)
+        assert r["factor"] == 1.0 and r["launch_ms"] == pytest.approx(issue + 1.0)
 
 
 def test_given_no_issue_then_ddr_runb_has_no_launch_ms():
@@ -306,6 +316,7 @@ def test_given_the_u_conv_1024_build_then_every_shim_read_is_a_32b_run():
     ddr = bdgraph.features(UCONV)["ddr_bytes"]
     rd = [c for c in ddr["channels"] if c["dir"] == "MM2S"]
     assert rd and {c["run_b"] for c in rd} == {32}
-    rb = bdgraph.ddr_runb(bdgraph.ddr_floor(ddr, board_params("palmyra213")), ddr, {32: 2.67}, issue_ms=480 * 5.67e-3)
-    assert rb["factor"] == pytest.approx(2.67) and rb["regime"] == "dma"
+    rb = bdgraph.ddr_runb(bdgraph.ddr_floor(ddr, board_params("palmyra213")), ddr, bdgraph.RUN_B_FACTOR_FIT["palmyra213"],
+                          issue_ms=480 * 5.67e-3)
+    assert rb["regime"] == "dma" and rb["launch_ms"] == pytest.approx(10.174, rel=0.03)   # measured 32 B launch
     assert rb["launch_ms"] == pytest.approx(10.174, rel=0.05)   # measured 10.174 ms/launch (in-sample: f was fit here)
