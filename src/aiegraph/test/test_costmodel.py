@@ -274,3 +274,55 @@ def test_l_interleaved_host_line(tmp_path):
     assert p["l_meas"] == pytest.approx(1.872 + 0.0 + 0.023 + 0.9875 + 0.0237)
     assert p["words"]["kload_w"] == 9728.0 and p["words"]["bdcfg_w"] == 576.0
     assert p["calls"]["core_reset"] == 33.0 and p["calls"]["bdcfg"] == 456.0
+
+
+# ---- L segment M1.2.2 P4: L prediction from static (build-directory) features only ----
+PERF = SRC.parent / "script" / "perf"
+KBUILD = DATA / "build_off_u_lin_1024x320x320"  # trimmed k_off/u_lin_1024x320x320 build, see its README
+KLOG = DATA / "l_off_u_lin_1024x320x320.log"    # board log of the same build (M1-L/kernels/off)
+
+
+def _script(name):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, PERF / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_static_feat_kernel_u_lin_1024x320x320():
+    from aiegraph.costmodel import launch_l
+    ls = _script("l_static")
+    calls, words = ls.static_calls_words(KBUILD)
+    got = ls.flat(calls, words)
+    # host.cc: 480 bd_config + 240 startio per launch; 16 core tiles x (8 DMA reset + 3 core ctrl + 17 DM words), PM warm
+    assert got == {"bdcfg_calls": 480.0, "startio_calls": 240.0, "bdcfg_w": 576.0, "cp_w": 0.0,
+                   "kload_w": 448.0, "rst": 0.0}
+    p = launch_l.point(str(KLOG))
+    meas = ls.flat(p["calls"], p["words"])
+    from aiegraph.costmodel.static_feat import rel_of
+    assert max(rel_of(got[k], meas[k], k.endswith("_w")) for k in got) == 0.0
+
+
+def test_l_static_ignores_log_counts(tmp_path):
+    import re
+    from aiegraph.costmodel import launch_l
+    lf = _script("l_fit")
+    prm = launch_l.load_params()
+    txt = KLOG.read_text()
+
+    def x10(m):
+        return re.sub(r"=(\d+(?:\.\d+)?)", lambda v: "=%g" % (float(v.group(1)) * 10), m.group(0))
+    hacked = re.sub(r"LAUNCH split_words .*", x10, txt)
+    hacked = re.sub(r"(LAUNCH split_detail calls )(\w+=\d+ ?)+", x10, hacked)
+    assert hacked != txt and "kload_w=4480 " in hacked and "bdcfg=38400 " in hacked
+    bad = tmp_path / "x10.log"
+    bad.write_text(hacked)
+    # log-feature pred does move with the counts ...
+    p0, p1 = launch_l.point(str(KLOG)), launch_l.point(str(bad))
+    assert launch_l.predict_l(p1["calls"], p1["words"], "off", prm) != pytest.approx(
+        launch_l.predict_l(p0["calls"], p0["words"], "off", prm))
+    # ... the static pred reads the build only: same value, equal to the log-feature pred of the real log
+    s = lf.pred_static(KBUILD, "off", prm)
+    assert s == lf.pred_static(KBUILD, "off", prm)
+    assert s == pytest.approx(launch_l.predict_l(p0["calls"], p0["words"], "off", prm), abs=1e-12)

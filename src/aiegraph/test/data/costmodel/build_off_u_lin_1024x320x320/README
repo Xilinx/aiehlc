@@ -1,0 +1,8 @@
+Trimmed copy of the off P0 kernel build /scratch/staff/huaj/tmp/costmodel_m1/k_off/u_lin_1024x320x320 (M1.2.2),
+only the files the static L features read:
+  aout/worklocal/host.cc               static_feat (bdcfg/startio calls, bdcfg_w, cp_w)
+  aout/worklocal/build/host_fixed.cc   kload_static / rst_static (kernel-group load sites)
+  aout/worklocal/build/kernel          AIE ELF cut to ELF header + program headers (564 B; kload_static reads PT_LOAD only)
+  kacc_gemm.cc                         rst_static (P0 host prints literal core_reset=0)
+  build.log                            the -DAIEHLC_* switches lines only
+Board log of the same build: ../l_off_u_lin_1024x320x320.log (M1-L/kernels/off).

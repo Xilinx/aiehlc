@@ -18,6 +18,13 @@
       Prediction uses only per-launch call counts and word counts.  Prints
       LGATE cfg=.. board=.. launches=.. pred_ms= meas_ms= abs_us= rel=%.3f  and
       LGATE ALL n=<n> maxrel=%.3f PASS|FAIL (<=0.200).
+  l_fit.py --check-unet CFG=LOG [...] --static-root R      (M1.2.2 P4)
+      pred uses only the static features of the build R/unet_<cfg> (l_static.static_calls_words: static_feat,
+      kload_static, rst_static; no log count enters it); meas and the unet_check (CMP board, 258 launches,
+      ctrlpkt, [CTRLPKT_AOT]) still come from the log.  Prints
+      LGATE cfg=.. src=static board=.. launches=.. pred_ms= meas_ms= abs_us= rel=%.3f,
+      LDIFF cfg=.. pred_static=%.4f pred_logfeat=%.4f dus=%.1f   (|static - log-feature pred|, us/launch) and
+      LGATE ALL n=<n> src=static maxrel=%.3f PASS|FAIL.
 """
 import argparse
 import json
@@ -30,6 +37,21 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from aiegraph.costmodel.launch_split import lines  # noqa: E402
 from aiegraph.costmodel.launch_l import CFGS, FEATURES, feature_row, point, predict_l, load_params  # noqa: E402
+
+
+def _l_static():
+    """script/perf/l_static.py (python -I does not put the script dir on sys.path)"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("l_static", Path(__file__).resolve().with_name("l_static.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def pred_static(build, cfg, prm):
+    """L pred (ms/launch) from the build directory's static features only."""
+    calls, words = _l_static().static_calls_words(build)
+    return predict_l(calls, words, cfg, prm)
 
 ND = 6
 
@@ -138,6 +160,7 @@ def main():
     ap.add_argument("--check-unet", nargs="+", metavar="CFG=LOG")
     ap.add_argument("--params")
     ap.add_argument("--unet-launches", type=int, default=258, help="required aie_launches (0 = any)")
+    ap.add_argument("--static-root", help="--check-unet pred from the static features of <root>/unet_<cfg>")
     a = ap.parse_args()
     rc = 0
     if a.kernels:
@@ -193,18 +216,24 @@ def main():
             else:  # legacy LOG:CFG
                 log, cfg = item.rsplit(":", 1)
             err = None
+            src = " src=static" if a.static_root else ""
             try:
                 u = unet_meta(log)
                 p = point(log)
+                if a.static_root:
+                    pr_s = pred_static(Path(a.static_root) / f"unet_{cfg}", cfg, prm)
             except Exception as e:  # noqa: BLE001
                 err, u = f"parse error {e!r}", {}
             if err is None:
                 err = unet_check(u, cfg, a.unet_launches)
             if err:
-                print(f"LGATE cfg={cfg} FAIL {err}")
+                print(f"LGATE cfg={cfg}{src} FAIL {err}")
                 worst = max(worst, 9.999)
                 continue
             pr = predict_l(p["calls"], p["words"], cfg, prm)
+            if a.static_root:
+                print(f"LDIFF cfg={cfg} pred_static={pr_s:.4f} pred_logfeat={pr:.4f} dus={abs(pr_s - pr) * 1000:.1f}")
+                pr = pr_s
             meas = p["l_meas"]
             rel = abs(pr - meas) / meas
             worst = max(worst, rel)
@@ -213,10 +242,10 @@ def main():
                   f"kload={p['calls']['kload']:.3f} rst={p['calls']['core_reset']:.3f} words bdcfg_w={p['words']['bdcfg_w']:.1f} "
                   f"cp_w={p['words']['cp_w']:.1f} kload_w={p['words']['kload_w']:.1f} "
                   f"ctrlpkt={u['ctrlpkt']} cp_aot_lines={u['cp_lines']}")
-            print(f"LGATE cfg={cfg} board={u['board']} launches={u['launches']} pred_ms={pr:.4f} meas_ms={meas:.4f} "
+            print(f"LGATE cfg={cfg}{src} board={u['board']} launches={u['launches']} pred_ms={pr:.4f} meas_ms={meas:.4f} "
                   f"abs_us={abs(pr - meas) * 1000:.1f} rel={rel:.3f}")
         ok = worst <= 0.200 and n_ok == len(a.check_unet)
-        print(f"LGATE ALL n={len(a.check_unet)} maxrel={worst:.3f} {'PASS' if ok else 'FAIL'}")
+        print(f"LGATE ALL n={len(a.check_unet)}{' src=static' if a.static_root else ''} maxrel={worst:.3f} {'PASS' if ok else 'FAIL'}")
         rc = rc or (0 if ok else 1)
     return rc
 
