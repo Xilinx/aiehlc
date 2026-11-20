@@ -552,28 +552,50 @@ def _fn_body(rt, sig):
 
 
 def test_site_perf_kco_snapshot():
-    # M3.1.1: off and aot-kco take the same per-wait snapshot (after the shim-BD ack, before the timed window);
-    # the old once-per-launch startio / first-wait snapshot (taken before rt_sb_commit / L / glue) is gone
+    # M3.1.1 launch window: A once per launch -- off before the first startio (__Runtime_startio), aot-kco before
+    # the first wait_io's rt_sb_commit (both calls no-op unless A is pending); no per-wait snapshot by default
     rt = (RT / "aie_runtime.c").read_text()
     assert "rt_core_perf_snap_at_startio" not in rt and "s_core_perf_snap_pending" not in rt
     w = _wait_io_body(rt)
-    i = w.index("rt_core_perf_wait_snap();")
-    assert w.index("rt_sb_commit();") < w.index("(void)rt_sb_ack_wait();") < i
+    i = w.index("rt_core_perf_launch_snap(0);")
+    assert i < w.index("rt_sb_commit();") < w.index("(void)rt_sb_ack_wait();")
     assert i < w.index("RT_PROF_TIC()") and i < w.index("ahs_now()")
     st = _fn_body(rt, "struct_ioevent __Runtime_startio(XAie_DevInst *dev")
-    assert "rt_core_perf_" not in st  # no counter MMIO on the startio path
-    # launch start (kernel group enabled, counters zeroed) clears the per-launch window sums
+    assert st.count("rt_core_perf_") == 1 and "rt_core_perf_launch_snap(0);" in st
+    assert st.index("rt_core_perf_launch_snap(0);") < st.index("RT_PROF_TIC()")
+    # launch start (kernel group enabled, counters zeroed) clears the per-launch sums and arms A
     kp = _fn_body(rt, "static void rt_kernel_profile_setup(XAie_DevInst *dev, struct_kernel_group kg) {")
     assert kp.index("rt_core_perf_launch_reset();") < kp.index("__Runtime_core_perf_setup(dev, kg.tiles[i]);")
+    rs = _fn_body(rt, "static void rt_core_perf_launch_reset(void) {")
+    assert "s_klw_state = 1;" in rs
+
+
+def _guard_of(rt, needle):
+    """innermost #if line guarding the first occurrence of needle"""
+    depth = 0
+    for ln in reversed(rt[:rt.index(needle)].split("\n")):
+        t = ln.strip()
+        if t.startswith("#endif"):
+            depth += 1
+        elif t.startswith("#if"):
+            if depth == 0:
+                return t
+            depth -= 1
+    return ""
 
 
 def test_core_perf_wait_window():
-    """M3.1.1 counter window: snapshot after rt_sb_ack_wait(), before __wio_t0; read after RT_PROF_ADD;
-    per-wait deltas summed per launch; pre_io / snap_gap reported separately (source order + semantics)."""
+    """M3.1.1: the per-wait snapshot (old wait window, ~27.8 us MMIO per wait, ISS-1120090911-PD) is compiled
+    only with AIEHLC_PROFILING && AIEHLC_CORE_PERF_WIN (default 0); still outside __wio_t0..RT_PROF_ADD."""
     rt = (RT / "aie_runtime.c").read_text()
+    assert "#ifndef AIEHLC_CORE_PERF_WIN\n#define AIEHLC_CORE_PERF_WIN 0\n#endif" in rt
     assert rt.count("static void rt_core_perf_wait_snap(void)") == 1
     assert rt.count("rt_core_perf_wait_snap();") == 1
     w = _wait_io_body(rt)
+    for f in ("rt_core_perf_wait_snap();", "rt_core_perf_site_read();"):
+        g = _guard_of(w, f)
+        assert "AIEHLC_PROFILING" in g and "AIEHLC_CORE_PERF_WIN" in g, (f, g)
+    assert _guard_of(rt, "static void rt_core_perf_wait_snap(void)") == "#if AIEHLC_CORE_PERF_WIN"
     order = ["(void)rt_sb_ack_wait();", "rt_core_perf_wait_snap();", "unsigned long long __wio_t0 = RT_PROF_TIC();",
              "RT_PROF_ADD(g_wait_io_cycles, g_wait_io_calls, __wio_t0);", "rt_core_perf_site_read();"]
     pos = [w.index(x) for x in order]
@@ -581,36 +603,174 @@ def test_core_perf_wait_window():
     # WINLINT: nothing of the counter path inside __wio_t0 .. RT_PROF_ADD
     win = w[pos[2]:pos[3]]
     assert "rt_core_perf_" not in win and "XAie_PerfCounterGet" not in win and "s_kwin_" not in win
-    # gap mark (plain store) + read both after the window, in that order
-    assert pos[3] < w.index("rt_core_perf_wio_mark(__hs_t0);") < pos[4]
-    # snapshot: host time first, then counters 0/2/3 of every armed tile
-    sn = _fn_body(rt, "static void rt_core_perf_wait_snap(void)")
-    assert sn.index("s_kwin_snap_t = ahs_now();") < sn.index("__Runtime_core_perf_read(")
-    assert "for (int i = 0; i < s_core_perf_ntiles; i++)" in sn
-    # read: per-wait delta summed (+=) into this launch's per-tile accumulators, gap summed in AIE cycles
-    rd = _fn_body(rt, "static void rt_core_perf_site_read(void)")
-    for a in ("s_kwin_a[i] += (uint32_t)(a - s_kwin_snap_a[i]);", "s_kwin_ls[i] += (uint32_t)(ls - s_kwin_snap_ls[i]);",
-              "s_kwin_ss[i] += (uint32_t)(ss - s_kwin_snap_ss[i]);",
-              "s_kwin_gap_cyc += rt_core_perf_ticks_to_cyc(s_kwin_wio_t - s_kwin_snap_t);"):
-        assert a in rd, a
-    assert "s_kwin_snap_valid = 0;" in rd  # one read per snapshot
+    assert "s_klw_" not in win
+    # default build: the only per-wait counter-path code is the plain-store wait accounting after RT_PROF_ADD
+    assert pos[3] < w.index("rt_core_perf_wait_done(__hs_t0, ahs_now());") < pos[4]
+    wd = _fn_body(rt, "static inline void rt_core_perf_wait_done(")
+    assert "__Runtime_core_perf_read" not in wd and "XAie_" not in wd and "printf" not in wd
     assert "#define RT_CORE_PERF_AIE_MHZ 1000ULL" in rt
-    rs = _fn_body(rt, "static void rt_core_perf_launch_reset(void) {")
-    for a in ("s_kwin_a[i] = s_kwin_ls[i] = s_kwin_ss[i] = 0ULL;", "s_kwin_n = 0;", "s_kwin_gap_cyc = 0ULL;",
-              "s_kwin_given = 0;"):
-        assert a in rs, a
-    # getter: launch sums (no last-launch scaling), once per launch
-    g = _fn_body(rt, "int __Runtime_core_perf_last_launch_win(")
-    assert "*io_act_cyc = v ? s_kwin_a[b] : 0ULL;" in g and "*snap_gap_cyc = v ? s_kwin_gap_cyc : 0ULL;" in g
-    assert "s_kwin_last_a[b] - s_kwin_a[b]" in g and "s_kwin_given = 1;" in g
-    # [PERFIO]: io_active = window sum, pre_io_active = the rest since kernel-group enable, snap_gap_cyc at the end
-    pr = _fn_body(rt, "void __Runtime_core_perf_report(int tag) {")
-    m = re.search(r'"\[PERFIO\] tag=%d tile=\(%u,%u\) pre_io_active=%llu pre_io_lock_stall=%llu io_active=%llu "\s*'
-                  r'"io_lock_stall=%llu snap_gap_cyc=%llu\\n"', pr)
-    assert m, pr
-    tail = pr[m.end():pr.index(");", m.end())]
-    assert "(unsigned long long)a - s_kwin_a[i]" in tail and tail.rstrip().endswith("s_kwin_gap_cyc")
     # the aie_host_split line is untouched (n_fit.py:71 / m3_site.py:61 still end in launches=<n>)
     hdr = (RT / "aie_host_split.h").read_text()
     assert '"stream_stall_cyc=%llu pre_io_act_cyc=%llu snap_gap_cyc=%llu"' in hdr
     assert "pre_io_act_cyc" not in hdr[hdr.index("static inline int ahs_format(const ahs_table *a"):]
+
+
+LW_STUB = r"""
+#include <stdio.h>
+#include <stdint.h>
+typedef int AieRC;
+#define XAIE_OK 0
+typedef struct { uint8_t Row, Col; } XAie_LocType;
+typedef struct { int x; } XAie_DevInst;
+static unsigned long long g_now, g_tic;
+static unsigned long long ahs_now(void) { return g_now; }
+#define RT_PROF_TIC() (++g_tic)
+static unsigned long long g_frq;          /* host ticks/s; stands in for cntfrq_el0 */
+static uint32_t g_a[4], g_ss[4], g_ls[4]; /* counters 0/2/3 per tile */
+static int g_reads;                       /* counter reads (one per tile per call) */
+static unsigned long long g_read_cost;    /* host ticks one tile read takes */
+AieRC __Runtime_core_perf_read(XAie_DevInst *dev, XAie_LocType t, uint32_t *a, uint32_t *v, uint32_t *ss,
+                               uint32_t *ls) {
+    (void)dev; (void)v; g_reads++; g_now += g_read_cost;
+    if (a) *a = g_a[t.Col];
+    if (ss) *ss = g_ss[t.Col];
+    if (ls) *ls = g_ls[t.Col];
+    return XAIE_OK;
+}
+int __Runtime_core_perf_last_launch_win(unsigned long long *, unsigned long long *, unsigned long long *,
+                                        unsigned long long *, unsigned long long *);
+"""
+LW_API = r"""
+static XAie_DevInst g_dev;
+void arm(int n) {
+    s_core_perf_ntiles = n; s_core_perf_probe_dev = &g_dev;
+    for (int i = 0; i < n; i++) { s_core_perf_tiles[i].Col = (uint8_t)i; s_core_perf_tiles[i].Row = 2; }
+    rt_core_perf_launch_reset();
+}
+void set_ctr(int t, unsigned a, unsigned ss, unsigned ls) { g_a[t] = a; g_ss[t] = ss; g_ls[t] = ls; }
+void setup(unsigned long long frq, unsigned long long cost) { g_frq = frq; g_read_cost = cost; }
+void advance(unsigned long long t) { g_now += t; }
+void snap(int end) { rt_core_perf_launch_snap(end); }
+void wait_done(unsigned long long t0, unsigned long long t1) { rt_core_perf_wait_done(t0, t1); }
+unsigned long long now(void) { return g_now; }
+int reads(void) { return g_reads; }
+int get(unsigned long long *o) { return __Runtime_core_perf_last_launch_win(&o[0], &o[1], &o[2], &o[3], &o[4]); }
+void report(int tag) { __Runtime_core_perf_report(tag); fflush(stdout); }
+unsigned long long compute(int i) { return s_klw_compute[i]; }
+unsigned long long io(int i) { return s_klw_io[i]; }
+unsigned long long ovl(void) { return s_klw_ovl_cyc; }
+unsigned long long tic(int e) { return s_klw_tic[e]; }
+"""
+
+
+def _lw_lib(win=False):
+    """the runtime's counter-window block + __Runtime_core_perf_report, verbatim, over a counter/clock stub"""
+    rt = (RT / "aie_runtime.c").read_text()
+    blk = rt[rt.index("static int s_core_perf_probe_valid = 0;"):rt.index("/* Core perf counter 0 is not free")]
+    assert "unsigned long long f = 0ULL;" in blk
+    blk = blk.replace("unsigned long long f = 0ULL;", "unsigned long long f = g_frq;", 1)
+    rep = _fn_body(rt, "void __Runtime_core_perf_report(int tag) {") + "\n}\n"
+    src = f"#define AIEHLC_CORE_PERF_WIN {int(win)}\n" + LW_STUB + blk + rep + LW_API
+    L = ctypes.CDLL(str(_cc(src, "lw_win" if win else "lw")))
+    for f in ("compute", "io", "ovl", "now", "tic"):
+        getattr(L, f).restype = U
+    L.setup.argtypes = [U, U]
+    L.wait_done.argtypes = [U, U]
+    L.advance.argtypes = [U]
+    return L
+
+
+def _capture(fn):
+    import os
+    r, wfd = os.pipe()
+    saved = os.dup(1)
+    os.dup2(wfd, 1)
+    try:
+        fn()
+    finally:
+        os.dup2(saved, 1)
+        os.close(wfd)
+        os.close(saved)
+    out = os.read(r, 1 << 16).decode()
+    os.close(r)
+    return out
+
+
+def test_core_perf_launch_window():
+    """M3.1.1 launch window: counters 0/2/3 read once at A and once at B per launch (never per wait);
+    compute = dACTIVE - dLOCK - dSTREAM, ovl = (B start - A end) - sum(wait), io_active = max(0, compute - ovl),
+    snap_gap = last wait end -> B; [PERFIO] old fields unchanged + compute_cyc/ovl_cyc appended."""
+    rt = (RT / "aie_runtime.c").read_text()
+    assert rt.count("static void rt_core_perf_launch_snap(int end)") == 1
+    calls = re.findall(r"^\s*rt_core_perf_launch_snap\(([01])\);", rt, re.M)
+    assert calls.count("0") == 2 and calls.count("1") >= 1, calls
+    sn = _fn_body(rt, "static void rt_core_perf_launch_snap(int end)")
+    assert "RT_PROF_TIC()" in sn and "__Runtime_core_perf_read(" in sn
+    # B: before [PERFIO] and in the site-perf getter, never in wait_io
+    pr = _fn_body(rt, "void __Runtime_core_perf_report(int tag) {")
+    assert pr.index("rt_core_perf_launch_snap(1);") < pr.index('"[PERFIO]')
+    assert "rt_core_perf_launch_snap(1);" in _fn_body(rt, "int __Runtime_core_perf_last_launch_win(")
+    w = _wait_io_body(rt)
+    assert "rt_core_perf_launch_snap(1);" not in w
+    assert w.index("RT_PROF_ADD(g_wait_io_cycles") < w.index("rt_core_perf_wait_done(")
+    assert re.search(r'"\[PERFIO\] tag=%d tile=\(%u,%u\) pre_io_active=%llu pre_io_lock_stall=%llu io_active=%llu "'
+                     r'\s*"io_lock_stall=%llu snap_gap_cyc=%llu compute_cyc=%llu ovl_cyc=%llu\\n"', pr), pr
+    hdr = (RT / "aie_host_split.h").read_text()
+    assert "__Runtime_core_perf_last_launch_win(&ia, &ls, &ss, &pre, &gap)" in hdr
+
+    # ---- semantics, the runtime source compiled on x86: 1 tick = 1 us, AIE 1000 MHz -> 1000 cyc/tick
+    L = _lw_lib()
+    L.setup(1000000, 1)
+    L.arm(2)
+    L.set_ctr(0, 100, 5, 7)
+    L.set_ctr(1, 50, 0, 0)
+    L.snap(1)                       # B before A: no-op
+    assert L.reads() == 0
+    L.advance(10)
+    L.snap(0)                       # A: 2 tile reads of 1 tick -> A ends at 12
+    assert L.reads() == 2 and L.now() == 12 and L.tic(0) > 0
+    L.snap(0)                       # A once per launch
+    assert L.reads() == 2
+    L.advance(3)
+    for _ in range(3):              # 3 waits of 20 ticks, 2 ticks of host glue after each
+        t0 = L.now()
+        L.advance(20)
+        L.wait_done(t0, L.now())
+        L.advance(2)
+    assert L.reads() == 2           # nothing read per wait
+    L.advance(4)                    # last wait ended at 79; B starts at 85
+    L.set_ctr(0, 100 + 70000, 5 + 2000, 7 + 1000)
+    L.set_ctr(1, 50 + 1000, 0, 0)
+    o = (U * 5)()
+    assert L.get(o) == 1            # the getter takes B
+    assert L.reads() == 4 and L.tic(1) > L.tic(0)
+    assert L.compute(0) == 67000 and L.compute(1) == 1000          # dA - dLOCK - dSTREAM
+    assert L.ovl() == 13000                                         # (85 - 12) - 60 ticks
+    # io = 67000 - 13000; lock, stream; pre_io = ACTIVE total - io; snap_gap = 85 - 79 ticks
+    assert list(o) == [54000, 1000, 2000, 70100 - 54000, 6000], list(o)
+    assert L.io(1) == 0             # max(0, 1000 - 13000)
+    assert L.get(o) == 0            # handed out once per launch
+    L.snap(1)
+    assert L.reads() == 4           # B once per launch
+    out = _capture(lambda: L.report(3))
+    rows = re.findall(r"^\[PERFIO\] tag=3 tile=\((\d+),2\) pre_io_active=(\d+) pre_io_lock_stall=(\d+) "
+                      r"io_active=(\d+) io_lock_stall=(\d+) snap_gap_cyc=(\d+) compute_cyc=(\d+) ovl_cyc=(\d+)$",
+                      out, re.M)
+    assert rows == [("0", str(70100 - 54000), "7", "54000", "1000", "6000", "67000", "13000"),
+                    ("1", "1050", "0", "0", "0", "6000", "1000", "13000")], out
+    assert L.reads() == 6           # [PERF] totals only; B not re-taken
+    # next launch: re-armed, report also takes B; io bounded by the waits (io <= compute - host time)
+    L.arm(2)
+    L.set_ctr(0, 0, 0, 0)
+    L.set_ctr(1, 0, 0, 0)
+    L.snap(0)
+    L.advance(100)
+    t0 = L.now()
+    L.advance(50)
+    L.wait_done(t0, L.now())
+    L.set_ctr(0, 150000, 0, 0)      # busy all 150 ticks; only the 50-tick wait is io
+    out = _capture(lambda: L.report(4))
+    assert re.search(r"^\[PERFIO\] tag=4 tile=\(0,2\) .* io_active=50000 .* snap_gap_cyc=0 compute_cyc=150000 "
+                     r"ovl_cyc=100000$", out, re.M), out
+    # AIEHLC_CORE_PERF_WIN=1 still compiles (diagnostic per-wait path)
+    _lw_lib(win=True)
