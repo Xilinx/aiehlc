@@ -30,7 +30,8 @@ from aiegraph.costmodel.n_layout import layout_sites  # noqa: E402
 from aiegraph.costmodel.static_feat import unet_site_feat  # noqa: E402
 from aiegraph.costmodel.unet_seq import launches_of, parse_aiek, parse_driver, read  # noqa: E402
 
-LAUNCH_FEATS = ("cp_w", "bdcfg_w", "shim_bd", "tile_bd", "wbytes", "kswitch", "kfirst", "rr", "rr_pair")
+LAUNCH_FEATS = ("cp_w", "bdcfg_w", "shim_bd", "tile_bd", "wbytes", "kswitch", "kfirst", "rr", "rr_pair", "ucs_b",
+                "ucs_b2b")
 LAYOUT_FEATS = ("in_pack_bytes", "out_scatter_bytes", "relayout", "up", "down")
 _GEMM_W = re.compile(r"^gemm_kacc__(\d+)_(\d+)_(\d+)_")
 
@@ -65,17 +66,18 @@ def base_sites(build, build_log):
         if kind == "conv":
             m = re.search(r"M=(\d+) N=(\d+) K=(\d+)", ls[0][2])
             M, N, K = (int(x) for x in m.groups())
-            s = dict(kind="conv", MK=M * K, MN=M * N)
+            s = dict(kind="conv", MK=M * K, MN=M * N, Mw=M, Kw=K, Nw=N)
         elif kind == "linear":
             x, _w, y = c[2]
             M, K, N = x[0], x[1], y[1]
-            s = dict(kind="linear", MK=M * K, MN=M * N)
+            s = dict(kind="linear", MK=M * K, MN=M * N, Mw=M, Kw=K, Nw=N)
         else:
             if ls:
                 g = gfa[c[3]]
-                s = dict(kind="fa", MK=g["h"] * g["n"] * g["d"], MN=g["h"] * g["n"] * g["m"], cls=c[3])
+                s = dict(kind="fa", MK=g["h"] * g["n"] * g["d"], MN=g["h"] * g["n"] * g["m"], cls=c[3],
+                         Mw=g["h"] * g["n"], Kw=g["d"], Nw=g["m"])
             else:
-                s = dict(kind="attn", MK=0, MN=0, cls=c[3])
+                s = dict(kind="attn", MK=0, MN=0, cls=c[3], Mw=0, Kw=0, Nw=0)
         s.update(cid=c[1], launches=len(ls), kernels=sorted({k for k, _s, _d in ls}))
         out.append(s)
     return out
@@ -87,10 +89,23 @@ def wbytes(kernel):
     return int(m.group(2)) * int(m.group(1)) * 2 if m else 0
 
 
+def ucs_line(i, d):
+    """console line uc_conv / uc_linear printf+fflush between sp1 and sp2 of launch i (aiek_unetconv.cc
+    '[UCS] l=%d M=%d N=%d K=%d tkw=%d' / '[UCS] l=%d lin M=.. N=.. K=.. px=.. s=../.. tkw=%d'), '' for fa launches.
+    l = graph_run launch index, tkw = gemm_kacc__ name field 7. Reproduces the board log [UCS] lines exactly."""
+    if not _GEMM_W.match(d["kernel"]):
+        return ""
+    tkw = int(d["kernel"].split("__", 1)[1].split("_")[6])
+    desc = re.sub(r"^(conv|lin) cid=\d+ ", lambda m: "" if m.group(1) == "conv" else "lin ", d["desc"])
+    return "[UCS] l=%d %s tkw=%d\n" % (i, desc, tkw)
+
+
 def add_launch_feats(st, seq):
     """sum the per-launch static_feat.unet_site_feat records over each site's launches (in order):
     cp_w/bdcfg_w (+ rr on a kernel-switch launch), shim_bd, tile_bd, wbytes, kswitch, kfirst (first launch of
-    that kernel in graph_run), rr, rr_pair (cur's return-route words on shim tiles prev's window does not route)"""
+    that kernel in graph_run), rr, rr_pair (cur's return-route words on shim tiles prev's window does not route),
+    ucs_b (console bytes printed inside the launch windows, ucs_line), ucs_b2b (bytes of the previous launch's console
+    line when that launch also printed: UART backlog the print may wait on)"""
     i = 0
     tiles, seen = {}, set()
     for d in seq:
@@ -98,6 +113,7 @@ def add_launch_feats(st, seq):
     for s in st:
         f = dict.fromkeys(LAUNCH_FEATS, 0)
         ks = set()
+        n = 0
         for d in seq[i:i + s["launches"]]:
             ks.add(d["kernel"])
             f["cp_w"] += d["cp_w"] + d["rr"]
@@ -109,6 +125,11 @@ def add_launch_feats(st, seq):
             f["kfirst"] += d["kernel"] not in seen
             seen.add(d["kernel"])
             f["rr"] += d["rr"]
+            j = i + n
+            n += 1
+            f["ucs_b"] += len(ucs_line(j, d))
+            if j > 0 and ucs_line(j, d) and ucs_line(j - 1, seq[j - 1]):
+                f["ucs_b2b"] += len(ucs_line(j - 1, seq[j - 1]))
             if d["kswitch"]:
                 prev_t = set(tiles.get(d["prev"], {})) if d["prev"] else set()
                 f["rr_pair"] += sum(w for t, w in d["rr_tiles"].items() if t not in prev_t)

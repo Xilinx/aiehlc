@@ -10,10 +10,16 @@ Per site (n_feat.sites of DIR/unet_<cfg>, aligned with the log's 'PROF part=<i> 
   site_ms - aie_ms is the PROF part 'ms'; glue/flush/inval come from 'PROF aie_host_split part=<i>'.
   aie_ms (in launch: kload, rt_*) belongs to K+L, not N.
 Features (all static, n_feat.sites = base sites + static_feat launch features + n_layout layout features):
-  MK MN launches wbytes cp_w bdcfg_w rr rr_pair kswitch kfirst in_pack_bytes out_scatter_bytes relayout
+  FEATS below; Mw/Kw/Nw = gemm dims (words), ucs_b = console bytes of the '[UCS]' printf+fflush that sits inside the
+  glue window (sp1..sp2), ucs_b2b = previous launch's console bytes when it printed too (UART backlog),
+  krep = launches - kswitch, in_arm / out_arm = pack / scatter bytes whose producer / reader is an ARM call.
 Model per (cfg, kind in conv|linear|fa), sites with launches>0 only:
-  N = sum_f coef_f * f + d    (least squares on relative error, weight 1/N; a feature constant over the kind's sites
-                               or linearly dependent on the others -> coef 0)
+  N = sum_f coef_f * f + d    (NNLS on relative error, weight 1/N, coef >= 0, d >= 0; <= MAX_FEATS active features,
+                               subset = exhaustive search, see fit_kind)
+  NLOO  cfg=.. run=a|b kind=.. loo_maxrel=..                           (LOO with the subset frozen from run a;
+                                                                       run b = the --check log of that cfg)
+  NLOO  ALL cfgs=.. runs=.. maxloo=.. PASS|FAIL                        (max over cfg x run, <=0.200)
+  NTOTAL cfg=.. total_rel=..                                           (printed only, not a gate)
 --lower-bound: sites with identical (kind, launches, all FEATS) get the same prediction p from ANY such model, so
 per-site maxrel >= (hi-lo)/(hi+lo) over each group; prints the worst group per cfg and the max over cfgs:
   NLB cfg=.. groups=.. top=<kind cid>/<kind cid> maxlb=..
@@ -24,25 +30,28 @@ and only enters total_rel.
   NSUM  cfg=.. site_glue_ms=.. split_glue_ms=.. rel=.. PASS|FAIL       (sum site glue vs split_detail
                                                                        host_glue_bdcfg*launches, rel<=0.02)
   NFIT  cfg=.. kind=.. n=.. a=.. b=.. c=.. d=..
-  NLOO  cfg=.. kind=.. loo_maxrel=..                                   (leave-one-out, printed only)
   NGATE cfg=.. sites=.. r2=.. maxrel=.. total_rel=.. attn_host_ms=.. PASS|FAIL   (maxrel<=0.200)
   NGATE ALL src=board cfgs=.. sites=.. r2_min=.. maxrel=.. PASS|FAIL
 """
 import argparse
+import itertools
 import json
 import re
 import sys
 from pathlib import Path
 
 import numpy as np
+from scipy.optimize import nnls
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from aiegraph.costmodel.n_feat import sites as n_sites  # noqa: E402
 from aiegraph.costmodel.unet_seq import read  # noqa: E402
 
 KINDS = ("conv", "linear", "fa")
-FEATS = ("MK", "MN", "launches", "wbytes", "cp_w", "bdcfg_w", "rr", "rr_pair", "kswitch", "kfirst",
-         "in_pack_bytes", "out_scatter_bytes", "relayout")
+FEATS = ("MK", "MN", "Mw", "Kw", "Nw", "launches", "krep", "wbytes", "cp_w", "bdcfg_w", "rr", "rr_pair", "kswitch",
+         "kfirst", "in_pack_bytes", "in_arm", "out_scatter_bytes", "out_arm", "relayout", "ucs_b", "ucs_b2b")
+MAX_FEATS = 5  # active features per (cfg, kind): fa has n=18
+TOP_LOO = 40   # in-sample best subsets re-ranked by leave-one-out max relative error
 GATE = 0.200
 LB_GATE = 0.150
 SUM_TOL = 0.02
@@ -58,6 +67,15 @@ _LAUNCH = re.compile(r"^LAUNCH (?:warm|cold) .*?\blaunches=(\d+)", re.M)
 
 def sig(x, n=9):
     return float("%.*g" % (n, x))
+
+
+def derive(r):
+    """static features derived from n_feat.sites: krep (launches that rerun the previous launch's kernel),
+    in_arm / out_arm (pack / scatter bytes whose producer / reader is an ARM call)"""
+    r["krep"] = r["launches"] - r["kswitch"]
+    r["in_arm"] = r["in_pack_bytes"] if r["up"] == "arm" else 0
+    r["out_arm"] = r["out_scatter_bytes"] if r["down"] == "arm" else 0
+    return r
 
 
 def measure(build, log):
@@ -82,7 +100,7 @@ def measure(build, log):
                 raise ValueError("part=%d split launches=%d vs build %d" % (part, n, s["launches"]))
         elif s["launches"] > 0:
             raise ValueError("part=%d: no aie_host_split line" % part)
-        out.append(dict(s, part=part, ms=ms, aie_ms=aie_ms, glue=g, N=ms + g + f + i))
+        out.append(derive(dict(s, part=part, ms=ms, aie_ms=aie_ms, glue=g, N=ms + g + f + i)))
     return out, txt
 
 
@@ -105,31 +123,52 @@ def sum_line(cfg, rows, txt):
     return ok
 
 
-def design(rows, active):
-    return np.array([[float(r[f]) for f, on in zip(FEATS, active) if on] + [1.0] for r in rows])
+def _nnls(X, y):
+    """non-negative least squares on relative error (weight 1/y); X has the intercept column last"""
+    sc = np.maximum(np.abs(X).max(axis=0), 1e-300)
+    c, _ = nnls(X / sc / y[:, None], np.ones(len(y)))
+    return c / sc
 
 
-def fit_kind(rows):
-    """{'coef': {feat: v}, 'd': v}; a feature constant over rows, or dependent on the ones before it, gets 0"""
-    X = np.array([[float(r[f]) for f in FEATS] for r in rows])
-    active = []
-    for j in range(len(FEATS)):
-        on = bool(np.ptp(X[:, j]) > 0)
-        if on:
-            trial = design(rows, active + [True] + [False] * (len(FEATS) - j - 1))
-            on = np.linalg.matrix_rank(trial / np.maximum(np.abs(trial).max(axis=0), 1e-300)) == trial.shape[1]
-        active.append(on)
+def _params(sub, c):
+    return {"coef": {f: sig(float(v)) for f, v in zip(sub, c[:-1]) if v > 0}, "d": sig(float(c[-1]))}
+
+
+def maxrel(p, rows):
+    return max(abs(predict(p, r) - r["N"]) / r["N"] for r in rows)
+
+
+def fit_kind(rows, sub=None):
+    """{'coef': {feat: v>0}, 'd': v>=0} by NNLS on relative error. sub=None: every subset of <= MAX_FEATS
+    non-constant FEATS; the TOP_LOO with the smallest in-sample max relative error are re-ranked by
+    max(in-sample, leave-one-out) max relative error on the same rows (ties: fewer features, FEATS order);
+    'feats' = the chosen subset (frozen for LOO). sub given: refit on that subset."""
     y = np.array([r["N"] for r in rows])
-    w = 1.0 / y  # relative-error least squares: the gate is per-site maxrel, not absolute ms
-    A = design(rows, active)
-    scale = np.maximum(np.abs(A).max(axis=0), 1e-300)
-    coef, *_ = np.linalg.lstsq(A / scale * w[:, None], y * w, rcond=None)
-    coef = coef / scale
-    full, k = {}, 0
-    for f, on in zip(FEATS, active):
-        full[f] = sig(float(coef[k])) if on else 0.0
-        k += on
-    return {"coef": full, "d": sig(float(coef[-1]))}
+    X = np.array([[float(r[f]) for f in FEATS] + [1.0] for r in rows])
+    if sub is not None:
+        cols = [FEATS.index(f) for f in sub] + [len(FEATS)]
+        return _params(sub, _nnls(X[:, cols], y))
+    var = [j for j in range(len(FEATS)) if np.ptp(X[:, j]) > 0]
+    cand = []
+    for k in range(MAX_FEATS + 1):
+        for cmb in itertools.combinations(var, k):
+            cols = list(cmb) + [len(FEATS)]
+            c = _nnls(X[:, cols], y)
+            cand.append((float(np.max(np.abs(X[:, cols] @ c - y) / y)), k, cmb, c))
+    cand.sort(key=lambda t: (t[0], t[1], t[2]))
+    best = None
+    for m, k, cmb, c in cand[:TOP_LOO]:
+        cols = list(cmb) + [len(FEATS)]
+        lv = 0.0
+        for i in range(len(y)):
+            keep = np.arange(len(y)) != i
+            ci = _nnls(X[keep][:, cols], y[keep])
+            lv = max(lv, abs(float(X[i, cols] @ ci) - y[i]) / y[i])
+        if best is None or max(lv, m) < best[0] - 1e-12:
+            best = (max(lv, m), [FEATS[j] for j in cmb], c)
+    p = _params(best[1], best[2])
+    p["feats"] = [f for f in best[1] if f in p["coef"]]
+    return p
 
 
 def predict(p, r):
@@ -161,10 +200,11 @@ def lower_bound(cfg, rows):
     return lb
 
 
-def loo(rows):
+def loo(rows, sub):
+    """leave-one-out max relative error with the frozen feature subset sub (coefficients refit)"""
     worst = 0.0
     for i in range(len(rows)):
-        p = fit_kind(rows[:i] + rows[i + 1:])
+        p = fit_kind(rows[:i] + rows[i + 1:], sub)
         worst = max(worst, abs(predict(p, rows[i]) - rows[i]["N"]) / rows[i]["N"])
     return worst
 
@@ -203,7 +243,8 @@ def main(argv=None):
     else:
         if not a.fit or not a.out:
             ap.error("--fit and --out are required without --params")
-        prm = {}
+        prm, looruns = {}, []
+        checks = dict(pairs(a.check))
         for cfg, log in pairs(a.fit):
             rows, txt = measure("%s/unet_%s" % (root, cfg), log)
             ok &= src_line(cfg, log, txt)
@@ -215,10 +256,25 @@ def main(argv=None):
                 p["n"] = len(kr)
                 kinds[kind] = p
                 print("NFIT cfg=%s kind=%s n=%d %s d=%.6g" % (cfg, kind, len(kr), " ".join(
-                    "%s=%.6g" % (f, v) for f, v in p["coef"].items() if v), p["d"]))
-                print("NLOO cfg=%s kind=%s loo_maxrel=%.3f" % (cfg, kind, loo(kr)))
+                    "%s=%.6g" % (f, v) for f, v in sorted(p["coef"].items())), p["d"]))
+            # LOO with the subset chosen on the fit run, once on the fit log (a) and once on the check log (b)
+            runs = [("a", rows)]
+            if cfg in checks:
+                runs.append(("b", measure("%s/unet_%s" % (root, cfg), checks[cfg])[0]))
+            for run, rr in runs:
+                worst_run = 0.0
+                for kind in KINDS:
+                    kr = [r for r in rr if r["kind"] == kind and r["launches"] > 0]
+                    lv = loo(kr, kinds[kind]["feats"])
+                    worst_run = max(worst_run, lv)
+                    print("NLOO cfg=%s run=%s kind=%s loo_maxrel=%.3f" % (cfg, run, kind, lv))
+                looruns.append(worst_run)
             host = sig(sum(r["N"] for r in rows if r["launches"] == 0))
-            prm[cfg] = {"kinds": kinds, "attn_host_ms": host, "model": "N=sum(coef[f]*f)+d (ms)"}
+            prm[cfg] = {"kinds": kinds, "attn_host_ms": host,
+                        "model": "N=sum(coef[f]*f)+d (ms), nnls on relative error, <=%d features per kind" % MAX_FEATS}
+        mloo = max(looruns) if looruns else float("inf")
+        print("NLOO ALL cfgs=%d runs=%d maxloo=%.3f %s" % (len(prm), len(looruns) // max(len(prm), 1), mloo,
+                                                           "PASS" if looruns and mloo <= GATE else "FAIL"))
         with open(a.out, "w") as f:
             json.dump(prm, f, sort_keys=True, indent=1)
             f.write("\n")
@@ -248,6 +304,7 @@ def main(argv=None):
         mx = float(rel.max())
         good = mx <= GATE
         ok &= good
+        print("NTOTAL cfg=%s total_rel=%.3f meas_ms=%.3f pred_ms=%.3f" % (cfg, trel, tot_meas, tot_pred))
         print("NGATE cfg=%s sites=%d r2=%.3f maxrel=%.3f total_rel=%.3f attn_host_ms=%.3f %s"
               % (cfg, len(fr), r2, mx, trel, host_meas, "PASS" if good else "FAIL"))
         allsites += len(fr)

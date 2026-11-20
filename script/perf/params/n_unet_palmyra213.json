@@ -1,0 +1,110 @@
+{
+ "aot-kco": {
+  "attn_host_ms": 14.752,
+  "kinds": {
+   "conv": {
+    "coef": {
+     "MK": 8.48096893e-07,
+     "in_pack_bytes": 5.78906315e-07,
+     "relayout": 0.632854384,
+     "wbytes": 1.16681406e-07
+    },
+    "d": 0.956128744,
+    "feats": [
+     "MK",
+     "wbytes",
+     "in_pack_bytes",
+     "relayout"
+    ],
+    "n": 48
+   },
+   "fa": {
+    "coef": {
+     "MK": 1.0952905e-06,
+     "MN": 1.14118831e-07,
+     "bdcfg_w": 0.000145706125
+    },
+    "d": 0.239234095,
+    "feats": [
+     "MK",
+     "MN",
+     "bdcfg_w"
+    ],
+    "n": 18
+   },
+   "linear": {
+    "coef": {
+     "MK": 1.20921863e-06,
+     "out_arm": 8.00091577e-07,
+     "ucs_b": 0.0297419146,
+     "ucs_b2b": 0.0151947267,
+     "wbytes": 1.10931575e-07
+    },
+    "d": 0.639498682,
+    "feats": [
+     "MK",
+     "wbytes",
+     "out_arm",
+     "ucs_b",
+     "ucs_b2b"
+    ],
+    "n": 72
+   }
+  },
+  "model": "N=sum(coef[f]*f)+d (ms), nnls on relative error, <=5 features per kind"
+ },
+ "off": {
+  "attn_host_ms": 14.655,
+  "kinds": {
+   "conv": {
+    "coef": {
+     "MK": 6.95679292e-07,
+     "MN": 3.51311482e-06,
+     "in_pack_bytes": 4.47279411e-07,
+     "relayout": 0.550193784,
+     "wbytes": 1.45238722e-07
+    },
+    "d": 1.50835571,
+    "feats": [
+     "MK",
+     "MN",
+     "wbytes",
+     "in_pack_bytes",
+     "relayout"
+    ],
+    "n": 48
+   },
+   "fa": {
+    "coef": {
+     "MN": 1.82135431e-07,
+     "Mw": 0.000545604547
+    },
+    "d": 0.703895892,
+    "feats": [
+     "MN",
+     "Mw"
+    ],
+    "n": 18
+   },
+   "linear": {
+    "coef": {
+     "Mw": 0.000973142326,
+     "Nw": 0.00100236363,
+     "out_scatter_bytes": 1.00109796e-06,
+     "ucs_b": 0.0423455188,
+     "wbytes": 1.28849699e-07
+    },
+    "d": 0.0,
+    "feats": [
+     "Mw",
+     "Nw",
+     "wbytes",
+     "out_scatter_bytes",
+     "ucs_b"
+    ],
+    "n": 72
+   }
+  },
+  "model": "N=sum(coef[f]*f)+d (ms), nnls on relative error, <=5 features per kind"
+ }
+}
