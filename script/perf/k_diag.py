@@ -2,6 +2,7 @@
 """UNet K anchor diagnosis per site: measured core counters + static BD shape (costmodel M3.1).
 
   k_diag.py --build-root DIR CFG=LOG_A[,LOG_B] ... [--ref CFG=M2C_B_LOG ...]
+  k_diag.py --build-root DIR --fit CFG=LOG_A ... --check CFG=LOG_B ... [--ref CFG=M2C_B_LOG ...]
   k_diag.py --map-only --build-root DIR CFG=LOG ...
   k_diag.py --selftest
 
@@ -29,12 +30,13 @@ Classes (KCLS): conv_tkw4 (conv, kacc tkw == 4), conv_big (other conv), fa_d160 
 Output:
   KSITE   cfg run site part launches K_meas core compute tail lock stream dma bound K_hat rel
   KCLS    cfg run cls sites K_ms core_ms compute_ms tail_ms dma_ms bound=core:n/dma:n/sync:n
-  KFA     cfg run fa128_K_ms fa134_K_ms ratio
+  KFA     cfg fa128/fa134 meas_ratio run fa128_K_ms fa134_K_ms
   KSANITY cfg run io_act_over_K_max PASS|FAIL
   KFIT    cfg log=A bw_<bucket>_GBps.. t0_ms params r2 maxrel loo_maxrel
   KCHK    cfg log=B r2 maxrel
   KDRIFT  cfg=<c> wait_sum_rel_vs_ref=<%.3f>   (--ref: M2c b log, built without counters)
-  KFLOOR  cfg ... PASS|FAIL;  KFLOOR ALL cfgs sites perf_sites r2_min maxrel loo_maxrel drift_max PASS|FAIL
+  KDSRC   cfg log board launches run_rc sites perf_sites   (CMP line of each log; src=board needs palmyra, run_rc=0)
+  KFLOOR  cfg ... PASS|FAIL;  KFLOOR ALL src cfgs sites perf_sites r2_min maxrel loo_maxrel act_over_k_max PASS|FAIL  (drift: KDRIFT, gates per-cfg KFLOOR)
 --map-only (no counter lines needed):
   KDMAP   cfg site part kind launches bd_n num_dims run_b bucket ddr_b ;  KDMAP cfg=.. sites bd_missing PASS|FAIL
   KDMAP ALL logs= sites= bd_missing= PASS|FAIL   (always the last line)
@@ -65,6 +67,7 @@ _PERF = re.compile(r"^PROF aie_site_perf part=(\d+) kind=(\w+) launches=(\d+) pe
 _SPLIT = re.compile(r"^PROF aie_host_split part=(\d+) kind=(\w+) .*wait_ms=([\d.]+) .*inval_ms=([\d.]+) "
                     r"launches=(\d+)$", re.M)
 _FA_D = re.compile(r"_d(\d+)_")
+_CMP = re.compile(r"^CMP unet board=(\S+) .*aie_launches=(\d+) .*run_rc=(-?\d+)", re.M)
 
 
 # ------------------------------------------------------------------ parsing / per-site split
@@ -256,8 +259,8 @@ def diag_lines(cfg, run, sites, p=None):
     by = {s["site"]: s for s in sites}
     if "fa128" in by and "fa134" in by:
         a, b = by["fa128"]["K"], by["fa134"]["K"]
-        print("KFA cfg=%s run=%s fa128_K_ms=%.3f fa134_K_ms=%.3f ratio=%.3f" % (cfg, run, a, b, a / b if b else
-                                                                              float("inf")))
+        print("KFA cfg=%s fa128/fa134 meas_ratio=%.3f run=%s fa128_K_ms=%.3f fa134_K_ms=%.3f"
+              % (cfg, a / b if b else float("inf"), run, a, b))
     iok = max((s["core"] / s["K"] for s in ps), default=float("inf"))
     print("KSANITY cfg=%s run=%s io_act_over_K_max=%.3f %s" % (cfg, run, iok, "PASS" if iok <= IOK_MAX else "FAIL"))
     return iok
@@ -296,14 +299,21 @@ def map_only(a):
 def full(a):
     refs = dict(x.split("=", 1) for x in (a.ref or []))
     ok_all = True
-    agg = dict(cfgs=0, sites=0, perf=0, r2=float("inf"), maxrel=0.0, loo=0.0, drift=0.0)
+    agg = dict(cfgs=0, sites=0, perf=0, r2=float("inf"), maxrel=0.0, loo=0.0, drift=0.0, iok=0.0)
+    src_ok = True
     for spec in a.runs:
         cfg, logs = spec.split("=", 1)
         la, lb = (logs.split(",") + [None])[:2]
-        sa, _ = load(cfg, la, a.build_root)
-        sb, _ = load(cfg, lb, a.build_root) if lb else (sa, None)
+        sa, ta = load(cfg, la, a.build_root)
+        sb, tb = load(cfg, lb, a.build_root) if lb else (sa, ta)
         pa = [s for s in sa if s["perf"] is not None and s["bd_ok"] and s["K"] > 0]
         pb = [s for s in sb if s["perf"] is not None and s["bd_ok"] and s["K"] > 0]
+        for lg, ss, ps, tx in ((la, sa, pa, ta), (lb, sb, pb, tb)) if lb else ((la, sa, pa, ta),):
+            m = _CMP.findall(tx)
+            bd, nl, rc = m[-1] if m else ("?", "0", "-1")
+            print("KDSRC cfg=%s log=%s board=%s launches=%s run_rc=%s sites=%d perf_sites=%d"
+                  % (cfg, lg, bd, nl, rc, len(ss), len(ps)))
+            src_ok = src_ok and bool(m) and bd.startswith("palmyra") and rc == "0"
         if not pa or not pb:
             print("KFLOOR cfg=%s sites=%d perf_sites=%d FAIL (no counter lines)" % (cfg, len(sb), len(pb)))
             ok_all = False
@@ -337,10 +347,13 @@ def full(a):
         agg["maxrel"] = max(agg["maxrel"], mra, mrb)
         agg["loo"] = max(agg["loo"], lo)
         agg["drift"] = max(agg["drift"], dr)
-    print("KFLOOR ALL cfgs=%d sites=%d perf_sites=%d r2_min=%.4f maxrel=%.4f loo_maxrel=%.4f drift_max=%.3f %s"
-          % (agg["cfgs"], agg["sites"], agg["perf"], agg["r2"], agg["maxrel"], agg["loo"], agg["drift"],
-             "PASS" if ok_all and agg["cfgs"] else "FAIL"))
-    return ok_all and agg["cfgs"] > 0
+        agg["iok"] = max(agg["iok"], ioka, iokb)
+    ok_all = ok_all and src_ok and agg["cfgs"] > 0
+    print("KFLOOR ALL src=%s cfgs=%d sites=%d perf_sites=%d r2_min=%.3f maxrel=%.3f loo_maxrel=%.3f "
+          "act_over_k_max=%.3f %s"
+          % ("board" if src_ok else "nonboard", agg["cfgs"], agg["sites"], agg["perf"], agg["r2"], agg["maxrel"],
+             agg["loo"], agg["iok"], "PASS" if ok_all else "FAIL"))
+    return ok_all
 
 
 # ------------------------------------------------------------------ selftest (synthetic, known answer)
@@ -435,8 +448,16 @@ def main(argv=None):
     ap.add_argument("--map-only", action="store_true")
     ap.add_argument("--build-root")
     ap.add_argument("--ref", nargs="+", metavar="CFG=LOG")
+    ap.add_argument("--fit", nargs="+", metavar="CFG=LOG_A", help="logs the K floor is fitted on (run a)")
+    ap.add_argument("--check", nargs="+", metavar="CFG=LOG_B", help="held-out logs (run b, never fitted)")
     ap.add_argument("runs", nargs="*", metavar="CFG=LOG_A[,LOG_B]")
     a = ap.parse_args(argv)
+    if a.fit:  # --fit cfg=A --check cfg=B  ==  positional cfg=A,B
+        chk = dict(x.split("=", 1) for x in (a.check or []))
+        a.runs = list(a.runs) + [x + ("," + chk[x.split("=", 1)[0]] if x.split("=", 1)[0] in chk else "")
+                                 for x in a.fit]
+    elif a.check:
+        ap.error("--check needs --fit")
     if a.selftest:
         return 0 if selftest() else 1
     if not a.build_root or not a.runs:
