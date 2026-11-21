@@ -16,7 +16,8 @@ Input schema (settled in the cost channel: Steve's form, field ``recipe`` not ``
              "host": {"bd_us": float},                # host BD-issue cost per BD (segment L input)
              "l": {"cfg": "off|off-cold|aot|aot-kco", "calls": {...}, "words": {...}},  # L features, per launch
              "bdgraph": {"worklocal": dir,            # build JSON dir (dfscheduleprovenancemap + schedule_view)
-                         "bd_write_path": "jit_mmio|aot_window|uart_degraded",  # required to price issue_ms
+                         "bd_write_path": "jit_mmio|aot_window|uart_degraded",  # required to price issue_ms;
+                                                      #   the board fit only prices its own path (palmyra213: jit_mmio)
                          "trip_count": int}}          # optional; else start_io.loop_range (see bdgraph.py)
                                                       # -> counts only + issue_ms + ddr floor (report only,
                                                       #    bdgraph.ddr_floor); K terms listed in "unpriced"
@@ -142,6 +143,8 @@ def estimate_bdgraph(op: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, An
         unpriced.append("rounds_unknown")
     elif bd_us is None:
         unpriced.append("host_bd_us")
+    elif bd_us_src == "board_fit" and params.get("bdgraph_fit_path") not in (None, f["bd_write_path"]):
+        unpriced.append(f"issue(bd_write_path={f['bd_write_path']}; board fit is {params['bdgraph_fit_path']})")
     else:
         issue = f["bd_configs_per_launch"] * float(bd_us) / 1e3
         fit = params.get("bdgraph_issue_fit") if bd_us_src == "board_fit" else None
@@ -169,9 +172,11 @@ def estimate(group: Any, board: str = "palmyra213", params: Optional[Dict[str, A
     """Predicted ms of one execution of ``group`` (see module docstring for the schema)."""
     prm = params if params is not None else board_params(board)
     if "bdgraph_bd_us" not in prm:
-        from .bdgraph import BD_US_FIT, ISSUE_FIT
+        from .bdgraph import BD_US_FIT, BD_US_FIT_PATH, ISSUE_FIT
         if board in BD_US_FIT:
             prm = {**prm, "bdgraph_bd_us": BD_US_FIT[board]}
+            if board in BD_US_FIT_PATH and "bdgraph_fit_path" not in prm:
+                prm = {**prm, "bdgraph_fit_path": BD_US_FIT_PATH[board]}
         if board in ISSUE_FIT and "bdgraph_issue_fit" not in prm:
             prm = {**prm, "bdgraph_issue_fit": ISSUE_FIT[board]}
     if "bdgraph_run_b_factor" not in prm:
