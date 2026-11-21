@@ -11,6 +11,7 @@ cost channel 2026-11-20).  This module only COUNTS; it does not price DMA bytes 
   run_b        per BD contiguous DDR run after the runtime's eff_dims trim (rt_seq_bd_desc): trailing wrap<=1 dims
                dropped; one dim of stride 4 with wrap*4 == len is a plain addr/len BD, run_b = len.
   skipped      ``bd_id: "runtime"`` placeholders (BD chosen at run time) are skipped and counted.
+  start queue  <= START_Q starts outstanding per (tile, channel) between waits, loops unrolled (hw_violations).
   locks        BDs whose acquire AND release lock ids are >= 0 (one id alone = no lock).  Not priced until the
                AM020 lock semantics are confirmed.
 
@@ -57,6 +58,7 @@ def run_bytes(bd: Dict[str, Any]) -> int:
 # Hard HW/runtime limits (Amit, amit/tasks/2026-11-20_des-json-gap/README.md section 2; AIE2PS).
 BD_POOL = {"core": 16, "shim": 16, "memtile": 48}   # BDs per tile DMA (shim's 16 shared by its channels)
 REPEAT_MAX = 256                                     # start_io repeat_count, 8-bit field (R-1)
+START_Q = 4                                          # aie-rt StartQSizeMax: starts outstanding per channel; host blocks on the 5th
 WRAP_MAX = 1024                                      # D0..D2 wrap after the eff_dims trim
 PLAIN_SHIM_WORDS_MAX = 1023                          # plain shim BD > 1023 words: legacy path, not an AOT "bd" site
 
@@ -133,6 +135,51 @@ def _host_lines(sv: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def start_queue_violations(sv: Dict[str, Any], trip_n: Optional[int]) -> List[str]:
+    """Starts outstanding per (tile, channel) between waits, over the host schedule with loops unrolled.
+
+    Amit's bdgraph_extract.py scans the lines once; a start inside a loop whose wait is outside the loop then
+    queues one entry per round, so here each loop body runs min(trip, START_Q + 1) times (once if the trip count
+    is unknown -- a lower bound).  A line belongs to the first channel whose host_lines carry it (as in the extractor).
+    """
+    seen: Dict[int, Dict[str, Any]] = {}
+    for t in sv.get("tiles", []):
+        loc = tuple(t.get("loc") or (t.get("col"), t.get("row")))
+        for c in t.get("dma_channels", []):
+            for h in c.get("host_lines", []):
+                seen.setdefault(h["line"], {"line": h["line"], "kind": h["kind"],
+                                            "key": (loc, f"{c.get('direction')}{c.get('channel')}")})
+    seq = [seen[k] for k in sorted(seen) if seen[k]["kind"] in ("startio", "wait", "loop", "loopend")]
+    reps = 1 if trip_n is None else max(1, min(int(trip_n), START_Q + 1))
+    out: Dict[Any, int] = {}
+    worst: Dict[Any, tuple] = {}
+
+    def run(i: int) -> int:                          # executes seq[i:] until the matching loopend; returns its index
+        while i < len(seq):
+            h = seq[i]
+            if h["kind"] == "loop":
+                end = i + 1
+                for _ in range(reps):
+                    end = run(i + 1)
+                i = end + 1
+                continue
+            if h["kind"] == "loopend":
+                return i
+            k = h["key"]
+            if h["kind"] == "wait":
+                out[k] = 0
+            else:
+                out[k] = out.get(k, 0) + 1
+                if out[k] > START_Q and out[k] > worst.get(k, (0,))[0]:
+                    worst[k] = (out[k], h["line"])
+            i += 1
+        return i
+
+    run(0)
+    return [f"line {ln}: {n} starts outstanding on {k[0]} {k[1]} (> {START_Q}, host blocks)"
+            for k, (n, ln) in sorted(worst.items(), key=lambda kv: kv[1][1])]
+
+
 def features(src: Any) -> Dict[str, Any]:
     """src = worklocal dir (str/Path) or {'worklocal': dir, 'trip_count': int?, 'bd_write_path': str?}."""
     spec = dict(src) if isinstance(src, dict) else {"worklocal": src}
@@ -198,6 +245,8 @@ def features(src: Any) -> Dict[str, Any]:
     rounds = next(iter(trips)) if len(trips) == 1 and not rounds_unknown else (1 if not trips and not rounds_unknown else None)
     bdcfg = per["launch"] + per["round"] * rounds if rounds is not None else None
     ddr = _ddr_bytes(dfs, sv, ovr, rounds) if sv is not None else None
+    if sv is not None:
+        viol += start_queue_violations(sv, ovr if ovr is not None else rounds)
     shim_runs = sorted({b["run_b"] for c in channels if c["type"] == "shim" for b in c["bds"]})
     return {"worklocal": str(d), "channels": channels, "rounds": rounds,
             "rounds_unknown": rounds_unknown or (per["round"] > 0 and rounds is None),

@@ -499,3 +499,39 @@ def test_given_a_plain_shim_bd_over_4092_bytes_under_aot_window_then_it_is_unpri
                            "host": {"bd_us": 2.0}}]}, cycles=cycles_file)
     assert any(u.startswith("plain_shim_bds_large(1)") for u in r["unpriced"])
     assert r["hw_violations"] == []
+
+
+# --- start queue: <= 4 starts outstanding per channel between waits (aie-rt StartQSizeMax) ---
+
+def _sq(tmp_path, host, starts=LOOPED, **kw):
+    d = _write(tmp_path, starts, [_bd(0, 256)], host)
+    return bdgraph.features({"worklocal": str(d), **kw})
+
+
+def test_given_a_wait_every_round_then_the_start_queue_never_exceeds_one(tmp_path):
+    assert _sq(tmp_path, HOST)["hw_violations"] == []
+
+
+def test_given_starts_in_a_loop_and_the_wait_after_it_then_rounds_above_4_overflow_the_queue(tmp_path):
+    host = [{"line": 20, "kind": "loop"}, {"line": 21, "kind": "startio"}, {"line": 22, "kind": "loopend"},
+            {"line": 30, "kind": "wait"}]
+    f = _sq(tmp_path, host)                                   # loop_range 0..5 -> 5 rounds
+    assert f["hw_violations"] == ["line 21: 5 starts outstanding on (0, 0) MM2S0 (> 4, host blocks)"]
+    four = [{"repeat_count": 1, "inside_scf_for": True, "loop_range": "0..4"}]
+    assert _sq(tmp_path, host, starts=four)["hw_violations"] == []
+
+
+def test_given_an_unknown_trip_count_then_the_loop_is_checked_once_as_a_lower_bound(tmp_path):
+    host = [{"line": 20, "kind": "loop"}, {"line": 21, "kind": "startio"}, {"line": 22, "kind": "loopend"},
+            {"line": 30, "kind": "wait"}]
+    ssa = [{"repeat_count": 1, "inside_scf_for": True, "loop_range": "v7..v6 step v5"}]
+    assert _sq(tmp_path, host, starts=ssa)["hw_violations"] == []
+    assert len(_sq(tmp_path, host, starts=ssa, trip_count=8)["hw_violations"]) == 1
+
+
+def test_given_five_starts_at_launch_level_then_only_a_wait_between_them_avoids_the_overflow(tmp_path):
+    starts = [{"repeat_count": 1}]
+    five = [{"line": 10 + i, "kind": "startio"} for i in range(5)]
+    assert any("5 starts outstanding" in v for v in _sq(tmp_path, five, starts=starts)["hw_violations"])
+    split = five[:3] + [{"line": 13, "kind": "wait"}] + [{"line": 14 + i, "kind": "startio"} for i in range(2)]
+    assert _sq(tmp_path, split, starts=starts)["hw_violations"] == []
