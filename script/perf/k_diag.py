@@ -181,10 +181,34 @@ def split_site(wait, inval, perf):
     cyc_ms = 1.0 / (AIE_MHZ * 1e3)
     d.update(core=perf["io_act"] * cyc_ms, compute=(perf["io_act"] - perf["lock"] - perf["stream"]) * cyc_ms,
              lock=perf["lock"] * cyc_ms, stream=perf["stream"] * cyc_ms, gap=perf.get("gap", 0) * cyc_ms)
+    d["dwait"] = d["lock"] + d["stream"]  # data wait (ms) = lock + stream stalls
     d["tail"] = d["K"] - d["core"]
     if perf.get("has_ovl"):  # overlap model terms (ms): compute_cyc / 1e6, ovl_cyc / 1e6
         d.update(oc=perf["compute_cyc"] * cyc_ms, ovl=perf["ovl_cyc"] * cyc_ms, dact=perf.get("dact_cyc", 0) * cyc_ms)
+        # KSEM: compute = the logged compute_cyc (same A->B window as the stalls), not io_act - stalls
+        # (io_act misses the overlap window, so io_act - lock - stream went negative on stall-heavy sites)
+        d["compute"] = d["oc"]
     return d
+
+
+KSEM_TOL = 0.05     # |oc + lock + stream - (core + ovl)| / (core + ovl) per site
+KSEM_CORE_MS = 0.05  # dact check only on sites with core > this
+
+
+def ksem_line(cfg, runs_sites, tol=KSEM_TOL, core_min=KSEM_CORE_MS):
+    """KSEM of one cfg over all runs (perf_ok sites with the ovl tail): neg_compute = rows with compute < 0,
+    dact_bad = rows with core > core_min and |oc + lock + stream - (core + ovl)| / (core + ovl) > tol; PASS iff both 0"""
+    rows = [s for ss in runs_sites for s in ss if perf_ok(s) and "oc" in s]
+    neg = sum(s["compute"] < 0 for s in rows)
+    bad = 0
+    for s in rows:
+        den = s["core"] + s["ovl"]
+        if s["core"] > core_min and (den <= 0 or abs(s["oc"] + s["lock"] + s["stream"] - den) / den > tol):
+            bad += 1
+    ok = neg == 0 and bad == 0 and len(rows) > 0
+    print("KSEM cfg=%s runs=%d site_runs=%d neg_compute=%d dact_bad=%d dact_tol=%s %s"
+          % (cfg, len(runs_sites), len(rows), neg, bad, ("%.2f" % tol), "PASS" if ok else "FAIL"))
+    return dict(ok=ok, rows=len(rows), neg=neg, bad=bad)
 
 
 def bound(compute, dma, lock, stream):
@@ -886,6 +910,8 @@ def full(a):
         r2a, mra = r2(p, pa), max(rels(p, pa))
         print("KFIT cfg=%s log=%s %s r2=%.4f maxrel=%.4f loo_maxrel=%.4f" % (cfg, logs[0], fmt_p(p), r2a, mra, lo))
         ioks = [diag_lines(cfg, run, ss, p) for run, ss in zip(names, sss)]
+        if model == "ovl":
+            ksem_line(cfg, sss)
         iok = max(ioks)
         ksan_ok &= iok <= IOK_MAX
         r2b, mrb = r2a, mra
@@ -1359,6 +1385,25 @@ def selftest():
     chk("kcap_violation", not k_bad and k_ok and kc == ["KCAP cfg=synth cls=conv params=7 cap=7 ok=1",
                                                         "KCAP cfg=synth cls=linear params=6 cap=5 ok=0",
                                                         "KCAP cfg=synth cls=fa16 params=5 cap=5 ok=1"], " | ".join(kc))
+    # 23 ksem_pass: compute = logged compute_cyc; oc + lock + stream == core + ovl -> KSEM PASS
+    cyc = AIE_MHZ * 1e3
+    pg = dict(kind="conv", launches=1, perf_n=1, short=False, has_ovl=True, io_act=int(6.369 * cyc),
+              lock=int(7.267 * cyc), stream=0, gap=0, compute_cyc=int(1.900 * cyc), ovl_cyc=int(2.798 * cyc), dact_cyc=0)
+    sg = dict(perf=pg, **split_site(7.0, 0.245, pg))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        kg = ksem_line("synth", [[sg], [dict(sg)], [dict(sg)]])
+    ln = buf.getvalue().strip()
+    chk("ksem_pass", kg["ok"] and abs(sg["compute"] - 1.900) < 1e-6 and abs(sg["dwait"] - 7.267) < 1e-6
+        and ln == "KSEM cfg=synth runs=3 site_runs=3 neg_compute=0 dact_bad=0 dact_tol=0.05 PASS", ln)
+    # 24 ksem_negfail: a row with compute < 0 (and an oc that breaks the window identity) -> KSEM FAIL
+    sb_ = dict(sg, compute=-0.5, oc=-0.5)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        kb = ksem_line("synth", [[sg], [sb_]])
+    ln = buf.getvalue().strip()
+    chk("ksem_negfail", not kb["ok"] and kb["neg"] == 1 and kb["bad"] == 1
+        and ln == "KSEM cfg=synth runs=2 site_runs=2 neg_compute=1 dact_bad=1 dact_tol=0.05 FAIL", ln)
     n = sum(res)
     ok = n == len(res)
     print("KDIAG SELFTEST %s (%d/%d)" % ("PASS" if ok else "FAIL", n, len(res)))

@@ -566,3 +566,46 @@ def test_k_diag_tol_3runs(capsys):
     out = capsys.readouterr().out
     for name in ("3run_tol", "small_scope", "kresid_sum"):
         assert "KDIAG SELFTEST %-28s ok" % name in out
+
+
+def _k_diag_mod(name):
+    import importlib.util
+    path = SRC.parent / "script" / "perf" / "k_diag.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    kd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kd)
+    return kd
+
+
+def _ksem_perf(io_act, lock, stream, cc, oc):
+    return dict(kind="conv", launches=1, perf_n=1, short=False, has_ovl=True, io_act=io_act, lock=lock,
+                stream=stream, gap=0, compute_cyc=cc, ovl_cyc=oc, dact_cyc=0)
+
+
+def test_ksem_compute_same_window():
+    """KSEM (M3.1.1 RS): compute = logged compute_cyc (same A->B window), dwait = lock + stream; the board row
+    conv0 (io_act - stalls < 0) no longer gives a negative compute"""
+    kd = _k_diag_mod("k_diag_ksem1")
+    pf = _ksem_perf(6369000, 7267000, 0, 1900000, 2798000)
+    d = kd.split_site(6.755, 0.0, pf)
+    assert abs(d["compute"] - 1.9) < 1e-12 and abs(d["dwait"] - 7.267) < 1e-12
+    assert d["compute"] >= 0 and abs(d["oc"] + d["dwait"] - (d["core"] + d["ovl"])) < 1e-9
+    old = kd.split_site(6.755, 0.0, dict(pf, has_ovl=False))  # no ovl tail: legacy io_act - stalls kept
+    assert abs(old["compute"] - (6.369 - 7.267)) < 1e-12 and "oc" not in old
+
+
+def test_ksem_line_pass_and_fail(capsys):
+    """KSEM line: PASS on window-consistent rows; a negative compute and a broken identity -> FAIL;
+    sites with core <= 0.05 ms are not dact-checked"""
+    kd = _k_diag_mod("k_diag_ksem2")
+    good = dict(perf=_ksem_perf(1, 1, 1, 1, 1), **kd.split_site(9.0, 0.0, _ksem_perf(6000000, 3000000, 1000000,
+                                                                                   2500000, 500000)))
+    tiny = dict(perf=_ksem_perf(1, 1, 1, 1, 1), **kd.split_site(0.1, 0.0, _ksem_perf(40000, 0, 0, 1000, 0)))
+    r = kd.ksem_line("t", [[good, tiny], [dict(good)], [dict(good)]])
+    assert r["ok"] and r["rows"] == 4
+    bad = dict(good, compute=-0.1, oc=-0.1)
+    r = kd.ksem_line("t", [[good], [bad]])
+    assert not r["ok"] and r["neg"] == 1 and r["bad"] == 1
+    out = capsys.readouterr().out.splitlines()
+    assert out == ["KSEM cfg=t runs=3 site_runs=4 neg_compute=0 dact_bad=0 dact_tol=0.05 PASS",
+                   "KSEM cfg=t runs=2 site_runs=2 neg_compute=1 dact_bad=1 dact_tol=0.05 FAIL"]
