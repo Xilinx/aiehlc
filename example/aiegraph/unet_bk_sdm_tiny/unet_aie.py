@@ -626,7 +626,9 @@ def kacc_geom(ch: int, k: int, px: int) -> dict:
     assert tkw >= 4 and (k // 2) % tkw == 0, (ch, k, px, tkw)
     # K padded by one zero chunk when the W port would be square (ch == k/2 words): aiehlc's GemmSpace
     # derivation then mis-sizes the A window (gemm_kacc_1280x2560x64: 24 elements instead of 512)
-    kp = k + 2 * tkw if ch == k // 2 else k
+    # ... and when transposed with px == k/2 (a = X [px][k/2] square; runb12 build failure; Maxwell peer:1120164720-61cc6e:
+    # +2*tkw makes kp/2 = px + tkw, never a multiple of 64, so it cannot hit ch, 32 or 64)
+    kp = k + 2 * tkw if ch == k // 2 or (tr and px == k // 2) else k
     # KACC_KP_PAD (costmodel stride probe, opt-in, default off): pad K with zero chunks up to this kp so the DDR
     # row stride changes (palmyra213: kp 320/656/1280 run_b fast, 960 slow). Applied only when > kp, a multiple of
     # 2*tkw, and kp/2 avoids ch, 32 and 64 (Maxwell's legality rule for the pad) -- and px when transposed: there

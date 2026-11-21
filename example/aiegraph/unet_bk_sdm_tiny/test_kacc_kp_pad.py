@@ -24,6 +24,8 @@ import unet_aie as u  # noqa: E402
     (320, 1920, 512, 2048, 2048),   # tr=0, legal (runb12b KCMP PASS)
     (320, 960, 1024, 968, 960),     # not a multiple of 2*tkw
     (320, 960, 1024, 640, 960),     # pad below kp is ignored
+    (320, 2048, 1024, 0, 2064),     # default rule: tr=1, k/2 == px -> +2*tkw (tkw 8; peer:1120164720-61cc6e)
+    (320, 2048, 512, 0, 2048),      # tr=0, k/2 != ch -> no pad
 ])
 def test_kp_pad(monkeypatch, ch, k, px, pad, kp):
     if pad:
