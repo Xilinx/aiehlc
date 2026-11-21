@@ -4,6 +4,7 @@
   k_diag.py --build-root DIR CFG=LOG_A[,LOG_B] ... [--ref CFG=M2C_B_LOG ...]
   k_diag.py --build-root DIR --fit CFG=LOG_A ... --check CFG=LOG_B ... [--ref CFG=M2C_B_LOG ...]
   k_diag.py --map-only --build-root DIR CFG=LOG ...
+  k_diag.py --sanity-only --build-root DIR CFG=L1,L2[,L3] ... [--ref CFG=M2C_B_LOG ...]
   k_diag.py --selftest
 
 Site table: m3_site.site_rows(DIR/unet_<cfg>, LOG) -- the launches>0 sites (72 linear + 48 conv + 18 fa = 138
@@ -54,6 +55,8 @@ Output:
 rc=1 on FAIL; rc=2 when --model ovl meets a non-short part without the ovl fields.
 """
 import argparse
+import contextlib
+import io
 import math
 import re
 import sys
@@ -327,6 +330,11 @@ def diag_lines(cfg, run, sites, p=None):
         a, b = by["fa128"]["K"], by["fa134"]["K"]
         print("KFA cfg=%s fa128/fa134 meas_ratio=%.3f run=%s fa128_K_ms=%.3f fa134_K_ms=%.3f"
               % (cfg, a / b if b else float("inf"), run, a, b))
+    return ksanity_line(cfg, run, ps)
+
+
+def ksanity_line(cfg, run, ps):
+    """KSANITY of one log over its full-reading (perf_ok) sites; returns io_act/K max"""
     iok = max((s["core"] / (s["K"] + s.get("gap", 0.0)) for s in ps), default=float("inf"))
     print("KSANITY cfg=%s run=%s io_act_over_K_max=%.3f %s" % (cfg, run, iok, "PASS" if iok <= IOK_MAX else "FAIL"))
     return iok
@@ -362,6 +370,47 @@ def map_only(a):
     return ok_all
 
 
+def kdsrc_line(cfg, lg, ss, ps, tx):
+    """KDSRC of one log; True if the log has a CMP line from a palmyra board with run_rc=0"""
+    m = _CMP.findall(tx)
+    bd, nl, rc = m[-1] if m else ("?", "0", "-1")
+    print("KDSRC cfg=%s log=%s board=%s launches=%s run_rc=%s sites=%d perf_sites=%d"
+          % (cfg, lg, bd, nl, rc, len(ss), len(ps)))
+    return bool(m) and bd.startswith("palmyra") and rc == "0"
+
+
+def ref_sites(a, cfg, log):
+    from m3_site import site_rows
+    rrows, rtxt = site_rows(str(Path(a.build_root) / ("unet_" + cfg)), log)
+    rsp = parse_split(rtxt)
+    return [dict(K=rsp[r["part"]][0] - rsp[r["part"]][1]) for r in rrows]
+
+
+def sanity_only(a):
+    """--sanity-only: CFG=L1,L2[,L3,...] (runs a, b, c, ...): KDSRC + KSANITY per log, one KDRIFT per cfg
+    (max over its runs vs --ref); no fit, no ovl fields needed. rc: 0 PASS, 1 any KSANITY FAIL, 2 bad source"""
+    refs = dict(x.split("=", 1) for x in (a.ref or []))
+    src_ok = ksan_ok = True
+    for spec in a.runs:
+        cfg, logs = spec.split("=", 1)
+        logs = logs.split(",")
+        rs = ref_sites(a, cfg, refs[cfg]) if cfg in refs else None
+        drs = []
+        for i, lg in enumerate(logs):
+            run = chr(ord("a") + i)
+            ss, tx = load(cfg, lg, a.build_root)
+            ps = [s for s in ss if perf_ok(s) and s["bd_ok"] and s["K"] > 0]
+            src_ok &= kdsrc_line(cfg, lg, ss, ps, tx)
+            ksan_ok &= ksanity_line(cfg, run, [s for s in ss if perf_ok(s)]) <= IOK_MAX
+            if rs is not None:
+                drs.append(drift(ss, rs))
+        if drs:
+            print("KDRIFT cfg=%s runs=%d wait_sum_rel_vs_ref_max=%.3f" % (cfg, len(drs), max(drs)))
+    if not src_ok:
+        return 2
+    return 0 if ksan_ok else 1
+
+
 def full(a):
     """rc: 0 PASS, 1 FAIL, 2 --model ovl on a log without the ovl fields"""
     model = getattr(a, "model", "ovl") or "ovl"
@@ -388,11 +437,7 @@ def full(a):
         if miss:
             return 2
         for lg, ss, ps, tx in ((la, sa, pa, ta), (lb, sb, pb, tb)) if lb else ((la, sa, pa, ta),):
-            m = _CMP.findall(tx)
-            bd, nl, rc = m[-1] if m else ("?", "0", "-1")
-            print("KDSRC cfg=%s log=%s board=%s launches=%s run_rc=%s sites=%d perf_sites=%d"
-                  % (cfg, lg, bd, nl, rc, len(ss), len(ps)))
-            src_ok = src_ok and bool(m) and bd.startswith("palmyra") and rc == "0"
+            src_ok = kdsrc_line(cfg, lg, ss, ps, tx) and src_ok
         if not pa or not pb:
             print("KFLOOR cfg=%s sites=%d perf_sites=%d FAIL (no counter lines)" % (cfg, len(sb), len(pb)))
             ok_all = False
@@ -412,10 +457,7 @@ def full(a):
         print("KCHK cfg=%s log=%s r2=%.4f maxrel=%.4f" % (cfg, lb or la, r2b, mrb))
         dr = 0.0
         if cfg in refs:
-            from m3_site import site_rows
-            rrows, rtxt = site_rows(str(Path(a.build_root) / ("unet_" + cfg)), refs[cfg])
-            rsp = parse_split(rtxt)
-            dr = drift(sb, [dict(K=rsp[r["part"]][0] - rsp[r["part"]][1]) for r in rrows])
+            dr = drift(sb, ref_sites(a, cfg, refs[cfg]))
             print("KDRIFT cfg=%s wait_sum_rel_vs_ref=%.3f" % (cfg, dr))
         kinds = {k: sum(s["kind"] == k for s in sb) for k in SITES_PER_CFG}
         ok = (kinds == SITES_PER_CFG and len(pb) == len(sb) and nparams(p) <= 4 and min(r2a, r2b) >= GATE["r2"]
@@ -614,6 +656,52 @@ def selftest():
     chk("ovl_missing_rc2", rc_ovl == 2 and rc_add == 1 and ovl_missing(parse_perf(old)) == 2
         and seen == ["a.log", "b.log"] * 2,
         "rc_ovl=%d rc_add=%d" % (rc_ovl, rc_add))
+    # 13 --sanity-only: 3 runs (a/b/c) on old-format logs (no ovl fields) -> no rc=2 for ovl; KSANITY per run,
+    #    one KDRIFT per cfg (max over runs); a KSANITY FAIL -> rc=1, all PASS -> rc=0, no CMP line -> rc=2
+    cmp_ok = "CMP unet board=palmyra213 x aie_launches=258 y run_rc=0\n"
+    cases = {"a.log": 2.0, "b.log": 4.0, "c.log": 2.5}   # site K scale -> io/K = 1.0 / 0.5 / 0.8
+    seen3 = []
+
+    def _stub3(cfg, log, build_root, need_perf=True):
+        seen3.append(log)
+        pf0 = parse_perf(old)
+        ss = []
+        for prt in (1, 3):
+            s = dict(cfg=cfg, site="linear%d" % prt, part=prt, kind="linear", launches=pf0[prt]["launches"],
+                     cls="linear", bd_ok=True, run_b=32, ddr_b=1e6, bd_n=1, num_dims=1, perf=pf0[prt], bucket=0)
+            s.update(split_site(pf0[prt]["io_act"] / 1e6 * cases[log] / 2.0, 0.0, pf0[prt]))
+            ss.append(s)
+        return ss, ("" if log == "nocmp.log" else cmp_ok) + old
+
+    def _stub_ref(a_, cfg, log):
+        return [dict(K=3.5)]        # run sums 3.5 / 7.0 / 4.375 -> drift 0 / 1.0 / 0.25 -> max 1.0
+    real_ref = g["ref_sites"]
+    g["load"], g["ref_sites"] = _stub3, _stub_ref
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc_pass = main(["--sanity-only", "--build-root", "/x", "synth=a.log,b.log,c.log", "--ref", "synth=r.log"])
+            cases["a.log"] = 1.0                                        # io/K = 2.0 -> FAIL
+            rc_fail = main(["--sanity-only", "--build-root", "/x", "synth=a.log,b.log,c.log", "--ref", "synth=r.log"])
+            cases["nocmp.log"] = 2.0
+            rc_src = main(["--sanity-only", "--build-root", "/x", "synth=nocmp.log"])
+    finally:
+        g["load"], g["ref_sites"] = real_load, real_ref
+    out = buf.getvalue().splitlines()
+    ks = [x for x in out if x.startswith("KSANITY")]
+    kd_ = [x for x in out if x.startswith("KDRIFT")]
+    ksrc = [x for x in out if x.startswith("KDSRC")]
+    chk("sanity_only_3runs", rc_pass == 0 and rc_fail == 1 and rc_src == 2
+        and ks[:3] == ["KSANITY cfg=synth run=%s io_act_over_K_max=%s PASS" % rv
+                       for rv in (("a", "1.000"), ("b", "0.500"), ("c", "0.800"))]
+        and ks[3] == "KSANITY cfg=synth run=a io_act_over_K_max=2.000 FAIL"
+        and kd_ == ["KDRIFT cfg=synth runs=3 wait_sum_rel_vs_ref_max=1.000",
+                    "KDRIFT cfg=synth runs=3 wait_sum_rel_vs_ref_max=1.000"]
+        and len(ksrc) == 7 and ksrc[0] == "KDSRC cfg=synth log=a.log board=palmyra213 launches=258 run_rc=0 sites=2 "
+                                          "perf_sites=2" and "board=? launches=0 run_rc=-1" in ksrc[6]
+        and not any(x.startswith(("KFIT", "KMODEL", "KDIAG ERROR")) for x in out)
+        and seen3 == ["a.log", "b.log", "c.log"] * 2 + ["nocmp.log"],
+        "rc_pass=%d rc_fail=%d rc_src=%d" % (rc_pass, rc_fail, rc_src))
     n = sum(res)
     ok = n == len(res)
     print("KDIAG SELFTEST %s (%d/%d)" % ("PASS" if ok else "FAIL", n, len(res)))
@@ -624,6 +712,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--map-only", action="store_true")
+    ap.add_argument("--sanity-only", action="store_true",
+                    help="CFG=L1,L2[,L3]: KDSRC/KSANITY per log + KDRIFT (max over runs) per cfg; no fit, no ovl fields")
     ap.add_argument("--build-root")
     ap.add_argument("--model", choices=MODELS, default="ovl",
                     help="ovl (default): overlap K floor (sum|max form by LOO); add: M3.1 max(compute, dma) floor")
@@ -644,6 +734,8 @@ def main(argv=None):
         ap.error("--build-root and CFG=LOG runs are required")
     if a.map_only:
         return 0 if map_only(a) else 1
+    if a.sanity_only:
+        return sanity_only(a)
     return full(a)
 
 

@@ -413,6 +413,50 @@ def test_k_diag_noscale():
     assert kd.kperf_line("t", "b", pf) == (2, 1)
 
 
+def test_k_diag_sanity_only():
+    """k_diag.py --sanity-only (M3.1.2 PK): runs a/b/c on old-format logs (no ovl fields), KSANITY per log,
+    one KDRIFT (max over runs) per cfg, KSANITY FAIL -> rc=1, no CMP line -> rc=2; no fit"""
+    import contextlib
+    import importlib.util
+    import io
+    path = SRC.parent / "script" / "perf" / "k_diag.py"
+    spec = importlib.util.spec_from_file_location("k_diag_sanity", path)
+    kd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kd)
+    old = ("PROF aie_site_perf part=1 kind=linear launches=2 perf_n=2 io_act_cyc=2000000 lock_stall_cyc=0 "
+           "stream_stall_cyc=0\n")
+    kms = {"a": 1.0, "b": 2.0, "c": 4.0}   # core = 2 ms -> io/K = 2.0 FAIL / 1.0 / 0.5
+
+    def load(cfg, log, build_root, need_perf=True):
+        pf = kd.parse_perf(old)
+        s = dict(cfg=cfg, site="linear1", part=1, kind="linear", launches=2, cls="linear", bd_ok=True, run_b=32,
+                 ddr_b=1e6, bd_n=1, num_dims=1, perf=pf[1], bucket=0)
+        s.update(kd.split_site(kms[log], 0.0, pf[1]))
+        cmp_ = "" if cfg == "nocmp" else "CMP unet board=palmyra213 aie_launches=258 run_rc=0\n"
+        return [s], cmp_ + old
+    kd.load = load
+    kd.ref_sites = lambda a, cfg, log: [dict(K=2.0)]   # drifts 0.5 / 0 / 1.0
+
+    def run(argv):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = kd.main(argv)
+        return rc, buf.getvalue().splitlines()
+    rc, out = run(["--sanity-only", "--build-root", "/x", "off=a,b,c", "--ref", "off=r"])
+    assert rc == 1
+    assert [x for x in out if x.startswith("KSANITY")] == [
+        "KSANITY cfg=off run=a io_act_over_K_max=2.000 FAIL", "KSANITY cfg=off run=b io_act_over_K_max=1.000 PASS",
+        "KSANITY cfg=off run=c io_act_over_K_max=0.500 PASS"]
+    assert [x for x in out if x.startswith("KDRIFT")] == ["KDRIFT cfg=off runs=3 wait_sum_rel_vs_ref_max=1.000"]
+    assert sum(x.startswith("KDSRC cfg=off log=") and "board=palmyra213 launches=258 run_rc=0 sites=1 perf_sites=1"
+               in x for x in out) == 3
+    assert not any(x.startswith(("KFIT", "KMODEL", "KDIAG ERROR")) for x in out)
+    rc, out = run(["--sanity-only", "--build-root", "/x", "off=b,c"])
+    assert rc == 0 and not any(x.startswith("KDRIFT") for x in out)
+    rc, out = run(["--sanity-only", "--build-root", "/x", "nocmp=b"])
+    assert rc == 2 and "board=? launches=0 run_rc=-1" in out[0]
+
+
 def test_k_diag_ovl_model():
     """k_diag.py --model ovl (M3.1.2): compute/ovl tail parsed; sum / max overlap forms; old lines refused"""
     import importlib.util
