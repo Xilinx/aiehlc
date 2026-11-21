@@ -138,3 +138,66 @@ def test_build_fresh_fail_modes(repo, tmp_path):
     assert c.returncode == 1 and " elf_newer=0 " in c.stdout
     # --dry-run and --check-fresh together is a usage error
     assert run(repo, "off", str(o), "--dry-run", "--check-fresh").returncode == 2
+
+
+# ---- script/perf/build_fresh.py (M3.1.2.2 PF): content-based freshness, test_*.py out of scope,
+# inputs != head_inputs -> kacc_geom-only hunks + same kacc_geom results -> SAME (toy unet_aie.py in a temp repo)
+import importlib.util  # noqa: E402
+
+_BF = REPO / "script/perf/build_fresh.py"
+_spec = importlib.util.spec_from_file_location("build_fresh", _BF)
+bf = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(bf)
+
+
+def _check(r, o):
+    return bf.check("off", o, r, bf.toy_geom)
+
+
+def test_build_fresh_exact_test_only(tmp_path):
+    r, o, b = bf.make_case(tmp_path)
+    bf.commit_file(r, f"{UDIR}/test_unet.py", "def test_x():\n    assert 1\n", "test only")
+    line, ok = _check(r, o)
+    assert ok and line == (f"BUILD FRESH cfg=off inputs={b} head_inputs={b} dirty=0 elf_newer=1 "
+                           "site_perf=1 kincore=1 equiv=EXACT PASS")
+
+
+def test_build_fresh_equiv_same(tmp_path):
+    r, o, b = bf.make_case(tmp_path)
+    bf.commit_file(r, bf.UA_REL, bf.UA_SAME)
+    line, ok = _check(r, o)
+    h = git(r, "log", "-1", "--format=%h").strip()
+    assert ok and line.endswith(f"inputs={b} head_inputs={h} dirty=0 elf_newer=1 site_perf=1 kincore=1 "
+                                "equiv=SAME PASS")
+
+
+def test_build_fresh_equiv_diff(tmp_path):
+    r, o, b = bf.make_case(tmp_path)
+    bf.commit_file(r, bf.UA_REL, bf.UA_DIFF)
+    line, ok = _check(r, o)
+    assert not ok and line.endswith(" equiv=DIFF FAIL")
+
+
+def test_build_fresh_outside(tmp_path):
+    r, o, b = bf.make_case(tmp_path)
+    bf.commit_file(r, bf.UA_REL, bf.UA_OUTSIDE)
+    line, ok = _check(r, o)
+    assert not ok and line.endswith(" equiv=OUTSIDE FAIL")
+    r, o, b = bf.make_case(tmp_path / "2")
+    bf.commit_file(r, "src/aiednn/f.txt", "y\n")
+    line, ok = _check(r, o)
+    assert not ok and line.endswith(" equiv=OUTSIDE FAIL")
+
+
+def test_build_fresh_dirty(tmp_path):
+    r, o, b = bf.make_case(tmp_path)
+    (r / "src/aiegraph/runtime/f.txt").write_text("dirty\n")
+    line, ok = _check(r, o)
+    assert not ok and " dirty=1 " in line and line.endswith(" equiv=EXACT FAIL")
+
+
+def test_build_fresh_cli_rc(tmp_path):
+    r, o, b = bf.make_case(tmp_path)
+    (o / "unet_off.src").unlink()
+    assert bf.main(["off", str(o)]) == 1      # real TOP, no .src -> FAIL rc=1
+    assert bf.main(["bogus", str(o)]) == 2
