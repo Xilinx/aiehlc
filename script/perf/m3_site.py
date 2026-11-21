@@ -42,6 +42,17 @@ max held-out rel.  --check logs are never fitted.  Gate per cfg: every site rel 
   KLGATE  cfg=.. log=.. board=.. launches=.. sites=.. ddr_bw_scale=.. kfa_scale=.. r2=.. maxrel=.. loo_maxrel=..
           sum_rel=.. (printed only) PASS|FAIL
   KLGATE  ALL src=board cfgs=.. sites=.. r2_min=.. maxrel=.. loo_maxrel=.. PASS|FAIL   (rc=1 on FAIL)
+
+  m3_site.py --lpred --kfirst site|avg --params l_palmyra213.json --tsv OUT.tsv --build-root DIR CFG=LOG[,LOG...]
+Frozen L (no refit) per site, the --kl L path (launch_l.predict_l + static_feat.unet_site_feat + kload_static
+replay, core_reset = 0: the site L's kload already contains one core_reset, do not add the rst term again).
+kfirst=site: per-launch kload_w (a kernel's first launch on a tile pays the PM reload); avg: whole-net mean.
+Tshare = |L_hat - L_meas| / site_ms (site_ms = K + L + N); PASS per cfg iff every log has 138 sites and
+Tshare_max <= L_TSHARE.  probe() lines are printed only (M3SPLIT L_sum_rel is site-vs-LAUNCH bookkeeping, not L error).
+  LCHK cfg=.. logs=.. sites=.. rst=<param> kfirst=.. L_maxrel=.. Tshare_max=.. PASS|FAIL
+  LFA  cfg=.. small_sites=<FA sites, launches <= 4> maxrel_avg=.. maxrel_site=..
+  LCHK ALL logs=.. sites=.. kfirst=.. L_maxrel=.. Tshare_max=.. PASS|FAIL   (rc=1 on FAIL)
+  TSV: cfg run part site kind launches site_ms L_meas L_hat
 """
 import argparse
 import json
@@ -140,8 +151,10 @@ def k_params():
     return prm
 
 
-def kload_per_launch(build):
-    """per-launch kload_w of a UNet build: the replay of kload_static.kload_static, one value per launch"""
+def kload_per_launch(build, kfirst="site"):
+    """per-launch kload_w of a UNet build: the replay of kload_static.kload_static, one value per launch.
+    kfirst=site: each launch its own replayed words (a kernel's first launch on a tile pays the PM reload, n_feat
+    kfirst); kfirst=avg: every launch the whole-net mean (kload_static kload_w), the pre-M3 L input"""
     from aiegraph.costmodel import kswitch
     from aiegraph.costmodel import kload_static as ks
     from aiegraph.costmodel.rst_static import AIE_TILE_ROW_START
@@ -172,17 +185,19 @@ def kload_per_launch(build):
     ref = ks.kload_static(b)["kload_w"]
     if abs(sum(out) / len(out) - ref) > 1e-6 * max(1.0, ref):
         raise ValueError("per-launch kload_w mean %.3f != kload_static %.3f" % (sum(out) / len(out), ref))
+    if kfirst == "avg":
+        out = [float(ref)] * len(out)
     return out, [ln["kernel"] for ln in launches]
 
 
-def l_sites(build, cfg):
+def l_sites(build, cfg, params=None, kfirst="site"):
     """{(kind, cid): predicted L ms of the site} from build-dir static features only"""
     from aiegraph.costmodel import launch_l
     from aiegraph.costmodel.static_feat import unet_site_feat
     from site_feat import site_feats
-    lp = launch_l.load_params(str(HERE / "params" / "l_palmyra213.json"))
+    lp = launch_l.load_params(str(params or HERE / "params" / "l_palmyra213.json"))
     seq = unet_site_feat(build)
-    kw, kk = kload_per_launch(build)
+    kw, kk = kload_per_launch(build, kfirst)
     if kk != [d["kernel"] for d in seq]:
         raise ValueError("kload launch order != unet_site_feat launch order")
     st, _ = site_feats(build, build + ".build.log")
@@ -352,11 +367,84 @@ def kl_main(a):
     return 0 if ok else 1
 
 
-def main():
+# ------------------------------------------------------------------ --lpred: frozen L per site vs measured L
+L_TSHARE = 0.10      # ASSUMED budget: |L_hat - L_meas| / site_ms per site (L and N each <= 0.10 of T)
+LFA_SMALL = 4        # FA sites with launches <= LFA_SMALL: kfirst=avg vs kfirst=site
+TSV_COLS = ("cfg", "run", "part", "site", "kind", "launches", "site_ms", "L_meas", "L_hat")
+
+
+def lpred_main(a):
+    """frozen L params (no refit) on every site of every log: Tshare = |L_hat - L_meas| / site_ms.
+    probe() lines (M3SITE/M3SPLIT/M3SUM) are printed for provenance only and never enter rc."""
+    from aiegraph.costmodel import launch_l
+    root = a.build_root.rstrip("/")
+    prm = launch_l.load_params(a.params)
+    tsv = []
+    ok_all, all_n, all_rel, all_ts, all_logs = True, 0, 0.0, 0.0, 0
+    for spec in a.runs:
+        cfg, logs = spec.split("=", 1)
+        build = "%s/unet_%s" % (root, cfg)
+        try:
+            lh = l_sites(build, cfg, a.params, a.kfirst)
+            la = l_sites(build, cfg, a.params, "avg")
+        except (ValueError, KeyError, OSError) as e:
+            print("LCHK cfg=%s %s: %s FAIL" % (cfg, type(e).__name__, e))
+            ok_all = False
+            continue
+        n, mrel, mts, nlog, ok = 0, 0.0, 0.0, 0, True
+        fa_avg, fa_site, fa_keys = 0.0, 0.0, set()
+        for log in logs.split(","):
+            try:
+                probe(cfg, log, build)          # provenance only, verdict ignored
+                rows, _ = site_rows(build, log)
+            except (ValueError, KeyError, OSError) as e:
+                print("M3ERR cfg=%s log=%s %s: %s" % (cfg, log, type(e).__name__, e))
+                ok = False
+                continue
+            nlog += 1
+            run = Path(log).name
+            ok &= len(rows) == sum(SITES_PER_CFG.values())
+            for r in rows:
+                key = (r["kind"], r["cid"])
+                site_ms = r["K"] + r["L"] + r["N"]
+                lm, lp = r["L"], lh[key]
+                err = abs(lp - lm)
+                rel = err / lm if lm > 0 else float("inf")
+                ts = err / site_ms if site_ms > 0 else float("inf")
+                mrel, mts, n = max(mrel, rel), max(mts, ts), n + 1
+                if r["kind"] == "fa" and r["launches"] <= LFA_SMALL:
+                    fa_keys.add(key)
+                    fa_site = max(fa_site, rel)
+                    fa_avg = max(fa_avg, abs(la[key] - lm) / lm if lm > 0 else float("inf"))
+                tsv.append((cfg, run, r["part"], "%s%d" % key, r["kind"], r["launches"], site_ms, lm, lp))
+        ok &= nlog == len(logs.split(",")) and mts <= L_TSHARE
+        print("LCHK cfg=%s logs=%d sites=%d rst=%.6f kfirst=%s L_maxrel=%.4f Tshare_max=%.4f %s"
+              % (cfg, nlog, n, float(prm["cfg"][cfg]["coef"].get("rst", 0.0)), a.kfirst, mrel, mts,
+                 "PASS" if ok else "FAIL"))
+        print("LFA cfg=%s small_sites=%d maxrel_avg=%.4f maxrel_site=%.4f" % (cfg, len(fa_keys), fa_avg, fa_site))
+        ok_all &= ok
+        all_n, all_logs = all_n + n, all_logs + nlog
+        all_rel, all_ts = max(all_rel, mrel), max(all_ts, mts)
+    out = Path(a.tsv)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w") as fh:
+        fh.write("\t".join(TSV_COLS) + "\n")
+        for t in tsv:
+            fh.write("%s\t%s\t%d\t%s\t%s\t%d\t%.4f\t%.4f\t%.4f\n" % t)
+    ok_all &= all_n > 0
+    print("LCHK ALL logs=%d sites=%d kfirst=%s L_maxrel=%.4f Tshare_max=%.4f %s"
+          % (all_logs, all_n, a.kfirst, all_rel, all_ts, "PASS" if ok_all else "FAIL"))
+    return 0 if ok_all else 1
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--probe", action="store_true")
     mode.add_argument("--kl", action="store_true")
+    mode.add_argument("--lpred", action="store_true")
+    ap.add_argument("--kfirst", choices=("site", "avg"), default="site")
+    ap.add_argument("--tsv")
     ap.add_argument("--build-root", required=True)
     ap.add_argument("--cycles")
     ap.add_argument("--fit", nargs="+", metavar="CFG=LOG")
@@ -364,11 +452,15 @@ def main():
     ap.add_argument("--params")
     ap.add_argument("--check", nargs="+", metavar="CFG=LOG")
     ap.add_argument("runs", nargs="*", metavar="CFG=LOG[,LOG...]")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     if a.kl:
         if not a.cycles or not a.check or bool(a.fit) == bool(a.params) or (a.fit and not a.out):
             ap.error("--kl needs --cycles, --check and either --fit + --out or --params")
         return kl_main(a)
+    if a.lpred:
+        if not a.params or not a.tsv or not a.runs:
+            ap.error("--lpred needs --params, --tsv and CFG=LOG[,LOG...] runs")
+        return lpred_main(a)
     if not a.runs:
         ap.error("--probe needs CFG=LOG runs")
     root = a.build_root.rstrip("/")

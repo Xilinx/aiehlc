@@ -748,3 +748,41 @@ def test_kcore_maxrel_kcyc_fa_src(tmp_path):
     kco = dict(core_cyc=120, src_md5=dict(kernel=h(b"kco"), fa=h(b"fa"), bcf=h(b"bcf")))
     assert k.fa_iss_pick(str(tmp_path), K, dict(off, variants=[kco]))["core_cyc"] == 120
     assert k.fa_iss_pick(str(tmp_path / "missing"), K, dict(off, variants=[kco])) is None
+
+
+def _m3_lpred_mod(monkeypatch, l_hat, tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("m3_site_lp", SRC.parent / "script" / "perf" / "m3_site.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    monkeypatch.setattr(m, "SITES_PER_CFG", {"fa": 1})
+    rows = [dict(kind="fa", cid=3, part=7, launches=2, K=0.5, L=0.2, N=0.3)]
+    monkeypatch.setattr(m, "site_rows", lambda b, lg: (rows, ""))
+    monkeypatch.setattr(m, "probe", lambda c, lg, b: print("M3SITE stub"))
+    monkeypatch.setattr(m, "l_sites", lambda b, c, p, k: {("fa", 3): l_hat if k == "site" else 0.1})
+    prm = tmp_path / "l.json"
+    prm.write_text('{"cfg": {"off": {"coef": {"rst": 0.020983}}}}')
+    return m, prm
+
+
+def test_m3_lpred_pass_and_tsv(monkeypatch, capsys, tmp_path):
+    """Tshare = |L_hat - L_meas| / (K+L+N) = 0.05 <= 0.10 -> PASS rc=0; rst per cfg; TSV mkdir -p + 1 row"""
+    m, prm = _m3_lpred_mod(monkeypatch, 0.25, tmp_path)
+    tsv = tmp_path / "new" / "lp.tsv"
+    rc = m.main(["--lpred", "--params", str(prm), "--tsv", str(tsv), "--build-root", "/x", "off=a.log"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "LCHK cfg=off logs=1 sites=1 rst=0.020983 kfirst=site L_maxrel=0.2500 Tshare_max=0.0500 PASS" in out
+    assert "LFA cfg=off small_sites=1 maxrel_avg=0.5000 maxrel_site=0.2500" in out
+    assert out.splitlines()[-1] == "LCHK ALL logs=1 sites=1 kfirst=site L_maxrel=0.2500 Tshare_max=0.0500 PASS"
+    lines = tsv.read_text().splitlines()
+    assert lines[0].split("\t") == ["cfg", "run", "part", "site", "kind", "launches", "site_ms", "L_meas", "L_hat"]
+    assert lines[1].split("\t") == ["off", "a.log", "7", "fa3", "fa", "2", "1.0000", "0.2000", "0.2500"]
+
+
+def test_m3_lpred_tshare_fail(monkeypatch, capsys, tmp_path):
+    """Tshare 0.15 > 0.10 -> FAIL rc=1 (probe verdict never enters rc)"""
+    m, prm = _m3_lpred_mod(monkeypatch, 0.35, tmp_path)
+    rc = m.main(["--lpred", "--params", str(prm), "--tsv", str(tmp_path / "lp.tsv"), "--build-root", "/x", "off=a.log"])
+    out = capsys.readouterr().out
+    assert rc == 1 and out.splitlines()[-1].endswith("Tshare_max=0.1500 FAIL"), out
