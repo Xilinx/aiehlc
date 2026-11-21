@@ -55,6 +55,11 @@ Output:
   KSMALL  cfg=<c> sites within_tol maxrel   (the kge0.1-excluded sites; report only)
   KRESID  cfg=<c> cls=<cls> site_runs sum_abs_resid_ms top_term=<oc|ovl|dma|t0|launches> abs_<term>..;
           KRESID ALL site_runs=<n> ...   (resid_terms: model piece - measured piece per term, sums to K_hat - K)
+  KORCLS  cfg=<c> cls=<cls> sites bw_.. t0_ms params form kfirst_ms maxrel_a loo_maxrel   (per-class oracle fit)
+  KORACLE cfg=<c> params=<n> r2_min=<x> tol_fail=<n> loo_maxrel=<x> reach=<0|1>   (M3.1.2.2 diagnosis only: per
+          cls own inv/t0/form + kfirst (once per site = kfirst/launches per launch), fit on run a, KTOL tol rule
+          on all runs; reach=1 iff tol_fail=0 and loo<=0.20 -- the upper bound of the current feature set; NOT
+          part of the delivered model)
   KFLOOR  cfg ... tol_fail PASS|FAIL (gates on KTOL; maxrel printed only);
   KFLOOR ALL src cfgs sites perf_sites r2_min maxrel loo_maxrel act_over_k_max PASS|FAIL tol_fail=<n>  (last line)
 --map-only (no counter lines needed):
@@ -217,7 +222,8 @@ def _ab(s, form):
 def k_hat(p, s):
     """p = dict(inv={bucket: ms per byte}, t0=ms per launch, form=add|sum|max)"""
     base, b = _ab(s, p.get("form"))
-    return max(base, s["ddr_b"] * p["inv"].get(s["bucket"], 0.0) + b) + p["t0"] * s["launches"]
+    return (max(base, s["ddr_b"] * p["inv"].get(s["bucket"], 0.0) + b) + p["t0"] * s["launches"]
+            + p.get("kfirst", 0.0))
 
 
 def rels(p, sites):
@@ -231,10 +237,10 @@ def r2(p, sites):
     return 1.0 - float((e ** 2).sum()) / tot if tot > 0 else float("nan")
 
 
-def _nnls_assign(sites, bks, dma_set, form=None):
-    """weighted (1/K) NNLS of (inv_j, t0) with the max() branch fixed: dma_set sites use the dma term"""
+def _nnls_assign(sites, bks, dma_set, form=None, kf=False):
+    """weighted (1/K) NNLS of (inv_j, t0[, kfirst]) with the max() branch fixed: dma_set sites use the dma term"""
     nb = len(bks)
-    X = np.zeros((len(sites), nb + 1))
+    X = np.zeros((len(sites), nb + 1 + bool(kf)))
     y = np.zeros(len(sites))
     for i, s in enumerate(sites):
         w = 1.0 / s["K"]
@@ -245,14 +251,20 @@ def _nnls_assign(sites, bks, dma_set, form=None):
         else:
             y[i] = (s["K"] - base) * w
         X[i, nb] = s["launches"] * w
+        if kf:
+            X[i, nb + 1] = w
     sc = np.maximum(np.abs(X).max(axis=0), 1e-300)
     c, _ = nnls(X / sc, y)
     c = c / sc
-    return dict(inv={b: float(c[j]) for j, b in enumerate(bks)}, t0=float(c[nb]), form=form)
+    p = dict(inv={b: float(c[j]) for j, b in enumerate(bks)}, t0=float(c[nb]), form=form)
+    if kf:
+        p["kfirst"] = float(c[nb + 1])
+    return p
 
 
-def fit(sites, form=None):
-    """minimax-relative fit of the K floor (form: add|sum|max); params: inv per present bucket + t0"""
+def fit(sites, form=None, kf=False):
+    """minimax-relative fit of the K floor (form: add|sum|max); params: inv per present bucket + t0
+    (kf: + kfirst, a once-per-site constant = kfirst * 1/launches per launch; KORACLE only)"""
     bks = sorted({s["bucket"] for s in sites})
     best = None
     ab = [_ab(s, form) for s in sites]
@@ -260,7 +272,7 @@ def fit(sites, form=None):
               {i for i, s in enumerate(sites) if ab[i][0] < 0.5 * s["K"]}]
     for d in starts:
         for _ in range(50):
-            p = _nnls_assign(sites, bks, d, form)
+            p = _nnls_assign(sites, bks, d, form, kf)
             nd = {i for i, s in enumerate(sites)
                   if s["ddr_b"] * p["inv"].get(s["bucket"], 0.0) + ab[i][1] > ab[i][0]}
             if nd == d:
@@ -272,11 +284,15 @@ def fit(sites, form=None):
     m0, p0 = best
     if m0 > 1e-9:  # polish the max relative error (smooth in log-params, non-smooth max: Nelder-Mead)
         keys = bks
-        x0 = np.log(np.maximum([p0["inv"][b] for b in keys] + [p0["t0"]], 1e-30))
+        x0 = np.log(np.maximum([p0["inv"][b] for b in keys] + [p0["t0"]] + ([p0["kfirst"]] if kf else []), 1e-30))
+        nk = len(keys)
 
         def unpack(x):
-            return dict(inv={b: float(math.exp(x[j])) for j, b in enumerate(keys)}, t0=float(math.exp(x[-1])),
-                        form=form)
+            q = dict(inv={b: float(math.exp(x[j])) for j, b in enumerate(keys)}, t0=float(math.exp(x[nk])),
+                     form=form)
+            if kf:
+                q["kfirst"] = float(math.exp(x[nk + 1]))
+            return q
 
         def obj(x):
             return max(rels(unpack(x), sites))
@@ -286,10 +302,10 @@ def fit(sites, form=None):
     return p0
 
 
-def loo(sites, form=None):
+def loo(sites, form=None, kf=False):
     out = 0.0
     for i in range(len(sites)):
-        p = fit(sites[:i] + sites[i + 1:], form)
+        p = fit(sites[:i] + sites[i + 1:], form, kf)
         out = max(out, rels(p, [sites[i]])[0])
     return out
 
@@ -302,7 +318,7 @@ def choose_form(sites):
 
 
 def nparams(p):
-    return len(p["inv"]) + 1
+    return len(p["inv"]) + 1 + ("kfirst" in p)
 
 
 def fmt_p(p):
@@ -409,6 +425,61 @@ def kresid_acc(cfg, runs_sites, p, acc):
         top = max(TERMS, key=lambda k: ts[k])
         print("KRESID cfg=%s cls=%s site_runs=%d sum_abs_resid_ms=%.3f top_term=%s %s"
               % (cfg, c, n, tot, top if n else "none", " ".join("abs_%s=%.3f" % (k, ts[k]) for k in TERMS)))
+
+
+# ------------------------------------------------------------------ M3.1.2.2 per-class oracle (diagnosis only)
+CLASSES = ("conv_big", "conv_tkw4", "fa16", "fa_d160", "linear")
+
+
+def oracle_fit(sites):
+    """per-class fit on run a: for every cls its own inv/t0/kfirst and form (sum|max by LOO max-rel, tie -> fit
+    max-rel); returns {cls: (p, loo)}.  Class params, never per-site: a site gets its class's params."""
+    out = {}
+    for c in CLASSES:
+        g = [s for s in sites if s["cls"] == c]
+        if not g:
+            continue
+        best = None
+        for f in (FORMS if all("oc" in s for s in g) else (None,)):   # --model add logs: no ovl fields
+            pf_ = fit(g, f, kf=True)
+            lo = loo(g, f, kf=True) if len(g) > 1 else float("inf")
+            key = (lo, max(rels(pf_, g)))
+            if best is None or key < best[0]:
+                best = (key, pf_, lo)
+        out[c] = (best[1], best[2])
+    return out
+
+
+def oracle_lines(cfg, scope, pa, runs_sites):
+    """KORCLS per cls + one KORACLE line: the class oracle fitted on pa (run a, perf_ok/bd_ok/K>0), checked on
+    every run (KTOL tol rule, same scope); reach = 1 iff tol_fail == 0 and loo <= GATE loo.  Diagnosis only."""
+    po = oracle_fit(pa)
+    for c in CLASSES:
+        if c in po:
+            p, lo = po[c]
+            g = [s for s in pa if s["cls"] == c]
+            print("KORCLS cfg=%s cls=%s sites=%d %s kfirst_ms=%.5g maxrel_a=%.4f loo_maxrel=%.4f"
+                  % (cfg, c, len(g), fmt_p(p), p.get("kfirst", 0.0), max(rels(p, g)), lo))
+
+    def kh(s):
+        return k_hat(po[s["cls"]][0], s) if s["cls"] in po else float("nan")
+    by = [{s["site"]: s for s in ss} for ss in runs_sites]
+    names = [n for n in by[0] if all(n in b for b in by[1:]) and by[0][n]["cls"] in po]
+    rows = [dict(part=by[0][n]["part"], K=[b[n]["K"] for b in by], Kh=[kh(b[n]) for b in by]) for n in names]
+    t = ktol_eval(rows, scope)
+    r2s = []
+    for b in by:
+        y = np.array([b[n]["K"] for n in names])
+        e = y - np.array([kh(b[n]) for n in names])
+        tot = float(((y - y.mean()) ** 2).sum()) if len(y) else 0.0
+        r2s.append(1.0 - float((e ** 2).sum()) / tot if tot > 0 else float("nan"))
+    lo = max((v[1] for v in po.values()), default=float("inf"))
+    npar = sum(nparams(v[0]) for v in po.values())
+    reach = int(t["fail"] == 0 and t["sites"] > 0 and lo <= GATE["loo"])
+    print("KORACLE cfg=%s params=%d r2_min=%.4f tol_fail=%d loo_maxrel=%.4f reach=%d"
+          % (cfg, npar, min(r2s) if r2s else float("nan"), t["fail"], lo, reach))
+    return dict(params=npar, r2=min(r2s) if r2s else float("nan"), tol_fail=t["fail"], loo=lo, reach=reach,
+                classes=po)
 
 
 # ------------------------------------------------------------------ reporting
@@ -583,6 +654,7 @@ def full(a):
         rs_all = [[s for s in ss if perf_ok(s)] for ss in sss]
         kt = ktol_lines(cfg, scope, rs_all, p)
         kresid_acc(cfg, rs_all, p, racc)
+        oracle_lines(cfg, scope, pa, rs_all)
         dr = 0.0
         if cfg in refs:
             dr = drift(sb, ref_sites(a, cfg, refs[cfg]))
@@ -910,6 +982,44 @@ def selftest():
             t, r = resid_terms(pp, s)
             worst = max(worst, abs(sum(t.values()) - r), abs(r - (k_hat(pp, s) - s["K"])))
     chk("kresid_sum", ok_h and worst <= 1e-9, "hand_resid=%.3f sum_err_max=%.1e" % (hr, worst))
+    # 17 kfirst_recover: K = max-form floor + t0*L + kfirst (once per site); fit(kf=True) recovers kfirst, t0,
+    #    inv within 5 % with 1 % noise (and exactly without noise); without kfirst the fit cannot
+    kf0 = 0.3
+    Ak = [dict(s, K=s["K"] + kf0) for s in _synth(41, 60, inv3, t03, form="max")]
+    pk = fit(Ak, "max", kf=True)
+    e0 = max([abs(pk["inv"][j] - inv3[j]) / inv3[j] for j in range(3)] + [abs(pk["t0"] - t03) / t03,
+                                                                          abs(pk["kfirst"] - kf0) / kf0])
+    An_ = [dict(s, K=(s["K"] + kf0) * (1.0 + 0.01 * math.sin(5.0 * i))) for i, s in
+           enumerate(_synth(42, 60, inv3, t03, form="max"))]
+    pkn = fit(An_, "max", kf=True)
+    en = max([abs(pkn["inv"][j] - inv3[j]) / inv3[j] for j in range(3)] + [abs(pkn["t0"] - t03) / t03,
+                                                                           abs(pkn["kfirst"] - kf0) / kf0])
+    p_nokf = fit(Ak, "max")
+    chk("kfirst_recover", e0 < 1e-6 and en <= 0.05 and nparams(pk) == 5 and max(rels(pk, Ak)) < 1e-9
+        and max(rels(p_nokf, Ak)) > 0.05,
+        "kfirst=%.4f exact_maxrel=%.1e noisy_param_maxrel=%.4f nokf_maxrel=%.3f"
+        % (pkn["kfirst"], e0, en, max(rels(p_nokf, Ak))))
+    # 18 oracle_perclass: two classes with different (inv, t0, kfirst, form); one shared fit misses, the class
+    #    oracle recovers each class and reaches (3 runs, KTOL rule): KORACLE ... reach=1, params = 5 + 5
+    gen = {"linear": (inv3, t03, 0.05, "max"), "fa16": ((1 / 0.5e6, 1 / 1.0e6, 1 / 1.5e6), 0.2, 0.4, "sum")}
+    S0 = []
+    for k, (cls, (iv, tt, kfc, fm)) in enumerate(sorted(gen.items())):
+        for s in _synth(50 + k, 30, iv, tt, form=fm):
+            S0.append(dict(s, site="%s_%s" % (cls, s["site"]), part=100 * k + s["part"], cls=cls, K=s["K"] + kfc))
+    runs = [[dict(s, K=s["K"] * f) for s in S0] for f in (1.0, 1.02, 0.99)]
+    pg, _, _ = choose_form(S0[::3])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        orc = oracle_lines("synth", "all", runs[0], runs)
+    ol = buf.getvalue().splitlines()
+    rec = max(max([abs(orc["classes"][c][0]["inv"][j] - gen[c][0][j]) / gen[c][0][j] for j in range(3)]
+                  + [abs(orc["classes"][c][0]["t0"] - gen[c][1]) / gen[c][1],
+                     abs(orc["classes"][c][0]["kfirst"] - gen[c][2]) / gen[c][2]]) for c in gen)
+    chk("oracle_perclass", orc["reach"] == 1 and orc["tol_fail"] == 0 and orc["params"] == 10 and rec < 1e-3
+        and all(orc["classes"][c][0]["form"] == gen[c][3] for c in gen) and max(rels(pg, S0)) > 0.15
+        and re.match(r"KORACLE cfg=synth params=10 r2_min=\S+ tol_fail=0 loo_maxrel=\S+ reach=1$", ol[-1]) is not None
+        and sum(x.startswith("KORCLS") for x in ol) == 2,
+        "param_maxrel=%.1e shared_maxrel=%.3f %s" % (rec, max(rels(pg, S0)), ol[-1] if ol else ""))
     n = sum(res)
     ok = n == len(res)
     print("KDIAG SELFTEST %s (%d/%d)" % ("PASS" if ok else "FAIL", n, len(res)))
