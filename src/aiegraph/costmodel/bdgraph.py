@@ -30,7 +30,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-BD_WRITE_PATHS = ("jit_mmio", "aot_window", "uart_degraded")
+BD_WRITE_PATHS = ("jit_mmio", "jit_ctrlpkt", "aot_window", "uart_degraded")
 _RANGE = re.compile(r"^\s*(-?\d+)\s*\.\.\s*(-?\d+)\s*$")
 _STARTIO_R = re.compile(r"__Runtime_startio\([^,]+,[^,]+,[^,]+,\s*(\d+)\s*\)")
 
@@ -212,12 +212,14 @@ def _interp_cols(points: List[List[float]], n: int) -> float:
 # leave-one-out median |rel| of launch ~ issue + ddr_floor = 7.4%, same as in-sample.  Conv kernels run
 # 6.5-9.5 us (issue blocks when DMA per config is slower); see xiaojiang/tasks/2026-11-20_ddr-floor-vs-meas.
 BD_US_FIT = {"palmyra213": 5.67}
-# BD write path the board fits (BD_US_FIT, ISSUE_FIT) were measured on.  The 17 kacc kernels write every BD at the
-# call (u_conv_1024x2880x320: 482 bdcfg calls/launch, rt_bdcfg 1.05 ms/launch; amit/tasks/2026-11-19_costmodel-microbench),
-# i.e. jit_mmio.  An aot_window design takes precomputed shim BDs (rt_sb_aot_take, no BD write at the call) and a
-# uart_degraded BD costs ~6 ms (amit/tasks/2026-11-20_des-json-gap §3), so the fit must not price those paths:
-# estimate() lists them as unpriced unless the op/params give bd_us explicitly.
-BD_US_FIT_PATH = {"palmyra213": "jit_mmio"}
+# BD write path the board fits (BD_US_FIT, ISSUE_FIT) were measured on.  The 17 kacc kernels write their shim BDs at
+# the call as ctrl packets: host.cc wraps them in __Runtime_ctrl_shim_bd_begin/commit (rt_sb_commit), with no
+# __Runtime_ctrl_aot_window (Arthur grepped all 17 costmodel_p0/*/aout/worklocal/host.cc, peer ask 11-21 21:5x);
+# u_conv_1024x2880x320 does 482 bdcfg calls/launch, rt_bdcfg 1.05 ms/launch (amit/tasks/2026-11-19_costmodel-microbench).
+# jit_mmio (direct register writes), aot_window (precomputed shim BDs, rt_sb_aot_take) and uart_degraded (~6 ms/BD,
+# amit/tasks/2026-11-20_des-json-gap §3) are different costs, so estimate() lists them as unpriced unless the op/params
+# give bd_us explicitly.
+BD_US_FIT_PATH = {"palmyra213": "jit_ctrlpkt"}
 
 # Short-DDR-run penalty, per board: {run_b: {"issue": f, "dma": f}, "r_switch": r} -- launch ~ issue + floor x
 # f(run_b, regime), regime "dma" when ddr_floor > r_switch x host issue (default r_switch 1), else "issue" (part of

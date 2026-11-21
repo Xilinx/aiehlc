@@ -226,7 +226,7 @@ def test_given_the_maxwell_2k_mesh_build_on_palmyra213_then_the_floor_is_read_bo
 
 def test_given_no_bd_us_on_palmyra213_then_the_board_fit_prices_issue(tmp_path, cycles_file):
     d = _write(tmp_path, LOOPED, [_bd(0, 256)], HOST)
-    r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "jit_mmio"}}], cycles=cycles_file)
+    r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "jit_ctrlpkt"}}], cycles=cycles_file)
     op = r["ops"][0]
     assert op["bd_us"] == bdgraph.BD_US_FIT["palmyra213"] == 5.67 and op["bd_us_source"] == "board_fit"
     assert r["issue_ms"] == pytest.approx(17 * 5.67 / 1e3) and "host_bd_us" not in r["unpriced"]
@@ -270,7 +270,7 @@ def test_given_a_32b_run_shim_read_on_palmyra213_then_ddr_runb_uses_the_board_fi
     host = [{"line": 10, "kind": "createio", "bd_id": 0}, {"line": 11, "kind": "startio", "code": "__Runtime_startio(a, b, 0, 1);"}]
     shim = [_bd(0, 4096, dim_strides=[4, 64], dim_wraps=[8, 128])]   # 8 words = 32 B contiguous, then jump
     d = _write(tmp_path, [{"repeat_count": 1}], [_bd(0, 64)], host, shim_bds=shim)
-    r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "jit_mmio"}}], cycles=cycles_file)
+    r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "jit_ctrlpkt"}}], cycles=cycles_file)
     op = r["ops"][0]
     assert op["bdgraph"]["ddr_bytes"]["channels"][0]["run_b"] == 32
     rb = op["ddr_runb"]
@@ -362,7 +362,7 @@ def test_given_a_32b_read_and_no_op_bd_us_then_estimate_prices_issue_with_the_p4
     host = [{"line": 10, "kind": "createio", "bd_id": 0}, {"line": 11, "kind": "startio", "code": "__Runtime_startio(a, b, 0, 1);"}]
     shim = [_bd(0, 4096, dim_strides=[4, 64], dim_wraps=[8, 128])]
     d = _write(tmp_path, [{"repeat_count": 1}], [_bd(0, 64)], host, shim_bds=shim)
-    r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "jit_mmio"}}], cycles=cycles_file)
+    r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "jit_ctrlpkt"}}], cycles=cycles_file)
     op = r["ops"][0]
     fit = bdgraph.ISSUE_FIT["palmyra213"]
     rd_ms = op["ddr_floor"]["terms"]["rd"] / (estimate_mod_board_params()["aie_clk_mhz"] * 1e3)
@@ -383,7 +383,7 @@ def test_given_palmyra213_32b_builds_then_p4j_launch_ms_is_within_3pct(build, me
     wl = RUNB / build / "aout/worklocal"
     if not (wl / "schedule_view.json").exists():
         pytest.skip("real build dir not present")
-    op = estimate([{"kernel": build, "bdgraph": {"worklocal": str(wl), "bd_write_path": "jit_mmio"}}])["ops"][0]
+    op = estimate([{"kernel": build, "bdgraph": {"worklocal": str(wl), "bd_write_path": "jit_ctrlpkt"}}])["ops"][0]
     assert op["ddr_runb"]["launch_ms"] == pytest.approx(meas, rel=0.03)    # P4i: -11.5% on u_lin_2048x960x320
 
 
@@ -426,18 +426,18 @@ def test_given_palmyra213_fast_and_slow_stride_builds_then_p4k_launch_ms_is_with
     if not hit:
         pytest.skip("real build dir not present")
     wl = hit[0].parent
-    op = estimate([{"kernel": build, "bdgraph": {"worklocal": str(wl), "bd_write_path": "jit_mmio"}}])["ops"][0]
+    op = estimate([{"kernel": build, "bdgraph": {"worklocal": str(wl), "bd_write_path": "jit_ctrlpkt"}}])["ops"][0]
     assert op["ddr_runb"]["launch_ms"] == pytest.approx(meas, rel=0.07)
 
 
-# ---- the board fit only prices the BD write path it was measured on (jit_mmio on palmyra213)
+# ---- the board fit only prices the BD write path it was measured on (jit_ctrlpkt on palmyra213)
 
-@pytest.mark.parametrize("path", ["aot_window", "uart_degraded"])
+@pytest.mark.parametrize("path", ["jit_mmio", "aot_window", "uart_degraded"])
 def test_given_another_bd_write_path_and_no_bd_us_then_the_board_fit_does_not_price_issue(tmp_path, cycles_file, path):
     d = _write(tmp_path, LOOPED, [_bd(0, 256)], HOST)
     r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": path}}], cycles=cycles_file)
     assert r["issue_ms"] is None and r["total_ms"] == 0.0
-    assert f"issue(bd_write_path={path}; board fit is jit_mmio)" in r["unpriced"]
+    assert f"issue(bd_write_path={path}; board fit is jit_ctrlpkt)" in r["unpriced"]
 
 
 def test_given_another_bd_write_path_and_an_explicit_bd_us_then_issue_is_priced(tmp_path, cycles_file):
@@ -450,5 +450,5 @@ def test_given_another_bd_write_path_and_an_explicit_bd_us_then_issue_is_priced(
 def test_given_jit_and_aot_on_palmyra213_then_only_jit_is_priced_by_the_fit(tmp_path, cycles_file):
     d = _write(tmp_path, LOOPED, [_bd(0, 256)], HOST)
     jit, aot = (estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": p}}], cycles=cycles_file)
-                for p in ("jit_mmio", "aot_window"))
+                for p in ("jit_ctrlpkt", "aot_window"))
     assert jit["issue_ms"] > 0 and aot["issue_ms"] is None

@@ -16,8 +16,8 @@ Input schema (settled in the cost channel: Steve's form, field ``recipe`` not ``
              "host": {"bd_us": float},                # host BD-issue cost per BD (segment L input)
              "l": {"cfg": "off|off-cold|aot|aot-kco", "calls": {...}, "words": {...}},  # L features, per launch
              "bdgraph": {"worklocal": dir,            # build JSON dir (dfscheduleprovenancemap + schedule_view)
-                         "bd_write_path": "jit_mmio|aot_window|uart_degraded",  # required to price issue_ms;
-                                                      #   the board fit only prices its own path (palmyra213: jit_mmio)
+                         "bd_write_path": "jit_mmio|jit_ctrlpkt|aot_window|uart_degraded",  # required to price issue_ms;
+                                                      #   the board fit only prices its own path (palmyra213: jit_ctrlpkt)
                          "trip_count": int}}          # optional; else start_io.loop_range (see bdgraph.py)
                                                       # -> counts only + issue_ms + ddr floor (report only,
                                                       #    bdgraph.ddr_floor); K terms listed in "unpriced"
