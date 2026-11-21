@@ -786,3 +786,60 @@ def test_m3_lpred_tshare_fail(monkeypatch, capsys, tmp_path):
     rc = m.main(["--lpred", "--params", str(prm), "--tsv", str(tmp_path / "lp.tsv"), "--build-root", "/x", "off=a.log"])
     out = capsys.readouterr().out
     assert rc == 1 and out.splitlines()[-1].endswith("Tshare_max=0.1500 FAIL"), out
+
+
+# --- M3.1.2.3 PA: k_dmafeat --perch --ddrt (ddr_t = sum_ch bytes / BW(run_b), ms/launch) ---
+def test_kdmaf_ddrt_sum_and_reject():
+    """ddr_t sums every channel's bytes / BW(run_b) in ms; run_b outside the BW table raises (ch_feats -> nan)"""
+    kf = _kdmaf_mod("k_dmafeat_ddrt1")
+    ch = {(0, "MM2S", 0): dict(bytes=1.9e6, bd_n=1.0, run_b=16), (0, "S2MM", 0): dict(bytes=10.8e6, bd_n=1.0, run_b=4096),
+          (1, "MM2S", 0): dict(bytes=0.0, bd_n=0.0, run_b=0)}
+    assert abs(kf.ddr_t(ch) - 2.0) < 1e-12
+    with pytest.raises(ValueError):
+        kf.bw_run(0)
+    v = kf.ch_feats({(0, "MM2S", 0): dict(bytes=5.0, bd_n=1.0, run_b=0)})["ddr_t"]
+    assert v != v  # nan
+    assert abs(kf.ddr_t({(0, "MM2S", 0): dict(bytes=1.32383e8, bd_n=1.0, run_b=16)}) - 1.32383e8 / 1.9e6) < 1e-9
+
+
+def test_kdmaf_ddrt_dwait_ms_from_ksite():
+    """dwait_ms = (KSITE lock + stream) / launches via k_diag.split_site (AIE 1 GHz: 1e6 cyc = 1 ms)"""
+    kf = _kdmaf_mod("k_dmafeat_ddrt2")
+    d = kf.load_dwait_ms("PROF aie_site_perf part=7 kind=conv launches=4 perf_n=4 io_act_cyc=1 "
+                         "lock_stall_cyc=6000000 stream_stall_cyc=2000000\n")
+    assert abs(d[7] - 2.0) < 1e-12
+
+
+def test_kdmaf_ddrt_tsv(tmp_path):
+    """write_tsv: header = TSV_COLS, one row per site, parent dir created"""
+    kf = _kdmaf_mod("k_dmafeat_ddrt3")
+    s = dict(cfg="off", part=414, site="conv121", kind="conv", launches=1, ddr_b=1.32383e8, dom_bytes=2.94912e7,
+             maxch_t=15521.7, ddr_t=68.5381, rw_ratio=0.98, bd_n=384)
+    p = tmp_path / "a" / "b" / "x.tsv"
+    kf.write_tsv(p, [s, s])
+    rows = p.read_text().splitlines()
+    assert rows[0].split("\t") == list(kf.TSV_COLS) and len(rows) == 3
+    assert rows[1].split("\t")[:4] == ["off", "414", "conv121", "conv"] and rows[1].split("\t")[8] == "68.5381"
+
+
+def test_kdmaf_ddrt_unet_logs(tmp_path):
+    """M3.1.2.3 PA on the UNet a-logs (skipped when absent): conv TGT feat=ddr_t PASS, conv121 DDRT, 276 TSV rows"""
+    import re
+    import subprocess
+    b = Path("/scratch/staff/huaj/tmp/costmodel_m3121")
+    d = Path("/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks/2026-11-20_M3121")
+    logs = [d / "unet_off.a.log", d / "unet_aot-kco.a.log"]
+    if not (b.is_dir() and all(x.is_file() for x in logs)):
+        pytest.skip("UNet build dir / logs not present")
+    p = SRC.parent / "script" / "perf" / "k_dmafeat.py"
+    t = tmp_path / "kln" / "dmach.tsv"
+    r = subprocess.run([sys.executable, "-I", str(p), "--perch", "--ddrt", "--tsv", str(t), "--build-root", str(b),
+                        "off=%s" % logs[0], "aot-kco=%s" % logs[1]], capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr
+    assert r.stdout.splitlines()[-1] == "KDMAF ALL sites=276 feats=dmach+ddrt PASS"
+    for cfg in ("off", "aot-kco"):
+        assert re.search(r"^KDMAF TGT cfg=%s cls=conv n=48 feat=ddr_t spearman=-?[0-9.]+ nan=0 PASS$" % cfg,
+                         r.stdout, re.M), cfg
+    assert re.search(r"^KDMAF DDRT cfg=off site=conv121 part=414 ddr_t_ms=\d+\.\d+ dwait_ms=6\d\.\d+ ratio=\d+\.\d+$",
+                     r.stdout, re.M)
+    assert len(t.read_text().splitlines()) == 277

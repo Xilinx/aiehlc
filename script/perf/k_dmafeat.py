@@ -16,7 +16,7 @@ Features per site (launches>0 sites, all launches of the site):
   bd_n      shim BDs per launch = sum over the site's launches of kernel bd_n / launches   site_feat.bd_shape_rows
   ddr_b     DDR bytes per launch = (ddr_in_b + ddr_out_b) / launches                      site_feat.bd_shape_rows
 Bandwidth references (notes only, not parameters): R+W 7.4 GB/s and read-only 9.9 GB/s are ASSUMED (not re-measured
-here; no log line cited).
+here; no file:line source found in this repo -- `git grep '7.4 GB|9.9 GB'` only hits this docstring).
 Public API: site_dma_feats(cfg, log, build_root) -> {part: {feat: value}} (build dir + the log's site table only,
 no board timing; used by k_diag --dmafeat).
 Residual: dma_resid_ms = mean over the KSITE runs of the site of (K_hat - K_meas); dma_ms (model dma term) is
@@ -47,8 +47,19 @@ CORRCLS nan (feature constant inside a class) is reported, not a failure.
   KDMAF ALL sites=<n> feats=dmach PASS|FAIL   (last; FAIL rc=1 if a site lacks bd/perf, a conv TGT fails or any
             varying feature gives nan)
 
+--perch --ddrt [--tsv FILE] (M3.1.2.3 PA): physical per-channel DMA time per launch
+    ddr_t = sum over the site's shim row-0 channels of bytes_ch / BW(run_b_ch)  (ms/launch, BW_RUN table;
+            a run_b outside the table range (<= 0) raises ValueError -- no silent default)
+  target dwait_ms = KSITE lock + stream (k_diag.split_site on the log's PROF aie_site_perf, ms) / launches
+  KDMAF DDRT cfg=<c> site=<s> part=<p> ddr_t_ms=<x> dwait_ms=<y> ratio=<x/y>     (every site)
+  KDMAF TGT cfg=<c> cls=<k> n=<n> feat=ddr_t spearman=<x> nan=<0|1> PASS|FAIL     (PASS iff |rho| >= TGT_MIN, finite)
+  KDMAF TGTBEST cfg=<c> cls=<k> n=<n> const=<k> best=<f> spearman=<x> nan=<n> PASS|FAIL   (the RA best= ranking)
+  KDMAF ALL sites=<n> feats=dmach+ddrt PASS|FAIL  (also FAIL if any ddr_t is not finite or the conv ddr_t TGT fails)
+  --tsv: cfg part site cls launches ddr_b dom_bytes maxch_t ddr_t_ms rw_ratio bd_n, one row per site (parent mkdir -p)
+
 usage: k_dmafeat.py --build-root DIR --resid KSITE.out off=<log> aot-kco=<log>
        k_dmafeat.py --perch --build-root DIR off=<log> aot-kco=<log>
+       k_dmafeat.py --perch --ddrt [--tsv FILE] --build-root DIR off=<log> aot-kco=<log>
        k_dmafeat.py --selftest      (last line: KDMAF SELFTEST PASS (k/n))
 """
 from __future__ import annotations
@@ -69,6 +80,7 @@ FEATS_CH = ("run_b", "shim_ch", "rw_ratio", "bd_n", "ddr_b", "dom_run_b", "dom_b
 BW_RUN = ((16, 1.9), (32, 5.3), (64, 9.8), (128, 10.8))   # run_b (B) -> GB/s, GAP-k_dmafeat-014082
 TGT_MIN = 0.5
 TGT_CLS = "conv"
+TSV_COLS = ("cfg", "part", "site", "cls", "launches", "ddr_b", "dom_bytes", "maxch_t", "ddr_t_ms", "rw_ratio", "bd_n")
 CLS_MIN_N = 3
 _KSITE = re.compile(r"^KSITE cfg=(\S+) run=(\S+) (\S+) part=(\d+) .*?K_meas=([-\d.]+) .*?dma=([-\d.]+) .*?"
                     r"K_hat=([-\d.naif]+) ", re.M)
@@ -150,7 +162,14 @@ def site_launch_ch(kchx, lk):
 
 
 def bw_run(run_b):
-    """GB/s of a contiguous run of run_b bytes (BW_RUN step table)"""
+    """GB/s of a contiguous run of run_b bytes (BW_RUN step table); ValueError if run_b <= 0 (not in the table)"""
+    if not run_b > 0:
+        raise ValueError("run_b=%r outside the BW_RUN table (need > 0)" % (run_b,))
+    return _bw_step(run_b)
+
+
+def _bw_step(run_b):
+    """BW_RUN step lookup without the range check (RA maxch_t behaviour kept: run_b <= 16 -> 1.9)"""
     for edge, bw in BW_RUN:
         if run_b <= edge:
             return bw
@@ -165,14 +184,25 @@ def dom_channel(ch):
 
 def maxch_t(ch):
     """max over channels of bytes / BW(run_b), in us (GB/s = 1e3 B/us)"""
-    return max([c["bytes"] / (bw_run(c["run_b"]) * 1e3) for c in ch.values() if c["bytes"] > 0] or [0.0])
+    return max([c["bytes"] / (_bw_step(c["run_b"]) * 1e3) for c in ch.values() if c["bytes"] > 0] or [0.0])
+
+
+def ddr_t(ch):
+    """sum over channels with bytes of bytes / BW(run_b), in ms (GB/s = 1e6 B/ms); ValueError if a channel's
+    run_b is outside the BW_RUN table"""
+    return sum(c["bytes"] / (bw_run(c["run_b"]) * 1e6) for c in ch.values() if c["bytes"] > 0)
 
 
 def ch_feats(ch):
     """dom_run_b, dom_bytes, dom_bd_n, maxch_t of one per-launch channel table"""
     d = dom_channel(ch)
     c = ch[d] if d else dict(bytes=0.0, bd_n=0.0, run_b=0)
-    return dict(dom_run_b=c["run_b"], dom_bytes=c["bytes"], dom_bd_n=c["bd_n"], maxch_t=maxch_t(ch), dom_ok=d is not None)
+    try:
+        dt = ddr_t(ch)
+    except ValueError:
+        dt = float("nan")
+    return dict(dom_run_b=c["run_b"], dom_bytes=c["bytes"], dom_bd_n=c["bd_n"], maxch_t=maxch_t(ch), ddr_t=dt,
+                dom_ok=d is not None)
 
 
 def site_launch_kernels(build, build_log):
@@ -217,6 +247,7 @@ def site_table(cfg, log, build_root):
                         rw_ratio=f["ddr_in_b"] / tot if tot else float("nan"),
                         bd_n=per_launch(f["bd_n"] if f else 0, nl), ddr_b=per_launch(tot, nl)))
         out[-1]["ok"] &= nl > 0
+        out[-1]["launches"] = nl
         out[-1]["shim_ch"], out[-1]["shim_ch_n"] = shim_ch_eff(out[-1]["shim_ch_b"])
         cf = ch_feats(site_launch_ch(kchx, lks.get((r["kind"], r["cid"])) or []))
         out[-1]["ok_ch"] = out[-1]["ok"] and cf.pop("dom_ok")
@@ -232,7 +263,8 @@ def per_launch(total, launches):
 def site_dma_feats(cfg, log, build_root):
     """{part: {feat: value}} of the 7 FEATS + the per-channel FEATS_CH (+ ok, ok_ch) for the launches>0 sites of
     build_root/unet_<cfg>; reads the build dir (and the log's site/launch table) only, never board timing"""
-    return {s["part"]: dict({f: s[f] for f in FEATS + FEATS_CH}, ok=s["ok"], ok_ch=s["ok_ch"], kind=s["kind"],
+    return {s["part"]: dict({f: s[f] for f in FEATS + FEATS_CH}, ddr_t=s["ddr_t"], ok=s["ok"], ok_ch=s["ok_ch"],
+                            kind=s["kind"],
                             site=s["site"])
             for s in site_table(cfg, log, build_root)}
 
@@ -285,14 +317,44 @@ def load_dwait(txt):
     return out
 
 
+def load_dwait_ms(txt):
+    """{part: dwait_ms per launch} = (KSITE lock + stream) / launches; lock/stream (ms) from k_diag.split_site on the
+    log's PROF aie_site_perf line (the KSITE values, not re-derived here)"""
+    from k_diag import parse_perf, split_site
+    out = {}
+    for p, pf in parse_perf(txt).items():
+        d = split_site(0.0, 0.0, pf)
+        out[p] = (d["lock"] + d["stream"]) / pf["launches"] if pf["launches"] > 0 else float("nan")
+    return out
+
+
+def ddrt_ratio(t, w):
+    return t / w if w > 0 and math.isfinite(t) else float("nan")
+
+
+def write_tsv(path, rows):
+    """TSV_COLS, one row per site; mkdir -p the parent"""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        f.write("\t".join(TSV_COLS) + "\n")
+        for s in rows:
+            f.write("\t".join(str(s["cfg"]) if c == "cfg" else str(s["part"]) if c == "part" else
+                               s["site"] if c == "site" else s["kind"] if c == "cls" else
+                               str(s["launches"]) if c == "launches" else
+                               "%.6g" % s["ddr_t"] if c == "ddr_t_ms" else "%.6g" % float(s[c]) for c in TSV_COLS) + "\n")
+
+
 def main_perch(a):
     from k_diag import _CMP
     ok = True
     tot = 0
+    tsv = []
+    ddrt = getattr(a, "ddrt", False)
     for spec in a.runs:
         cfg, log = spec.split("=", 1)
         txt = open(log).read()
         dw = load_dwait(txt)
+        dms = load_dwait_ms(txt) if ddrt else {}
         m = _CMP.findall(txt)
         board, nl, rc = m[-1] if m else ("-", "-1", "-1")
         sites = site_table(cfg, log, a.build_root)
@@ -310,6 +372,12 @@ def main_perch(a):
             print("KDMAF CH cfg=%s part=%d kind=%s site=%s %s dwait_cyc=%.1f%s"
                   % (cfg, s["part"], s["kind"], s["site"], " ".join("%s=%.6g" % (f, s[f]) for f in FEATS_CH),
                      s["dwait"], "" if good else " MISSING"))
+            if ddrt:
+                s["dwait_ms"] = dms.get(s["part"], float("nan"))
+                ok &= math.isfinite(s["ddr_t"]) and math.isfinite(s["dwait_ms"])
+                print("KDMAF DDRT cfg=%s site=%s part=%d ddr_t_ms=%.4f dwait_ms=%.4f ratio=%.4f"
+                      % (cfg, s["site"], s["part"], s["ddr_t"], s["dwait_ms"], ddrt_ratio(s["ddr_t"], s["dwait_ms"])))
+                tsv.append(s)
         tot += len(sites)
         by = {}
         for s in used:
@@ -323,11 +391,20 @@ def main_perch(a):
                 print("KDMAF CORRCH cfg=%s cls=%s feat=%s n=%d spearman=%.4f" % (cfg, c, f, len(ss), r))
             tp = tgt_pass(rho, nn)
             ok &= nn == 0 and (tp or c != TGT_CLS)
-            print("KDMAF TGT cfg=%s cls=%s n=%d const=%d best=%s spearman=%.4f nan=%d %s"
-                  % (cfg, c, len(ss), nc, best or "-", rho, nn, "PASS" if tp else "FAIL"))
+            print("KDMAF %s cfg=%s cls=%s n=%d const=%d best=%s spearman=%.4f nan=%d %s"
+                  % ("TGTBEST" if ddrt else "TGT", cfg, c, len(ss), nc, best or "-", rho, nn, "PASS" if tp else "FAIL"))
+            if ddrt:
+                r = spearman([s["ddr_t"] for s in ss], [s["dwait_ms"] for s in ss])
+                nan = int(not math.isfinite(r))
+                tp = tgt_pass(r, nan)
+                ok &= tp or c != TGT_CLS
+                print("KDMAF TGT cfg=%s cls=%s n=%d feat=ddr_t spearman=%.4f nan=%d %s"
+                      % (cfg, c, len(ss), r, nan, "PASS" if tp else "FAIL"))
         if TGT_CLS not in by:
             ok = False
-    print("KDMAF ALL sites=%d feats=dmach %s" % (tot, "PASS" if ok else "FAIL"))
+    if ddrt and a.tsv:
+        write_tsv(a.tsv, tsv)
+    print("KDMAF ALL sites=%d feats=%s %s" % (tot, "dmach+ddrt" if ddrt else "dmach", "PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
 
@@ -422,6 +499,19 @@ def selftest():
                                   "lock_stall_cyc=10 stream_stall_cyc=4\n") == {3: (7.0, 2, 2)})
     chk("feats_ch", "num_dims" not in FEATS_CH and "burst_b" not in FEATS_CH and "shim_ch_n" not in FEATS_CH
         and {"dom_run_b", "dom_bytes", "dom_bd_n", "maxch_t", "rw_ratio", "bd_n", "ddr_b"} <= set(FEATS_CH))
+    # ddr_t = sum over channels of bytes / BW(run_b) in ms (S2MM counts, empty channels skipped)
+    chk("ddrt_sum", abs(ddr_t(ch) - (1000 / 9.8e6 + 3000 / 1.9e6 + 9000 / 10.8e6)) < 1e-15
+        and ddr_t({(0, "MM2S", 0): dict(bytes=0.0, bd_n=0.0, run_b=0)}) == 0.0
+        and abs(ddr_t({(0, "MM2S", 0): dict(bytes=1.32383e8, bd_n=1.0, run_b=16)}) - 69.675263) < 1e-5)
+    try:
+        bw_run(0)
+        bad = False
+    except ValueError:
+        bad = True
+    chk("ddrt_runb_reject", bad and math.isnan(ch_feats({(0, "MM2S", 0): dict(bytes=5.0, bd_n=1.0, run_b=0)})["ddr_t"]))
+    chk("dwait_ms_ksite", abs(load_dwait_ms("PROF aie_site_perf part=3 kind=conv launches=2 perf_n=2 io_act_cyc=9 "
+                                            "lock_stall_cyc=2000000 stream_stall_cyc=1000000\n")[3] - 1.5) < 1e-12)
+    chk("ddrt_ratio", ddrt_ratio(2.0, 4.0) == 0.5 and math.isnan(ddrt_ratio(1.0, 0.0)))
     k = sum(cases)
     print("KDMAF SELFTEST %s (%d/%d)" % ("PASS" if k == len(cases) else "FAIL", k, len(cases)))
     return 0 if k == len(cases) else 1
@@ -433,6 +523,8 @@ def main(argv=None):
     ap.add_argument("--build-root")
     ap.add_argument("--resid", help="k_diag output with KSITE lines")
     ap.add_argument("--perch", action="store_true", help="per-channel features vs the logged data wait (no --resid)")
+    ap.add_argument("--ddrt", action="store_true", help="with --perch: ddr_t = sum_ch bytes/BW(run_b) vs KSITE dwait")
+    ap.add_argument("--tsv", help="with --perch --ddrt: per-site TSV (TSV_COLS)")
     ap.add_argument("runs", nargs="*", help="cfg=log")
     a = ap.parse_args(argv)
     if a.selftest:
