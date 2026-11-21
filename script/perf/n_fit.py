@@ -110,14 +110,17 @@ def measure(build, log):
                 raise ValueError("part=%d split launches=%d vs build %d" % (part, n, s["launches"]))
         elif s["launches"] > 0:
             raise ValueError("part=%d: no aie_host_split line" % part)
-        out.append(derive(dict(s, part=part, ms=ms, aie_ms=aie_ms, glue=g, N=ms + g + f + i)))
+        out.append(derive(dict(s, part=part, ms=ms, aie_ms=aie_ms, site_ms=float(site_ms), glue=g, flush=f,
+                                    inval=i, N=ms + g + f + i)))
     return out, txt
 
 
-def src_line(cfg, log, txt):
+def src_line(cfg, log, txt, sites=None):
+    """sites given (--predict): ' sites=<n>' = launches>0 sites of the log appended"""
     m = _CMP.findall(txt)
     board, launches, rc = m[-1] if m else ("-", "-1", "-1")
-    print("NSRC cfg=%s log=%s board=%s launches=%s run_rc=%s" % (cfg, log, board, launches, rc))
+    print("NSRC cfg=%s log=%s board=%s launches=%s run_rc=%s%s" % (cfg, log, board, launches, rc,
+                                                                   "" if sites is None else " sites=%d" % sites))
     return rc == "0" and int(launches) > 0
 
 
@@ -305,6 +308,234 @@ def floor_mode(a, root):
     return 0 if ok else 1
 
 
+# --predict (costmodel M3.1.2.1 PN): frozen N per launch site, static inputs only, over a/b/c logs per cfg.
+LOG_FIELDS = frozenset(("part", "ms", "site_ms", "aie_ms", "glue", "flush", "inval", "N"))  # measure() adds these
+TSHARE_GATE = 0.100
+TSV_COLS = ("cfg", "run", "part", "site", "launches", "site_ms", "N_meas", "N_hat", "ovl_meas", "ovl_hat")
+L_PARAMS = Path(__file__).resolve().parent / "params" / "l_palmyra213.json"
+
+
+def static_rows(build):
+    """the build's sites with static features only (n_feat.sites + derive) -- the only input of npred_site"""
+    return [derive(dict(s)) for s in n_sites(build, build + ".build.log")]
+
+
+def _off_corr(build, lparams):
+    """[corr_ms] per launches>0 site: k_ovl_check --off-corr (119b55c6) in-window rt bdcfg/startio of cfg=off, static"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import k_ovl_check as ko
+    return [(k, c, ms) for k, c, ms, _info in ko.off_corr_sites(build, ko.load_off_coef(str(lparams)))]
+
+
+def npred_site(pc, s, corr_ms=0.0):
+    """(N_hat, ovl_hat) of one site from its static row s and the cfg params pc; ovl_hat None without pc['ovl'].
+    ovl_hat = ovl_k * (glue_hat + corr_ms): the host glue between startio and wait (huaj overlap model) predicted by
+    the static glue component pc['ovl']['kinds'], plus (off) the static in-window rt bdcfg/startio correction."""
+    bad = LOG_FIELDS.intersection(s)
+    if bad:
+        raise ValueError("npred_site: log fields %s in the predict input" % sorted(bad))
+    nh = predict(pc["kinds"][s["kind"]], s)
+    if "ovl" not in pc:
+        return nh, None
+    o = pc["ovl"]
+    return nh, o["ovl_k"] * (predict(o["kinds"][s["kind"]], s) + corr_ms)
+
+
+def ovl_meas(perf, launches):
+    """ovl_ms of the site over all its launches (aie_site_perf ovl_cyc over perf_n launches, AIE_MHZ)"""
+    from k_diag import AIE_MHZ
+    return perf["ovl_cyc"] / (AIE_MHZ * 1e3) * launches / float(min(perf["perf_n"], launches))
+
+
+def _fit_ovl(fr, perf, corr):
+    """static glue component per kind (fit_kind on AHS glue) + one scale ovl_k (relative LSQ of ovl_meas on
+    glue_hat + corr_ms), fitted on the a log's launches>0 rows fr"""
+    kinds = {}
+    for kind in KINDS:
+        kr = [dict(r, N=r["glue"]) for r in fr if r["kind"] == kind]
+        if kr:
+            kinds[kind] = fit_kind(kr, kind=kind)
+            kinds[kind]["n"] = len(kr)
+    h = np.array([predict(kinds[r["kind"]], r) + c for r, c in zip(fr, corr)])
+    o = np.array([ovl_meas(perf[r["part"]], r["launches"]) for r in fr])
+    q = h / o
+    return {"kinds": kinds, "ovl_k": sig(float(q.sum() / (q * q).sum())),
+            "model": "ovl_hat = ovl_k * (glue_hat + corr_ms); glue_hat = sum(coef[f]*f)+d on AHS glue_ms (a log)"}
+
+
+def fit_minimax(rows, sub):
+    """{'coef', 'd'} on the feature subset sub minimising the MAX relative error (LP, coef >= 0, d >= 0)"""
+    from scipy.optimize import linprog
+    y = np.array([r["N"] for r in rows])
+    X = np.array([[float(r[f]) for f in sub] + [1.0] for r in rows])
+    sc = np.maximum(np.abs(X).max(axis=0), 1e-300)
+    A = X / sc / y[:, None]
+    k, one = A.shape[1], np.ones(len(y))
+    res = linprog(np.r_[np.zeros(k), 1.0], A_ub=np.r_[np.c_[A, -one], np.c_[-A, -one]], b_ub=np.r_[one, -one],
+                  bounds=[(0, None)] * (k + 1), method="highs")
+    if res.status != 0:
+        raise ValueError("fit_minimax: linprog status %d" % res.status)
+    return _params(sub, res.x[:k] / sc)
+
+
+def loo_minimax(rows, sub):
+    return max(abs(predict(fit_minimax(rows[:i] + rows[i + 1:], sub), r) - r["N"]) / r["N"]
+               for i, r in enumerate(rows))
+
+
+def _refit_cfg(rows, method="minimax"):
+    """one refit of a cfg on its a-log rows: subset per kind = fit_kind's choice (NNLS + LOO ranking);
+    method minimax: coefficients re-solved on that subset for the max relative error (the NCHK metric);
+    nnls: fit_kind's coefficients. 'loo_a' = leave-one-out max relative error of the method on the a log."""
+    kinds = {}
+    for kind in KINDS:
+        kr = [r for r in rows if r["kind"] == kind and r["launches"] > 0]
+        p = fit_kind(kr, kind=kind)
+        if method == "minimax":
+            p = dict(fit_minimax(kr, p["feats"]), feats=p["feats"])
+            p["loo_a"] = sig(loo_minimax(kr, p["feats"]))
+        else:
+            p["loo_a"] = sig(loo(kr, p["feats"]))
+        p["method"], p["n"] = method, len(kr)
+        kinds[kind] = p
+    return {"kinds": kinds, "attn_host_ms": sig(sum(r["N"] for r in rows if r["launches"] == 0)),
+            "model": "N=sum(coef[f]*f)+d (ms), nnls on relative error, <=%s features per kind"
+                     % json.dumps(MAX_FEATS, sort_keys=True)}
+
+
+def _metrics(cfg, runs, pc):
+    """(N_maxrel, Tshare_max) of params pc over runs [(run, log, rows, srows)]"""
+    nm = ts = 0.0
+    for _run, _log, rows, srows in runs:
+        for r, s in zip(rows, srows):
+            if r["launches"] > 0:
+                nh = npred_site(pc, s)[0]
+                nm = max(nm, abs(nh - r["N"]) / r["N"])
+                ts = max(ts, abs(nh - r["N"]) / r["site_ms"])
+    return nm, ts
+
+
+def predict_mode(a, root):
+    """--predict CFG=A,B,C ...: NSRC (+sites) per log, frozen params (--params); when a cfg's frozen N_maxrel or
+    Tshare_max fails and --refit-a allows it, ONE refit of that cfg on its first (a) log, written to
+    <params>.m3121.json (b/c only checked); NCHK per cfg + ALL; --ovl: OVLP per cfg (site mean over the logs);
+    --tsv: one row per (log, launches>0 site)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))  # k_diag / k_ovl_check (python -I drops the script dir)
+    prm = json.load(open(a.params))
+    specs = [(c, lg.split(",")) for c, lg in pairs(a.runs)]
+    ok, data = True, {}
+    for cfg, logs in specs:
+        build = "%s/unet_%s" % (root, cfg)
+        srows = static_rows(build)
+        corr = [0.0] * sum(1 for s in srows if s["launches"] > 0)
+        if a.ovl and cfg == "off":
+            cs = _off_corr(build, a.off_corr)
+            fk = [(s["kind"], s["cid"]) for s in srows if s["launches"] > 0]
+            if [(k, c) for k, c, _ in cs] != fk:
+                raise ValueError("off-corr sites vs n_feat sites differ")
+            corr = [ms for _k, _c, ms in cs]
+        runs = []
+        for i, lg in enumerate(logs):
+            rows, txt = measure(build, lg)
+            if [(r["kind"], r["cid"]) for r in rows] != [(s["kind"], s["cid"]) for s in srows]:
+                raise ValueError("%s: log sites vs static sites differ" % lg)
+            ok &= src_line(cfg, lg, txt, sites=sum(1 for r in rows if r["launches"] > 0))
+            ok &= sum_line(cfg, rows, txt)
+            runs.append(("abcdefgh"[i] if i < 8 else str(i), lg, rows, srows, txt))
+        data[cfg] = (runs, corr, build)
+    nrefit, refit_cfgs = 0, []
+    for cfg, (runs, corr, build) in data.items():
+        if cfg not in prm:
+            print("NCHK cfg=%s no params FAIL" % cfg)
+            ok = False
+            continue
+        nm, ts = _metrics(cfg, [r[:4] for r in runs], prm[cfg])
+        good = nm <= GATE and ts <= TSHARE_GATE
+        print("NFROZEN cfg=%s params=%s N_maxrel=%.4f Tshare_max=%.4f %s" % (cfg, a.params, nm, ts,
+                                                                             "PASS" if good else "FAIL"))
+        if not good and a.refit_a != "no":
+            refit_cfgs.append(cfg)
+    from k_diag import parse_perf
+    perf = {cfg: [parse_perf(r[4]) for r in runs] for cfg, (runs, _c, _b) in data.items()}
+    need_ovl = [c for c in data if a.ovl and c in prm and "ovl" not in prm[c]]
+    if refit_cfgs or need_ovl:
+        out = dict(prm)
+        for cfg in sorted(set(refit_cfgs) | set(need_ovl)):
+            runs, corr, _b = data[cfg]
+            run, lg, rows = runs[0][:3]
+            fr = [r for r in rows if r["launches"] > 0]
+            pc = _refit_cfg(rows, a.refit_method) if cfg in refit_cfgs else dict(prm[cfg])
+            pc["refit"] = {"log": lg, "run": run, "nrefit": int(cfg in refit_cfgs), "from": a.params}
+            if a.ovl:
+                pc["ovl"] = _fit_ovl(fr, perf[cfg][0], corr)
+                print("OVLFIT cfg=%s run=%s ovl_k=%.4f %s" % (cfg, run, pc["ovl"]["ovl_k"], " ".join(
+                    "%s:%s" % (k, ",".join(sorted(v["coef"])) or "d") for k, v in sorted(pc["ovl"]["kinds"].items()))))
+            for kind in KINDS if cfg in refit_cfgs else ():
+                p = pc["kinds"][kind]
+                print("NREFIT cfg=%s run=%s kind=%s method=%s n=%d loo_a=%.4f %s d=%.6g" % (
+                    cfg, run, kind, p["method"], p["n"], p["loo_a"], " ".join(
+                        "%s=%.6g" % (f, v) for f, v in sorted(p["coef"].items())), p["d"]))
+            out[cfg] = pc
+        nrefit = int(bool(refit_cfgs))
+        prm = out
+        if refit_cfgs:
+            dst = re.sub(r"(\.m3121)?\.json$", "", a.params) + ".m3121.json"
+            with open(dst, "w") as f:
+                json.dump(prm, f, sort_keys=True, indent=1)
+                f.write("\n")
+            print("NREFIT_OUT cfgs=%s path=%s" % (",".join(refit_cfgs), dst))
+    tsv = []
+    tot_logs = tot_sites = 0
+    wn = wt = 0.0
+    for cfg, (runs, corr, _b) in data.items():
+        if cfg not in prm:
+            continue
+        pc = prm[cfg]
+        nm = ts = 0.0
+        nsites = 0
+        om = {}
+        for (run, _lg, rows, srows, _t), pf in zip(runs, perf[cfg]):
+            j = 0
+            for r, s in zip(rows, srows):
+                if r["launches"] <= 0:
+                    continue
+                nh, oh = npred_site(pc, s, corr[j])
+                j += 1
+                om_ = ovl_meas(pf[r["part"]], r["launches"]) if a.ovl else float("nan")
+                om.setdefault(j, [s, oh, []])[2].append(om_)
+                nm = max(nm, abs(nh - r["N"]) / r["N"])
+                ts = max(ts, abs(nh - r["N"]) / r["site_ms"])
+                nsites += 1
+                tsv.append((cfg, run, "%d" % r["part"], "%s%d" % (r["kind"], r["cid"]), "%d" % r["launches"],
+                            "%.4f" % r["site_ms"], "%.4f" % r["N"], "%.4f" % nh, "%.4f" % om_,
+                            "%.4f" % (oh if oh is not None else float("nan"))))
+        good = nm <= GATE and ts <= TSHARE_GATE
+        ok &= good
+        nr = int(pc.get("refit", {}).get("nrefit", 0) == 1 and cfg in refit_cfgs)
+        print("NCHK cfg=%s logs=%d sites=%d nrefit=%d N_maxrel=%.4f Tshare_max=%.4f %s"
+              % (cfg, len(runs), nsites, nr, nm, ts, "PASS" if good else "FAIL"))
+        if a.ovl:
+            hs = np.array([v[1] for v in om.values()])
+            ms = np.array([float(np.mean(v[2])) for v in om.values()])
+            r2 = 1.0 - float(np.sum((hs - ms) ** 2)) / float(np.sum((ms - ms.mean()) ** 2))
+            st = int(all(not LOG_FIELDS.intersection(v[0]) for v in om.values()))
+            print("OVLP cfg=%s static=%d sites=%d r2=%.4f maxrel=%.4f"
+                  % (cfg, st, len(om), r2, float(np.max(np.abs(hs - ms) / ms))))
+        tot_logs += len(runs)
+        tot_sites += nsites
+        wn, wt = max(wn, nm), max(wt, ts)
+    ok &= tot_logs > 0 and len(data) == len(prm.keys() & data.keys())
+    print("NCHK ALL logs=%d sites=%d nrefit=%d N_maxrel=%.4f Tshare_max=%.4f %s"
+          % (tot_logs, tot_sites, nrefit, wn, wt, "PASS" if ok else "FAIL"))
+    if a.tsv:
+        Path(a.tsv).parent.mkdir(parents=True, exist_ok=True)
+        with open(a.tsv, "w") as f:
+            f.write("\t".join(TSV_COLS) + "\n")
+            for t in tsv:
+                f.write("\t".join(t) + "\n")
+    return 0 if ok else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-root", required=True)
@@ -319,9 +550,23 @@ def main(argv=None):
                     help="--ab spread: rel = |a-b|/mean (default), abs = |a-b| in ms")
     ap.add_argument("--ref-build-root", help="build root of the --ab-ref logs (default --build-root)")
     ap.add_argument("--floor", action="store_true", help="NNLS on all FEATS, no cap: fit on --fit, error on --check")
+    ap.add_argument("--predict", action="store_true",
+                    help="frozen --params per launch site on CFG=A,B,C positionals (NSRC sites=, NCHK, rc)")
+    ap.add_argument("--ovl", action="store_true", help="--predict: static ovl_hat vs ovl_meas, OVLP per cfg")
+    ap.add_argument("--tsv", help="--predict: per (log, site) rows " + " ".join(TSV_COLS))
+    ap.add_argument("--refit-a", choices=("auto", "no"), default="auto",
+                    help="--predict: auto = one refit on the a log of a cfg whose frozen params fail (default)")
+    ap.add_argument("--refit-method", choices=("minimax", "nnls"), default="minimax",
+                    help="--predict refit coefficients: minimax (max relative error, default) or nnls (fit_kind)")
+    ap.add_argument("--off-corr", default=str(L_PARAMS), help="--predict --ovl: l_palmyra213 params for cfg=off")
+    ap.add_argument("runs", nargs="*", metavar="CFG=A.log,B.log,C.log", help="--predict logs per cfg")
     a = ap.parse_args(argv)
     root = a.build_root.rstrip("/")
     ok = True
+    if a.predict:
+        if not a.params or not a.runs:
+            ap.error("--predict needs --params and CFG=LOG[,LOG...] positionals")
+        return predict_mode(a, root)
     if a.ab:
         return ab_mode(a, root)
     if a.floor:
