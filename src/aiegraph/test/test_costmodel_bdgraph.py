@@ -452,3 +452,50 @@ def test_given_jit_and_aot_on_palmyra213_then_only_jit_is_priced_by_the_fit(tmp_
     jit, aot = (estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": p}}], cycles=cycles_file)
                 for p in ("jit_ctrlpkt", "aot_window"))
     assert jit["issue_ms"] > 0 and aot["issue_ms"] is None
+
+
+# --- hard HW/runtime limits (Amit des-json-gap section 2) ---
+
+def test_given_a_design_inside_all_limits_then_there_are_no_hw_violations(tmp_path):
+    f = bdgraph.features(_write(tmp_path, LOOPED, [_bd(0, 256)], HOST, shim_bds=[_bd(0, 4092)]))
+    assert f["hw_violations"] == [] and f["plain_shim_bds_large"] == 0
+
+
+def test_given_17_bds_on_a_core_dma_then_the_pool_violation_is_reported(tmp_path):
+    bds = [_bd(i % 16, 256) for i in range(16)] + [_bd(16, 256)]
+    f = bdgraph.features(_write(tmp_path, LOOPED, bds, HOST))
+    assert any("17 BDs > pool 16" in v for v in f["hw_violations"])
+
+
+def test_given_repeat_count_257_then_it_is_a_violation(tmp_path):
+    starts = [{"repeat_count": 257, "inside_scf_for": False}]
+    f = bdgraph.features(_write(tmp_path, starts, [_bd(0, 256)], HOST))
+    assert any("repeat_count 257" in v for v in f["hw_violations"])
+
+
+def test_given_wrap_over_1024_then_violation_unless_the_bd_collapses_to_a_plain_run(tmp_path):
+    bad = _bd(0, 4 * 2048 * 2, dim_strides=[4, 8192], dim_wraps=[2048, 2])
+    f = bdgraph.features(_write(tmp_path, LOOPED, [bad], HOST))
+    assert any("wrap[0]=2048 > 1024" in v for v in f["hw_violations"])
+    # UNet conv shim S2MM [4,20480]/[1280,1]-style: trailing wrap 1 trimmed, 1 dim stride 4, wrap*4 == len -> plain
+    ok = _bd(0, 5120 * 4, dim_strides=[4, 20480], dim_wraps=[5120, 1])
+    g = bdgraph.features(_write(tmp_path, LOOPED, [ok], HOST))
+    assert g["hw_violations"] == []
+
+
+def test_given_a_stride_not_multiple_of_4_then_violation(tmp_path):
+    f = bdgraph.features(_write(tmp_path, LOOPED, [_bd(0, 256, dim_strides=[4, 6], dim_wraps=[8, 8])], HOST))
+    assert any("stride[1]=6 not %4" in v for v in f["hw_violations"])
+
+
+def test_given_a_plain_shim_bd_over_4092_bytes_under_aot_window_then_it_is_unpriced(tmp_path, cycles_file):
+    d = _write(tmp_path, LOOPED, [_bd(0, 256)], HOST, shim_bds=[_bd(0, 4096)])
+    f = bdgraph.features(d)
+    assert f["plain_shim_bds_large"] == 1
+    small = bdgraph.features(_write(tmp_path, LOOPED, [_bd(0, 256)], HOST, shim_bds=[_bd(0, 4092)]))
+    assert small["plain_shim_bds_large"] == 0
+    d = _write(tmp_path, LOOPED, [_bd(0, 256)], HOST, shim_bds=[_bd(0, 4096)])
+    r = estimate({"ops": [{"kernel": "x", "bdgraph": {"worklocal": str(d), "bd_write_path": "aot_window"},
+                           "host": {"bd_us": 2.0}}]}, cycles=cycles_file)
+    assert any(u.startswith("plain_shim_bds_large(1)") for u in r["unpriced"])
+    assert r["hw_violations"] == []

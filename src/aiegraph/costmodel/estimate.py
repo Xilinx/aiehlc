@@ -156,6 +156,9 @@ def estimate_bdgraph(op: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, An
         unpriced.append("locks(AM020)")
     if f["runtime_bds_skipped"]:
         unpriced.append(f"runtime_bds({f['runtime_bds_skipped']})")
+    if f["plain_shim_bds_large"] and f["bd_write_path"] == "aot_window":
+        # such BDs are written directly, outside the AOT window (Amit des-json-gap section 1)
+        unpriced.append(f"plain_shim_bds_large({f['plain_shim_bds_large']}) outside aot_window")
     return {"kernel": op.get("kernel"), "recipe": op.get("recipe"), "wait": None, "compute": None,
             "ddr": floor["ms"] if floor else None, "ddr_floor": floor, "ddr_runb": runb, "l_ms": None, "issue_ms": issue, "bd_us": bd_us if issue is not None else None,
             "bd_us_source": bd_us_src if issue is not None else None, "bound": None, "rounds": f["rounds"], "bdgraph": f,
@@ -196,4 +199,6 @@ def estimate(group: Any, board: str = "palmyra213", params: Optional[Dict[str, A
             "wait": x(wait), "compute": x(comp), "ddr": x(ddr), "l_ms": x(l_ms), "issue_ms": x(issue),
             "total_ms": ((wait or 0.0) + (l_ms or 0.0) + (issue or 0.0)) * launches,
             "bound": bounds.pop() if len(bounds) == 1 else ("mixed" if bounds else None), "launches": launches,
-            "board": board, "unpriced": unpriced, "ops": rows}
+            "board": board, "unpriced": unpriced, "ops": rows,
+            # hard HW/runtime limits broken by a bdgraph op: the design will not run as built, total_ms is moot
+            "hw_violations": [v for r in rows for v in (r.get("bdgraph") or {}).get("hw_violations", [])]}

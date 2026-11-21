@@ -54,6 +54,41 @@ def run_bytes(bd: Dict[str, Any]) -> int:
     return int(wr[0]) * 4 if st[0] == 4 else 4
 
 
+# Hard HW/runtime limits (Amit, amit/tasks/2026-11-20_des-json-gap/README.md section 2; AIE2PS).
+BD_POOL = {"core": 16, "shim": 16, "memtile": 48}   # BDs per tile DMA (shim's 16 shared by its channels)
+REPEAT_MAX = 256                                     # start_io repeat_count, 8-bit field (R-1)
+WRAP_MAX = 1024                                      # D0..D2 wrap after the eff_dims trim
+PLAIN_SHIM_WORDS_MAX = 1023                          # plain shim BD > 1023 words: legacy path, not an AOT "bd" site
+
+
+def hw_checks(tile_type: Any, bd: Dict[str, Any]) -> List[str]:
+    """Per-BD limit violations (strings).  A 1-dim stride-4 BD that collapses to a plain run is exempt from WRAP_MAX."""
+    out: List[str] = []
+    st, wr = list(bd.get("dim_strides") or []), list(bd.get("dim_wraps") or [])
+    n = int(bd.get("len", 0))
+    for i, x in enumerate(st):
+        if int(x) % 4:
+            out.append(f"stride[{i}]={x} not %4")
+    eff = len(wr)
+    while eff > 1 and wr[eff - 1] <= 1:
+        eff -= 1
+    plain = eff == 1 and st[:1] == [4] and int(wr[0]) * 4 == n
+    if wr and not plain:
+        for i, w in enumerate(wr[:min(eff, 3)]):
+            if int(w) > WRAP_MAX:
+                out.append(f"wrap[{i}]={w} > {WRAP_MAX}")
+    return out
+
+
+def is_plain_large_shim(tile_type: Any, bd: Dict[str, Any]) -> bool:
+    """Plain (no multi-dim) shim BD over 1023 words: __Runtime_dma_bd_config takes the legacy path (AXI burst not
+    set, not batched in the AOT shim-BD window; Amit des-json-gap section 1)."""
+    if tile_type != "shim" or int(bd.get("len", 0)) <= PLAIN_SHIM_WORDS_MAX * 4:
+        return False
+    st, wr = list(bd.get("dim_strides") or []), list(bd.get("dim_wraps") or [])
+    return not st or not wr
+
+
 def trip(start: Dict[str, Any], override: Optional[int] = None) -> Optional[int]:
     """Loop trip count of one start_io (1 outside a loop; None if it cannot be read)."""
     if not start.get("inside_scf_for"):
@@ -113,7 +148,16 @@ def features(src: Any) -> Dict[str, Any]:
 
     channels, skipped, locked, trips = [], 0, 0, set()
     rounds_unknown = False
+    viol: List[str] = []
+    plain_large = 0
     for t in dfs.get("tiles", []):
+        tloc, ttype = (t.get("col"), t.get("row")), t.get("type")
+        ids = {b["bd_id"] for c in t.get("dma_channels", []) for b in c.get("bd_chain", [])
+               if isinstance(b.get("bd_id"), int)}
+        if ttype in BD_POOL and len(ids) > BD_POOL[ttype]:
+            viol.append(f"{ttype}{tloc}: {len(ids)} BDs > pool {BD_POOL[ttype]}")
+        if ttype in BD_POOL and any(i < 0 or i >= BD_POOL[ttype] for i in ids):
+            viol.append(f"{ttype}{tloc}: bd_id outside 0..{BD_POOL[ttype] - 1}")
         for c in t.get("dma_channels", []):
             bds = []
             for b in c.get("bd_chain", []):
@@ -123,6 +167,9 @@ def features(src: Any) -> Dict[str, Any]:
                 a = (b.get("acquire_lock") or [{}])[0].get("id", -1)
                 r = (b.get("release_lock") or [{}])[0].get("id", -1)
                 locked += int(a >= 0 and r >= 0)
+                viol += [f"{ttype}{tloc} {c.get('direction')}{c.get('channel')} bd{b['bd_id']}: {v}"
+                         for v in hw_checks(ttype, b)]
+                plain_large += int(is_plain_large_shim(ttype, b))
                 bds.append({"bd_id": b["bd_id"], "len": int(b.get("len", 0)), "run_b": run_bytes(b),
                             "packet": bool(b.get("enable_packet"))})
             starts = []
@@ -131,7 +178,10 @@ def features(src: Any) -> Dict[str, Any]:
                 rounds_unknown |= n is None
                 if n is not None and s.get("inside_scf_for"):
                     trips.add(n)
-                starts.append({"repeat_count": int(s.get("repeat_count", 1)), "trip": n})
+                rc = int(s.get("repeat_count", 1))
+                if not 1 <= rc <= REPEAT_MAX:
+                    viol.append(f"{ttype}{tloc} {c.get('direction')}{c.get('channel')}: repeat_count {rc} not in 1..{REPEAT_MAX}")
+                starts.append({"repeat_count": rc, "trip": n})
             channels.append({"tile": (t.get("col"), t.get("row")), "type": t.get("type"),
                              "dir": c.get("direction"), "ch": c.get("channel"), "bds": bds, "starts": starts})
 
@@ -153,7 +203,8 @@ def features(src: Any) -> Dict[str, Any]:
             "rounds_unknown": rounds_unknown or (per["round"] > 0 and rounds is None),
             "bd_config": per, "bd_configs_per_launch": bdcfg, "waits": waits,
             "runtime_bds_skipped": skipped, "locked_bds": locked, "shim_run_b": shim_runs,
-            "bd_write_path": wp, "has_host_lines": sv is not None, "ddr_bytes": ddr}
+            "bd_write_path": wp, "has_host_lines": sv is not None, "ddr_bytes": ddr,
+            "hw_violations": viol, "plain_shim_bds_large": plain_large}
 
 
 def _ddr_bytes(dfs: Dict[str, Any], sv: Dict[str, Any], ovr: Optional[int], rounds: Optional[int]) -> Dict[str, Any]:
