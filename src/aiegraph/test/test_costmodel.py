@@ -609,3 +609,69 @@ def test_ksem_line_pass_and_fail(capsys):
     out = capsys.readouterr().out.splitlines()
     assert out == ["KSEM cfg=t runs=3 site_runs=4 neg_compute=0 dact_bad=0 dact_tol=0.05 PASS",
                    "KSEM cfg=t runs=2 site_runs=2 neg_compute=1 dact_bad=1 dact_tol=0.05 FAIL"]
+
+
+def _kdmaf_mod(name):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, SRC.parent / "script" / "perf" / "k_dmafeat.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_kdmaf_perch_selftest():
+    """k_dmafeat.py --selftest (M3.1.2.3 RA): >= 12 cases incl. dominant-channel pick, constant drop, nan reject"""
+    import re
+    import subprocess
+    p = SRC.parent / "script" / "perf" / "k_dmafeat.py"
+    r = subprocess.run([sys.executable, "-I", str(p), "--selftest"], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+    m = re.search(r"^KDMAF SELFTEST PASS \((\d+)/(\d+)\)$", r.stdout, re.M)
+    assert m and m.group(1) == m.group(2) and int(m.group(1)) >= 12, r.stdout
+    for name in ("dom_channel", "const_drop", "nan_reject", "maxch_t_bw"):
+        assert re.search(r"^KDMAF SELFTEST %s ok$" % name, r.stdout, re.M), name
+
+
+def test_kdmaf_perch_dom_and_rank():
+    """dominant = MM2S channel with most bytes; constant features dropped; varying nan feature rejects the TGT"""
+    kf = _kdmaf_mod("k_dmafeat_perch1")
+    ch = {(0, "MM2S", 0): dict(bytes=10.0, bd_n=1.0, run_b=32), (0, "MM2S", 1): dict(bytes=50.0, bd_n=5.0, run_b=64),
+          (0, "S2MM", 0): dict(bytes=500.0, bd_n=1.0, run_b=128)}
+    f = kf.ch_feats(ch)
+    assert (f["dom_bytes"], f["dom_bd_n"], f["dom_run_b"]) == (50.0, 5.0, 64)
+    assert abs(f["maxch_t"] - 500 / 10800.0) < 1e-12
+    ss = [dict(k=3, v=x, dwait=-x) for x in (1, 2, 3, 4)]
+    best, rho, cr, nc, nn = kf.rank_feats(ss, ("k", "v"))
+    assert best == "v" and abs(rho + 1.0) < 1e-12 and nc == 1 and nn == 0 and kf.tgt_pass(rho, nn)
+    best, rho, cr, nc, nn = kf.rank_feats([dict(v=x, dwait=1.0) for x in (1, 2, 3)], ("v",))
+    assert nn == 1 and not kf.tgt_pass(rho, nn)
+
+
+def test_kdmaf_perch_no_resid_needed(tmp_path):
+    """--perch does not require --resid (argparse error rc=2 only without --build-root / runs); plain mode still does"""
+    import subprocess
+    p = SRC.parent / "script" / "perf" / "k_dmafeat.py"
+    r = subprocess.run([sys.executable, "-I", str(p), "--perch"], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2 and "--perch needs" in r.stderr and "--resid" not in r.stderr.split("error:")[-1]
+    r = subprocess.run([sys.executable, "-I", str(p), "--build-root", str(tmp_path), "x=y"], capture_output=True,
+                       text=True, timeout=60)
+    assert r.returncode == 2 and "--resid" in r.stderr
+
+
+def test_kdmaf_perch_unet_logs():
+    """M3.1.2.3 RA on the UNet a-logs (skipped when the build dir / logs are absent): conv TGT |rho| >= 0.5 nan=0"""
+    import re
+    import subprocess
+    b = Path("/scratch/staff/huaj/tmp/costmodel_m3121")
+    d = Path("/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks/2026-11-20_M3121")
+    logs = [d / "unet_off.a.log", d / "unet_aot-kco.a.log"]
+    if not (b.is_dir() and all(x.is_file() for x in logs)):
+        pytest.skip("UNet build dir / logs not present")
+    p = SRC.parent / "script" / "perf" / "k_dmafeat.py"
+    r = subprocess.run([sys.executable, "-I", str(p), "--perch", "--build-root", str(b), "off=%s" % logs[0],
+                        "aot-kco=%s" % logs[1]], capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr
+    assert r.stdout.splitlines()[-1] == "KDMAF ALL sites=276 feats=dmach PASS"
+    for cfg in ("off", "aot-kco"):
+        assert re.search(r"^KDMAF TGT cfg=%s cls=conv n=48 const=\d+ best=\S+ spearman=-?(0\.[5-9]\d*|1\.0*) nan=0 PASS$"
+                         % cfg, r.stdout, re.M), cfg
