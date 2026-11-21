@@ -65,6 +65,13 @@ Output:
           cap (columns + t0 + kfirst), chosen by run-a max-rel then LOO; extra lines:
           KDMAF7  cfg log sites no_feat ; KCAP cfg=<c> cls=<cls> params=<n> cap=<7 conv|5> ok=<0|1> ;
           KORRES  cfg site cls part K_a Kh_a rel_a excess_ms (top 5 tolerance-excess sites) ; KCAP ALL ok=<0|1>
+  --khat-tsv PATH (M3.1.1.2b PKP probe, needs --dmafeat for src=koracle_dma7, else koracle_bw): per cfg the
+          KORACLE class params fitted on run a applied to every run-a site with launches > 0 -> K_hat_ms per launch
+          (= k_hat / launches, kfirst spread over the launches); TSV 8 cols cfg part site cls launches K_hat_ms
+          compute_src ovl_src ('#' header), compute/ovl src = meas (log-a compute_cyc/ovl_cyc) | none (no counters,
+          K_hat nan); the old file is removed first, the new one written once after all cfgs; one line per cfg
+          KHAT cfg=<c> src=<koracle_dma7|koracle_bw> fit=a sites=<n> compute=<meas|none|mixed> ovl=<..> tsv=<path>
+          (probe only, no gate)
   KFLOOR  cfg ... tol_fail PASS|FAIL (gates on KTOL; maxrel printed only);
   KFLOOR ALL src cfgs sites perf_sites r2_min maxrel loo_maxrel act_over_k_max PASS|FAIL tol_fail=<n>  (last line)
 --map-only (no counter lines needed):
@@ -543,7 +550,7 @@ def oracle_lines(cfg, scope, pa, runs_sites, dmafeat=False):
     print("KORACLE cfg=%s feats=%s params=%d r2_min=%.4f tol_fail=%d loo_maxrel=%.4f reach=%d"
           % (cfg, "dma7" if dmafeat else "bw", npar, min(r2s) if r2s else float("nan"), t["fail"], lo, reach))
     return dict(params=npar, r2=min(r2s) if r2s else float("nan"), tol_fail=t["fail"], loo=lo, reach=reach,
-                classes=po, cap_ok=cap_ok)
+                classes=po, cap_ok=cap_ok, clsf=clsf)
 
 
 # ------------------------------------------------------------------ M3.1.2.3 QK: per-class oracle over the 7 DMA features
@@ -855,6 +862,48 @@ def spreadx_line(mine, ref, want=SPREADX_SITES, tol=SPREADX_TOL):
     return ok
 
 
+KHAT_COLS = ("cfg", "part", "site", "cls", "launches", "K_hat_ms", "compute_src", "ovl_src")
+
+
+def khat_rows(cfg, po, clsf, sites):
+    """PKP probe: K_hat per launch of every run-a site with launches > 0 from the KORACLE class params po
+    ({cls: (p, loo)}, fit on run a); compute/ovl src = meas when the site carries the log-a counters (oc/ovl),
+    else none (K_hat nan); a site whose class has no oracle params also gets nan.  Returns TSV row dicts."""
+    out = []
+    for s in sorted((s for s in sites if s.get("launches", 0) > 0), key=lambda s: s["part"]):
+        c = clsf(s)
+        cs = "meas" if "oc" in s else "none"
+        os_ = "meas" if "ovl" in s else "none"
+        kh = float("nan")
+        if c in po and cs == "meas" and os_ == "meas" and (s.get("dcol") is not None or "w" not in po[c][0]):
+            kh = k_hat(po[c][0], s) / s["launches"]
+        out.append(dict(cfg=cfg, part=s["part"], site=s["site"], cls=c, launches=s["launches"], K_hat_ms=kh,
+                        compute_src=cs, ovl_src=os_))
+    return out
+
+
+def _src_sum(vals):
+    v = set(vals)
+    return v.pop() if len(v) == 1 else ("mixed" if v else "none")
+
+
+def write_khat(path, rows_by_cfg, src):
+    """write the KHAT TSV (header + rows of every cfg) and print one KHAT line per cfg (after the write, so
+    tsv= names a file that exists); returns the number of data rows"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# " + " ".join(KHAT_COLS)]
+    for rows in rows_by_cfg.values():
+        lines += ["%s %d %s %s %d %.6f %s %s" % (r["cfg"], r["part"], r["site"], r["cls"], r["launches"],
+                                                 r["K_hat_ms"], r["compute_src"], r["ovl_src"]) for r in rows]
+    path.write_text("\n".join(lines) + "\n")
+    for cfg, rows in rows_by_cfg.items():
+        print("KHAT cfg=%s src=%s fit=a sites=%d compute=%s ovl=%s tsv=%s"
+              % (cfg, src, len(rows), _src_sum(r["compute_src"] for r in rows),
+                 _src_sum(r["ovl_src"] for r in rows), path))
+    return len(lines) - 1
+
+
 def full(a):
     """rc: 0 PASS, 1 FAIL, 2 --model ovl on a log without the ovl fields.
     CFG=LA[,LB,LC,...]: fit on LA (run a), every other log is a check run (b, c, ...). Per-cfg PASS needs KTOL
@@ -870,6 +919,10 @@ def full(a):
     spx = {}
     dmafeat = bool(getattr(a, "dmafeat", False))
     cap_all = True
+    khat_tsv = getattr(a, "khat_tsv", None)
+    khat = {}
+    if khat_tsv:
+        Path(khat_tsv).unlink(missing_ok=True)   # never let an old TSV pass as this run's output
     for spec in a.runs:
         cfg, logs = spec.split("=", 1)
         logs = logs.split(",")
@@ -931,6 +984,8 @@ def full(a):
         kresid_acc(cfg, rs_all, p, racc)
         orc = oracle_lines(cfg, scope, pa, rs_all, dmafeat)
         cap_all &= orc["cap_ok"]
+        if khat_tsv:
+            khat[cfg] = khat_rows(cfg, orc["classes"], orc["clsf"], sss[0])
         dr = 0.0
         if cfg in refs:
             dr = drift(sb, ref_sites(a, cfg, refs[cfg]))
@@ -961,6 +1016,8 @@ def full(a):
         spreadx_line(spx, read_spread_ref(a.spread_ref))
     if dmafeat:
         print("KCAP ALL ok=%d" % int(cap_all and agg["cfgs"] > 0))
+    if khat_tsv:
+        write_khat(khat_tsv, khat, "koracle_dma7" if dmafeat else "koracle_bw")
     ok_all = ok_all and src_ok and ksan_ok and agg["cfgs"] > 0
     print("KFLOOR ALL src=%s cfgs=%d sites=%d perf_sites=%d r2_min=%.3f maxrel=%.3f loo_maxrel=%.3f "
           "act_over_k_max=%.3f %s tol_fail=%d"
@@ -1375,6 +1432,25 @@ def selftest():
         and sorted(pl["w"]) == ["ch", "run"] and "KCAP cfg=synth cls=linear params=4 cap=5 ok=1" in od
         and re.match(r"KORACLE cfg=synth feats=dma7 params=4 r2_min=\S+ tol_fail=0 loo_maxrel=\S+ reach=1$", od[-1])
         is not None, "param_maxrel=%.1e %s" % (ed, od[-1] if od else ""))
+    # 21b khat_tsv (PKP): the dma7 oracle's run-a class params -> per-launch K_hat rows (== k_hat / launches),
+    #    a site without counters -> none / nan; TSV header + rows, KHAT line names the file
+    import tempfile
+    sx = dict(Ad[0], site="dx", part=999)
+    sx.pop("oc"), sx.pop("ovl")
+    kr = khat_rows("synth", ord_["classes"], ord_["clsf"], Ad + [sx, dict(Ad[1], site="d0l", part=998, launches=0)])
+    kerr = max(abs(r["K_hat_ms"] * r["launches"] - k_hat(pl, s)) / s["K"]
+               for r, s in zip(kr, sorted(Ad, key=lambda s: s["part"])))
+    with tempfile.TemporaryDirectory() as td:
+        tp = Path(td) / "k" / "khat.tsv"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            nk = write_khat(tp, {"synth": kr}, "koracle_dma7")
+        tl = tp.read_text().splitlines()
+    kl = buf.getvalue().splitlines()
+    chk("khat_tsv", nk == 31 and len(tl) == 32 and tl[0] == "# " + " ".join(KHAT_COLS)
+        and all(len(x.split()) == 8 for x in tl[1:]) and kerr < 1e-9 and tl[-1].endswith(" nan none none")
+        and kl == ["KHAT cfg=synth src=koracle_dma7 fit=a sites=31 compute=mixed ovl=mixed tsv=%s" % tp],
+        "rows=%d kerr=%.1e %s" % (nk, kerr, kl[0] if kl else ""))
     # 22 kcap_violation: a class over its cap -> KCAP ok=0 (and the cfg not ok); conv may use 7, others 5
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -1426,6 +1502,9 @@ def main(argv=None):
                     help="KTOL site scope per cfg (default off=kge0.1, others all)")
     ap.add_argument("--spread-ref", metavar="TSV",
                     help="spread_abc.tsv (k_noise --spread-out): SPREADX per-site check of k_diag's own spread")
+    ap.add_argument("--khat-tsv", metavar="TSV",
+                    help="PKP probe: per-launch K_hat of every run-a site from the KORACLE class params (fit on a) "
+                         "-> TSV (cfg part site cls launches K_hat_ms compute_src ovl_src) + one KHAT line per cfg")
     ap.add_argument("--dmafeat", action="store_true",
                     help="KORACLE over the 7 static DMA features (k_dmafeat.site_dma_feats), conv one class + tkw; "
                          "KCAP per class (conv <= 7, others <= 5 params)")

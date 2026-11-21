@@ -845,6 +845,36 @@ def test_kdmaf_ddrt_unet_logs(tmp_path):
     assert len(t.read_text().splitlines()) == 277
 
 
+def test_khat_tsv_probe(tmp_path, capsys):
+    """k_diag.py --khat-tsv (M3.1.1.2b PKP): KORACLE run-a class params -> per-launch K_hat rows (k_hat / launches),
+    sites without counters -> none / nan, launches=0 sites dropped; TSV header + 8 cols, KHAT line names the file;
+    the selftest carries the khat_tsv case"""
+    kd = _k_diag_mod("k_diag_khat")
+    w, t0, kf = dict(ch=0.08, run=0.004), 0.03, 0.2
+    A = kd._synth_dma(61, 12, w, t0, kf)
+    po = kd.oracle_fit_dma(A)
+    p = po["linear"][0]
+    nc = dict(A[0], site="dx", part=99)
+    del nc["oc"], nc["ovl"]
+    rows = kd.khat_rows("c", po, kd.dma_cls, A + [nc, dict(A[1], site="dz", part=98, launches=0)])
+    assert len(rows) == 13 and [r["part"] for r in rows] == sorted(r["part"] for r in rows)
+    by = {s["part"]: s for s in A}
+    for r in rows[:-1]:
+        assert r["compute_src"] == r["ovl_src"] == "meas"
+        assert abs(r["K_hat_ms"] * r["launches"] - kd.k_hat(p, by[r["part"]])) < 1e-9
+    assert rows[-1]["compute_src"] == "none" and rows[-1]["K_hat_ms"] != rows[-1]["K_hat_ms"]
+    tsv = tmp_path / "khat_probe.tsv"
+    capsys.readouterr()
+    assert kd.write_khat(tsv, {"c": rows[:-1]}, "koracle_dma7") == 12
+    out = capsys.readouterr().out.splitlines()
+    assert out == ["KHAT cfg=c src=koracle_dma7 fit=a sites=12 compute=meas ovl=meas tsv=%s" % tsv]
+    lines = tsv.read_text().splitlines()
+    assert lines[0] == "# cfg part site cls launches K_hat_ms compute_src ovl_src" and len(lines) == 13
+    assert all(len(x.split()) == 8 for x in lines[1:])
+    assert kd.selftest()
+    assert "KDIAG SELFTEST %-28s ok" % "khat_tsv" in capsys.readouterr().out
+
+
 # ---- M3.1.1.2 PC: kln_site per-launch K + L + N synthesis ----
 def test_kln_norm_run_join():
     """lpred run 'unet_off.a.log' and npred run 'a' unify to the same (cfg, run, part) key"""
