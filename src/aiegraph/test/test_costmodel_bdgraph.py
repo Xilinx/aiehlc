@@ -535,3 +535,15 @@ def test_given_five_starts_at_launch_level_then_only_a_wait_between_them_avoids_
     assert any("5 starts outstanding" in v for v in _sq(tmp_path, five, starts=starts)["hw_violations"])
     split = five[:3] + [{"line": 13, "kind": "wait"}] + [{"line": 14 + i, "kind": "startio"} for i in range(2)]
     assert _sq(tmp_path, split, starts=starts)["hw_violations"] == []
+
+
+def test_given_a_loop_host_line_with_trip_count_then_it_sets_the_unroll_over_the_ssa_range(tmp_path):
+    # schedule_view loop lines now carry trip_count (des-json gap s4 ask 1); it wins over loop_range / trip_n
+    ssa = [{"repeat_count": 1, "inside_scf_for": True, "loop_range": "v7..v6 step v5"}]
+    host = [{"line": 20, "kind": "loop", "trip_count": 8}, {"line": 21, "kind": "startio"},
+            {"line": 22, "kind": "loopend"}, {"line": 30, "kind": "wait"}]
+    assert len(_sq(tmp_path, host, starts=ssa)["hw_violations"]) == 1
+    host[0]["trip_count"] = 4
+    assert _sq(tmp_path, host, starts=ssa, trip_count=8)["hw_violations"] == []
+    host[0]["trip_count"] = None                               # unresolved -> falls back to trip_n
+    assert len(_sq(tmp_path, host, starts=ssa, trip_count=8)["hw_violations"]) == 1

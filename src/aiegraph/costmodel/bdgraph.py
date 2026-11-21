@@ -140,14 +140,15 @@ def start_queue_violations(sv: Dict[str, Any], trip_n: Optional[int]) -> List[st
 
     Amit's bdgraph_extract.py scans the lines once; a start inside a loop whose wait is outside the loop then
     queues one entry per round, so here each loop body runs min(trip, START_Q + 1) times (once if the trip count
-    is unknown -- a lower bound).  A line belongs to the first channel whose host_lines carry it (as in the extractor).
+    is unknown -- a lower bound).  A loop host_line's own ``trip_count`` (schedule_view, des-json gap s4 ask 1)
+    takes precedence over ``trip_n``.  A line belongs to the first channel whose host_lines carry it (as in the extractor).
     """
     seen: Dict[int, Dict[str, Any]] = {}
     for t in sv.get("tiles", []):
         loc = tuple(t.get("loc") or (t.get("col"), t.get("row")))
         for c in t.get("dma_channels", []):
             for h in c.get("host_lines", []):
-                seen.setdefault(h["line"], {"line": h["line"], "kind": h["kind"],
+                seen.setdefault(h["line"], {"line": h["line"], "kind": h["kind"], "trip": h.get("trip_count"),
                                             "key": (loc, f"{c.get('direction')}{c.get('channel')}")})
     seq = [seen[k] for k in sorted(seen) if seen[k]["kind"] in ("startio", "wait", "loop", "loopend")]
     reps = 1 if trip_n is None else max(1, min(int(trip_n), START_Q + 1))
@@ -159,7 +160,8 @@ def start_queue_violations(sv: Dict[str, Any], trip_n: Optional[int]) -> List[st
             h = seq[i]
             if h["kind"] == "loop":
                 end = i + 1
-                for _ in range(reps):
+                n = reps if h["trip"] is None else max(1, min(int(h["trip"]), START_Q + 1))
+                for _ in range(n):
                     end = run(i + 1)
                 i = end + 1
                 continue
