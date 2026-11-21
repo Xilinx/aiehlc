@@ -843,3 +843,35 @@ def test_kdmaf_ddrt_unet_logs(tmp_path):
     assert re.search(r"^KDMAF DDRT cfg=off site=conv121 part=414 ddr_t_ms=\d+\.\d+ dwait_ms=6\d\.\d+ ratio=\d+\.\d+$",
                      r.stdout, re.M)
     assert len(t.read_text().splitlines()) == 277
+
+
+# ---- M3.1.1.2 PC: kln_site per-launch K + L + N synthesis ----
+def test_kln_norm_run_join():
+    """lpred run 'unet_off.a.log' and npred run 'a' unify to the same (cfg, run, part) key"""
+    ks = _script("kln_site")
+    assert ks.norm_run("unet_off.a.log") == ks.norm_run("a") == "a"
+    assert ks.norm_run("/x/unet_aot-kco.c.log") == "c"
+    with pytest.raises(ValueError):
+        ks.norm_run("unet_off.log")
+    lp = ks.tsv_map([dict(cfg="off", run="unet_off.b.log", part="14", site="conv0", site_ms="1")], ("site_ms",))
+    np_ = ks.tsv_map([dict(cfg="off", run="b", part="14", site="conv0", site_ms="1")], ("site_ms",))
+    assert set(lp) == set(np_) == {("off", "b", 14)}
+
+
+def test_kln_selftest_audit(capsys):
+    """selftest PASS; the predict path reads no measured field"""
+    ks = _script("kln_site")
+    assert ks.selftest()
+    assert ks.audit()
+    assert capsys.readouterr().out.splitlines()[-1] == "KLN AUDIT meas_at_predict=0"
+    pv = ks.pred_view(dict(L_hat=1.0, N_hat=1.0, launches=2, L_meas=5.0, N_meas=5.0, site_ms=50.0))
+    assert set(pv) == {"L_hat", "N_hat", "launches"} and ks.predict_launch(2.0, pv) == 2.0
+
+
+def test_kln_insample_khat_missing(tmp_path):
+    """--insample with a missing or empty khat file -> rc=2"""
+    ks = _script("kln_site")
+    e = tmp_path / "k.tsv"
+    e.write_text("")
+    for k in (tmp_path / "none.tsv", e):
+        assert ks.main(["--insample", "--khat", str(k), "--lpred", "x", "--npred", "y", "--fit", "off=z"]) == 2
