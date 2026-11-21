@@ -20,11 +20,14 @@ core_cyc = ISS cycles of ONE core for ONE launch (multiply by launches per site)
             NNLS on relative error over the --iss json's u_* points; leave-one-out max relative error is printed.
             (a*MACs + b*chunks + c*rounds alone has LOO 0.66 on the 14 points: the TKW=8 vs 32 instances differ
             in per-sub-tile cost, hence the two *S terms.)
-fa sites: no FA entry in the ISS json and no board FA core cycles -> fa_src=formula_noloo:
-  core_cyc = (2*h*n*m*d MACs of the site / launches / 16 cores) / median u_* ISS MAC/cyc  (ASSUMED, not validated;
-  P3 calibrates FA on the board log).
+fa sites, per site:
+  iss            the --iss-unet json has an entry (or one of its "variants") for the site's fa_kernel__<K> (ISS of a
+                 UNet build's own FA TU, iss_unet_fa.sh) whose recorded kernel_<K>.cc / <K>.cc / aieml_<K>.bcf md5
+                 equal this build's (unet_off and unet_aot-kco FA TUs differ: KCO code; each has its own ISS run)
+  formula_noloo  else: core_cyc = (2*h*n*m*d MACs / launches / 16 cores) / median u_* ISS MAC/cyc (ASSUMED)
+  fa_src = iss when every FA site is iss, formula_noloo when none, else mixed.
 Prints one KCYC_SITE line per AIE site, KCYC_FCHK lines (formula vs iss_unet points, if any), then
-  KCYC unet kacc=<covered>/<n> fa=<n_fa_cyc>/<n_fa> iss=<i> formula=<f> fa_src=formula_noloo formula_loo_maxrel=<x>
+  KCYC unet kacc=<covered>/<n> fa=<n_fa_cyc>/<n_fa> iss=<i> formula=<f> fa_src=<iss|mixed|formula_noloo> formula_loo_maxrel=<x>
   KCYC_SUM kacc_sites=<n> covered=<covered>
 rc=1 when iss+formula != kacc sites, or any count disagrees with the build log.
 """
@@ -91,6 +94,28 @@ def md5(p):
     return hashlib.md5(open(p, "rb").read()).hexdigest()
 
 
+def fa_iss_pick(wl, kern, u):
+    """the --iss-unet FA entry (or one of its 'variants', e.g. the aot-kco TU) whose recorded TU md5
+    (kernel_<K>.cc, <K>.cc, aieml_<K>.bcf) equals this build's; None when no ISS run matches this TU"""
+    try:
+        have = (md5(os.path.join(wl, "kernel_%s.cc" % kern)), md5(os.path.join(wl, "%s.cc" % kern)),
+                md5(os.path.join(wl, "aieml_%s.bcf" % kern)))
+    except OSError:
+        return None
+    for v in [u] + list(u.get("variants", [])):
+        m = v.get("src_md5") or {}
+        if (m.get("kernel"), m.get("fa"), m.get("bcf")) == have and v.get("core_cyc", 0) > 0:
+            return v
+    return None
+
+
+def fa_src_of(n_iss, n_fa):
+    """iss when every FA site has an ISS value, formula_noloo when none, else mixed"""
+    if n_fa and n_iss == n_fa:
+        return "iss"
+    return "mixed" if n_iss else "formula_noloo"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-root", required=True)
@@ -128,7 +153,7 @@ def main(argv=None):
     wl = os.path.join(build, "ag_work", "aiek", "aiek_unetconv", "worklocal")
 
     out_sites, fchk = [], []
-    cnt = dict(iss=0, iss_unet=0, formula=0, fa=0)
+    cnt = dict(iss=0, iss_unet=0, formula=0, fa=0, fa_iss=0)
     n_kacc = n_fa = 0
     for i, s in enumerate(st):
         if s["kind"] in ("conv", "linear"):
@@ -169,10 +194,19 @@ def main(argv=None):
             n_fa += 1
             g = gfa[s["cls"]]
             macs = 2 * g["h"] * g["n"] * g["m"] * g["d"]
+            kern = s["kernels"][0]
             cyc = macs / s["launches"] / NCORE / mac_rate
-            out_sites.append(dict(i=i, kind="fa", cid=s["cid"], kernel=s["kernels"][0], launches=s["launches"],
-                                  cls=s["cls"], fa=g, macs_site=macs, core_cyc=round(cyc, 1),
-                                  core_cyc_site=round(cyc * s["launches"], 1), src="formula_noloo"))
+            rec = dict(i=i, kind="fa", cid=s["cid"], kernel=kern, launches=s["launches"], cls=s["cls"], fa=g,
+                       macs_site=macs, formula_cyc=round(cyc, 1))
+            u = iss_unet.get(kern)
+            v = fa_iss_pick(wl, kern, u) if u is not None else None
+            if v is not None:
+                rec.update(core_cyc=v["core_cyc"], src="iss", iss_log=v.get("log"))
+                cnt["fa_iss"] += 1
+            else:
+                rec.update(core_cyc=round(cyc, 1), src="formula_noloo")
+            rec["core_cyc_site"] = rec["core_cyc"] * s["launches"]
+            out_sites.append(rec)
             cnt["fa"] += 1
 
     seen = set()
@@ -198,7 +232,7 @@ def main(argv=None):
     if covered != n_kacc_bl or n_kacc != n_kacc_bl:
         print("KCYC_ERR iss+formula=%d kacc_sites=%d build.log=%d" % (covered, n_kacc, n_kacc_bl))
         rc = 1
-    fa_src = "formula_noloo"
+    fa_src = fa_src_of(cnt["fa_iss"], cnt["fa"])
     doc = dict(build=build, build_log=blog, iss_json=a.iss, iss_unet_json=a.iss_unet if iss_unet else None,
                core_cyc_unit="ISS cycles, one core, one launch (multiply by launches)",
                counts=dict(build_log=dict(conv=n_conv, linear=n_lin, attn=n_attn), kacc_sites=n_kacc, fa_sites=n_fa,
@@ -207,9 +241,10 @@ def main(argv=None):
                             loo_maxrel=loo_max, in_maxrel=ins_max,
                             loo=dict(zip([k["name"] for k in iss], [round(e, 4) for e in loo_err])),
                             chk_iss_unet=[dict(kernel=k, iss=c, formula=p) for k, c, p in fchk]),
-               fa=dict(src=fa_src, mac_per_cyc_assumed=mac_rate,
-                       note="core_cyc = 2*h*n*m*d / launches / 16 / median u_* ISS MAC/cyc; no LOO, no FA ISS/board "
-                            "point; P3 calibrates on the board log"),
+               fa=dict(src=fa_src, n_iss=cnt["fa_iss"], n_fa=cnt["fa"], mac_per_cyc_assumed=mac_rate,
+                       note="src=iss: core_cyc = ISS of the site's own FA TU (--iss-unet entry, md5 of kernel/fa/bcf "
+                            "checked against this build); fallback formula_noloo = 2*h*n*m*d / launches / 16 / median "
+                            "u_* ISS MAC/cyc. No coefficient is fitted to board compute_cyc."),
                sites=out_sites)
     with open(a.out, "w") as fh:
         json.dump(doc, fh, indent=1)

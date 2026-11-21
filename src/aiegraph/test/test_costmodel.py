@@ -675,3 +675,76 @@ def test_kdmaf_perch_unet_logs():
     for cfg in ("off", "aot-kco"):
         assert re.search(r"^KDMAF TGT cfg=%s cls=conv n=48 const=\d+ best=\S+ spearman=-?(0\.[5-9]\d*|1\.0*) nan=0 PASS$"
                          % cfg, r.stdout, re.M), cfg
+
+
+# --- M3.1.2.3 RF: k_core_check --max-rel / src= / fa_src= (FA core from ISS) ---
+def _kcore_mod(name, monkeypatch, fa_src="iss", fa_pred=900.0, lin_pred=1000.0):
+    """k_core_check with a fake k_diag (one log, two sites: linear0 + fa1, compute_cyc 1000 each) and a fake kcyc"""
+    import importlib.util
+    import types
+    spec = importlib.util.spec_from_file_location(name, SRC.parent / "script" / "perf" / "k_core_check.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    kd = types.ModuleType("k_diag")
+    import re
+    kd._CMP = re.compile(r"^CMP unet board=(\S+) .*aie_launches=(\d+) .*run_rc=(-?\d+)", re.M)
+    perf = dict(compute_cyc=1000, perf_n=1, has_ovl=True)
+    kd.load = lambda cfg, lg, br: ([dict(kind="linear", site="linear0", cls="linear", launches=1, perf=perf),
+                                    dict(kind="fa", site="fa1", cls="fa16", launches=1, perf=perf)],
+                                   "CMP unet board=palmyra213 x aie_launches=258 y run_rc=0\n")
+    monkeypatch.setitem(sys.modules, "k_diag", kd)
+    monkeypatch.setattr(m, "SITES_PER_CFG", 2)
+    monkeypatch.setattr(m, "N_LOGS", 1)
+    monkeypatch.setattr(m, "kcyc", lambda b, i: (0, {("linear", 0): dict(core_cyc=lin_pred, src="iss"),
+                                                     ("fa", 1): dict(core_cyc=fa_pred, src=fa_src)}))
+    return m
+
+
+def _kcore_run(m, capsys, *extra):
+    rc = m.main(["--build-root", "/nonexistent", *extra, "c=x.log"])
+    return rc, capsys.readouterr().out
+
+
+def test_kcore_maxrel_fail_and_pass(monkeypatch, capsys):
+    """--max-rel: maxrel 0.25 > 0.20 -> FAIL rc=1; <= 0.30 -> PASS; no --max-rel -> no accuracy limit"""
+    m = _kcore_mod("k_core_check_rf1", monkeypatch, fa_pred=750.0)
+    rc, out = _kcore_run(m, capsys, "--max-rel", "0.20")
+    last = out.splitlines()[-1]
+    assert rc == 1 and last.startswith("KCORE ALL sites=2 cover=2 finite=1 maxrel=0.2500 ") and last.endswith(
+        " fa_src=iss FAIL"), out
+    rc, out = _kcore_run(m, capsys, "--max-rel", "0.30")
+    assert rc == 0 and out.splitlines()[-1].endswith(" fa_src=iss PASS"), out
+    rc, out = _kcore_run(m, capsys)
+    assert rc == 0 and out.splitlines()[-1].endswith(" PASS"), out
+
+
+def test_kcore_maxrel_src_and_fa_src(monkeypatch, capsys):
+    """per-class src=<iss|formula|mixed>; fa_src=formula on the ALL line -> FAIL even within --max-rel"""
+    import re
+    m = _kcore_mod("k_core_check_rf2", monkeypatch, fa_src="formula_noloo", fa_pred=1000.0)
+    rc, out = _kcore_run(m, capsys, "--max-rel", "0.20")
+    assert re.search(r"^KCORE cfg=c cls=fa16 sites=1 .* src=formula$", out, re.M), out
+    assert re.search(r"^KCORE cfg=c cls=linear sites=1 .* src=iss$", out, re.M), out
+    assert re.search(r"^KCORE cfg=c cls=ALL sites=2 .* src=mixed$", out, re.M), out
+    assert rc == 1 and re.search(r"^KCORE ALL sites=2 cover=2 finite=1 maxrel=0\.0000 med_rel=0\.0000 worst_cls=\S+ "
+                                 r"fa_src=formula FAIL$", out.splitlines()[-1]), out
+    assert "no accuracy threshold" not in m.__doc__.lower()
+
+
+def test_kcore_maxrel_kcyc_fa_src(tmp_path):
+    """kcyc_unet: fa_src from the data (iss only when every FA site has an md5-matching ISS value), variants"""
+    import hashlib
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("kcyc_unet_rf", SRC.parent / "script" / "perf" / "kcyc_unet.py")
+    k = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(k)
+    assert (k.fa_src_of(18, 18), k.fa_src_of(0, 18), k.fa_src_of(6, 18)) == ("iss", "formula_noloo", "mixed")
+    K = "fa_kernel__x"
+    for f, t in (("kernel_%s.cc" % K, b"kco"), ("%s.cc" % K, b"fa"), ("aieml_%s.bcf" % K, b"bcf")):
+        (tmp_path / f).write_bytes(t)
+    h = lambda b: hashlib.md5(b).hexdigest()  # noqa: E731
+    off = dict(core_cyc=100, src_md5=dict(kernel=h(b"off"), fa=h(b"fa"), bcf=h(b"bcf")))
+    assert k.fa_iss_pick(str(tmp_path), K, off) is None
+    kco = dict(core_cyc=120, src_md5=dict(kernel=h(b"kco"), fa=h(b"fa"), bcf=h(b"bcf")))
+    assert k.fa_iss_pick(str(tmp_path), K, dict(off, variants=[kco]))["core_cyc"] == 120
+    assert k.fa_iss_pick(str(tmp_path / "missing"), K, dict(off, variants=[kco])) is None

@@ -226,6 +226,163 @@
     "gemm": "705e89316b026defdc25d63606ccd490",
     "bcf": "ddc50ea5b5e40266887c946bd3773d19"
    }
+  },
+  "fa_kernel__ns_fa_h8_n1024_m1024_d40_8_1024_1024_40_0_1280_32_5120_81920_5120": {
+   "core_cyc": 43171,
+   "cls": "fa16",
+   "fa_src": "iss",
+   "wall_s": 82,
+   "log": "/scratch/staff/huaj/tmp/maxwell_faiss/fa_kernel__ns_fa_h8_n1024_m1024_d40_8_1024_1024_40_0_1280_32_5120_81920_5120/iss.log",
+   "src_md5": {
+    "kernel": "a47dd31ea72377ae3a5fea1a5f99f17f",
+    "fa": "107af6d2f597da09432f6f5b04c76f2c",
+    "bcf": "cfa78dff2a65318e43957cdcdb29560d"
+   },
+   "cfg": "off",
+   "variants": [
+    {
+     "cfg": "aot-kco",
+     "core_cyc": 43171,
+     "wall_s": 76,
+     "log": "/scratch/staff/huaj/tmp/maxwell_faiss_kco/fa_kernel__ns_fa_h8_n1024_m1024_d40_8_1024_1024_40_0_1280_32_5120_81920_5120/iss.log",
+     "src_md5": {
+      "kernel": "dac4e925db823e0567a7f5c2f6151f4e",
+      "fa": "d252a0c2d84f22c046a0add6fcf582eb",
+      "bcf": "cfa78dff2a65318e43957cdcdb29560d"
+     }
+    }
+   ]
+  },
+  "fa_kernel__ns_fa_h8_n1024_m77_d40_8_1024_77_40_0_1280_3_5120_7680_5120": {
+   "core_cyc": 5803,
+   "cls": "fa16",
+   "fa_src": "iss",
+   "wall_s": 79,
+   "log": "/scratch/staff/huaj/tmp/maxwell_faiss/fa_kernel__ns_fa_h8_n1024_m77_d40_8_1024_77_40_0_1280_3_5120_7680_5120/iss.log",
+   "src_md5": {
+    "kernel": "9240d845d47ce371ebefb8fdd743bdd4",
+    "fa": "1738055006c649419c6b9eb15d77509b",
+    "bcf": "cfa78dff2a65318e43957cdcdb29560d"
+   },
+   "cfg": "off",
+   "variants": [
+    {
+     "cfg": "aot-kco",
+     "core_cyc": 5803,
+     "wall_s": 74,
+     "log": "/scratch/staff/huaj/tmp/maxwell_faiss_kco/fa_kernel__ns_fa_h8_n1024_m77_d40_8_1024_77_40_0_1280_3_5120_7680_5120/iss.log",
+     "src_md5": {
+      "kernel": "5a3338c85dd8551158800f44472cc036",
+      "fa": "cbdbea09667dc74c6cde2ca6eddd8333",
+      "bcf": "cfa78dff2a65318e43957cdcdb29560d"
+     }
+    }
+   ]
+  },
+  "fa_kernel__ns_fa_h8_n256_m256_d80_8_256_256_80_0_2560_8_10240_40960_10240": {
+   "core_cyc": 16423,
+   "cls": "fa16",
+   "fa_src": "iss",
+   "wall_s": 80,
+   "log": "/scratch/staff/huaj/tmp/maxwell_faiss/fa_kernel__ns_fa_h8_n256_m256_d80_8_256_256_80_0_2560_8_10240_40960_10240/iss.log",
+   "src_md5": {
+    "kernel": "049fdbdaf0ba09025bf3e0e95d8acf02",
+    "fa": "3d9d62bcaac6d4cf237149a9eaea522c",
+    "bcf": "842db7ca77c7a4183051cf11bd827ffc"
+   },
+   "cfg": "off",
+   "variants": [
+    {
+     "cfg": "aot-kco",
+     "core_cyc": 16423,
+     "wall_s": 76,
+     "log": "/scratch/staff/huaj/tmp/maxwell_faiss_kco/fa_kernel__ns_fa_h8_n256_m256_d80_8_256_256_80_0_2560_8_10240_40960_10240/iss.log",
+     "src_md5": {
+      "kernel": "a939286f6cc651c3765a29b48d9c89b9",
+      "fa": "d5f81b87191b4e7f2a48beaac04ac66b",
+      "bcf": "842db7ca77c7a4183051cf11bd827ffc"
+     }
+    }
+   ]
+  },
+  "fa_kernel__ns_fa_h8_n256_m77_d80_8_256_77_80_0_2560_3_10240_15360_10240": {
+   "core_cyc": 7808,
+   "cls": "fa16",
+   "fa_src": "iss",
+   "wall_s": 80,
+   "log": "/scratch/staff/huaj/tmp/maxwell_faiss/fa_kernel__ns_fa_h8_n256_m77_d80_8_256_77_80_0_2560_3_10240_15360_10240/iss.log",
+   "src_md5": {
+    "kernel": "bf226b394d65cd77d53b6f203f40c8b2",
+    "fa": "23370790c4c3ec8304c059d3700f2f16",
+    "bcf": "842db7ca77c7a4183051cf11bd827ffc"
+   },
+   "cfg": "off",
+   "variants": [
+    {
+     "cfg": "aot-kco",
+     "core_cyc": 7808,
+     "wall_s": 75,
+     "log": "/scratch/staff/huaj/tmp/maxwell_faiss_kco/fa_kernel__ns_fa_h8_n256_m77_d80_8_256_77_80_0_2560_3_10240_15360_10240/iss.log",
+     "src_md5": {
+      "kernel": "5d0549c0b35776230e1b3b869ed03ccf",
+      "fa": "355da1ce6d73b2dcf9d4e0226463164c",
+      "bcf": "842db7ca77c7a4183051cf11bd827ffc"
+     }
+    }
+   ]
+  },
+  "fa_kernel__ns_fa_h8_n64_m64_d160_8_64_64_160_1_2560_2_20480_20480_10240": {
+   "core_cyc": 8438,
+   "cls": "fa_d160",
+   "fa_src": "iss",
+   "wall_s": 81,
+   "log": "/scratch/staff/huaj/tmp/maxwell_faiss/fa_kernel__ns_fa_h8_n64_m64_d160_8_64_64_160_1_2560_2_20480_20480_10240/iss.log",
+   "src_md5": {
+    "kernel": "0bdb3538037a96623aa40f51703a98b6",
+    "fa": "7e8ae1a9fe38cbdc13121fab7176ce94",
+    "bcf": "842db7ca77c7a4183051cf11bd827ffc"
+   },
+   "cfg": "off",
+   "variants": [
+    {
+     "cfg": "aot-kco",
+     "core_cyc": 8438,
+     "wall_s": 74,
+     "log": "/scratch/staff/huaj/tmp/maxwell_faiss_kco/fa_kernel__ns_fa_h8_n64_m64_d160_8_64_64_160_1_2560_2_20480_20480_10240/iss.log",
+     "src_md5": {
+      "kernel": "255d90fab27fcbf6f3a90f3376d1c8fa",
+      "fa": "ade57c2ef38de4e706326146cb6266ef",
+      "bcf": "842db7ca77c7a4183051cf11bd827ffc"
+     }
+    }
+   ]
+  },
+  "fa_kernel__ns_fa_h8_n64_m77_d160_8_64_77_160_1_2560_3_20480_30720_10240": {
+   "core_cyc": 11285,
+   "cls": "fa_d160",
+   "fa_src": "iss",
+   "wall_s": 79,
+   "log": "/scratch/staff/huaj/tmp/maxwell_faiss/fa_kernel__ns_fa_h8_n64_m77_d160_8_64_77_160_1_2560_3_20480_30720_10240/iss.log",
+   "src_md5": {
+    "kernel": "ec2ee0a9d109ffd7386aa01a4821ed59",
+    "fa": "630cfa123b90542331e0ed55388368d3",
+    "bcf": "842db7ca77c7a4183051cf11bd827ffc"
+   },
+   "cfg": "off",
+   "variants": [
+    {
+     "cfg": "aot-kco",
+     "core_cyc": 11285,
+     "wall_s": 76,
+     "log": "/scratch/staff/huaj/tmp/maxwell_faiss_kco/fa_kernel__ns_fa_h8_n64_m77_d160_8_64_77_160_1_2560_3_20480_30720_10240/iss.log",
+     "src_md5": {
+      "kernel": "5f86772b3f46d00e19c9ae45b0034171",
+      "fa": "2939faf41de9bf71359f001a19106771",
+      "bcf": "842db7ca77c7a4183051cf11bd827ffc"
+     }
+    }
+   ]
   }
- }
+ },
+ "fa_source": "RF0+RF: 6 UNet FA kernels ISS (xca_udm_dbg, iss_unet_fa.sh + iss_patch_fa.py, maxwell clones/cost/tasks/2026-11-21_M311): top level = unet_off TU; variants[] = unet_aot-kco TU (kernel/fa .cc differ: KCO); kcyc_unet picks the entry whose kernel/fa/bcf md5 match the build"
 }
