@@ -34,6 +34,19 @@ Output:
   KTOLNEED cfg= sites= tol_lt015= tol_015_030= tol_030_050= min_tol= at=SITE:RUN   (all logs of the cfg;
           tol = (max_rel - |L_hat - L_meas + N_hat - N_meas| / site_ms) / (K_meas / site_ms) = the K relative error
           a K model may have on that site)
+--oracle-k --dump-kmeas PATH: also writes the per-launch K of every joined row (fit + check logs) as TSV
+  cfg run part site cls launches K_meas_ms lock_ms stream_ms   (cls = LPRED kind; all *_ms per launch:
+  K_meas_ms = K_meas / launches, lock/stream = k_diag.split_site counter sums / perf_n; nan without a perf line)
+--k-tsv PATH: external K (TSV cfg run part site K_hat_ms [K_loo_ms] [dw_hat_ms], *_ms per launch); K = K_hat_ms x
+  launches goes into predict_launch.  --kswap D1[,D2..]: diag, K = max(0, K_meas + launches x sum delta_ms) with
+  delta TSVs cfg run part site delta_ms (missing key = 0).  Both print (--k-label L, default hat|swap):
+  KLNHAT cfg= run= k= sites= r2= maxrel= sum_rel= PASS|FAIL[ fit]       (fit = run a, not in ALL)
+  KLNHAT LOO cfg= run=a k= sites= loo_maxrel= PASS|FAIL                 (--k-tsv: K_loo_ms of the run-a rows,
+          nan when the column is missing or all nan; --kswap: the swapped K itself, nothing is fitted)
+  KLNHAT121 cfg= k= part= runs=b,c K_hat_ms= K_meas_ms= lock_ms= dw_hat_ms= rel_T=   (conv121 mean over b/c,
+          per launch; rel_T = mean (T_hat - T) / T; dw_hat_ms from the K TSV, nan without the column)
+  KLNHAT ALL k= logs= sites= r2_min= maxrel= loo_max= PASS|FAIL  (b/c only; loo_max = max of the LOO lines, with
+          --loo X PASS also needs loo_max <= X, nan = FAIL); rc=1 when ALL FAILs.  Uncomputable metrics print nan.
 --audit: AST check of the predict path (PREDICT_FNS): no measured field name may appear in it (MEAS_FIELDS);
   prints 'KLN AUDIT fn=.. names=.. meas=..' per function and 'KLN AUDIT meas_at_predict=<n>' last (rc=1 if n>0).
 """
@@ -86,12 +99,23 @@ def predict_launch(k_ms, pv):
     return (k_ms + pv["L_hat"] + pv["N_hat"]) / pv["launches"]
 
 
-PREDICT_FNS = (pred_view, predict_launch)
+def k_tsv_launch(k_ms_launch, pv):
+    """--k-tsv: the external K is per launch; predict_launch takes the site total"""
+    return k_ms_launch * pv["launches"]
+
+
+def k_swap(K_meas, deltas_ms, pv):
+    """--kswap (diag, reads the measured K): K = max(0, K_meas + launches x sum of per-launch deltas)"""
+    return max(0.0, K_meas + pv["launches"] * sum(deltas_ms))
+
+
+PREDICT_FNS = (pred_view, predict_launch, k_tsv_launch)
+DIAG_FNS = (k_swap,)   # audited and printed, flagged diag, not counted in meas_at_predict
 
 
 def audit():
     bad = 0
-    for fn in PREDICT_FNS:
+    for fn in PREDICT_FNS + DIAG_FNS:
         tree = ast.parse(inspect.getsource(fn))
         names = set()
         for n in ast.walk(tree):
@@ -106,8 +130,11 @@ def audit():
         if fn is pred_view:
             names.update(PRED_KEYS)
         meas = sorted(x for x in names if any(f.lower() in x.lower() for f in MEAS_FIELDS))
-        bad += len(meas)
-        print("KLN AUDIT fn=%s names=%s meas=%s" % (fn.__name__, ",".join(sorted(names)), ",".join(meas) or "-"))
+        diag = fn in DIAG_FNS
+        if not diag:
+            bad += len(meas)
+        print("KLN AUDIT fn=%s names=%s meas=%s%s" % (fn.__name__, ",".join(sorted(names)), ",".join(meas) or "-",
+                                                     " diag" if diag else ""))
     print("KLN AUDIT meas_at_predict=%d" % bad)
     return bad == 0
 
@@ -127,6 +154,8 @@ def tsv_map(rows, cols):
             raise ValueError("duplicate key %r" % (k,))
         d = {c: float(r[c]) for c in cols}
         d["site"] = r["site"]
+        if "kind" in r:
+            d["kind"] = r["kind"]
         out[k] = d
     return out
 
@@ -178,7 +207,8 @@ def join(lp, np_, logs):
                 raise ValueError("misaligned %r: log %s/%d lpred %s/%d npred %s/%d"
                                  % (k, site, n, lr["site"], lr["launches"], nr["site"], nr["launches"]))
             dl, dn = max(dl, abs(lr["site_ms"] - site_ms)), max(dn, abs(nr["site_ms"] - site_ms))
-            rows.append(dict(cfg=cfg, run=run, part=part, site=site, launches=n, site_ms_log=site_ms,
+            rows.append(dict(cfg=cfg, run=run, part=part, site=site, cls=lr.get("kind", "-"), launches=n,
+                             site_ms_log=site_ms,
                              site_ms_lpred=lr["site_ms"], L_meas=lr["L_meas"], L_hat=lr["L_hat"],
                              N_meas=nr["N_meas"], N_hat=nr["N_hat"], fit=_fit, log=path))
     nl = sum(k in lp for k in keys)
@@ -250,6 +280,179 @@ def kln121(rows, src, site=KLN_SITE):
         print("KLN121 cfg=%s part=%d K_meas_ms=%.4f lock_ms=%.4f stream_ms=%.4f launches=%d runs=%s"
               % (cfg, rs[0]["part"], sum(km) / len(km), sum(lk) / len(lk), sum(st) / len(st), rs[0]["launches"],
                  ",".join(r["run"] for r in rs)))
+
+
+def _f(x):
+    return "%.4f" % x   # nan -> 'nan'
+
+
+def lock_stream(rows):
+    """{(cfg, run, part): (lock_ms, stream_ms) per launch} from 'PROF aie_site_perf' (sums / perf_n)"""
+    from k_diag import parse_perf, parse_split, split_site
+    out, cache = {}, {}
+    for r in rows:
+        if r["log"] not in cache:
+            txt = Path(r["log"]).read_text(errors="replace")
+            cache[r["log"]] = (parse_split(txt), parse_perf(txt))
+        sp, pf = cache[r["log"]]
+        perf = pf.get(r["part"])
+        w, i, _n = sp[r["part"]]
+        d = split_site(w, i, perf)
+        pn = max(1, perf["perf_n"]) if perf else 1
+        out[(r["cfg"], r["run"], r["part"])] = (d.get("lock", float("nan")) / pn, d.get("stream", float("nan")) / pn)
+    return out
+
+
+KMEAS_COLS = ("cfg", "run", "part", "site", "cls", "launches", "K_meas_ms", "lock_ms", "stream_ms")
+
+
+def dump_kmeas(rows, src, path):
+    """--dump-kmeas: per-launch K_meas / lock / stream of every joined row (repr floats, no rounding)"""
+    ls = lock_stream(rows)
+    with open(path, "w") as f:
+        f.write("\t".join(KMEAS_COLS) + "\n")
+        for r in rows:
+            lk, st = ls[(r["cfg"], r["run"], r["part"])]
+            n = r["launches"]
+            f.write("\t".join([r["cfg"], r["run"], str(r["part"]), r["site"], r.get("cls", "-"), str(n),
+                               repr(k_meas(r, src) / n), repr(lk), repr(st)]) + "\n")
+    return len(rows)
+
+
+def _fl(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def read_ktsv(path):
+    """--k-tsv: {(cfg, run, part): dict(site, K_hat_ms, K_loo_ms, dw_hat_ms)} (per launch; absent column = nan)"""
+    out = {}
+    for r in read_tsv(path):
+        k = (r["cfg"], norm_run(r["run"]), int(r["part"]))
+        if k in out:
+            raise ValueError("duplicate key %r in %s" % (k, path))
+        out[k] = dict(site=r["site"], K_hat_ms=_fl(r.get("K_hat_ms")), K_loo_ms=_fl(r.get("K_loo_ms")),
+                      dw_hat_ms=_fl(r.get("dw_hat_ms")))
+    return out
+
+
+def read_kswap(paths):
+    """--kswap D1[,D2..]: {(cfg, run, part): [delta_ms per launch, one per file]}; site checked across files"""
+    out, sites = {}, {}
+    for p in [x for x in paths.split(",") if x]:
+        for r in read_tsv(p):
+            k = (r["cfg"], norm_run(r["run"]), int(r["part"]))
+            if sites.setdefault(k, r["site"]) != r["site"]:
+                raise ValueError("site mismatch %r in %s" % (k, p))
+            out.setdefault(k, []).append(float(r["delta_ms"]))
+    return out, sites
+
+
+def khat_eval(rows, src, kmap, label, r2_gate, rel_gate, loo_gate, ls=None):
+    """KLNHAT / LOO / 121 / ALL; kmap[(cfg, run, part)] = dict(K=site-total K or None, K_loo=site total or nan,
+    dw=per-launch or nan).  True iff ALL PASS."""
+    nan = float("nan")
+    groups = {}
+    for r in rows:
+        groups.setdefault((r["cfg"], r["run"]), []).append(r)
+    ok_all, r2s, rels, loos, nlog, nsite = True, [], [], [], 0, 0
+    for (cfg, run), rs in groups.items():
+        fit = rs[0]["fit"]
+        pairs, miss = [], 0
+        for r in rs:
+            km = kmap.get((cfg, run, r["part"]))
+            if km is None or km["K"] is None or math.isnan(km["K"]):
+                miss += 1
+                continue
+            pairs.append((r["site_ms_" + src] / r["launches"], predict_launch(km["K"], pred_view(r)),
+                          r["launches"], r["site"]))
+        if miss or len(pairs) < 2:
+            r2, mr, sr = nan, nan, nan
+        else:
+            r2, mr, _w, sr = metrics(pairs)
+        ok = (not miss) and r2 >= r2_gate and mr <= rel_gate
+        print("KLNHAT cfg=%s run=%s k=%s sites=%d r2=%s maxrel=%s sum_rel=%s %s%s"
+              % (cfg, run, label, len(rs), _f(r2), _f(mr), _f(sr), "PASS" if ok else "FAIL", " fit" if fit else ""))
+        if run == "a":
+            lp = []
+            for r in rs:
+                km = kmap.get((cfg, run, r["part"]))
+                kl = km["K_loo"] if km else nan
+                if math.isnan(kl):
+                    lp = None
+                    break
+                lp.append((r["site_ms_" + src] / r["launches"], predict_launch(kl, pred_view(r)), r["launches"],
+                           r["site"]))
+            lmr = metrics(lp)[1] if lp and len(lp) >= 2 else nan
+            lok = not math.isnan(lmr) and (loo_gate is None or lmr <= loo_gate)
+            print("KLNHAT LOO cfg=%s run=a k=%s sites=%d loo_maxrel=%s %s"
+                  % (cfg, label, len(rs), _f(lmr), "PASS" if lok else "FAIL"))
+            loos.append(lmr)
+        if not fit:
+            ok_all &= ok
+            r2s.append(r2)
+            rels.append(mr)
+            nlog, nsite = nlog + 1, nsite + len(rs)
+    for cfg in dict.fromkeys(r["cfg"] for r in rows):
+        rs = [r for r in rows if r["cfg"] == cfg and r["site"] == KLN_SITE and not r["fit"]]
+        if not rs:
+            continue
+        kh, kmv, lk, dw, rt = [], [], [], [], []
+        for r in rs:
+            key = (cfg, r["run"], r["part"])
+            km = kmap.get(key) or dict(K=nan, dw=nan)
+            k = nan if km["K"] is None else km["K"]
+            n = r["launches"]
+            kh.append(k / n)
+            kmv.append(k_meas(r, src) / n)
+            lk.append(ls[key][0] if ls and key in ls else nan)
+            dw.append(km.get("dw", nan))
+            t = r["site_ms_" + src] / n
+            rt.append((predict_launch(k, pred_view(r)) - t) / t)
+        m = lambda v: sum(v) / len(v)
+        print("KLNHAT121 cfg=%s k=%s part=%d runs=%s K_hat_ms=%s K_meas_ms=%s lock_ms=%s dw_hat_ms=%s rel_T=%s"
+              % (cfg, label, rs[0]["part"], ",".join(r["run"] for r in rs), _f(m(kh)), _f(m(kmv)), _f(m(lk)),
+                 _f(m(dw)), _f(m(rt))))
+    any_nan = lambda v: (not v) or any(math.isnan(x) for x in v)
+    loo_max = nan if any_nan(loos) else max(loos)
+    r2_min = nan if any_nan(r2s) else min(r2s)
+    rel_max = nan if any_nan(rels) else max(rels)
+    ok_all &= nlog > 0 and not math.isnan(r2_min) and not math.isnan(rel_max)
+    if loo_gate is not None:
+        ok_all &= not math.isnan(loo_max) and loo_max <= loo_gate
+    print("KLNHAT ALL k=%s logs=%d sites=%d r2_min=%s maxrel=%s loo_max=%s %s"
+          % (label, nlog, nsite, _f(r2_min), _f(rel_max), _f(loo_max), "PASS" if ok_all else "FAIL"))
+    return ok_all
+
+
+def kmap_tsv(rows, kt):
+    """--k-tsv rows -> kmap (K x launches through k_tsv_launch); site mismatch raises"""
+    out = {}
+    for r in rows:
+        key = (r["cfg"], r["run"], r["part"])
+        e = kt.get(key)
+        if e is None:
+            continue
+        if e["site"] != r["site"]:
+            raise ValueError("k-tsv site mismatch %r: %s vs log %s" % (key, e["site"], r["site"]))
+        pv = pred_view(r)
+        out[key] = dict(K=k_tsv_launch(e["K_hat_ms"], pv), K_loo=k_tsv_launch(e["K_loo_ms"], pv),
+                        dw=e["dw_hat_ms"])
+    return out
+
+
+def kmap_swap(rows, src, deltas, sites):
+    """--kswap (diag): K = max(0, K_meas + launches x sum delta); LOO = the same K on run a (nothing fitted)"""
+    out = {}
+    for r in rows:
+        key = (r["cfg"], r["run"], r["part"])
+        if key in sites and sites[key] != r["site"]:
+            raise ValueError("kswap site mismatch %r: %s vs log %s" % (key, sites[key], r["site"]))
+        k = k_swap(k_meas(r, src), deltas.get(key, []), pred_view(r))
+        out[key] = dict(K=k, K_loo=k, dw=float("nan"))
+    return out
 
 
 def ktolneed(rows, src, rel_gate):
@@ -370,6 +573,12 @@ def selftest():
            "glue_ms=9.7 flush_ms=0.1 inval_ms=0.02 launches=16\n")
     ls = log_sites(txt)
     chk("log_sites", ls == {14: ("conv0", 1, 16.183), 36: ("fa5", 16, 26.1)})
+    pv4 = pred_view(dict(L_hat=1.0, N_hat=3.0, launches=4))
+    k4 = k_tsv_launch(2.5, pv4)   # 2.5 ms per launch x 4 launches = 10 ms site total
+    chk("ktsv_units_launches4", abs(k4 - 10.0) < 1e-12 and abs(predict_launch(k4, pv4) - 3.5) < 1e-12)
+    chk("kswap_units_launches4", abs(k_swap(10.0, [0.25, -0.5], pv4) - 9.0) < 1e-12
+        and k_swap(1.0, [-1.0], pv4) == 0.0)
+    chk("nan_literal", _f(float("nan")) == "nan")
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         a_ok = audit()
     chk("audit_clean", a_ok and buf.getvalue().splitlines()[-1] == "KLN AUDIT meas_at_predict=0")
@@ -388,6 +597,11 @@ def main(argv=None):
     md.add_argument("--audit", action="store_true")
     md.add_argument("--oracle-k", action="store_true")
     md.add_argument("--insample", action="store_true")
+    md.add_argument("--k-tsv", metavar="PATH")
+    md.add_argument("--kswap", metavar="D1[,D2..]")
+    ap.add_argument("--k-label")
+    ap.add_argument("--loo", type=float)
+    ap.add_argument("--dump-kmeas", metavar="PATH")
     ap.add_argument("--site-src", choices=("log", "lpred"), default="log")
     ap.add_argument("--khat")
     ap.add_argument("--khat-src", default="koracle_dma7")
@@ -400,6 +614,8 @@ def main(argv=None):
     ap.add_argument("--fit", nargs="*", default=[])
     ap.add_argument("--check", nargs="*", default=[])
     a = ap.parse_args(argv)
+    if a.dump_kmeas and not a.oracle_k:
+        ap.error("--dump-kmeas needs --oracle-k")
     if a.selftest:
         return 0 if selftest() else 1
     if a.audit:
@@ -425,7 +641,16 @@ def main(argv=None):
     if a.insample:
         rows = [dict(r, run=a.fit_run) for r in rows if r["fit"]]
         return 0 if insample(rows, khat, a.site_src, a.khat_src) else 1
+    if a.k_tsv or a.kswap:
+        if a.k_tsv:
+            kmap, label = kmap_tsv(rows, read_ktsv(a.k_tsv)), a.k_label or "hat"
+        else:
+            kmap, label = kmap_swap(rows, a.site_src, *read_kswap(a.kswap)), a.k_label or "swap"
+        ok = khat_eval(rows, a.site_src, kmap, label, a.r2, a.max_rel, a.loo, lock_stream(rows))
+        return 0 if ok else 1
     ok = oracle(rows, a.site_src, a.r2, a.max_rel)
+    if a.dump_kmeas:
+        print("KLNDUMP kmeas=%s rows=%d" % (a.dump_kmeas, dump_kmeas(rows, a.site_src, a.dump_kmeas)))
     kln121(rows, a.site_src)
     ktolneed(rows, a.site_src, a.max_rel)
     return 0 if ok else 1
