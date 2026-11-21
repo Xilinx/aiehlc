@@ -905,3 +905,75 @@ def test_kln_insample_khat_missing(tmp_path):
     e.write_text("")
     for k in (tmp_path / "none.tsv", e):
         assert ks.main(["--insample", "--khat", str(k), "--lpred", "x", "--npred", "y", "--fit", "off=z"]) == 2
+
+
+# ---- M3.1.1.2 PL1: m3_site --lpred --lrefit (aot-kco L + offset / kswitch, fit on run a only) ----
+def _m3_lrefit_mod(monkeypatch, tmp_path, l_meas):
+    """2 sites per log; site_ms 1.0; base L_hat 0.1; feats: (launches, kswitch) = (2, 1) and (1, 0)"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("m3_site_lr", SRC.parent / "script" / "perf" / "m3_site.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    monkeypatch.setattr(m, "SITES_PER_CFG", {"fa": 1, "linear": 1})
+    monkeypatch.setattr(m, "LREFIT_GRID", [round(0.01 * i, 2) for i in range(21)])
+
+    def rows(b, lg):
+        lm = l_meas[m.run_label(lg)] if "aot-kco" in b else (0.12, 0.12)
+        return [dict(kind="fa", cid=3, part=7, launches=2, K=0.5, L=lm[0], N=1.0 - 0.5 - lm[0]),
+                dict(kind="linear", cid=4, part=8, launches=1, K=0.5, L=lm[1], N=1.0 - 0.5 - lm[1])], ""
+    monkeypatch.setattr(m, "site_rows", rows)
+    monkeypatch.setattr(m, "probe", lambda c, lg, b: print("M3SITE stub"))
+    monkeypatch.setattr(m, "l_sites", lambda b, c, p, k: {("fa", 3): 0.1, ("linear", 4): 0.1})
+    monkeypatch.setattr(m, "site_launch_feats", lambda b: {("fa", 3): dict(launches=2, kswitch=1, kfirst=1, cp_w=5.0),
+                                                           ("linear", 4): dict(launches=1, kswitch=0, kfirst=0,
+                                                                               cp_w=1.0)})
+    prm = tmp_path / "l.json"
+    prm.write_text('{"cfg": {"off": {"coef": {"rst": 0.020983}}, "aot-kco": {"coef": {"const": 0.03}}}}')
+    return m, prm
+
+
+def _lrefit_argv(prm, tmp_path, x="0.08"):
+    return ["--lpred", "--params", str(prm), "--lrefit", "aot-kco", "--refit-feats", "offset,kswitch", "--fit-run", "a",
+            "--tshare-max", "aot-kco=" + x, "--out-params", str(tmp_path / "o.json"), "--tsv", str(tmp_path / "t.tsv"),
+            "--build-root", "/x", "off=unet_off.a.log", "aot-kco=unet_aot-kco.a.log,unet_aot-kco.b.log"]
+
+
+def test_m3_lrefit_fit_a_only_and_params(monkeypatch, capsys, tmp_path):
+    """run a: L = 0.1 + 0.02 x launches + 0.05 x kswitch exactly -> offset 0.02 kswitch 0.05 (b never fitted);
+    off copied unchanged, fit_runs [a]; LBIAS before LREFIT; rc=0; --params on the out json prints the same LREFIT"""
+    m, prm = _m3_lrefit_mod(monkeypatch, tmp_path, {"a": (0.19, 0.12), "b": (0.20, 0.12)})
+    rc = m.main(_lrefit_argv(prm, tmp_path))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    lr = "LREFIT cfg=aot-kco fit=a sites=2 feats=offset,kswitch offset_ms=0.0200 kswitch_ms=0.0500 loo_Tshare_max="
+    assert lr in out and out.index("LBIAS cfg=aot-kco run=a group=kswitch=1") < out.index(lr)
+    assert "LCHKRUN cfg=aot-kco run=a fit=1 sites=2 Tshare_max=0.0000 Lsum_rel=0.0000 PASS" in out
+    assert "LCHKRUN cfg=aot-kco run=b fit=0 sites=2 Tshare_max=0.0100 Lsum_rel=-0.0313 PASS" in out
+    import json
+    o = json.load(open(tmp_path / "o.json"))
+    assert o["cfg"]["off"] == json.load(open(prm))["cfg"]["off"]
+    assert o["cfg"]["aot-kco"]["fit_runs"] == ["a"] and o["cfg"]["aot-kco"]["coef"]["kswitch"] == 0.05
+    assert len((tmp_path / "t.tsv").read_text().splitlines()) == 1 + 2 + 4
+    rc2 = m.main(["--lpred", "--params", str(tmp_path / "o.json"), "--tsv", str(tmp_path / "t2.tsv"), "--build-root",
+                  "/x", "aot-kco=unet_aot-kco.a.log,unet_aot-kco.b.log"])
+    out2 = capsys.readouterr().out
+    assert lr in out2 and "LBIAS" not in out2 and "LCHKRUN cfg=aot-kco run=b fit=0" in out2
+
+
+def test_m3_lrefit_rc_strict_and_off(monkeypatch, capsys, tmp_path):
+    """held-out Tshare_max exactly 0.0800 is not < 0.08 -> FAIL rc=1; LCHK aot-kco never enters rc, LCHK off does"""
+    m, prm = _m3_lrefit_mod(monkeypatch, tmp_path, {"a": (0.19, 0.12), "b": (0.11, 0.20)})
+    rc = m.main(_lrefit_argv(prm, tmp_path))
+    out = capsys.readouterr().out
+    assert rc == 1 and "LCHKRUN cfg=aot-kco run=b fit=0 sites=2 Tshare_max=0.0800" in out and \
+        [x for x in out.splitlines() if x.startswith("LCHKRUN cfg=aot-kco run=b")][0].endswith(" FAIL"), out
+    rc = m.main(_lrefit_argv(prm, tmp_path, "0.09"))
+    out = capsys.readouterr().out
+    rb = [x for x in out.splitlines() if x.startswith("LCHKRUN cfg=aot-kco run=b")]
+    assert rc == 0 and rb[0].startswith("LCHKRUN cfg=aot-kco run=b fit=0 sites=2 Tshare_max=0.0800 Lsum_rel=") \
+        and rb[0].endswith(" PASS"), out
+    m2, prm2 = _m3_lrefit_mod(monkeypatch, tmp_path, {"a": (0.19, 0.12), "b": (0.19, 0.12)})
+    monkeypatch.setattr(m2, "l_sites", lambda b, c, p, k: {("fa", 3): 0.1, ("linear", 4): 0.1 if "aot" in b else 0.3})
+    rc = m2.main(_lrefit_argv(prm2, tmp_path))
+    out = capsys.readouterr().out
+    assert rc == 1 and "LCHK cfg=off logs=1 sites=2" in out and "Tshare_max=0.1800 FAIL" in out, out

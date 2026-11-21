@@ -53,6 +53,16 @@ Tshare_max <= L_TSHARE.  probe() lines are printed only (M3SPLIT L_sum_rel is si
   LFA  cfg=.. small_sites=<FA sites, launches <= 4> maxrel_avg=.. maxrel_site=..
   LCHK ALL logs=.. sites=.. kfirst=.. L_maxrel=.. Tshare_max=.. PASS|FAIL   (rc=1 on FAIL)
   TSV: cfg run part site kind launches site_ms L_meas L_hat
+
+  ... --lpred ... --lrefit CFG --refit-feats offset,kswitch --fit-run a --tshare-max CFG=X --out-params OUT.json
+CFG's L += offset x launches + kswitch x switching launches (site_launch_feats, kswitch.unet_launches order), both
+>= 0, minimax Tshare on the --fit-run logs only (LREFIT_GRID); other cfgs copied unchanged into OUT.json, CFG gets
+coef offset/kswitch + fit_runs.  --params with fit_runs (no --lrefit) prints the same LREFIT / LCHKRUN from the json.
+  LBIAS   cfg=.. run=<fit> group=kswitch=0|1 / kfirst=0|1 / kind=.. / cp_w=lo|mid|hi n=.. mean_resid_ms=..
+  LREFIT  cfg=.. fit=.. sites=.. feats=offset,kswitch offset_ms=.. kswitch_ms=.. loo_Tshare_max=..
+  LCHKRUN cfg=.. run=.. fit=0|1 sites=.. Tshare_max=.. Lsum_rel=.. PASS|FAIL   (Tshare_max < X, |Lsum_rel| < 0.05,
+          strict on the %.4f values)
+With --tshare-max: rc=0 iff LCHK cfg=off PASS and every fit=0 LCHKRUN of CFG PASS (LCHK CFG / ALL printed only).
 """
 import argparse
 import json
@@ -373,26 +383,130 @@ LFA_SMALL = 4        # FA sites with launches <= LFA_SMALL: kfirst=avg vs kfirst
 TSV_COLS = ("cfg", "run", "part", "site", "kind", "launches", "site_ms", "L_meas", "L_hat")
 
 
+LREFIT_FEATS = ("offset", "kswitch")
+LREFIT_GRID = [round(0.0005 * i, 4) for i in range(401)]   # offset / kswitch ms per launch, 0 .. 0.20 (non-negative)
+LSUM_TOL = 0.05      # |Lsum_rel| = |sum L_hat - sum L_meas| / sum L_meas per held-out run
+
+
+def site_launch_feats(build):
+    """{(kind, cid): dict(launches, kswitch, kfirst, cp_w)} from the build dir only.  Launch order is
+    kswitch.unet_launches (via kload_per_launch); kswitch = the launch's kernel differs from the previous launch's
+    (launch 0 counts as a switch), kfirst = first launch of that kernel in the net, cp_w = mean (cp_w + rr) words
+    per launch of the site."""
+    from aiegraph.costmodel.static_feat import unet_site_feat
+    from site_feat import site_feats
+    _, kk = kload_per_launch(build, "site")
+    seq = unet_site_feat(build)
+    st, _ = site_feats(build, build + ".build.log")
+    out, i, seen = {}, 0, set()
+    for s in st:
+        ks = kf = 0
+        cp = 0.0
+        for j in range(i, i + s["launches"]):
+            ks += int(j == 0 or kk[j] != kk[j - 1])
+            kf += int(kk[j] not in seen)
+            seen.add(kk[j])
+            cp += seq[j]["cp_w"] + seq[j]["rr"]
+        out[(s["kind"], s["cid"])] = dict(launches=s["launches"], kswitch=ks, kfirst=kf,
+                                          cp_w=cp / s["launches"] if s["launches"] else 0.0)
+        i += s["launches"]
+    return out
+
+
+def run_label(log):
+    m = re.search(r"\.([A-Za-z0-9]+)\.log$", Path(log).name)
+    return m.group(1) if m else Path(log).name
+
+
+def l_terms(coef, f):
+    """per-site offset + kswitch L term (ms): offset x launches + kswitch x switching launches"""
+    return float(coef.get("offset", 0.0)) * f["launches"] + float(coef.get("kswitch", 0.0)) * f["kswitch"]
+
+
+def lrefit_fit(pts):
+    """pts = [(L_meas, site_ms, L_base, launches, kswitch)]: non-negative (offset, kswitch) on LREFIT_GRID that
+    minimise max Tshare over pts (first on ties); returns (offset, kswitch, Tshare_max, loo_Tshare_max), LOO =
+    leave-one-site-out refit, held-out site Tshare"""
+    import numpy as np
+    x = np.array(pts, dtype=float).reshape(-1, 5)
+    g = np.array(LREFIT_GRID)
+    # ts[site, offset, kswitch]
+    lh = x[:, 2, None, None] + g[None, :, None] * x[:, 3, None, None] + g[None, None, :] * x[:, 4, None, None]
+    ts = np.abs(lh - x[:, 0, None, None]) / x[:, 1, None, None]
+
+    def best(mx):
+        i, j = np.unravel_index(int(np.argmin(mx)), mx.shape)
+        return i, j
+
+    m1 = ts.max(axis=0)
+    i, j = best(m1)
+    loo = 0.0
+    if x.shape[0] > 1:
+        # max over the other sites = top-1, or top-2 where the dropped site is the top-1
+        top = np.argmax(ts, axis=0)
+        m2 = np.where(np.arange(x.shape[0])[:, None, None] == top[None], -np.inf, ts).max(axis=0)
+        for s in range(x.shape[0]):
+            a, b = best(np.where(top == s, m2, m1))
+            loo = max(loo, float(ts[s, a, b]))
+    return float(g[i]), float(g[j]), float(m1[i, j]), loo
+
+
+def lbias(cfg, run, rows, base, feats):
+    """mean residual (L_meas - L_base) per launch, ms, per group of the fit run's sites"""
+    cps = sorted(feats[(r["kind"], r["cid"])]["cp_w"] for r in rows)
+    q1, q2 = cps[len(cps) // 3], cps[2 * len(cps) // 3]
+    groups = {}
+    for r in rows:
+        key = (r["kind"], r["cid"])
+        f = feats[key]
+        res = (r["L"] - base[key]) / r["launches"]
+        cp = "lo" if f["cp_w"] < q1 else ("mid" if f["cp_w"] < q2 else "hi")
+        for g in ("kswitch=%d" % int(f["kswitch"] > 0), "kfirst=%d" % int(f["kfirst"] > 0), "kind=%s" % r["kind"],
+                  "cp_w=%s" % cp):
+            groups.setdefault(g, []).append(res)
+    for g in sorted(groups):
+        v = groups[g]
+        print("LBIAS cfg=%s run=%s group=%s n=%d mean_resid_ms=%.4f" % (cfg, run, g, len(v), sum(v) / len(v)))
+
+
 def lpred_main(a):
-    """frozen L params (no refit) on every site of every log: Tshare = |L_hat - L_meas| / site_ms.
-    probe() lines (M3SITE/M3SPLIT/M3SUM) are printed for provenance only and never enter rc."""
+    """L params on every site of every log: Tshare = |L_hat - L_meas| / site_ms.
+    --lrefit CFG: add per-launch offset + kswitch terms to CFG's L, fitted (non-negative, minimax Tshare) on the
+    --fit-run log only; LBIAS (fit run) is printed before the fit.  Params with fit_runs (no --lrefit) print the
+    same LREFIT / LCHKRUN lines from the json.  probe() lines (M3SITE/M3SPLIT/M3SUM) are provenance only.
+    --tshare-max CFG=X: rc=0 iff LCHK cfg=off PASS and every held-out (fit=0) LCHKRUN of CFG PASS
+    (Tshare_max < X and |Lsum_rel| < LSUM_TOL, strict, on the %.4f printed values); without it rc as before."""
+    import copy
     from aiegraph.costmodel import launch_l
     root = a.build_root.rstrip("/")
-    prm = launch_l.load_params(a.params)
+    prm = copy.deepcopy(launch_l.load_params(a.params))
+    tmax = {}
+    for spec in a.tshare_max or []:
+        c, x = spec.split("=", 1)
+        tmax[c] = float(x)
     tsv = []
     ok_all, all_n, all_rel, all_ts, all_logs = True, 0, 0.0, 0.0, 0
+    off_ok, run_ok, run_n = None, True, 0
     for spec in a.runs:
         cfg, logs = spec.split("=", 1)
         build = "%s/unet_%s" % (root, cfg)
+        cp = prm["cfg"].get(cfg, {})
+        coef = cp.get("coef", {})
+        refit = a.lrefit == cfg
+        terms = refit or bool(cp.get("fit_runs"))
         try:
             lh = l_sites(build, cfg, a.params, a.kfirst)
             la = l_sites(build, cfg, a.params, "avg")
+            feats = site_launch_feats(build) if terms else {}
         except (ValueError, KeyError, OSError) as e:
             print("LCHK cfg=%s %s: %s FAIL" % (cfg, type(e).__name__, e))
             ok_all = False
+            if cfg == "off":
+                off_ok = False
             continue
         n, mrel, mts, nlog, ok = 0, 0.0, 0.0, 0, True
         fa_avg, fa_site, fa_keys = 0.0, 0.0, set()
+        runs = []
         for log in logs.split(","):
             try:
                 probe(cfg, log, build)          # provenance only, verdict ignored
@@ -401,27 +515,72 @@ def lpred_main(a):
                 print("M3ERR cfg=%s log=%s %s: %s" % (cfg, log, type(e).__name__, e))
                 ok = False
                 continue
+            runs.append((log, rows))
+        if refit:
+            fit = [(lg, rw) for lg, rw in runs if run_label(lg) in a.fit_run]
+            for lg, rw in fit:
+                lbias(cfg, run_label(lg), rw, lh, feats)
+            pts = [(r["L"], r["K"] + r["L"] + r["N"], lh[(r["kind"], r["cid"])],
+                    feats[(r["kind"], r["cid"])]["launches"], feats[(r["kind"], r["cid"])]["kswitch"])
+                   for _lg, rw in fit for r in rw]
+            if not pts:
+                print("LREFIT cfg=%s fit=%s no fit-run log FAIL" % (cfg, ",".join(a.fit_run)))
+                return 1
+            o, k, _fmx, loo = lrefit_fit(pts)
+            coef = dict(coef, offset=_g6(o), kswitch=_g6(k))
+            cp = dict(cp, coef=coef, fit_runs=list(a.fit_run), loo_Tshare_max=_g6(loo),
+                      refit="offset x launches + kswitch x switching launches (kswitch.unet_launches order) added "
+                            "to the frozen L; non-negative, minimax Tshare on the fit runs, grid 0.0005 ms")
+            prm["cfg"][cfg] = cp
+            nfit = len(pts)
+        if terms:
+            print("LREFIT cfg=%s fit=%s sites=%d feats=%s offset_ms=%.4f kswitch_ms=%.4f loo_Tshare_max=%.4f"
+                  % (cfg, ",".join(cp.get("fit_runs", [])), nfit if refit else sum(SITES_PER_CFG.values()),
+                     ",".join(LREFIT_FEATS), float(coef.get("offset", 0.0)), float(coef.get("kswitch", 0.0)),
+                     float(cp.get("loo_Tshare_max", float("nan")))))
+        lim = tmax.get(cfg)
+        for log, rows in runs:
             nlog += 1
             run = Path(log).name
             ok &= len(rows) == sum(SITES_PER_CFG.values())
+            r_ts, r_hat, r_meas = 0.0, 0.0, 0.0
             for r in rows:
                 key = (r["kind"], r["cid"])
                 site_ms = r["K"] + r["L"] + r["N"]
-                lm, lp = r["L"], lh[key]
+                lm, lp = r["L"], lh[key] + (l_terms(coef, feats[key]) if terms else 0.0)
                 err = abs(lp - lm)
                 rel = err / lm if lm > 0 else float("inf")
                 ts = err / site_ms if site_ms > 0 else float("inf")
                 mrel, mts, n = max(mrel, rel), max(mts, ts), n + 1
+                r_ts, r_hat, r_meas = max(r_ts, ts), r_hat + lp, r_meas + lm
                 if r["kind"] == "fa" and r["launches"] <= LFA_SMALL:
                     fa_keys.add(key)
                     fa_site = max(fa_site, rel)
-                    fa_avg = max(fa_avg, abs(la[key] - lm) / lm if lm > 0 else float("inf"))
+                    lpa = la[key] + (l_terms(coef, feats[key]) if terms else 0.0)
+                    fa_avg = max(fa_avg, abs(lpa - lm) / lm if lm > 0 else float("inf"))
                 tsv.append((cfg, run, r["part"], "%s%d" % key, r["kind"], r["launches"], site_ms, lm, lp))
-        ok &= nlog == len(logs.split(",")) and mts <= L_TSHARE
+            if terms:
+                lab = run_label(log)
+                fit0 = lab not in cp.get("fit_runs", [])
+                lsum = (r_hat - r_meas) / r_meas if r_meas > 0 else float("inf")
+                x = lim if lim is not None else L_TSHARE
+                pr = (len(rows) == sum(SITES_PER_CFG.values()) and float("%.4f" % r_ts) < x
+                      and abs(float("%.4f" % lsum)) < LSUM_TOL)
+                print("LCHKRUN cfg=%s run=%s fit=%d sites=%d Tshare_max=%.4f Lsum_rel=%.4f %s"
+                      % (cfg, lab, int(not fit0), len(rows), r_ts, lsum, "PASS" if pr else "FAIL"))
+                if fit0 and lim is not None:
+                    run_ok &= pr
+                    run_n += 1
+        if lim is not None:
+            ok &= nlog == len(logs.split(",")) and float("%.4f" % mts) < lim
+        else:
+            ok &= nlog == len(logs.split(",")) and mts <= L_TSHARE
         print("LCHK cfg=%s logs=%d sites=%d rst=%.6f kfirst=%s L_maxrel=%.4f Tshare_max=%.4f %s"
-              % (cfg, nlog, n, float(prm["cfg"][cfg]["coef"].get("rst", 0.0)), a.kfirst, mrel, mts,
+              % (cfg, nlog, n, float(coef.get("rst", 0.0)), a.kfirst, mrel, mts,
                  "PASS" if ok else "FAIL"))
         print("LFA cfg=%s small_sites=%d maxrel_avg=%.4f maxrel_site=%.4f" % (cfg, len(fa_keys), fa_avg, fa_site))
+        if cfg == "off":
+            off_ok = ok
         ok_all &= ok
         all_n, all_logs = all_n + n, all_logs + nlog
         all_rel, all_ts = max(all_rel, mrel), max(all_ts, mts)
@@ -431,9 +590,15 @@ def lpred_main(a):
         fh.write("\t".join(TSV_COLS) + "\n")
         for t in tsv:
             fh.write("%s\t%s\t%d\t%s\t%s\t%d\t%.4f\t%.4f\t%.4f\n" % t)
+    if a.lrefit and a.out_params:
+        with open(a.out_params, "w") as fh:
+            fh.write(json.dumps(prm, indent=1, sort_keys=True) + "\n")
+        print("[lpred] params -> %s" % a.out_params)
     ok_all &= all_n > 0
     print("LCHK ALL logs=%d sites=%d kfirst=%s L_maxrel=%.4f Tshare_max=%.4f %s"
           % (all_logs, all_n, a.kfirst, all_rel, all_ts, "PASS" if ok_all else "FAIL"))
+    if tmax:
+        return 0 if (off_ok is True and run_ok and run_n > 0) else 1
     return 0 if ok_all else 1
 
 
@@ -451,6 +616,11 @@ def main(argv=None):
     ap.add_argument("--out")
     ap.add_argument("--params")
     ap.add_argument("--check", nargs="+", metavar="CFG=LOG")
+    ap.add_argument("--lrefit", metavar="CFG")
+    ap.add_argument("--refit-feats", default="offset,kswitch")
+    ap.add_argument("--fit-run", nargs="+", default=["a"], metavar="RUN")
+    ap.add_argument("--tshare-max", nargs="+", metavar="CFG=X")
+    ap.add_argument("--out-params")
     ap.add_argument("runs", nargs="*", metavar="CFG=LOG[,LOG...]")
     a = ap.parse_args(argv)
     if a.kl:
@@ -460,6 +630,8 @@ def main(argv=None):
     if a.lpred:
         if not a.params or not a.tsv or not a.runs:
             ap.error("--lpred needs --params, --tsv and CFG=LOG[,LOG...] runs")
+        if a.lrefit and tuple(a.refit_feats.split(",")) != LREFIT_FEATS:
+            ap.error("--refit-feats supports only %s" % ",".join(LREFIT_FEATS))
         return lpred_main(a)
     if not a.runs:
         ap.error("--probe needs CFG=LOG runs")
