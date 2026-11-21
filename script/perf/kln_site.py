@@ -4,7 +4,11 @@
   kln_site.py --selftest
   kln_site.py --audit
   kln_site.py --oracle-k --site-src log|lpred [--r2 0.90] [--max-rel 0.20] ARGS
-  kln_site.py --insample --khat KHAT.tsv ARGS                    (KLNPROBE; rc=2 if KHAT is missing or empty)
+  kln_site.py --insample --khat KHAT.tsv --lpred LPRED.tsv --npred NPRED.tsv [--khat-src SRC] [--fit-run a]
+      (KLNPROBE, probe only: rc=0 when it ran, 1 if a cfg has no usable site, 2 if KHAT is missing or empty;
+       without --fit/--check the rows are the --fit-run rows of the LPRED/NPRED join, site_ms = LPRED;
+       KHAT = k_diag --khat-tsv (8 cols, K_hat_ms per launch, no run column = run a); SRC is not in the
+       TSV, default koracle_dma7 = the PKP k_diag --dmafeat run)
   ARGS = --lpred LPRED.tsv --npred NPRED.tsv --build-root DIR --fit CFG=LOG ... --check CFG=LOG[,LOG] ...
 
 Inputs: LPRED = m3_site --lpred TSV (cfg run part site kind launches site_ms L_meas L_hat; run = 'unet_off.a.log'),
@@ -266,31 +270,64 @@ def ktolneed(rows, src, rel_gate):
               % (cfg, len(rs), cnt[0], cnt[1], cnt[2], best[0], best[1]))
 
 
-def read_khat(path):
-    """{(cfg, run, part): K_hat ms (site)}; None if missing or empty"""
+def read_khat(path, run="a"):
+    """k_diag --khat-tsv file ('# cfg part site cls launches K_hat_ms compute_src ovl_src', space separated,
+    K_hat_ms per launch, fitted on run a) -> {(cfg, run, part): (site, launches, K_hat_ms per launch)};
+    None if missing or empty"""
     p = Path(path)
     if not p.is_file() or p.stat().st_size == 0:
         return None
-    rows = read_tsv(p)
-    return {(r["cfg"], norm_run(r["run"]), int(r["part"])): float(r["K_hat"]) for r in rows} or None
+    out = {}
+    for ln in p.read_text().splitlines():
+        if not ln.strip() or ln.startswith("#"):
+            continue
+        f = ln.split()
+        out[(f[0], run, int(f[1]))] = (f[2], int(f[4]), float(f[5]))
+    return out or None
 
 
-def insample(rows, khat, src, r2_gate, rel_gate):
+def tsv_rows(lp, np_, run):
+    """in-sample rows from the LPRED/NPRED join only (no log): keys of run in both TSVs, site_ms = LPRED"""
+    rows = []
+    for k in sorted(k for k in lp if k[1] == run and k in np_):
+        lr, nr = lp[k], np_[k]
+        if lr["site"] != nr["site"] or lr["launches"] != nr["launches"]:
+            raise ValueError("misaligned %r: lpred %s/%d npred %s/%d" % (k, lr["site"], lr["launches"],
+                                                                          nr["site"], nr["launches"]))
+        if lr["launches"] <= 0:
+            continue
+        rows.append(dict(cfg=k[0], run=run, part=k[2], site=lr["site"], launches=int(lr["launches"]),
+                         site_ms_lpred=lr["site_ms"], L_meas=lr["L_meas"], L_hat=lr["L_hat"],
+                         N_meas=nr["N_meas"], N_hat=nr["N_hat"], fit=True, log=None))
+    return rows
+
+
+def insample(rows, khat, src, khat_src):
+    """KLNPROBE (probe, no gate): T_hat = K_hat (per launch, khat) + (L_hat + N_hat) / launches vs T; sites with
+    a nan K_hat or a site/launches mismatch are counted, not used.  True iff every cfg has >= 2 usable sites."""
     ok_all = True
     for cfg in dict.fromkeys(r["cfg"] for r in rows):
-        rs = [r for r in rows if r["cfg"] == cfg and (r["cfg"], r["run"], r["part"]) in khat]
-        if not rs:
-            print("KLNPROBE cfg=%s sites=0 FAIL" % cfg)
+        pairs, nan, mis = [], 0, 0
+        for r in (r for r in rows if r["cfg"] == cfg):
+            kh = khat.get((r["cfg"], r["run"], r["part"]))
+            if kh is None:
+                continue
+            if kh[0] != r["site"] or kh[1] != r["launches"]:
+                mis += 1
+                continue
+            if math.isnan(kh[2]):
+                nan += 1
+                continue
+            pairs.append((r["site_ms_" + src] / r["launches"],
+                          predict_launch(kh[2] * r["launches"], pred_view(r)), r["launches"], r["site"]))
+        if len(pairs) < 2:
+            print("KLNPROBE cfg=%s src=%s sites=%d nan=%d mismatch=%d FAIL" % (cfg, khat_src, len(pairs), nan, mis))
             ok_all = False
             continue
-        pairs = [(r["site_ms_" + src] / r["launches"],
-                  predict_launch(khat[(r["cfg"], r["run"], r["part"])], pred_view(r)), r["launches"], r["site"])
-                 for r in rs]
         r2, mr, worst, sr = metrics(pairs)
-        ok = r2 >= r2_gate and mr <= rel_gate
-        ok_all &= ok
-        print("KLNPROBE cfg=%s sites=%d k=hat r2=%.4f maxrel=%.4f sum_rel=%.4f worst=%s %s"
-              % (cfg, len(rs), r2, mr, sr, worst, "PASS" if ok else "FAIL"))
+        print("KLNPROBE cfg=%s src=%s run=%s site_src=%s sites=%d nan=%d mismatch=%d k=hat r2=%.4f maxrel=%.4f "
+              "sum_rel=%.4f worst=%s probe" % (cfg, khat_src, rows[0]["run"], src, len(pairs), nan, mis, r2, mr, sr,
+                                               worst))
     return ok_all
 
 
@@ -353,6 +390,8 @@ def main(argv=None):
     md.add_argument("--insample", action="store_true")
     ap.add_argument("--site-src", choices=("log", "lpred"), default="log")
     ap.add_argument("--khat")
+    ap.add_argument("--khat-src", default="koracle_dma7")
+    ap.add_argument("--fit-run", default="a")
     ap.add_argument("--r2", type=float, default=0.90)
     ap.add_argument("--max-rel", type=float, default=0.20)
     ap.add_argument("--lpred")
@@ -365,24 +404,27 @@ def main(argv=None):
         return 0 if selftest() else 1
     if a.audit:
         return 0 if audit() else 1
-    if not (a.lpred and a.npred and (a.fit or a.check)):
+    if not (a.lpred and a.npred and (a.fit or a.check or a.insample)):
         ap.error("--lpred, --npred and --fit/--check are required")
     if a.build_root and not Path(a.build_root).is_dir():
         ap.error("--build-root %s is not a directory" % a.build_root)
     khat = None
     if a.insample:
-        khat = read_khat(a.khat) if a.khat else None
+        khat = read_khat(a.khat, a.fit_run) if a.khat else None
         if khat is None:
             print("KLNPROBE khat=%s missing or empty" % a.khat)
             return 2
     lp = tsv_map(read_tsv(a.lpred), ("launches", "site_ms", "L_meas", "L_hat"))
     np_ = tsv_map(read_tsv(a.npred), ("launches", "site_ms", "N_meas", "N_hat"))
+    if a.insample and not (a.fit or a.check):
+        return 0 if insample(tsv_rows(lp, np_, a.fit_run), khat, "lpred", a.khat_src) else 1
     logs = [(c, p, True) for c, p in parse_logs(a.fit)] + [(c, p, False) for c, p in parse_logs(a.check)]
     rows, ok = join(lp, np_, logs)
     if not ok:
         return 1
     if a.insample:
-        return 0 if insample(rows, khat, a.site_src, a.r2, a.max_rel) else 1
+        rows = [dict(r, run=a.fit_run) for r in rows if r["fit"]]
+        return 0 if insample(rows, khat, a.site_src, a.khat_src) else 1
     ok = oracle(rows, a.site_src, a.r2, a.max_rel)
     kln121(rows, a.site_src)
     ktolneed(rows, a.site_src, a.max_rel)

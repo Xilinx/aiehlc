@@ -907,6 +907,24 @@ def test_kln_insample_khat_missing(tmp_path):
         assert ks.main(["--insample", "--khat", str(k), "--lpred", "x", "--npred", "y", "--fit", "off=z"]) == 2
 
 
+def test_kln_insample_tsv_only(tmp_path, capsys):
+    """--insample without logs: run-a rows of the LPRED/NPRED join, k_diag KHAT (per launch, no run col), rc=0"""
+    ks = _script("kln_site")
+    lp, npd, kh = tmp_path / "l.tsv", tmp_path / "n.tsv", tmp_path / "k.tsv"
+    lp.write_text("cfg\trun\tpart\tsite\tkind\tlaunches\tsite_ms\tL_meas\tL_hat\n"
+                  "off\tunet_off.a.log\t1\ts1\tconv\t1\t10\t1\t1\n"
+                  "off\tunet_off.a.log\t2\ts2\tfa\t2\t4\t1\t1\n"
+                  "off\tunet_off.b.log\t1\ts1\tconv\t1\t99\t1\t1\n")
+    npd.write_text("cfg\trun\tpart\tsite\tlaunches\tsite_ms\tN_meas\tN_hat\n"
+                   "off\ta\t1\ts1\t1\t10\t2\t2\noff\ta\t2\ts2\t2\t4\t1\t1\noff\tb\t1\ts1\t1\t99\t2\t2\n")
+    kh.write_text("# cfg part site cls launches K_hat_ms compute_src ovl_src\n"
+                  "off 1 s1 conv 1 7.000000 meas meas\noff 2 s2 fa16 2 1.000000 meas meas\n")
+    assert ks.main(["--insample", "--khat", str(kh), "--lpred", str(lp), "--npred", str(npd)]) == 0
+    ln = capsys.readouterr().out.strip().splitlines()
+    assert len(ln) == 1 and ln[0].startswith("KLNPROBE cfg=off src=koracle_dma7 run=a site_src=lpred sites=2 nan=0 ")
+    assert " r2=1.0000 maxrel=0.0000 " in ln[0] and ln[0].endswith(" probe")
+
+
 # ---- M3.1.1.2 PL1: m3_site --lpred --lrefit (aot-kco L + offset / kswitch, fit on run a only) ----
 def _m3_lrefit_mod(monkeypatch, tmp_path, l_meas):
     """2 sites per log; site_ms 1.0; base L_hat 0.1; feats: (launches, kswitch) = (2, 1) and (1, 0)"""
