@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """UNet per-site K a/b noise floor on board logs (costmodel M3.1.2 P0).
 
-  k_noise.py [--require-reach] CFG=L1,L2[,L3...] [CFG=L1,L2[,L3...] ...]
+  k_noise.py [--require-reach] [--spread-out FILE] CFG=L1,L2[,L3...] [CFG=L1,L2[,L3...] ...]
+  k_noise.py --selftest
 
 Question: is a per-site KFLOOR maxrel <= 0.15 reachable at all on UNet board data?  Two runs of the same build
 (a, b; no counters, no perturbation) bound the best any model can do: if K itself moves by > 10 % between a and
@@ -18,13 +19,24 @@ Output:
   KNOISE cfg=<c> src=<board|other> launches=<CMP aie_launches> sites=<n> small=<K_a<0.05 ms> kmin_ms=<x>
          ab_maxrel=<max rel over all sites> worst_part=<p>
   KNOISE ALL ab_maxrel=<x> reach=<1 if ab_maxrel <= 0.10>          (ungated, informational)
+  KSPREAD ALL cfgs=<n> sites=<n> runs=<n> PASS|FAIL                (only with --spread-out)
   KNOISE GATED ALL maxrel=<x> reach=<1 if gated maxrel <= 0.10>    (always the last line)
 src=board needs every log's CMP line on a palmyra board with run_rc=0 and PASS, and equal aie_launches.
 rc=1 on unparsable input, a duplicated log path or a site-set mismatch.  Without --require-reach reach=0 is NOT
 an error (it is the finding); with --require-reach rc=3 iff GATED ALL reach=0 (KNOISE ALL reach is ignored).
+
+--spread-out FILE (M3.1.2.2 PS): per-site a/b/c spread reference table, independent of k_diag.py (PZ cross-checks
+k_diag's spread against it).  First line is a '#' header, then one row per launches>0 site of every cfg:
+  cfg part kind launches n_runs K_a K_b K_c spread_ms        (K = wait_ms - inval_ms; missing run -> nan;
+                                                              spread_ms = max K - min K over all runs)
+KSPREAD PASS iff every site of every cfg has a row, n_runs=3 and every K is finite and >= 0.  No rel threshold:
+off ab_maxrel=0.857 comes from K<0.1 ms noise sites.  A FAIL spread gives rc=1 (printed before GATED ALL, which
+stays the last line).
 """
+import math
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 _SPLIT = re.compile(r"^PROF aie_host_split part=(\d+) kind=(\w+) .*wait_ms=([\d.]+) .*inval_ms=([\d.]+) "
@@ -90,12 +102,40 @@ def one(cfg, logs):
     worst, wp = rows[0]
     print("KNOISE cfg=%s src=%s launches=%s sites=%d small=%d kmin_ms=%.3f ab_maxrel=%.3f worst_part=%d"
           % (cfg, "board" if board else "other", cs[0][1], len(sa), sum(k < SMALL_MS for k in ka), min(ka), worst, wp))
-    return worst, gworst
+    return worst, gworst, [(cfg, p, sa[p][0], sa[p][1], ks[p]) for p in sorted(sa)]
+
+
+SPREAD_RUNS = 3
+SPREAD_HDR = "# cfg part kind launches n_runs K_a K_b K_c spread_ms"
+
+
+def write_spread(path, rows, nsites):
+    """rows: [(cfg, part, kind, launches, [K per run])]; returns (ok, ncfg, nrows, runs)"""
+    lines = [SPREAD_HDR]
+    ok = len(rows) == nsites and len(rows) > 0
+    for cfg, p, kind, n, ks in rows:
+        kk = (list(ks) + [float("nan")] * 3)[:3]
+        sp = max(ks) - min(ks)
+        ok = ok and len(ks) == SPREAD_RUNS and all(math.isfinite(k) and k >= 0 for k in ks) and math.isfinite(sp)
+        lines.append("%s %d %s %d %d %s %.6f" % (cfg, p, kind, n, len(ks), " ".join("%.6f" % k for k in kk), sp))
+    Path(path).write_text("\n".join(lines) + "\n")
+    runs = sorted({len(r[4]) for r in rows})
+    return ok, len({r[0] for r in rows}), len(rows), runs[0] if len(runs) == 1 else -1
 
 
 def main(argv):
+    if argv == ["--selftest"]:
+        return 0 if selftest() else 1
     req = "--require-reach" in argv
     argv = [a for a in argv if a != "--require-reach"]
+    spread = None
+    if "--spread-out" in argv:
+        i = argv.index("--spread-out")
+        if i + 1 >= len(argv):
+            print(__doc__, file=sys.stderr)
+            return 2
+        spread = argv[i + 1]
+        argv = argv[:i] + argv[i + 2:]
     if not argv or any("=" not in a or "," not in a.split("=", 1)[1] for a in argv):
         print(__doc__, file=sys.stderr)
         return 2
@@ -108,13 +148,75 @@ def main(argv):
             raise ValueError("cfg=%s: empty or repeated log path in %s" % (cfg, logs))
         jobs.append((cfg, logs))
     worst = gworst = 0.0
+    srows = []
     for cfg, logs in jobs:
-        w, g = one(cfg, logs)
+        w, g, r = one(cfg, logs)
         worst, gworst = max(worst, w), max(gworst, g)
+        srows += r
     print("KNOISE ALL ab_maxrel=%.3f reach=%d" % (worst, worst <= REACH_MAX))
+    sok = True
+    if spread is not None:
+        sok, nc, nr, runs = write_spread(spread, srows, len(srows))
+        print("KSPREAD ALL cfgs=%d sites=%d runs=%d %s" % (nc, nr, runs, "PASS" if sok else "FAIL"))
     greach = gworst <= REACH_MAX
     print("KNOISE GATED ALL maxrel=%.3f reach=%d" % (gworst, greach))
+    if not sok:
+        return 1
     return 3 if req and not greach else 0
+
+
+def _log(parts, cmp=True):
+    """synthetic board log: parts = [(part, kind, wait_ms, inval_ms, launches)]"""
+    t = "".join("PROF aie_host_split part=%d kind=%s x=1 wait_ms=%.4f y=2 inval_ms=%.4f launches=%d\n" % q for q in parts)
+    if cmp:
+        t += "CMP unet board=palmyra213 a=1 aie_launches=9 b=2 run_rc=0 c=3 PASS\n"
+    return t
+
+
+def selftest():
+    import contextlib
+    import io
+    res = []
+    with tempfile.TemporaryDirectory() as td:
+        def mk(name, parts):
+            f = Path(td) / name
+            f.write_text(_log(parts))
+            return str(f)
+
+        def run(args):
+            o = io.StringIO()
+            with contextlib.redirect_stdout(o):
+                rc = main(args)
+            return rc, o.getvalue()
+
+        base = [(1, "conv", 1.0, 0.1, 4), (2, "fa", 0.5, 0.0, 3), (3, "conv", 0.2, 0.0, 0)]
+        la = mk("a", base)
+        lb = mk("b", [(1, "conv", 1.1, 0.1, 4), (2, "fa", 0.52, 0.0, 3), (3, "conv", 0.2, 0.0, 0)])
+        lc = mk("c", [(1, "conv", 0.95, 0.1, 4), (2, "fa", 0.49, 0.0, 3), (3, "conv", 0.2, 0.0, 0)])
+        sp = str(Path(td) / "sp.tsv")
+        rc, out = run(["--spread-out", sp, "x=%s,%s,%s" % (la, lb, lc)])
+        lines = out.strip().splitlines()
+        tab = Path(sp).read_text().splitlines()
+        r1 = tab[1].split()
+        res.append(("spread_pass", rc == 0 and "KSPREAD ALL cfgs=1 sites=2 runs=3 PASS" in lines
+                    and lines[-1].startswith("KNOISE GATED ALL") and lines[-2].startswith("KSPREAD ALL")
+                    and tab[0] == SPREAD_HDR and len(tab) == 3 and len(r1) == 9 and r1[:5] == ["x", "1", "conv", "4", "3"]
+                    and abs(float(r1[8]) - 0.15) < 1e-9 and abs(float(r1[6]) - 1.0) < 1e-9))
+        rc, out = run(["--spread-out", sp, "x=%s,%s" % (la, lb)])
+        lines = out.strip().splitlines()
+        res.append(("spread_runs2_fail", rc == 1 and "KSPREAD ALL cfgs=1 sites=2 runs=2 FAIL" in lines
+                    and lines[-1].startswith("KNOISE GATED ALL") and Path(sp).read_text().splitlines()[1].split()[7] == "nan"))
+        ln = mk("n", [(1, "conv", 0.05, 0.1, 4), (2, "fa", 0.5, 0.0, 3)])
+        rc, out = run(["--spread-out", sp, "x=%s,%s,%s" % (la, lb, ln)])
+        res.append(("spread_negK_fail", rc == 1 and "KSPREAD ALL cfgs=1 sites=2 runs=3 FAIL" in out))
+        rc, out = run(["x=%s,%s,%s" % (la, lb, lc)])
+        res.append(("no_spread_unchanged", rc == 0 and "KSPREAD" not in out
+                    and out.strip().splitlines()[-1].startswith("KNOISE GATED ALL")))
+    for n, ok in res:
+        print("KNOISE SELFTEST %-22s %s" % (n, "ok" if ok else "FAIL"))
+    npass = sum(ok for _, ok in res)
+    print("KNOISE SELFTEST %s (%d/%d)" % ("PASS" if npass == len(res) else "FAIL", npass, len(res)))
+    return npass == len(res)
 
 
 if __name__ == "__main__":

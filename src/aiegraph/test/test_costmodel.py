@@ -384,6 +384,39 @@ def test_k_diag_selftest():
         assert re.search(r"^KDIAG SELFTEST %s\s+ok" % name, r.stdout, re.M), name
 
 
+def test_k_noise_spread(tmp_path):
+    """k_noise.py --spread-out (M3.1.2.2 PS): per-site a/b/c spread table, KSPREAD before GATED ALL (still last),
+    n_runs!=3 -> FAIL rc=1; plus the built-in selftest"""
+    import re
+    import subprocess
+    kn = SRC.parent / "script" / "perf" / "k_noise.py"
+    r = subprocess.run([sys.executable, "-I", str(kn), "--selftest"], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0 and re.search(r"^KNOISE SELFTEST PASS \((\d+)/\1\)$", r.stdout, re.M), r.stdout + r.stderr
+    cmp = "CMP unet board=palmyra213 a=1 aie_launches=9 b=2 run_rc=0 c=3 PASS\n"
+    logs = []
+    for i, (w1, w2) in enumerate(((2.0, 0.30), (2.2, 0.31), (1.9, 0.29))):
+        f = tmp_path / ("r%d.log" % i)
+        f.write_text("PROF aie_host_split part=5 kind=conv q=1 wait_ms=%.3f q=1 inval_ms=0.100 launches=2\n"
+                     "PROF aie_host_split part=7 kind=fa q=1 wait_ms=%.3f q=1 inval_ms=0.000 launches=1\n"
+                     "PROF aie_host_split part=8 kind=fa q=1 wait_ms=1.000 q=1 inval_ms=0.000 launches=0\n" % (w1, w2)
+                     + cmp)
+        logs.append(str(f))
+    sp = tmp_path / "sp.tsv"
+    r = subprocess.run([sys.executable, "-I", str(kn), "--spread-out", str(sp), "c=" + ",".join(logs)],
+                       capture_output=True, text=True, timeout=120)
+    out = r.stdout.strip().splitlines()
+    assert r.returncode == 0 and out[-2] == "KSPREAD ALL cfgs=1 sites=2 runs=3 PASS", r.stdout + r.stderr
+    assert out[-1].startswith("KNOISE GATED ALL")
+    rows = [l.split() for l in sp.read_text().splitlines()]
+    assert rows[0][0] == "#" and len(rows) == 3 and all(len(x) == 9 for x in rows[1:])
+    assert rows[1][:5] == ["c", "5", "conv", "2", "3"] and abs(float(rows[1][8]) - 0.3) < 1e-9
+    assert abs(float(rows[2][8]) - 0.02) < 1e-9
+    r = subprocess.run([sys.executable, "-I", str(kn), "--spread-out", str(sp), "c=" + ",".join(logs[:2])],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 1 and "KSPREAD ALL cfgs=1 sites=2 runs=2 FAIL" in r.stdout
+    assert r.stdout.strip().splitlines()[-1].startswith("KNOISE GATED ALL")
+
+
 def test_k_diag_noscale():
     """k_diag.py (M3.1.1 counter window): perf_n < launches is short (never scaled, out of KSANITY);
     optional pre_io_act_cyc/snap_gap_cyc tail; KSANITY denominator is K_meas + snap_gap"""
