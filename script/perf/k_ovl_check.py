@@ -41,6 +41,20 @@ aot-kco is never corrected (A is taken after its startio/bdcfg, at the first wai
   KOVL STILL cfg=off kind=<k> part=<p> runs=<n> ratio_corr_max=<x> ovl_ms=.. glue_corr_ms=..   (site still violating)
   KOVL STILLSUM cfg=off sites=.. by_kind=<k:n,...>
 rc=1 also when cfg=aot-kco has viol>0.
+
+--npred NPRED.tsv [--delta-tsv TSV] (costmodel M3.1.1.2c PV; replaces the KOVL output): static ovl_hat of the n_fit
+--predict TSV (site total ms over the site's launches; PN 33aa8e35) against the counter ovl of each log, per launch:
+  ovl_meas = ovl_cyc / (AIE_MHZ*1e3) / min(perf_n, launches)   (always the counter: ovl_src=counter; the npred
+             ovl_meas column is only cross-checked, npred_meas_mismatch = sites where it differs)
+  ovl_hat  = npred ovl_hat / launches;  site_ms = npred site_ms / launches
+  OVLSRC cfg=<c> log=<log> board=<CMP board> launches=<CMP aie_launches> run_rc=<CMP run_rc> sites=<n>
+  OVLHAT cfg=<c> run=<r> sites=<n> ovl_src=counter r2=<site totals, OVLP basis> maxrel=<max|h-m|/m> sum_rel=
+         <sum h/sum m - 1> share_max=<max|h-m|/site_ms> r2_launch=<per launch> npred_meas_mismatch=<n> PASS|FAIL
+         (PASS iff r2 >= 0.9 and maxrel <= 0.20)
+  KDELTA term=ovl rows=<n> tsv=<TSV>
+  TSV (tab, header): cfg run part site delta_ms   delta_ms = -(ovl_hat - ovl_meas) per launch (the K increment
+  when the measured ovl is replaced by ovl_hat in K = core + wait - ovl).
+rc 0 every OVLHAT PASS, 1 a metric missed (TSV complete), 2 unusable input (old TSV removed, none written).
 """
 import re
 import statistics
@@ -288,6 +302,98 @@ def run_all(build_root, specs, aie_mhz, rows_of, off_corr=None, corr_of=None):
     return 0 if ok and allr else 1
 
 
+# ---- --npred / --delta-tsv (costmodel M3.1.1.2c PV): static ovl_hat vs the counter ovl, K increment kdelta_ovl ----
+NPRED_COLS = ("cfg", "run", "part", "site", "launches", "site_ms", "N_meas", "N_hat", "ovl_meas", "ovl_hat")
+_CMP3 = re.compile(r"^CMP unet board=(\S+) .*?\baie_launches=(\d+) .*?\brun_rc=(-?\d+)", re.M)
+OVLHAT_R2, OVLHAT_MAXREL = 0.9, 0.20
+
+
+def load_npred(path):
+    """{(cfg, run, part): row} of an n_fit --predict TSV (site totals in ms over the site's launches)"""
+    lines = open(path).read().splitlines()
+    hdr = lines[0].split("\t")
+    if tuple(hdr[:len(NPRED_COLS)]) != NPRED_COLS:
+        raise ValueError("npred header %s" % hdr)
+    out = {}
+    for ln in lines[1:]:
+        if not ln.strip():
+            continue
+        r = dict(zip(hdr, ln.split("\t")))
+        out[(r["cfg"], r["run"], int(r["part"]))] = r
+    return out
+
+
+def _r2(h, m):
+    mu = sum(m) / len(m)
+    ss = sum((x - mu) ** 2 for x in m)
+    return 1.0 - sum((a - b) ** 2 for a, b in zip(h, m)) / ss if ss > 0 else float("nan")
+
+
+def run_npred(build_root, specs, aie_mhz, rows_of, npred, delta_tsv):
+    """OVLSRC per log, OVLHAT per (cfg, run), KDELTA; writes delta_tsv (per launch ms).
+    ovl_meas = counter ovl_cyc of the log (k_diag.parse_perf, per measured launch); ovl_hat = npred ovl_hat / launches.
+    rc 0 all PASS, 1 a metric missed (TSV still complete), 2 unusable input (no TSV)."""
+    from k_diag import parse_perf
+    root = build_root.rstrip("/")
+    import os
+    if delta_tsv and os.path.exists(delta_tsv):
+        os.unlink(delta_tsv)
+    np_ = load_npred(npred)
+    bad, fail, delta = False, False, []
+    for spec in specs:
+        cfg, logs = spec.split("=", 1)
+        for i, lg in enumerate(logs.split(",")):
+            run = "abcdefgh"[i] if i < 8 else str(i)
+            try:
+                rows, txt = rows_of("%s/unet_%s" % (root, cfg), lg)
+                m = _CMP3.findall(txt)
+                board, nl, rrc = m[-1] if m else ("-", "-1", "-1")
+                print("OVLSRC cfg=%s log=%s board=%s launches=%s run_rc=%s sites=%d"
+                      % (cfg, lg, board, nl, rrc, len(rows)))
+                pf = parse_perf(txt)
+                hs, ms, ht, mt, sh, xm = [], [], [], [], [], 0
+                for r in rows:
+                    p, n = r["part"], r["launches"]
+                    q = np_.get((cfg, run, p))
+                    if q is None:
+                        raise KeyError("npred has no %s/%s part %d" % (cfg, run, p))
+                    site = "%s%d" % (r["kind"], r["cid"])
+                    if q["site"] != site or int(q["launches"]) != n:
+                        raise ValueError("npred %s/%s part %d: %s x%s vs log %s x%d"
+                                         % (cfg, run, p, q["site"], q["launches"], site, n))
+                    pp = pf.get(p)
+                    if pp is None or not pp.get("has_ovl"):
+                        raise KeyError("part %d: no aie_site_perf ovl tail" % p)
+                    om = pp["ovl_cyc"] / (aie_mhz * 1e3) / float(min(pp["perf_n"], n))   # counter, per launch
+                    oh = float(q["ovl_hat"]) / n
+                    sm = float(q["site_ms"]) / n
+                    if abs(float(q["ovl_meas"]) / n - om) > 1e-4 * max(1.0, om) + 0.5e-4 / n:
+                        xm += 1    # npred ovl_meas is not this counter (reported, the counter is used)
+                    hs.append(oh); ms.append(om); ht.append(oh * n); mt.append(om * n)
+                    sh.append(abs(oh - om) / sm)
+                    delta.append((cfg, run, "%d" % p, site, "%.6f" % -(oh - om)))
+                r2 = _r2(ht, mt)
+                mr = max(abs(a - b) / b for a, b in zip(hs, ms))
+                good = r2 >= OVLHAT_R2 and mr <= OVLHAT_MAXREL
+                fail |= not good
+                print("OVLHAT cfg=%s run=%s sites=%d ovl_src=counter r2=%.4f maxrel=%.4f sum_rel=%.4f share_max=%.4f "
+                      "r2_launch=%.4f npred_meas_mismatch=%d %s"
+                      % (cfg, run, len(rows), r2, mr, sum(ht) / sum(mt) - 1.0, max(sh), _r2(hs, ms), xm,
+                         "PASS" if good else "FAIL"))
+            except (ValueError, KeyError, OSError, ZeroDivisionError) as e:
+                print("OVLHAT ERROR cfg=%s run=%s log=%s %s: %s" % (cfg, run, lg, type(e).__name__, e))
+                bad = True
+    if bad or not delta:
+        return 2
+    if delta_tsv:
+        with open(delta_tsv, "w") as f:
+            f.write("cfg\trun\tpart\tsite\tdelta_ms\n")
+            for d in delta:
+                f.write("\t".join(d) + "\n")
+    print("KDELTA term=ovl rows=%d tsv=%s" % (len(delta), delta_tsv or "-"))
+    return 1 if fail else 0
+
+
 def selftest():
     import io
     from contextlib import redirect_stdout
@@ -395,6 +501,32 @@ def selftest():
                       corr_of=lambda b, c: [("linear", 11, 0.1, {})])
     chk("corr_misaligned_rc1", rc3 == 1 and "KOVL ERROR" in buf.getvalue())
     os.unlink(pj)
+    # 9 --npred: per-launch counter ovl vs npred ovl_hat/launches, OVLSRC from CMP, delta = -(hat - meas)
+    rows_n = [dict(part=1, kind="conv", cid=0, launches=1), dict(part=2, kind="fa", cid=5, launches=4)]
+    txt_n = (perf(1, 1, 1, int(2.0e3 * mhz)) + perf(2, 4, 2, int(2.0e3 * mhz))
+             + cmp_ln.replace("PASS", "aie_flop_frac=1.000 PASS"))
+    fd, npj = tempfile.mkstemp(suffix=".tsv")
+    os.write(fd, ("\t".join(NPRED_COLS) + "\n" + "c\ta\t1\tconv0\t1\t10.0\t5\t5\t2.0000\t1.5000\n"
+                  "c\ta\t2\tfa5\t4\t20.0\t5\t5\t4.0000\t4.4000\n").encode())
+    os.close(fd)
+    fd, dtj = tempfile.mkstemp(suffix=".tsv")
+    os.close(fd)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rcn = run_npred("/x", ["c=L1"], mhz, lambda b, lg: (rows_n, txt_n), npj, dtj)
+    o = buf.getvalue().splitlines()
+    dt = open(dtj).read().splitlines()
+    chk("npred_ovlhat", rcn == 1 and o[0] == "OVLSRC cfg=c log=L1 board=palmyra213 launches=258 run_rc=0 sites=2"
+        and o[1].startswith("OVLHAT cfg=c run=a sites=2 ovl_src=counter r2=") and "maxrel=0.2500 " in o[1]
+        and "sum_rel=-0.0167 share_max=0.0500 " in o[1] and "npred_meas_mismatch=0 FAIL" in o[1]
+        and o[-1] == "KDELTA term=ovl rows=2 tsv=%s" % dtj
+        and dt == ["cfg\trun\tpart\tsite\tdelta_ms", "c\ta\t1\tconv0\t0.500000", "c\ta\t2\tfa5\t-0.100000"],
+        " | ".join(o + dt))
+    with redirect_stdout(io.StringIO()):
+        rce = run_npred("/x", ["c=L1"], mhz, lambda b, lg: (rows_n + [dict(part=3, kind="fa", cid=6, launches=1)],
+                                                             txt_n), npj, dtj)
+    chk("npred_missing_rc2", rce == 2 and not os.path.exists(dtj))
+    os.unlink(npj)
     ok = all(res)
     print("KOVL SELFTEST %s (%d/%d)" % ("PASS" if ok else "FAIL", sum(1 for r in res if r), len(res)))
     return ok
@@ -417,10 +549,15 @@ def main(argv=None):
     ap.add_argument("--build-root", required=True)
     ap.add_argument("--off-corr", default=None, metavar="PARAMS.json",
                     help="l_palmyra213.json: static in-window rt bdcfg/startio correction of the cfg=off glue bound")
+    ap.add_argument("--npred", default=None, metavar="NPRED.tsv",
+                    help="n_fit --predict TSV: OVLSRC/OVLHAT (static ovl_hat vs counter ovl) + KDELTA instead of KOVL")
+    ap.add_argument("--delta-tsv", default=None, metavar="TSV", help="--npred: per-launch K increment -(ovl_hat-ovl)")
     ap.add_argument("runs", nargs="+", metavar="CFG=LOG[,LOG...]")
     a = ap.parse_args(argv)
     from k_diag import AIE_MHZ
     from m3_site import site_rows
+    if a.npred:
+        return run_npred(a.build_root, a.runs, AIE_MHZ, site_rows, a.npred, a.delta_tsv)
     return run_all(a.build_root, a.runs, AIE_MHZ, site_rows, off_corr=a.off_corr)
 
 
