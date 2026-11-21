@@ -396,7 +396,7 @@ def selftest():
     chk("corr_misaligned_rc1", rc3 == 1 and "KOVL ERROR" in buf.getvalue())
     os.unlink(pj)
     ok = all(res)
-    print("KOVL SELFTEST %s (%d checks)" % ("PASS" if ok else "FAIL", len(res)))
+    print("KOVL SELFTEST %s (%d/%d)" % ("PASS" if ok else "FAIL", sum(1 for r in res if r), len(res)))
     return ok
 
 
