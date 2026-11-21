@@ -48,7 +48,15 @@ Output:
   KCHK    cfg log=B r2 maxrel
   KDRIFT  cfg=<c> wait_sum_rel_vs_ref=<%.3f>   (--ref: M2c b log, built without counters)
   KDSRC   cfg log board launches run_rc sites perf_sites   (CMP line of each log; src=board needs palmyra, run_rc=0)
-  KFLOOR  cfg ... PASS|FAIL;  KFLOOR ALL src cfgs sites perf_sites r2_min maxrel loo_maxrel act_over_k_max PASS|FAIL  (drift: KDRIFT, gates per-cfg KFLOOR)
+  KTOL    cfg=<c> scope=<all|kge0.1> runs=<n> sites pass fail worst_part worst_excess_ms PASS|FAIL   (M3.1.2.1:
+          per site, every run i: |K_hat_i - K_i| <= tol_i = max(0.15 K_i, 2 spread_abc, 0.01 ms), spread_abc =
+          max - min of K over the runs; K_hat from the run-a fit; scope via --scope, default off=kge0.1 (K >= 0.1
+          on every run), others all)
+  KSMALL  cfg=<c> sites within_tol maxrel   (the kge0.1-excluded sites; report only)
+  KRESID  cfg=<c> cls=<cls> site_runs sum_abs_resid_ms top_term=<oc|ovl|dma|t0|launches> abs_<term>..;
+          KRESID ALL site_runs=<n> ...   (resid_terms: model piece - measured piece per term, sums to K_hat - K)
+  KFLOOR  cfg ... tol_fail PASS|FAIL (gates on KTOL; maxrel printed only);
+  KFLOOR ALL src cfgs sites perf_sites r2_min maxrel loo_maxrel act_over_k_max PASS|FAIL tol_fail=<n>  (last line)
 --map-only (no counter lines needed):
   KDMAP   cfg site part kind launches bd_n num_dims run_b bucket ddr_b ;  KDMAP cfg=.. sites bd_missing PASS|FAIL
   KDMAP ALL logs= sites= bd_missing= PASS|FAIL   (always the last line)
@@ -154,7 +162,7 @@ def split_site(wait, inval, perf):
              lock=perf["lock"] * cyc_ms, stream=perf["stream"] * cyc_ms, gap=perf.get("gap", 0) * cyc_ms)
     d["tail"] = d["K"] - d["core"]
     if perf.get("has_ovl"):  # overlap model terms (ms): compute_cyc / 1e6, ovl_cyc / 1e6
-        d.update(oc=perf["compute_cyc"] * cyc_ms, ovl=perf["ovl_cyc"] * cyc_ms)
+        d.update(oc=perf["compute_cyc"] * cyc_ms, ovl=perf["ovl_cyc"] * cyc_ms, dact=perf.get("dact_cyc", 0) * cyc_ms)
     return d
 
 
@@ -303,6 +311,106 @@ def fmt_p(p):
     return "%s t0_ms=%.5g params=%d form=%s" % (bw, p["t0"], nparams(p), p.get("form") or "add")
 
 
+# ------------------------------------------------------------------ M3.1.2.1 per-site tolerance gate + residual terms
+TERMS = ("oc", "ovl", "dma", "t0", "launches")
+TOL_REL, TOL_SPREAD, TOL_ABS, KGE = 0.15, 2.0, 0.01, 0.1
+SCOPES = ("all", "kge0.1")
+DEFAULT_SCOPE = {"off": "kge0.1"}     # other cfgs: all
+
+
+def resid_terms(p, s):
+    """residual r = K_hat - K_meas split into TERMS, sum(terms) == r exactly (float).
+    model pieces (h): the K_hat body g split into h_oc + h_dma + h_ovl (sum form: oc, dma, -ovl; max form: the
+      larger of oc / dma, the other 0, -ovl; add: max(compute, dma), no ovl); a clip at 0 goes into h_ovl;
+      h_t0 = t0 * launches.
+    measured pieces (m), a partition of K_meas: m_oc = oc (add: compute), m_dma = dact (dact_cyc, 0 if absent),
+      m_ovl = -ovl, m_launches = core - (m_oc + m_dma + m_ovl) (unmodelled in-window time: idle / sync inside
+      the launch window), m_t0 = K - core (tail outside the window: host per-launch overhead).
+    term = h - m (launches: h = 0)."""
+    form = p.get("form")
+    dma = s["ddr_b"] * p["inv"].get(s["bucket"], 0.0)
+    if form in (None, "add"):
+        oc, ov = s["compute"], 0.0
+    else:
+        oc, ov = s["oc"], s["ovl"]
+    if form == "sum":
+        h_oc, h_dma = oc, dma
+    elif oc >= dma:
+        h_oc, h_dma = oc, 0.0
+    else:
+        h_oc, h_dma = 0.0, dma
+    g = k_hat(dict(p, t0=0.0), s)
+    h_ovl = g - h_oc - h_dma            # = -ov unless clipped at 0
+    m_oc, m_dma, m_ovl = oc, s.get("dact", 0.0), -ov
+    m_l = s["core"] - (m_oc + m_dma + m_ovl)
+    m_t0 = s["K"] - s["core"]
+    t = dict(oc=h_oc - m_oc, ovl=h_ovl - m_ovl, dma=h_dma - m_dma, t0=p["t0"] * s["launches"] - m_t0,
+             launches=-m_l)
+    return t, k_hat(p, s) - s["K"]
+
+
+def ktol_eval(rows, scope):
+    """rows: [dict(part, K=[K per run], Kh=[K_hat per run])]; tol_i = max(0.15 K_i, 2 spread, 0.01) with
+    spread = max - min of K over the runs; a site passes iff |K_hat_i - K_i| <= tol_i on every run.
+    scope all: every row; kge0.1: rows with K >= 0.1 on every run (the others -> small).
+    returns dict(sites, pass, fail, worst_part, worst_excess, small=[...], small_within, small_maxrel)"""
+    out = dict(sites=0, npass=0, fail=0, worst_part=-1, worst_excess=-float("inf"), small=0, small_within=0,
+               small_maxrel=0.0)
+    for r in rows:
+        sp = max(r["K"]) - min(r["K"])
+        ex = [abs(h - k) - max(TOL_REL * k, TOL_SPREAD * sp, TOL_ABS) for k, h in zip(r["K"], r["Kh"])]
+        ok = max(ex) <= 0.0
+        if scope == "kge0.1" and min(r["K"]) < KGE:
+            out["small"] += 1
+            out["small_within"] += ok
+            out["small_maxrel"] = max([out["small_maxrel"]] + [abs(h - k) / k if k > 0 else float("inf")
+                                                                for k, h in zip(r["K"], r["Kh"])])
+            continue
+        out["sites"] += 1
+        out["npass" if ok else "fail"] += 1
+        if max(ex) > out["worst_excess"]:
+            out["worst_excess"], out["worst_part"] = max(ex), r["part"]
+    return out
+
+
+def ktol_lines(cfg, scope, runs_sites, p):
+    """KTOL (+ KSMALL for scope kge0.1) of one cfg; runs_sites: [sites of run a, b, c, ...] (perf_ok only),
+    joined by site name over all runs; returns the ktol_eval dict"""
+    by = [{s["site"]: s for s in ss} for ss in runs_sites]
+    names = [n for n in by[0] if all(n in b for b in by[1:])]
+    rows = [dict(part=by[0][n]["part"], K=[b[n]["K"] for b in by], Kh=[k_hat(p, b[n]) for b in by]) for n in names]
+    t = ktol_eval(rows, scope)
+    print("KTOL cfg=%s scope=%s runs=%d sites=%d pass=%d fail=%d worst_part=%d worst_excess_ms=%.4f %s"
+          % (cfg, scope, len(runs_sites), t["sites"], t["npass"], t["fail"], t["worst_part"], t["worst_excess"],
+             "PASS" if t["fail"] == 0 and t["sites"] > 0 else "FAIL"))
+    if scope == "kge0.1":
+        print("KSMALL cfg=%s sites=%d within_tol=%d maxrel=%.4f" % (cfg, t["small"], t["small_within"],
+                                                                    t["small_maxrel"]))
+    return t
+
+
+def kresid_acc(cfg, runs_sites, p, acc):
+    """KRESID per (cfg, cls) over every site-run; adds into acc (ALL); returns nothing"""
+    for c in ("conv_big", "conv_tkw4", "fa16", "fa_d160", "linear"):
+        n, tot, ts = 0, 0.0, dict.fromkeys(TERMS, 0.0)
+        for ss in runs_sites:
+            for s in ss:
+                if s["cls"] != c:
+                    continue
+                t, r = resid_terms(p, s)
+                n += 1
+                tot += abs(r)
+                for k in TERMS:
+                    ts[k] += abs(t[k])
+                    acc["terms"][k] += abs(t[k])
+                acc["n"] += 1
+                acc["abs"] += abs(r)
+                acc["signed"] += r
+        top = max(TERMS, key=lambda k: ts[k])
+        print("KRESID cfg=%s cls=%s site_runs=%d sum_abs_resid_ms=%.3f top_term=%s %s"
+              % (cfg, c, n, tot, top if n else "none", " ".join("abs_%s=%.3f" % (k, ts[k]) for k in TERMS)))
+
+
 # ------------------------------------------------------------------ reporting
 def diag_lines(cfg, run, sites, p=None):
     """KSITE / KCLS / KFA / KSANITY of one log; returns io_act/K max"""
@@ -412,22 +520,27 @@ def sanity_only(a):
 
 
 def full(a):
-    """rc: 0 PASS, 1 FAIL, 2 --model ovl on a log without the ovl fields"""
+    """rc: 0 PASS, 1 FAIL, 2 --model ovl on a log without the ovl fields.
+    CFG=LA[,LB,LC,...]: fit on LA (run a), every other log is a check run (b, c, ...). Per-cfg PASS needs KTOL
+    (all runs, per-site tol) -- the old maxrel 0.15 is printed only."""
     model = getattr(a, "model", "ovl") or "ovl"
     refs = dict(x.split("=", 1) for x in (a.ref or []))
+    scopes = dict(DEFAULT_SCOPE, **dict(x.split("=", 1) for x in (getattr(a, "scope", None) or [])))
     ok_all = True
-    agg = dict(cfgs=0, sites=0, perf=0, r2=float("inf"), maxrel=0.0, loo=0.0, drift=0.0, iok=0.0)
+    agg = dict(cfgs=0, sites=0, perf=0, r2=float("inf"), maxrel=0.0, loo=0.0, drift=0.0, iok=0.0, tol_fail=0)
+    racc = dict(n=0, abs=0.0, signed=0.0, terms=dict.fromkeys(TERMS, 0.0))
     src_ok = True
     ksan_ok = True
     for spec in a.runs:
         cfg, logs = spec.split("=", 1)
-        la, lb = (logs.split(",") + [None])[:2]
-        sa, ta = load(cfg, la, a.build_root)
-        sb, tb = load(cfg, lb, a.build_root) if lb else (sa, ta)
-        pa = [s for s in sa if perf_ok(s) and s["bd_ok"] and s["K"] > 0]
-        pb = [s for s in sb if perf_ok(s) and s["bd_ok"] and s["K"] > 0]
+        logs = logs.split(",")
+        names = [chr(ord("a") + i) for i in range(len(logs))]
+        loaded = [load(cfg, lg, a.build_root) for lg in logs]
+        sss = [x[0] for x in loaded]
+        txs = [x[1] for x in loaded]
+        pps = [[s for s in ss if perf_ok(s) and s["bd_ok"] and s["K"] > 0] for ss in sss]
         miss = 0
-        for run, lg, tx in (("a", la, ta), ("b", lb, tb)) if lb else (("a", la, ta),):
+        for run, lg, tx in zip(names, logs, txs):
             pf = parse_perf(tx)
             kperf_line(cfg, run, pf)
             if model == "ovl" and ovl_missing(pf):
@@ -436,12 +549,14 @@ def full(a):
                 miss += 1
         if miss:
             return 2
-        for lg, ss, ps, tx in ((la, sa, pa, ta), (lb, sb, pb, tb)) if lb else ((la, sa, pa, ta),):
+        for lg, ss, ps, tx in zip(logs, sss, pps, txs):
             src_ok = kdsrc_line(cfg, lg, ss, ps, tx) and src_ok
-        if not pa or not pb:
+        sb, pb = sss[-1], pps[-1]
+        if not all(pps):
             print("KFLOOR cfg=%s sites=%d perf_sites=%d FAIL (no counter lines)" % (cfg, len(sb), len(pb)))
             ok_all = False
             continue
+        pa = pps[0]
         if model == "ovl":
             p, lo, lf = choose_form(pa)
             print("KMODEL cfg=%s form=%s loo_sum=%.4f loo_max=%.4f" % (cfg, p["form"], lf["sum"], lf["max"]))
@@ -449,23 +564,37 @@ def full(a):
             p = fit(pa)
             lo = loo(pa)
         r2a, mra = r2(p, pa), max(rels(p, pa))
-        print("KFIT cfg=%s log=%s %s r2=%.4f maxrel=%.4f loo_maxrel=%.4f" % (cfg, la, fmt_p(p), r2a, mra, lo))
-        ioka = diag_lines(cfg, "a", sa, p)
-        iokb = diag_lines(cfg, "b", sb, p) if lb else ioka
-        ksan_ok &= max(ioka, iokb) <= IOK_MAX
-        r2b, mrb = r2(p, pb), max(rels(p, pb))
-        print("KCHK cfg=%s log=%s r2=%.4f maxrel=%.4f" % (cfg, lb or la, r2b, mrb))
+        print("KFIT cfg=%s log=%s %s r2=%.4f maxrel=%.4f loo_maxrel=%.4f" % (cfg, logs[0], fmt_p(p), r2a, mra, lo))
+        ioks = [diag_lines(cfg, run, ss, p) for run, ss in zip(names, sss)]
+        iok = max(ioks)
+        ksan_ok &= iok <= IOK_MAX
+        r2b, mrb = r2a, mra
+        if len(logs) > 1:
+            r2b, mrb = float("inf"), 0.0
+            for lg, ps in zip(logs[1:], pps[1:]):
+                r2c, mrc = r2(p, ps), max(rels(p, ps))
+                print("KCHK cfg=%s log=%s r2=%.4f maxrel=%.4f" % (cfg, lg, r2c, mrc))
+                r2b, mrb = min(r2b, r2c), max(mrb, mrc)
+        else:
+            print("KCHK cfg=%s log=%s r2=%.4f maxrel=%.4f" % (cfg, logs[0], r2a, mra))
+        scope = scopes.get(cfg, "all")
+        if scope not in SCOPES:
+            raise SystemExit("KDIAG ERROR: --scope %s=%s (want %s)" % (cfg, scope, "|".join(SCOPES)))
+        rs_all = [[s for s in ss if perf_ok(s)] for ss in sss]
+        kt = ktol_lines(cfg, scope, rs_all, p)
+        kresid_acc(cfg, rs_all, p, racc)
         dr = 0.0
         if cfg in refs:
             dr = drift(sb, ref_sites(a, cfg, refs[cfg]))
             print("KDRIFT cfg=%s wait_sum_rel_vs_ref=%.3f" % (cfg, dr))
         kinds = {k: sum(s["kind"] == k for s in sb) for k in SITES_PER_CFG}
-        ok = (kinds == SITES_PER_CFG and len(pb) == len(sb) and nparams(p) <= 4 and min(r2a, r2b) >= GATE["r2"]
-              and max(mra, mrb) <= GATE["maxrel"] and lo <= GATE["loo"] and max(ioka, iokb) <= IOK_MAX
+        tol_ok = kt["fail"] == 0 and kt["sites"] > 0
+        ok = (kinds == SITES_PER_CFG and all(len(ps) == len(ss) for ps, ss in zip(pps, sss)) and nparams(p) <= 4
+              and min(r2a, r2b) >= GATE["r2"] and tol_ok and lo <= GATE["loo"] and iok <= IOK_MAX
               and dr <= GATE["drift"])
-        print("KFLOOR cfg=%s sites=%d perf_sites=%d r2_a=%.4f r2_b=%.4f maxrel_a=%.4f maxrel_b=%.4f loo_maxrel=%.4f "
-              "io_act_over_K_max=%.3f %s" % (cfg, len(sb), len(pb), r2a, r2b, mra, mrb, lo, max(ioka, iokb),
-                                              "PASS" if ok else "FAIL"))
+        print("KFLOOR cfg=%s runs=%d sites=%d perf_sites=%d r2_a=%.4f r2_b=%.4f maxrel_a=%.4f maxrel_b=%.4f "
+              "loo_maxrel=%.4f io_act_over_K_max=%.3f tol_fail=%d %s"
+              % (cfg, len(logs), len(sb), len(pb), r2a, r2b, mra, mrb, lo, iok, kt["fail"], "PASS" if ok else "FAIL"))
         ok_all &= ok
         agg["cfgs"] += 1
         agg["sites"] += len(sb)
@@ -474,12 +603,17 @@ def full(a):
         agg["maxrel"] = max(agg["maxrel"], mra, mrb)
         agg["loo"] = max(agg["loo"], lo)
         agg["drift"] = max(agg["drift"], dr)
-        agg["iok"] = max(agg["iok"], ioka, iokb)
+        agg["iok"] = max(agg["iok"], iok)
+        agg["tol_fail"] += kt["fail"]
+    if racc["n"]:
+        print("KRESID ALL site_runs=%d sum_abs_resid_ms=%.3f sum_resid_ms=%.3f top_term=%s %s"
+              % (racc["n"], racc["abs"], racc["signed"], max(TERMS, key=lambda k: racc["terms"][k]),
+                 " ".join("abs_%s=%.3f" % (k, racc["terms"][k]) for k in TERMS)))
     ok_all = ok_all and src_ok and ksan_ok and agg["cfgs"] > 0
     print("KFLOOR ALL src=%s cfgs=%d sites=%d perf_sites=%d r2_min=%.3f maxrel=%.3f loo_maxrel=%.3f "
-          "act_over_k_max=%.3f %s"
+          "act_over_k_max=%.3f %s tol_fail=%d"
           % ("board" if src_ok else "nonboard", agg["cfgs"], agg["sites"], agg["perf"], agg["r2"], agg["maxrel"],
-             agg["loo"], agg["iok"], "PASS" if ok_all else "FAIL"))
+             agg["loo"], agg["iok"], "PASS" if ok_all else "FAIL", agg["tol_fail"]))
     return 0 if ok_all else 1
 
 
@@ -702,6 +836,80 @@ def selftest():
         and not any(x.startswith(("KFIT", "KMODEL", "KDIAG ERROR")) for x in out)
         and seen3 == ["a.log", "b.log", "c.log"] * 2 + ["nocmp.log"],
         "rc_pass=%d rc_fail=%d rc_src=%d" % (rc_pass, rc_fail, rc_src))
+    # 14 M3.1.2.1 3run_tol: tol = max(0.15 K_i, 2 spread, 0.01) hand values, then end to end through main with
+    #    --fit CFG=A --check CFG=B,C (3 runs): KTOL runs=3, 3 KCHK-able runs, KRESID ALL site_runs = 3 * sites,
+    #    KFLOOR ALL ... tol_fail=<n> (maxrel no longer gates: a 3 % runs spread passes KTOL)
+    hand = [dict(part=1, K=[1.0, 1.02, 0.98], Kh=[1.12, 1.12, 1.12]),    # spread .04 -> tol .15/.153/.147: ok
+            dict(part=2, K=[1.0, 1.0, 1.0], Kh=[1.2, 1.2, 1.2]),         # tol .15 -> excess .05: fail
+            dict(part=3, K=[1.0, 1.3, 1.0], Kh=[1.5, 1.5, 1.5]),         # spread .3 -> tol .6: ok (noisy site)
+            dict(part=4, K=[0.02, 0.02, 0.02], Kh=[0.029, 0.03, 0.031])]  # tol 0.01 abs: run c .011 -> fail
+    th = ktol_eval(hand, "all")
+    ok_hand = (th["sites"] == 4 and th["npass"] == 2 and th["fail"] == 2 and th["worst_part"] == 2
+               and abs(th["worst_excess"] - 0.05) < 1e-12 and th["small"] == 0)
+    inv3, t03 = (1 / 2.0e6, 1 / 6.0e6, 1 / 9.0e6), 0.02
+    base = _synth(21, 12, inv3, t03, form="max")
+    scale = {"a.log": 1.0, "b.log": 1.03, "c.log": 0.98}
+
+    def _stub_tol(cfg, log, build_root, need_perf=True):
+        ss, lines = [], ["CMP unet board=palmyra213 x aie_launches=258 y run_rc=0"]
+        for s in base:
+            e = dict(s, cfg=cfg, bd_ok=True, bd_n=1, num_dims=1, perf={}, K=s["K"] * scale[log], gap=0.0, dact=0.0)
+            e["core"] = e["K"] - 0.1 * s["launches"] * t03
+            e["tail"] = e["K"] - e["core"]
+            ss.append(e)
+            lines.append("PROF aie_site_perf part=%d kind=linear launches=%d perf_n=%d io_act_cyc=1 lock_stall_cyc=0 "
+                         "stream_stall_cyc=0 compute_cyc=1 ovl_cyc=1 dact_cyc=1" % (s["part"], s["launches"], s["launches"]))
+        return ss, "\n".join(lines) + "\n"
+    g["load"] = _stub_tol
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc3 = main(["--build-root", "/x", "--fit", "synth=a.log", "--check", "synth=b.log,c.log"])
+    finally:
+        g["load"] = real_load
+    o3 = buf.getvalue().splitlines()
+    kt3 = [x for x in o3 if x.startswith("KTOL")]
+    kr3 = [x for x in o3 if x.startswith("KRESID ALL")]
+    kf3 = [x for x in o3 if x.startswith("KFLOOR ALL")]
+    chk("3run_tol", ok_hand and rc3 == 1 and len(kt3) == 1
+        and re.match(r"KTOL cfg=synth scope=all runs=3 sites=12 pass=12 fail=0 worst_part=\d+ worst_excess_ms=-\S+ PASS$",
+                     kt3[0]) is not None
+        and sum(x.startswith("KCHK") for x in o3) == 2 and kr3 and kr3[0].startswith("KRESID ALL site_runs=36 ")
+        and kf3 and kf3[0].endswith(" FAIL tol_fail=0") and o3[-1] == kf3[0],
+        "hand pass=%d fail=%d worst=%d; e2e %s" % (th["npass"], th["fail"], th["worst_part"], kt3[:1]))
+    # 15 small_scope: kge0.1 drops sites with K < 0.1 on ANY run into KSMALL (reported, not gated); scope all keeps them
+    rows = [dict(part=1, K=[0.2, 0.3, 0.25], Kh=[0.25, 0.25, 0.25]),   # spread .1 -> tol .2: ok
+            dict(part=2, K=[0.05, 0.2, 0.2], Kh=[0.5, 0.5, 0.5]),      # small (run a), out of tol, rel 9.0
+            dict(part=3, K=[0.06, 0.06, 0.06], Kh=[0.065, 0.06, 0.06]),  # small, within 0.01 abs
+            dict(part=4, K=[2.0, 2.0, 2.0], Kh=[2.5, 2.0, 2.0])]       # in scope, fail .2
+    sk, sa = ktol_eval(rows, "kge0.1"), ktol_eval(rows, "all")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        # sum form with dma = ovl = t0 = 0: K_hat = max(0, oc) = the row's Kh
+        ktol_lines("off", "kge0.1", [[dict(site="s%d" % r["part"], part=r["part"], K=r["K"][i], oc=r["Kh"][i], ovl=0.0,
+                                           ddr_b=0.0, bucket=0, launches=1) for r in rows] for i in range(3)],
+                   dict(inv={}, t0=0.0, form="sum"))
+    ol = buf.getvalue().splitlines()
+    chk("small_scope", sk["sites"] == 2 and sk["npass"] == 1 and sk["fail"] == 1 and sk["worst_part"] == 4
+        and sk["small"] == 2 and sk["small_within"] == 1 and abs(sk["small_maxrel"] - 9.0) < 1e-12
+        and sa["sites"] == 4 and sa["fail"] == 2 and sa["small"] == 0
+        and ol == ["KTOL cfg=off scope=kge0.1 runs=3 sites=2 pass=1 fail=1 worst_part=4 worst_excess_ms=0.2000 FAIL",
+                   "KSMALL cfg=off sites=2 within_tol=1 maxrel=9.0000"], "%s" % ol)
+    # 16 kresid_sum: hand split (sum form) + sum(terms) == K_hat - K_meas (<= 1e-9) on every form, clipped sites too
+    hs = dict(oc=3.0, ovl=2.0, compute=2.5, ddr_b=1e6, bucket=0, launches=10, dact=1.5, core=2.9, K=3.15)
+    ht, hr = resid_terms(dict(inv={0: 1e-6}, t0=0.01, form="sum"), hs)
+    ok_h = (abs(hr + 1.05) < 1e-12 and all(abs(ht[k] - v) < 1e-12 for k, v in
+                                          dict(oc=0.0, dma=-0.5, ovl=0.0, launches=-0.4, t0=-0.15).items()))
+    worst = 0.0
+    rng = np.random.default_rng(5)
+    for form in ("sum", "max", "add"):
+        for s in _synth(31, 40, inv3, t03, 0.05, form=None if form == "add" else form):
+            s = dict(s, dact=float(rng.uniform(0, 2)) * s["oc"], ovl=s["ovl"] * float(rng.uniform(0.5, 4.0)))
+            s["core"] = s["K"] * float(rng.uniform(0.6, 1.0))
+            pp = dict(inv={0: inv3[0] * 1.3, 1: inv3[1] * 0.7, 2: inv3[2]}, t0=t03 * 1.5, form=form)
+            t, r = resid_terms(pp, s)
+            worst = max(worst, abs(sum(t.values()) - r), abs(r - (k_hat(pp, s) - s["K"])))
+    chk("kresid_sum", ok_h and worst <= 1e-9, "hand_resid=%.3f sum_err_max=%.1e" % (hr, worst))
     n = sum(res)
     ok = n == len(res)
     print("KDIAG SELFTEST %s (%d/%d)" % ("PASS" if ok else "FAIL", n, len(res)))
@@ -719,8 +927,10 @@ def main(argv=None):
                     help="ovl (default): overlap K floor (sum|max form by LOO); add: M3.1 max(compute, dma) floor")
     ap.add_argument("--ref", nargs="+", metavar="CFG=LOG")
     ap.add_argument("--fit", nargs="+", metavar="CFG=LOG_A", help="logs the K floor is fitted on (run a)")
-    ap.add_argument("--check", nargs="+", metavar="CFG=LOG_B", help="held-out logs (run b, never fitted)")
-    ap.add_argument("runs", nargs="*", metavar="CFG=LOG_A[,LOG_B]")
+    ap.add_argument("--check", nargs="+", metavar="CFG=LOG_B[,LOG_C]", help="held-out logs (runs b, c, never fitted)")
+    ap.add_argument("--scope", nargs="+", metavar="CFG=all|kge0.1",
+                    help="KTOL site scope per cfg (default off=kge0.1, others all)")
+    ap.add_argument("runs", nargs="*", metavar="CFG=LOG_A[,LOG_B,LOG_C]")
     a = ap.parse_args(argv)
     if a.fit:  # --fit cfg=A --check cfg=B  ==  positional cfg=A,B
         chk = dict(x.split("=", 1) for x in (a.check or []))

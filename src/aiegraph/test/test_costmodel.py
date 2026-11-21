@@ -517,3 +517,32 @@ def test_k_diag_ovl_model():
         A = kd._synth(21, 30, (1 / 2.0e6, 1 / 6.0e6, 1 / 9.0e6), 0.02, form=form)
         q = kd.fit(A, form)
         assert q["form"] == form and max(kd.rels(q, A)) < 1e-9
+
+
+def test_k_diag_tol_3runs(capsys):
+    """k_diag.py (M3.1.2.1): per-site tol = max(0.15 K_i, 2 spread_abc, 0.01) over runs a/b/c, kge0.1 scope -> KSMALL,
+    KRESID terms sum to K_hat - K_meas"""
+    import importlib.util
+    path = SRC.parent / "script" / "perf" / "k_diag.py"
+    spec = importlib.util.spec_from_file_location("k_diag_tol", path)
+    kd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kd)
+    rows = [dict(part=1, K=[1.0, 1.02, 0.98], Kh=[1.12] * 3),     # within 0.15 K (spread .04)
+            dict(part=2, K=[1.0, 1.0, 1.0], Kh=[1.2] * 3),        # excess 0.05
+            dict(part=3, K=[1.0, 1.3, 1.0], Kh=[1.5] * 3),        # noisy: tol = 2 * 0.3
+            dict(part=4, K=[0.05, 0.2, 0.2], Kh=[0.5] * 3)]       # K < 0.1 on run a
+    t = kd.ktol_eval(rows, "all")
+    assert (t["sites"], t["npass"], t["fail"], t["worst_part"]) == (4, 2, 2, 4)
+    t = kd.ktol_eval(rows, "kge0.1")
+    assert (t["sites"], t["npass"], t["fail"], t["worst_part"], t["small"], t["small_within"]) == (3, 2, 1, 2, 1, 0)
+    assert abs(t["worst_excess"] - 0.05) < 1e-12 and abs(t["small_maxrel"] - 9.0) < 1e-12
+    # residual split: sum form, dma 1 ms (model) vs dact 1.5 (measured), 0.4 ms unmodelled in-window, tail 0.25 vs t0*L 0.1
+    s = dict(oc=3.0, ovl=2.0, compute=2.5, ddr_b=1e6, bucket=0, launches=10, dact=1.5, core=2.9, K=3.15)
+    terms, r = kd.resid_terms(dict(inv={0: 1e-6}, t0=0.01, form="sum"), s)
+    assert abs(r + 1.05) < 1e-12 and abs(sum(terms.values()) - r) < 1e-12
+    assert abs(terms["dma"] + 0.5) < 1e-12 and abs(terms["launches"] + 0.4) < 1e-12 and abs(terms["t0"] + 0.15) < 1e-12
+    capsys.readouterr()
+    assert kd.selftest()
+    out = capsys.readouterr().out
+    for name in ("3run_tol", "small_scope", "kresid_sum"):
+        assert "KDIAG SELFTEST %-28s ok" % name in out
