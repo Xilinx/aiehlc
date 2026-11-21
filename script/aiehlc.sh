@@ -590,7 +590,9 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
     if [ "${SKIP_BSS}" -ne 0 ]; then
         hc_extra_defs="${hc_extra_defs} -DAIEHLC_SKIP_BSS_DEFAULT=${SKIP_BSS}"
     fi
-    WORKLOCAL_DIR="${WORKLOCAL_DIR}" AIE_VERSION="${aie_version}" PLATFORM="${platform}" \
+    # KERNEL_DIR: hostcompile.sh cd's into WORKLOCAL_DIR before it sources kc.sh,
+    # so kc.sh must be told where aiehlc wrote kernel_build_flags.sh.
+    KERNEL_DIR="${KERNEL_DIR}" WORKLOCAL_DIR="${WORKLOCAL_DIR}" AIE_VERSION="${aie_version}" PLATFORM="${platform}" \
         SIM_TILES="${SIM_TILES:-}" DEBUG_SYMS="${DEBUG_SYMS}" \
         AIEHLC_PROFILING="${PROFILING}" EXTRA_DEFS="${hc_extra_defs}" \
         USE_LLVM_AIE="${use_llvm_aie}" LLVM_AIE_PATH="${LLVM_AIE_PATH:-}" \

@@ -40,6 +40,12 @@ if [ -z "${WORKLOCAL_DIR:-}" ]; then
     fi
 fi
 BUILD_DIR="${WORKLOCAL_DIR}/build"
+# kc.sh reads kernel_build_flags.sh (klog pragma) from $KERNEL_DIR, else ./aout/.
+# Every kernel compile below runs with cwd = WORKLOCAL_DIR or BUILD_DIR/kpar/<k>,
+# so ./aout/ never matches there: default KERNEL_DIR to the aout that holds this
+# worklocal (aiehlc writes the file next to worklocal/), and export it so the
+# parallel per-kernel compiles see it too.
+export KERNEL_DIR="${KERNEL_DIR:-${WORKLOCAL_DIR}/../}"
 _HOSTCOMPILE_ORIG_PWD="$(pwd)"
 
 OPT_FLAGS="-Os"
@@ -53,12 +59,13 @@ HOST_OPT_FLAGS="${HOSTCOMPILE_HOST_OPT:-${OPT_FLAGS}}"
 KERNEL_FUNC_NAME="computekernel"   # default fallback; overridden by auto-detection below
 
 # Hash of everything build/kernel.o is made from: kernel.cc, the bcf/prx the
-# linker places it with, kc.sh itself, and the knobs that change its output.
+# linker places it with, kc.sh itself, kernel_build_flags.sh (klog on/off), and
+# the knobs that change its output.
 kernel_stamp() {
     local f
     {
         for f in "${WORKLOCAL_DIR}/kernel.cc" "${WORKLOCAL_DIR}/aieml.bcf" "${WORKLOCAL_DIR}/aieml.prx" \
-                 "${AIEHLC_ROOT}/script/kc.sh"; do
+                 "${AIEHLC_ROOT}/script/kc.sh" "${KERNEL_DIR%/}/kernel_build_flags.sh"; do
             [ -f "$f" ] && sha256sum < "$f"
         done
         echo "$1 ${AIE_VERSION:-5} ${PLATFORM:-baremetal} ${USE_LLVM_AIE:-false} ${DEBUG_SYMS:-0}"
