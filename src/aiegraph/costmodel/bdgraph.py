@@ -182,8 +182,31 @@ def start_queue_violations(sv: Dict[str, Any], trip_n: Optional[int]) -> List[st
             for k, (n, ln) in sorted(worst.items(), key=lambda kv: kv[1][1])]
 
 
+def infer_bd_write_path(d: Path) -> Optional[str]:
+    """The shim BD write path the generated host.cc asks for, or None when there is no host.cc.
+
+    __Runtime_ctrl_aot_window( -> "aot_window" (passapitocontrolpacket batches the begin/commit window into it);
+    __Runtime_ctrl_shim_bd_begin( -> "jit_ctrlpkt" (#pragma control_plan_shim_bd_ctrl, DfscheduleToApi);
+    neither -> "jit_mmio".  This is the intended path: at run time an AOT miss (rt_sb_aot_take == 0) or a
+    shim_bd_ctrl fallback writes the BD through RT_SB_CALL instead.  506 designs since 11-10: 405 / 91 / 10, none
+    with both calls.
+    """
+    f = Path(d) / "host.cc"
+    if not f.is_file():
+        return None
+    t = f.read_text(errors="replace")
+    if "__Runtime_ctrl_aot_window(" in t:
+        return "aot_window"
+    if "__Runtime_ctrl_shim_bd_begin(" in t:
+        return "jit_ctrlpkt"
+    return "jit_mmio"
+
+
 def features(src: Any) -> Dict[str, Any]:
-    """src = worklocal dir (str/Path) or {'worklocal': dir, 'trip_count': int?, 'bd_write_path': str?}."""
+    """src = worklocal dir (str/Path) or {'worklocal': dir, 'trip_count': int?, 'bd_write_path': str?}.
+
+    bd_write_path not given -> read from worklocal/host.cc (infer_bd_write_path); bd_write_path_src says which.
+    """
     spec = dict(src) if isinstance(src, dict) else {"worklocal": src}
     d = Path(spec["worklocal"])
     dfs = _load(d, "dfscheduleprovenancemap.json")
@@ -193,6 +216,10 @@ def features(src: Any) -> Dict[str, Any]:
     wp = spec.get("bd_write_path")
     if wp is not None and wp not in BD_WRITE_PATHS:
         raise ValueError(f"bd_write_path {wp!r} not in {BD_WRITE_PATHS}")
+    wp_src = "spec" if wp is not None else None
+    if wp is None:
+        wp = infer_bd_write_path(d)
+        wp_src = "host.cc" if wp is not None else None
     ovr = spec.get("trip_count")
 
     channels, skipped, locked, trips = [], 0, 0, set()
@@ -254,7 +281,7 @@ def features(src: Any) -> Dict[str, Any]:
             "rounds_unknown": rounds_unknown or (per["round"] > 0 and rounds is None),
             "bd_config": per, "bd_configs_per_launch": bdcfg, "waits": waits,
             "runtime_bds_skipped": skipped, "locked_bds": locked, "shim_run_b": shim_runs,
-            "bd_write_path": wp, "has_host_lines": sv is not None, "ddr_bytes": ddr,
+            "bd_write_path": wp, "bd_write_path_src": wp_src, "has_host_lines": sv is not None, "ddr_bytes": ddr,
             "hw_violations": viol, "plain_shim_bds_large": plain_large}
 
 

@@ -102,6 +102,32 @@ def test_given_no_bd_write_path_then_issue_is_unpriced_and_total_is_zero(tmp_pat
     assert r["issue_ms"] is None and r["total_ms"] == 0.0 and "bd_write_path" in r["unpriced"]
 
 
+@pytest.mark.parametrize("body,path", [
+    ("__Runtime_ctrl_aot_window(dev, &fab, 2, b0, b1);", "aot_window"),
+    ("__Runtime_ctrl_shim_bd_begin(&fab);\n__Runtime_ctrl_shim_bd_commit(&fab);", "jit_ctrlpkt"),
+    ("__Runtime_bd_config_multidim(dev, t, 0);", "jit_mmio"),
+])
+def test_given_no_bd_write_path_and_a_host_cc_then_the_path_is_read_from_host_cc(tmp_path, body, path):
+    d = _write(tmp_path, LOOPED, [_bd(0, 256)], HOST)
+    (d / "host.cc").write_text("int main() {\n" + body + "\n}\n")
+    g = bdgraph.features(str(d))
+    assert g["bd_write_path"] == path and g["bd_write_path_src"] == "host.cc"
+
+
+def test_given_an_explicit_bd_write_path_then_it_wins_over_host_cc(tmp_path):
+    d = _write(tmp_path, LOOPED, [_bd(0, 256)], HOST)
+    (d / "host.cc").write_text("__Runtime_ctrl_shim_bd_begin(&fab);")
+    g = bdgraph.features({"worklocal": str(d), "bd_write_path": "jit_mmio"})
+    assert g["bd_write_path"] == "jit_mmio" and g["bd_write_path_src"] == "spec"
+
+
+def test_given_a_ctrlpkt_host_cc_and_the_board_fit_then_issue_is_priced_without_a_path(tmp_path, cycles_file):
+    d = _write(tmp_path, LOOPED, [_bd(0, 256)], HOST)
+    (d / "host.cc").write_text("__Runtime_ctrl_shim_bd_begin(&fab);")
+    r = estimate([{"kernel": "x", "bdgraph": {"worklocal": str(d)}, "host": {"bd_us": 2.0}}], cycles=cycles_file)
+    assert r["issue_ms"] is not None and "bd_write_path" not in r["unpriced"]
+
+
 def test_given_an_unknown_bd_write_path_then_it_is_rejected(tmp_path):
     d = _write(tmp_path, LOOPED, [_bd(0, 256)], HOST)
     with pytest.raises(ValueError, match="bd_write_path"):
