@@ -590,6 +590,46 @@ def sanity_only(a):
     return 0 if ksan_ok else 1
 
 
+# ------------------------------------------------------------------ M3.1.2.2 PR spread cross-check
+SPREADX_SITES = 276
+SPREADX_TOL = 0.001   # ms
+
+
+def spread_sites(cfg, runs_sites):
+    """k_diag's own per-site spread_abc: max - min of K over every run, sites joined by name over all runs
+    (no perf filter: the tolerance spread is a property of the measured K); returns {(cfg, part): spread_ms}"""
+    by = [{s["site"]: s for s in ss} for ss in runs_sites]
+    return {(cfg, by[0][n]["part"]): max(b[n]["K"] for b in by) - min(b[n]["K"] for b in by)
+            for n in by[0] if all(n in b for b in by[1:]) and by[0][n].get("launches", 1) > 0}
+
+
+def read_spread_ref(path):
+    """spread_abc.tsv (k_noise --spread-out): 9 cols cfg part kind launches n_runs K_a K_b K_c spread_ms,
+    '#' lines are headers; returns {(cfg, part): spread_ms}"""
+    out = {}
+    for ln in Path(path).read_text().splitlines():
+        f = ln.split()
+        if not f or f[0].startswith("#"):
+            continue
+        if len(f) != 9:
+            raise SystemExit("KDIAG ERROR: %s: want 9 columns, got %d: %s" % (path, len(f), ln))
+        out[(f[0], int(f[1]))] = float(f[8])
+    return out
+
+
+def spreadx_line(mine, ref, want=SPREADX_SITES, tol=SPREADX_TOL):
+    """SPREADX: k_diag spread vs an independent reference, per (cfg, part); PASS iff no site is missing or extra
+    on either side, the count is want and max |diff| <= tol ms; returns ok"""
+    both = sorted(set(mine) & set(ref))
+    miss, extra = len(set(ref) - set(mine)), len(set(mine) - set(ref))
+    md = max([abs(mine[k] - ref[k]) for k in both] or [float("inf")])
+    worst = max(both, key=lambda k: abs(mine[k] - ref[k])) if both else ("none", -1)
+    ok = miss == 0 and extra == 0 and len(both) == want and md <= tol + 1e-12
+    print("SPREADX sites=%d maxdiff_ms=%.6f %s missing=%d extra=%d want=%d worst=%s:%d"
+          % (len(both), md, "PASS" if ok else "FAIL", miss, extra, want, worst[0], worst[1]))
+    return ok
+
+
 def full(a):
     """rc: 0 PASS, 1 FAIL, 2 --model ovl on a log without the ovl fields.
     CFG=LA[,LB,LC,...]: fit on LA (run a), every other log is a check run (b, c, ...). Per-cfg PASS needs KTOL
@@ -602,6 +642,7 @@ def full(a):
     racc = dict(n=0, abs=0.0, signed=0.0, terms=dict.fromkeys(TERMS, 0.0))
     src_ok = True
     ksan_ok = True
+    spx = {}
     for spec in a.runs:
         cfg, logs = spec.split("=", 1)
         logs = logs.split(",")
@@ -622,6 +663,7 @@ def full(a):
             return 2
         for lg, ss, ps, tx in zip(logs, sss, pps, txs):
             src_ok = kdsrc_line(cfg, lg, ss, ps, tx) and src_ok
+        spx.update(spread_sites(cfg, sss))
         sb, pb = sss[-1], pps[-1]
         if not all(pps):
             print("KFLOOR cfg=%s sites=%d perf_sites=%d FAIL (no counter lines)" % (cfg, len(sb), len(pb)))
@@ -681,6 +723,8 @@ def full(a):
         print("KRESID ALL site_runs=%d sum_abs_resid_ms=%.3f sum_resid_ms=%.3f top_term=%s %s"
               % (racc["n"], racc["abs"], racc["signed"], max(TERMS, key=lambda k: racc["terms"][k]),
                  " ".join("abs_%s=%.3f" % (k, racc["terms"][k]) for k in TERMS)))
+    if getattr(a, "spread_ref", None):
+        spreadx_line(spx, read_spread_ref(a.spread_ref))
     ok_all = ok_all and src_ok and ksan_ok and agg["cfgs"] > 0
     print("KFLOOR ALL src=%s cfgs=%d sites=%d perf_sites=%d r2_min=%.3f maxrel=%.3f loo_maxrel=%.3f "
           "act_over_k_max=%.3f %s tol_fail=%d"
@@ -1020,6 +1064,41 @@ def selftest():
         and re.match(r"KORACLE cfg=synth params=10 r2_min=\S+ tol_fail=0 loo_maxrel=\S+ reach=1$", ol[-1]) is not None
         and sum(x.startswith("KORCLS") for x in ol) == 2,
         "param_maxrel=%.1e shared_maxrel=%.3f %s" % (rec, max(rels(pg, S0)), ol[-1] if ol else ""))
+    # 19 spreadx: k_diag's own spread (3 runs joined by site) vs a 9-col spread_abc.tsv; exact copy -> PASS
+    #    (sites=want, maxdiff 0); 20 spreadx_diff: one site off by 0.002 ms -> FAIL; a ref row short (k_diag extra)
+    #    or a ref row more (k_diag missing) -> FAIL
+    import tempfile
+    sx = [[dict(site="conv%d" % i, part=10 + i, kind="conv", launches=1, K=1.0 + 0.01 * i + d) for i in range(4)]
+          for d in (0.0, 0.004, -0.003)]
+    mine = spread_sites("off", sx)
+    with tempfile.TemporaryDirectory() as td:
+        tsv = Path(td) / "spread_abc.tsv"
+
+        def _w(rows):
+            tsv.write_text("# cfg part kind launches n_runs K_a K_b K_c spread_ms\n" + "".join(
+                "%s %d conv 1 3 %.6f %.6f %.6f %.6f\n" % (k[0], k[1], 1, 1, 1, v) for k, v in rows))
+            return read_spread_ref(tsv)
+        ref0 = _w(sorted(mine.items()))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ok0 = spreadx_line(mine, ref0, want=4)
+        l0 = buf.getvalue().strip()
+        chk("spreadx", ok0 and abs(mine[("off", 12)] - 0.007) < 1e-9
+            and re.match(r"SPREADX sites=4 maxdiff_ms=0\.000\d* PASS", l0) is not None, l0)
+        bad = sorted(mine.items())
+        bad[1] = (bad[1][0], bad[1][1] + 0.002)
+        refd = _w(bad)
+        refm = _w(sorted(mine.items())[:3])
+        refx = _w(sorted(mine.items()) + [(("off", 99), 0.0)])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            okd = spreadx_line(mine, refd, want=4)
+            okm = spreadx_line(mine, refm, want=4)
+            okx = spreadx_line(mine, refx, want=4)
+        ld = buf.getvalue().strip().splitlines()
+    chk("spreadx_diff", not okd and not okm and not okx and len(ld) == 3
+        and re.match(r"SPREADX sites=4 maxdiff_ms=0\.0020\d* FAIL", ld[0]) is not None
+        and " extra=1 " in ld[1] and " missing=1 " in ld[2], " | ".join(ld))
     n = sum(res)
     ok = n == len(res)
     print("KDIAG SELFTEST %s (%d/%d)" % ("PASS" if ok else "FAIL", n, len(res)))
@@ -1040,6 +1119,8 @@ def main(argv=None):
     ap.add_argument("--check", nargs="+", metavar="CFG=LOG_B[,LOG_C]", help="held-out logs (runs b, c, never fitted)")
     ap.add_argument("--scope", nargs="+", metavar="CFG=all|kge0.1",
                     help="KTOL site scope per cfg (default off=kge0.1, others all)")
+    ap.add_argument("--spread-ref", metavar="TSV",
+                    help="spread_abc.tsv (k_noise --spread-out): SPREADX per-site check of k_diag's own spread")
     ap.add_argument("runs", nargs="*", metavar="CFG=LOG_A[,LOG_B,LOG_C]")
     a = ap.parse_args(argv)
     if a.fit:  # --fit cfg=A --check cfg=B  ==  positional cfg=A,B

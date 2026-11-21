@@ -380,8 +380,27 @@ def test_k_diag_selftest():
     assert r.returncode == 0, r.stdout + r.stderr
     m = re.search(r"^KDIAG SELFTEST PASS \((\d+)/(\d+)\)$", r.stdout, re.M)
     assert m and m.group(1) == m.group(2) and int(m.group(1)) >= 22, r.stdout
-    for name in ("ovl_parse", "ovl_model_sum", "ovl_model_max", "ovl_missing_rc2"):
+    for name in ("ovl_parse", "ovl_model_sum", "ovl_model_max", "ovl_missing_rc2", "spreadx", "spreadx_diff"):
         assert re.search(r"^KDIAG SELFTEST %s\s+ok" % name, r.stdout, re.M), name
+
+
+def test_k_diag_spreadx(capsys):
+    """k_diag.py SPREADX (M3.1.2.2 PR): own per-site spread vs a spread_abc.tsv; exact -> PASS,
+    0.002 ms off / missing / extra site -> FAIL"""
+    import importlib.util
+    path = SRC.parent / "script" / "perf" / "k_diag.py"
+    spec = importlib.util.spec_from_file_location("k_diag_spreadx", path)
+    kd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kd)
+    runs = [[dict(site="fa%d" % i, part=i, kind="fa", launches=1, K=0.5 + d) for i in (3, 5)] for d in (0, .01, .02)]
+    mine = kd.spread_sites("c", runs)
+    assert set(mine) == {("c", 3), ("c", 5)} and abs(mine[("c", 3)] - 0.02) < 1e-12
+    assert kd.spreadx_line(mine, dict(mine), want=2)
+    assert not kd.spreadx_line(mine, {k: v + 0.002 for k, v in mine.items()}, want=2)
+    assert not kd.spreadx_line(mine, {("c", 3): mine[("c", 3)]}, want=2)
+    assert not kd.spreadx_line(mine, {**mine, ("c", 9): 0.0}, want=2)
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("SPREADX sites=2 maxdiff_ms=0.000000 PASS") and " FAIL " in out[1]
 
 
 def test_k_noise_spread(tmp_path):
