@@ -33,3 +33,17 @@ def test_kp_pad(monkeypatch, ch, k, px, pad, kp):
     g = u.kacc_geom(ch, k, px)
     assert g["kp"] == kp
     assert g["nkc"] * g["tkw"] * 2 == g["kp"]
+
+
+def test_tr_tkw_floor_raises_assert_not_zerodiv(monkeypatch):
+    """ch/4 > KACC_TR_TKW_CAP halved tkw to 0 -> ZeroDivisionError (512px GEGLU 5120x640 at px 1024)."""
+    monkeypatch.delenv("KACC_TR_TKW_CAP", raising=False)
+    with pytest.raises(AssertionError):
+        u.kacc_geom(5120, 640, 1024)
+
+
+def test_kacc_split_falls_back_to_px_split(monkeypatch):
+    monkeypatch.delenv("KACC_TR_TKW_CAP", raising=False)
+    s, px = u.kacc_split(5120, 640, 1024)
+    assert (s, px) == (2, 512)
+    assert u.kacc_geom(5120, 640, px)["tr"] == 0

@@ -618,7 +618,10 @@ def kacc_geom(ch: int, k: int, px: int) -> dict:
         # KACC_TR_TKW_CAP (costmodel run-size probe, default 1024 words): cap on the transposed b window ch/4 x tkw;
         # a heuristic (aiehlc maxBufferBytes default), not a hardware limit -- Maxwell peer:1120041418-5e63e7
         cap = int(_os.environ.get("KACC_TR_TKW_CAP", "1024"))
-        while (ch // 4) * tkw > cap or (k // 2) % tkw:
+        # tkw >= 4 guard (as in aiegraph.plan.kincore_geom): ch/4 > cap (e.g. the 512px GEGLU 5120x640 at px 1024)
+        # used to halve tkw to 0 -> ZeroDivisionError, which kacc_split's fits() does not catch; now the assert
+        # below fires and kacc_split falls back to a px split
+        while tkw >= 4 and ((ch // 4) * tkw > cap or (k // 2) % tkw):
             tkw //= 2
     assert tkw >= 4 and (k // 2) % tkw == 0, (ch, k, px, tkw)
     # K padded by one zero chunk when the W port would be square (ch == k/2 words): aiehlc's GemmSpace
