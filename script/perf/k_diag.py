@@ -56,10 +56,15 @@ Output:
   KRESID  cfg=<c> cls=<cls> site_runs sum_abs_resid_ms top_term=<oc|ovl|dma|t0|launches> abs_<term>..;
           KRESID ALL site_runs=<n> ...   (resid_terms: model piece - measured piece per term, sums to K_hat - K)
   KORCLS  cfg=<c> cls=<cls> sites bw_.. t0_ms params form kfirst_ms maxrel_a loo_maxrel   (per-class oracle fit)
-  KORACLE cfg=<c> params=<n> r2_min=<x> tol_fail=<n> loo_maxrel=<x> reach=<0|1>   (M3.1.2.2 diagnosis only: per
+  KORACLE cfg=<c> feats=<bw|dma7> params=<n> r2_min=<x> tol_fail=<n> loo_maxrel=<x> reach=<0|1>   (M3.1.2.2 diagnosis only: per
           cls own inv/t0/form + kfirst (once per site = kfirst/launches per launch), fit on run a, KTOL tol rule
           on all runs; reach=1 iff tol_fail=0 and loo<=0.20 -- the upper bound of the current feature set; NOT
           part of the delivered model)
+  --dmafeat (M3.1.2.3): KORACLE feats=dma7 -- the per-class dma term is sum_c w_c * col_c over the 7 static
+          k_dmafeat features (DMA7 columns, see dma_col), conv one class (+ tkw column), subset per class within the
+          cap (columns + t0 + kfirst), chosen by run-a max-rel then LOO; extra lines:
+          KDMAF7  cfg log sites no_feat ; KCAP cfg=<c> cls=<cls> params=<n> cap=<7 conv|5> ok=<0|1> ;
+          KORRES  cfg site cls part K_a Kh_a rel_a excess_ms (top 5 tolerance-excess sites) ; KCAP ALL ok=<0|1>
   KFLOOR  cfg ... tol_fail PASS|FAIL (gates on KTOL; maxrel printed only);
   KFLOOR ALL src cfgs sites perf_sites r2_min maxrel loo_maxrel act_over_k_max PASS|FAIL tol_fail=<n>  (last line)
 --map-only (no counter lines needed):
@@ -157,6 +162,17 @@ def site_class(kind, kernels):
     return kind
 
 
+def site_tkw(kind, kernels):
+    """kacc tkw of a conv site's first kernel (0 if not a gemm_kacc name / not conv)"""
+    if kind != "conv" or not kernels:
+        return 0
+    try:
+        from kcyc_unet import kacc_inst
+        return int(kacc_inst(kernels[0])["tkw"])
+    except ValueError:
+        return 0
+
+
 def split_site(wait, inval, perf):
     """the K split of one site (ms); perf = parse_perf entry or None"""
     d = dict(K=wait - inval)
@@ -196,6 +212,7 @@ def load(cfg, log, build_root, need_perf=True):
                  ddr_b=(f["ddr_in_b"] + f["ddr_out_b"]) if f else 0, bd_n=f["bd_n"] if f else 0,
                  num_dims=f["num_dims"] if f else 0, perf=pf.get(r["part"]))
         s["bucket"] = bucket(s["run_b"])
+        s["tkw"] = site_tkw(r["kind"], r.get("kernels") or [])
         s.update(split_site(w, i, s["perf"]))
         out.append(s)
     return out, txt
@@ -219,11 +236,18 @@ def _ab(s, form):
     raise ValueError("form " + str(form))
 
 
+def dma_term(p, s):
+    """model dma ms of a site: --dmafeat params (p["w"]: {dma7 column: ms per column unit}) -> sum_c w_c * dcol_c
+    (dcol = launches * per-launch column, set by attach_dmafeat); else ddr_b / BW of the run_b bucket"""
+    if "w" in p:
+        return sum(w * s["dcol"][c] for c, w in p["w"].items())
+    return s["ddr_b"] * p["inv"].get(s["bucket"], 0.0)
+
+
 def k_hat(p, s):
-    """p = dict(inv={bucket: ms per byte}, t0=ms per launch, form=add|sum|max)"""
+    """p = dict(inv={bucket: ms per byte} | w={dma7 col: coef}, t0=ms per launch, form=add|sum|max)"""
     base, b = _ab(s, p.get("form"))
-    return (max(base, s["ddr_b"] * p["inv"].get(s["bucket"], 0.0) + b) + p["t0"] * s["launches"]
-            + p.get("kfirst", 0.0))
+    return max(base, dma_term(p, s) + b) + p["t0"] * s["launches"] + p.get("kfirst", 0.0)
 
 
 def rels(p, sites):
@@ -318,10 +342,13 @@ def choose_form(sites):
 
 
 def nparams(p):
-    return len(p["inv"]) + 1 + ("kfirst" in p)
+    return len(p["w"] if "w" in p else p["inv"]) + 1 + ("kfirst" in p)
 
 
 def fmt_p(p):
+    if "w" in p:
+        return "%s t0_ms=%.5g params=%d form=%s" % (" ".join("w_%s=%.4g" % (c, v) for c, v in p["w"].items()),
+                                                     p["t0"], nparams(p), p.get("form") or "add")
     bw = " ".join("bw_%s_GBps=%.4g" % (BUCKETS[b], (1.0 / v / 1e6) if v > 0 else float("inf"))
                   for b, v in sorted(p["inv"].items()))
     return "%s t0_ms=%.5g params=%d form=%s" % (bw, p["t0"], nparams(p), p.get("form") or "add")
@@ -344,7 +371,7 @@ def resid_terms(p, s):
       the launch window), m_t0 = K - core (tail outside the window: host per-launch overhead).
     term = h - m (launches: h = 0)."""
     form = p.get("form")
-    dma = s["ddr_b"] * p["inv"].get(s["bucket"], 0.0)
+    dma = dma_term(p, s)
     if form in (None, "add"):
         oc, ov = s["compute"], 0.0
     else:
@@ -450,23 +477,36 @@ def oracle_fit(sites):
     return out
 
 
-def oracle_lines(cfg, scope, pa, runs_sites):
+def oracle_lines(cfg, scope, pa, runs_sites, dmafeat=False):
     """KORCLS per cls + one KORACLE line: the class oracle fitted on pa (run a, perf_ok/bd_ok/K>0), checked on
-    every run (KTOL tol rule, same scope); reach = 1 iff tol_fail == 0 and loo <= GATE loo.  Diagnosis only."""
-    po = oracle_fit(pa)
-    for c in CLASSES:
+    every run (KTOL tol rule, same scope); reach = 1 iff tol_fail == 0 and loo <= GATE loo.  Diagnosis only.
+    dmafeat: classes DMA_CLASSES (conv merged), dma term over the dma7 columns (oracle_fit_dma), sites without
+    usable dma features dropped; + KCAP per class and KORRES (top tolerance excess sites); feats=dma7|bw"""
+    if dmafeat:
+        clsf, classes = dma_cls, DMA_CLASSES
+        pa = [s for s in pa if s.get("dmaf_ok")]
+        runs_sites = [[s for s in ss if s.get("dmaf_ok")] for ss in runs_sites]
+        po = oracle_fit_dma(pa)
+    else:
+        clsf, classes = (lambda s: s["cls"]), CLASSES
+        po = oracle_fit(pa)
+    for c in classes:
         if c in po:
             p, lo = po[c]
-            g = [s for s in pa if s["cls"] == c]
+            g = [s for s in pa if clsf(s) == c]
             print("KORCLS cfg=%s cls=%s sites=%d %s kfirst_ms=%.5g maxrel_a=%.4f loo_maxrel=%.4f"
                   % (cfg, c, len(g), fmt_p(p), p.get("kfirst", 0.0), max(rels(p, g)), lo))
+    cap_ok = kcap_lines(cfg, po) if dmafeat else True
 
     def kh(s):
-        return k_hat(po[s["cls"]][0], s) if s["cls"] in po else float("nan")
+        return k_hat(po[clsf(s)][0], s) if clsf(s) in po else float("nan")
     by = [{s["site"]: s for s in ss} for ss in runs_sites]
-    names = [n for n in by[0] if all(n in b for b in by[1:]) and by[0][n]["cls"] in po]
-    rows = [dict(part=by[0][n]["part"], K=[b[n]["K"] for b in by], Kh=[kh(b[n]) for b in by]) for n in names]
+    names = [n for n in by[0] if all(n in b for b in by[1:]) and clsf(by[0][n]) in po]
+    rows = [dict(part=by[0][n]["part"], site=n, cls=clsf(by[0][n]), K=[b[n]["K"] for b in by],
+                 Kh=[kh(b[n]) for b in by]) for n in names]
     t = ktol_eval(rows, scope)
+    if dmafeat:
+        korres_lines(cfg, [r for r in rows if not (scope == "kge0.1" and min(r["K"]) < KGE)])
     r2s = []
     for b in by:
         y = np.array([b[n]["K"] for n in names])
@@ -476,10 +516,171 @@ def oracle_lines(cfg, scope, pa, runs_sites):
     lo = max((v[1] for v in po.values()), default=float("inf"))
     npar = sum(nparams(v[0]) for v in po.values())
     reach = int(t["fail"] == 0 and t["sites"] > 0 and lo <= GATE["loo"])
-    print("KORACLE cfg=%s params=%d r2_min=%.4f tol_fail=%d loo_maxrel=%.4f reach=%d"
-          % (cfg, npar, min(r2s) if r2s else float("nan"), t["fail"], lo, reach))
+    print("KORACLE cfg=%s feats=%s params=%d r2_min=%.4f tol_fail=%d loo_maxrel=%.4f reach=%d"
+          % (cfg, "dma7" if dmafeat else "bw", npar, min(r2s) if r2s else float("nan"), t["fail"], lo, reach))
     return dict(params=npar, r2=min(r2s) if r2s else float("nan"), tol_fail=t["fail"], loo=lo, reach=reach,
-                classes=po)
+                classes=po, cap_ok=cap_ok)
+
+
+# ------------------------------------------------------------------ M3.1.2.3 QK: per-class oracle over the 7 DMA features
+# --dmafeat: the single ddr_b / BW(run_b bucket) dma term is replaced, per class, by sum_c w_c * dcol_c over columns
+# built from the 7 static features of k_dmafeat.site_dma_feats (build dir only, never board timing); one column per
+# feature, each = launches * per-launch value (w_c >= 0, NNLS + LP minimax on the max() branch assignment).
+# conv_tkw4 (1 site) is merged into one conv class with tkw as an extra column (ddr_b * 4 / tkw).
+DMA7 = ("ddr", "bd", "burst", "dims", "ch", "rw", "run")
+DMA7_FEAT = dict(ddr="ddr_b", bd="bd_n", burst="burst_b", dims="num_dims", ch="shim_ch", rw="rw_ratio", run="run_b")
+DMA_CLASSES = ("conv", "fa16", "fa_d160", "linear")
+KCAP = dict(conv=7)            # params per class (dma columns + t0 + kfirst); every other class <= KCAP_OTHER
+KCAP_OTHER = 5
+ORACLE_LOO_CANDS = 4           # subsets ranked by run-a max-rel; LOO decides among the best few
+
+
+def kcap(cls):
+    return KCAP.get(cls, KCAP_OTHER)
+
+
+def dma_cls(s):
+    """--dmafeat oracle class: every conv site in one class (tkw is a column), others = KCLS"""
+    return "conv" if s.get("kind") == "conv" or str(s.get("cls", "")).startswith("conv") else s["cls"]
+
+
+def dma_col(c, f, tkw=0):
+    """per-launch value of dma column c from one k_dmafeat.site_dma_feats entry f (scaled to ~ms magnitudes):
+    ddr = DDR bytes, bd = shim BDs, burst = AXI bursts (ddr_b / burst_b), dims = BD dims work (bd_n * num_dims),
+    ch = bytes of the busiest shim channel (ddr_b / shim_ch), rw = read bytes (ddr_b * rw_ratio),
+    run = contiguous runs (ddr_b / run_b), tkw (conv only) = ddr_b * 4 / tkw"""
+    b = float(f["ddr_b"])
+    v = dict(ddr=b * 1e-6, bd=f["bd_n"] * 1e-3, burst=b / f["burst_b"] * 1e-4 if f["burst_b"] else 0.0,
+             dims=f["bd_n"] * f["num_dims"] * 1e-3, ch=b / f["shim_ch"] * 1e-6 if f["shim_ch"] else 0.0,
+             rw=b * f["rw_ratio"] * 1e-6, run=b / f["run_b"] * 1e-4 if f["run_b"] else 0.0,
+             tkw=b * 4.0 / tkw * 1e-6 if tkw > 0 else 0.0)
+    return v[c]
+
+
+def set_dcol(s, f):
+    """attach the dma feature dict f to site s: s['dmaf'], s['dcol'] = {col: launches * per-launch value};
+    returns ok (feature ok and every column finite)"""
+    s["dmaf"] = f
+    try:
+        s["dcol"] = {c: s["launches"] * dma_col(c, f, s.get("tkw", 0)) for c in DMA7 + ("tkw",)}
+    except (KeyError, TypeError, ZeroDivisionError):
+        s["dcol"] = None
+    s["dmaf_ok"] = bool(f and f.get("ok", True) and s["dcol"] and all(math.isfinite(v) for v in s["dcol"].values()))
+    return s["dmaf_ok"]
+
+
+def attach_dmafeat(cfg, log, build_root, sites):
+    """k_dmafeat.site_dma_feats of the log's build (static) joined by part; returns the number of sites without
+    usable features"""
+    from k_dmafeat import site_dma_feats
+    fe = site_dma_feats(cfg, log, build_root)
+    return sum(not set_dcol(s, fe.get(s["part"])) for s in sites if s["launches"] > 0)
+
+
+def _dma_assign(sites, cols, dset, form, minimax):
+    """(1/K)-weighted fit of (w_cols, t0, kfirst) >= 0 with the max() branch fixed (dset: sites on the dma branch);
+    minimax: LP min max |rel| (else NNLS)"""
+    n = len(cols)
+    A = np.zeros((len(sites), n + 2))
+    y = np.zeros(len(sites))
+    for i, s in enumerate(sites):
+        w = 1.0 / s["K"]
+        base, b = _ab(s, form)
+        if i in dset:
+            A[i, :n] = [s["dcol"][c] * w for c in cols]
+            y[i] = (s["K"] - b) * w
+        else:
+            y[i] = (s["K"] - base) * w
+        A[i, n] = s["launches"] * w
+        A[i, n + 1] = w
+    sc = np.maximum(np.abs(A).max(axis=0), 1e-300)
+    As = A / sc
+    if minimax:
+        from scipy.optimize import linprog
+        m, k = As.shape
+        aub = np.vstack([np.hstack([As, -np.ones((m, 1))]), np.hstack([-As, -np.ones((m, 1))])])
+        r = linprog(np.r_[np.zeros(k), 1.0], A_ub=aub, b_ub=np.r_[y, -y], bounds=[(0, None)] * (k + 1),
+                    method="highs")
+        c = (r.x[:k] if r.success else nnls(As, y)[0]) / sc
+    else:
+        c = nnls(As, y)[0] / sc
+    return dict(w={col: float(c[j]) for j, col in enumerate(cols)}, t0=float(c[n]), kfirst=float(c[n + 1]),
+                form=form)
+
+
+def fit_dma(sites, cols, form):
+    """minimax-relative fit of K = max(base, sum_c w_c dcol_c + B) + t0 L + kfirst (form sum|max, see _ab):
+    NNLS over the max() branch assignment from 2 starts, then an LP minimax polish of each assignment"""
+    ab = [_ab(s, form) for s in sites]
+    best = None
+    for d in (set(range(len(sites))), {i for i, s in enumerate(sites) if ab[i][0] < 0.5 * s["K"]}):
+        for _ in range(30):
+            p = _dma_assign(sites, cols, d, form, False)
+            nd = {i for i, s in enumerate(sites) if dma_term(p, s) + ab[i][1] > ab[i][0]}
+            if nd == d:
+                break
+            d = nd
+        for q in (p, _dma_assign(sites, cols, d, form, True)):
+            m = max(rels(q, sites))
+            if best is None or m < best[0]:
+                best = (m, q)
+    return best[1]
+
+
+def loo_dma(sites, cols, form):
+    return max(rels(fit_dma(sites[:i] + sites[i + 1:], cols, form), [sites[i]])[0] for i in range(len(sites)))
+
+
+def oracle_fit_dma(sites, classes=DMA_CLASSES):
+    """per-class oracle on run a over the dma7 columns: for every class, every column subset within the cap
+    (columns + t0 + kfirst <= kcap(cls)) x form sum|max is fitted; the ORACLE_LOO_CANDS best by run-a max-rel get a
+    leave-one-site-out refit; the smallest (LOO, max-rel) wins.  Returns {cls: (p, loo)}."""
+    from itertools import combinations
+    out = {}
+    for c in classes:
+        g = [s for s in sites if dma_cls(s) == c]
+        if not g:
+            continue
+        cols_all = DMA7 + (("tkw",) if c == "conv" else ())
+        nmax = kcap(c) - 2
+        cands = []
+        for k in range(1, nmax + 1):
+            for cols in combinations(cols_all, k):
+                for f in FORMS:
+                    p = fit_dma(g, list(cols), f)
+                    cands.append((max(rels(p, g)), k, cols, f, p))
+        cands.sort(key=lambda x: (round(x[0], 9), x[1]))
+        best = None
+        for m, _k, cols, f, p in cands[:ORACLE_LOO_CANDS]:
+            lo = loo_dma(g, list(cols), f) if len(g) > 1 else float("inf")
+            if best is None or (lo, m) < best[0]:
+                best = ((lo, m), p, lo)
+        out[c] = (best[1], best[2])
+    return out
+
+
+def kcap_lines(cfg, po):
+    """KCAP per class of one cfg; returns ok (every class params <= cap)"""
+    ok = True
+    for c in sorted(po):
+        n = nparams(po[c][0])
+        print("KCAP cfg=%s cls=%s params=%d cap=%d ok=%d" % (cfg, c, n, kcap(c), int(n <= kcap(c))))
+        ok &= n <= kcap(c)
+    return ok
+
+
+def korres_lines(cfg, rows, top=5):
+    """KORRES: the top sites by tolerance excess (KTOL rule) under the oracle (reach=0 diagnosis)"""
+    ex = []
+    for r in rows:
+        sp = max(r["K"]) - min(r["K"])
+        e = [abs(h - k) - max(TOL_REL * k, TOL_SPREAD * sp, TOL_ABS) for k, h in zip(r["K"], r["Kh"])]
+        ex.append((max(e), r))
+    for e, r in sorted(ex, key=lambda x: -x[0])[:top]:
+        if e <= 0:
+            break
+        print("KORRES cfg=%s site=%s cls=%s part=%d K_a=%.3f Kh_a=%.3f rel_a=%+.3f excess_ms=%.4f"
+              % (cfg, r["site"], r["cls"], r["part"], r["K"][0], r["Kh"][0], (r["Kh"][0] - r["K"][0]) / r["K"][0], e))
 
 
 # ------------------------------------------------------------------ reporting
@@ -489,7 +690,7 @@ def diag_lines(cfg, run, sites, p=None):
         if s.get("perf") is None:
             continue
         s.setdefault("gap", 0.0)
-        s["dma"] = s["ddr_b"] * p["inv"].get(s["bucket"], 0.0) if p else 0.0
+        s["dma"] = dma_term(p, s) if p else 0.0
         s["bound"] = bound(s["compute"], s["dma"], s["lock"], s["stream"])
         kh = k_hat(p, s) if p else float("nan")
         print("KSITE cfg=%s run=%s %s part=%d launches=%d K_meas=%.3f core=%.3f compute=%.3f tail=%.3f lock=%.3f "
@@ -643,6 +844,8 @@ def full(a):
     src_ok = True
     ksan_ok = True
     spx = {}
+    dmafeat = bool(getattr(a, "dmafeat", False))
+    cap_all = True
     for spec in a.runs:
         cfg, logs = spec.split("=", 1)
         logs = logs.split(",")
@@ -651,6 +854,10 @@ def full(a):
         sss = [x[0] for x in loaded]
         txs = [x[1] for x in loaded]
         pps = [[s for s in ss if perf_ok(s) and s["bd_ok"] and s["K"] > 0] for ss in sss]
+        if dmafeat:
+            for lg, ss in zip(logs, sss):
+                nm = attach_dmafeat(cfg, lg, a.build_root, ss)
+                print("KDMAF7 cfg=%s log=%s sites=%d no_feat=%d" % (cfg, lg, sum(s["launches"] > 0 for s in ss), nm))
         miss = 0
         for run, lg, tx in zip(names, logs, txs):
             pf = parse_perf(tx)
@@ -696,7 +903,8 @@ def full(a):
         rs_all = [[s for s in ss if perf_ok(s)] for ss in sss]
         kt = ktol_lines(cfg, scope, rs_all, p)
         kresid_acc(cfg, rs_all, p, racc)
-        oracle_lines(cfg, scope, pa, rs_all)
+        orc = oracle_lines(cfg, scope, pa, rs_all, dmafeat)
+        cap_all &= orc["cap_ok"]
         dr = 0.0
         if cfg in refs:
             dr = drift(sb, ref_sites(a, cfg, refs[cfg]))
@@ -725,6 +933,8 @@ def full(a):
                  " ".join("abs_%s=%.3f" % (k, racc["terms"][k]) for k in TERMS)))
     if getattr(a, "spread_ref", None):
         spreadx_line(spx, read_spread_ref(a.spread_ref))
+    if dmafeat:
+        print("KCAP ALL ok=%d" % int(cap_all and agg["cfgs"] > 0))
     ok_all = ok_all and src_ok and ksan_ok and agg["cfgs"] > 0
     print("KFLOOR ALL src=%s cfgs=%d sites=%d perf_sites=%d r2_min=%.3f maxrel=%.3f loo_maxrel=%.3f "
           "act_over_k_max=%.3f %s tol_fail=%d"
@@ -757,6 +967,29 @@ def _synth(seed, n, inv, t0, noise=0.0, form=None):
         out.append(dict(site="s%d" % i, part=i, kind="linear", launches=L, run_b=run_b, bucket=bucket(run_b),
                         ddr_b=ddr_b, compute=compute, K=K, core=compute, lock=0.0, stream=0.0, perf={}, cls="linear",
                         oc=compute, ovl=ovl))
+    return out
+
+
+def _synth_dma(seed, n, w, t0, kf, form="max"):
+    """synthetic linear-class sites with random k_dmafeat features; K = form floor over dma = sum_c w_c dcol_c
+    (oc = 0.4 / 1.6 x dma, ovl = u * min(oc, dma)) + t0 * L + kf (no noise)"""
+    rng = np.random.default_rng(seed)
+    out = []
+    for i in range(n):
+        L = int(rng.integers(1, 4))
+        f = dict(ddr_b=float(rng.integers(1, 60)) * 1e6, bd_n=float(rng.integers(1, 40)) * 12.0,
+                 burst_b=float(rng.choice([32, 64, 128])), num_dims=int(rng.integers(1, 4)),
+                 shim_ch=float(rng.uniform(4, 9)), rw_ratio=float(rng.uniform(0.7, 1.0)),
+                 run_b=float(rng.choice([16, 32, 64, 128])), ok=True)
+        s = dict(site="d%d" % i, part=i, kind="linear", cls="linear", launches=L, tkw=0, perf={}, bucket=0,
+                 ddr_b=f["ddr_b"] * L)
+        set_dcol(s, f)
+        dma = sum(v * s["dcol"][c] for c, v in w.items())
+        oc = dma * (0.4 if i % 2 else 1.6) * float(rng.uniform(0.9, 1.1))
+        ovl = float(rng.uniform(0.2, 0.8)) * min(oc, dma)
+        k0 = max(oc, dma) - ovl if form == "max" else oc + dma - ovl
+        s.update(oc=oc, ovl=ovl, compute=oc, K=k0 + t0 * L + kf)
+        out.append(s)
     return out
 
 
@@ -1061,7 +1294,7 @@ def selftest():
                      abs(orc["classes"][c][0]["kfirst"] - gen[c][2]) / gen[c][2]]) for c in gen)
     chk("oracle_perclass", orc["reach"] == 1 and orc["tol_fail"] == 0 and orc["params"] == 10 and rec < 1e-3
         and all(orc["classes"][c][0]["form"] == gen[c][3] for c in gen) and max(rels(pg, S0)) > 0.15
-        and re.match(r"KORACLE cfg=synth params=10 r2_min=\S+ tol_fail=0 loo_maxrel=\S+ reach=1$", ol[-1]) is not None
+        and re.match(r"KORACLE cfg=synth feats=bw params=10 r2_min=\S+ tol_fail=0 loo_maxrel=\S+ reach=1$", ol[-1]) is not None
         and sum(x.startswith("KORCLS") for x in ol) == 2,
         "param_maxrel=%.1e shared_maxrel=%.3f %s" % (rec, max(rels(pg, S0)), ol[-1] if ol else ""))
     # 19 spreadx: k_diag's own spread (3 runs joined by site) vs a 9-col spread_abc.tsv; exact copy -> PASS
@@ -1099,6 +1332,33 @@ def selftest():
     chk("spreadx_diff", not okd and not okm and not okx and len(ld) == 3
         and re.match(r"SPREADX sites=4 maxdiff_ms=0\.0020\d* FAIL", ld[0]) is not None
         and " extra=1 " in ld[1] and " missing=1 " in ld[2], " | ".join(ld))
+    # 21 dma7_recover: K = max-form floor over dma7 columns ch + run (known w) + t0*L + kfirst; fit_dma recovers
+    #    w/t0/kfirst, and the --dmafeat oracle (3 runs, KTOL rule) picks a 2-column subset and reaches:
+    #    KORACLE cfg=synth feats=dma7 params=4 ... reach=1, KCAP ok=1
+    wd, t0d, kfd = dict(ch=0.08, run=0.004), 0.03, 0.2
+    Ad = _synth_dma(61, 30, wd, t0d, kfd)
+    pdm = fit_dma(Ad, ["ch", "run"], "max")
+    ed = max([abs(pdm["w"][c] - wd[c]) / wd[c] for c in wd] + [abs(pdm["t0"] - t0d) / t0d, abs(pdm["kfirst"] - kfd) / kfd])
+    runs_d = [[dict(s, K=s["K"] * f) for s in Ad] for f in (1.0, 1.02, 0.99)]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ord_ = oracle_lines("synth", "all", runs_d[0], runs_d, dmafeat=True)
+    od = buf.getvalue().splitlines()
+    pl = ord_["classes"]["linear"][0]
+    chk("dma7_recover", ed < 1e-4 and ord_["reach"] == 1 and ord_["cap_ok"] and nparams(pl) == 4
+        and sorted(pl["w"]) == ["ch", "run"] and "KCAP cfg=synth cls=linear params=4 cap=5 ok=1" in od
+        and re.match(r"KORACLE cfg=synth feats=dma7 params=4 r2_min=\S+ tol_fail=0 loo_maxrel=\S+ reach=1$", od[-1])
+        is not None, "param_maxrel=%.1e %s" % (ed, od[-1] if od else ""))
+    # 22 kcap_violation: a class over its cap -> KCAP ok=0 (and the cfg not ok); conv may use 7, others 5
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        k_bad = kcap_lines("synth", {"linear": (dict(w=dict.fromkeys(DMA7[:4], 1.0), t0=0.0, kfirst=0.0), 0.0),
+                                     "conv": (dict(w=dict.fromkeys(DMA7[:5], 1.0), t0=0.0, kfirst=0.0), 0.0)})
+        k_ok = kcap_lines("synth", {"fa16": (dict(w=dict.fromkeys(DMA7[:3], 1.0), t0=0.0, kfirst=0.0), 0.0)})
+    kc = buf.getvalue().splitlines()
+    chk("kcap_violation", not k_bad and k_ok and kc == ["KCAP cfg=synth cls=conv params=7 cap=7 ok=1",
+                                                        "KCAP cfg=synth cls=linear params=6 cap=5 ok=0",
+                                                        "KCAP cfg=synth cls=fa16 params=5 cap=5 ok=1"], " | ".join(kc))
     n = sum(res)
     ok = n == len(res)
     print("KDIAG SELFTEST %s (%d/%d)" % ("PASS" if ok else "FAIL", n, len(res)))
@@ -1121,6 +1381,9 @@ def main(argv=None):
                     help="KTOL site scope per cfg (default off=kge0.1, others all)")
     ap.add_argument("--spread-ref", metavar="TSV",
                     help="spread_abc.tsv (k_noise --spread-out): SPREADX per-site check of k_diag's own spread")
+    ap.add_argument("--dmafeat", action="store_true",
+                    help="KORACLE over the 7 static DMA features (k_dmafeat.site_dma_feats), conv one class + tkw; "
+                         "KCAP per class (conv <= 7, others <= 5 params)")
     ap.add_argument("runs", nargs="*", metavar="CFG=LOG_A[,LOG_B,LOG_C]")
     a = ap.parse_args(argv)
     if a.fit:  # --fit cfg=A --check cfg=B  ==  positional cfg=A,B

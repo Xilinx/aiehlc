@@ -379,8 +379,9 @@ def test_k_diag_selftest():
     r = subprocess.run([sys.executable, "-I", str(k_diag), "--selftest"], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stdout + r.stderr
     m = re.search(r"^KDIAG SELFTEST PASS \((\d+)/(\d+)\)$", r.stdout, re.M)
-    assert m and m.group(1) == m.group(2) and int(m.group(1)) >= 22, r.stdout
-    for name in ("ovl_parse", "ovl_model_sum", "ovl_model_max", "ovl_missing_rc2", "spreadx", "spreadx_diff"):
+    assert m and m.group(1) == m.group(2) and int(m.group(1)) >= 32, r.stdout
+    for name in ("ovl_parse", "ovl_model_sum", "ovl_model_max", "ovl_missing_rc2", "spreadx", "spreadx_diff",
+                 "dma7_recover", "kcap_violation"):
         assert re.search(r"^KDIAG SELFTEST %s\s+ok" % name, r.stdout, re.M), name
 
 
