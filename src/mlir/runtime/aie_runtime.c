@@ -135,6 +135,9 @@ static inline unsigned long long __rt_prof_now(void) { return __rt_pmccntr() - g
 /* GAP-RT1: always-on wait_io time in generic-timer ticks (XTime clock), independent of AIEHLC_PROFILING */
 static unsigned long long g_hs_wait_ticks = 0ULL;
 static unsigned int g_hs_wait_calls = 0U;
+/* always-on log-dump time (klog + debug snapshot), same tick axis as g_hs_wait_ticks */
+static unsigned long long g_log_dump_ticks = 0ULL;
+static unsigned int g_log_dump_calls = 0U;
 static unsigned long long g_wait_io_cycles = 0ULL;
 static unsigned int g_wait_io_calls = 0U;
 static unsigned long long g_wait_io_iters = 0ULL;
@@ -213,6 +216,17 @@ void __Runtime_host_split_wait_ticks(unsigned long long *ticks, unsigned int *ca
         *ticks = g_hs_wait_ticks;
     if (calls)
         *calls = g_hs_wait_calls;
+}
+void __Runtime_log_dump_ticks(unsigned long long *ticks, unsigned int *calls) {
+    if (ticks)
+        *ticks = g_log_dump_ticks;
+    if (calls)
+        *calls = g_log_dump_calls;
+}
+unsigned long long __Runtime_log_dump_now(void) { return ahs_now(); }
+void __Runtime_log_dump_account(unsigned long long ticks) {
+    g_log_dump_ticks += ticks;
+    g_log_dump_calls++;
 }
 void __Runtime_wait_io_iters(unsigned long long *iters) {
     if (iters)
@@ -2459,9 +2473,11 @@ void __Runtime_read_kernel_log(XAie_DevInst *dev, XAie_LocType tile) {
 }
 
 void __Runtime_read_kernel_logs(XAie_DevInst *dev, const uint8_t *cols, const uint8_t *rows, uint32_t n) {
+    unsigned long long __ld_t0 = ahs_now();
     printf("[kernel_log] ===== Kernel Log (DM offset 0x%X, %u core tiles) =====\n", KLOG_DM_OFFSET, (unsigned)n);
     for (uint32_t i = 0; i < n; i++)
         __Runtime_read_kernel_log(dev, XAie_TileLoc(cols[i], rows[i]));
+    __Runtime_log_dump_account(ahs_now() - __ld_t0);
 }
 
 /* ---------------------------------------------------------------------------

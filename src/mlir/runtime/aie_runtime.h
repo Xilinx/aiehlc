@@ -445,6 +445,13 @@ inline void __Runtime_wait(struct_ioevent ev) { __Runtime_wait_io(g_DevInst, ev)
 void __Runtime_read_kernel_log(XAie_DevInst *dev, XAie_LocType tile);
 // Same for n core tiles given as parallel (col, row) arrays.
 void __Runtime_read_kernel_logs(XAie_DevInst *dev, const uint8_t *cols, const uint8_t *rows, uint32_t n);
+// Always-on host time spent dumping logs (kernel klog + AIE_DEBUG_LOG snapshot), in the
+// same generic-timer ticks as __Runtime_host_split_wait_ticks / XTime. aiehlc emits the
+// dump at the end of the generated launch function, so a caller timing the launch can
+// subtract this delta: real_ticks = (t1 - t0) - (log_ticks_after - log_ticks_before).
+void __Runtime_log_dump_ticks(unsigned long long *ticks, unsigned int *calls);
+void __Runtime_log_dump_account(unsigned long long ticks);
+unsigned long long __Runtime_log_dump_now(void);
 
 // ---------------------------------------------------------------------------
 // Performance counter APIs for core tile memory module
