@@ -7348,10 +7348,27 @@ static void rt_pm_warm_verify(XAie_DevInst *dev, XAie_LocType loc, const unsigne
 #endif
 #endif
 
-/* mode 1: skip every zero-filled (.bss-only) segment (unsafe if the kernel
- *         reads a zero-initialised static before writing it).
+/* mode 1: skip every zero-filled (.bss-only) segment larger than
+ *         AIEHLC_SKIP_BSS_KEEP_SMALL bytes. Smaller ones are still zero-filled:
+ *         chess gives each scalar static its own tiny .bss segment (e.g. the
+ *         4-byte aiehlc_blk_cursor of every load_buffer port), and those rely on
+ *         C zero-init. Skipping them left the cursor at whatever the previous
+ *         ELF had in that word, so blk checks ran at a wrong round phase (false
+ *         BLKE on every block). Big segments (port buffers, scratch arrays) are
+ *         still skipped; they are unsafe only if the kernel reads them before
+ *         writing them.
  * mode 2: skip only .bss segments made entirely of DMA port buffers; all other
  *         .bss is still zero-filled. */
+#ifndef AIEHLC_SKIP_BSS_KEEP_SMALL
+#define AIEHLC_SKIP_BSS_KEEP_SMALL 64U
+#endif
+static int __Runtime_bss_seg_skippable(const unsigned char *elfmem, const Elf32_Phdr *phdr, int mode) {
+    if (phdr->p_filesz != 0U)
+        return 0;
+    if (mode == 1)
+        return phdr->p_memsz > (u32)(AIEHLC_SKIP_BSS_KEEP_SMALL);
+    return __Runtime_elf_range_is_port_bufs(elfmem, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz);
+}
 static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc, const unsigned char *elfmem,
                                              int mode) {
     g_elf_load_seq++;
@@ -7367,8 +7384,7 @@ static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc
         const Elf32_Phdr *phdr = (const Elf32_Phdr *)(elfmem + ehdr->e_phoff + (u64)ph * sizeof(Elf32_Phdr));
         if (phdr->p_type != (u32)PT_LOAD)
             continue;
-        if (phdr->p_filesz == 0U &&
-            (mode == 1 || __Runtime_elf_range_is_port_bufs(elfmem, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz))) {
+        if (__Runtime_bss_seg_skippable(elfmem, phdr, mode)) {
             skipped++;
             skipped_bytes += phdr->p_memsz;
             continue;
