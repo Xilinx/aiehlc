@@ -1207,6 +1207,14 @@ def khats_predict(p, form, f):
     return max(0.0, base - p["beta"] * f["ovl_l"]) + p["t0"] + p["kfirst"] * f["inv_launches"]
 
 
+def khats_cls_form(pcls, cfg_form):
+    """M3.1.2.2 PK: form of one class = classes.<cls>.form, else the cfg form (old jsons reproduce exactly)"""
+    form = pcls.get("form", cfg_form)
+    if form not in KHATS_FORMS:
+        raise ValueError("params form %r" % (form,))
+    return form
+
+
 def khats_params_rows(doc, stat, runs, cfgs):
     """--params: frozen per cfg x cls K_hat of every static row (no fit; json floats used as read)"""
     out = []
@@ -1219,11 +1227,19 @@ def khats_params_rows(doc, stat, runs, cfgs):
             for part in sorted(st):
                 s = st[part]
                 p = {k: float(pc[s["cls"]][k]) for k in KHATS_PNAMES}
-                out.append((cfg, run, part, s, khats_predict(p, form, khats_feat(s)), float("nan")))
+                fc = khats_cls_form(pc[s["cls"]], form)
+                out.append((cfg, run, part, s, khats_predict(p, fc, khats_feat(s)), float("nan")))
     return out
 
 
-KHATS_PREDICT_FNS = (khats_feat, khats_predict, khats_params_rows)
+def khats_target_t(r):
+    """--khat-obj t: run-a K target per launch = (site_ms - L_hat - N_hat) / launches (PREDICTED L, N only)"""
+    return (r["site_ms_log"] - r["L_hat"] - r["N_hat"]) / r["launches"]
+
+
+KHATS_PREDICT_FNS = (khats_feat, khats_predict, khats_cls_form, khats_params_rows)
+KHATS_TARGET_FNS = (khats_target_t,)   # fit target: may read site_ms, never a measured L / N / K
+KHATS_TARGET_BAN = ("L_meas", "N_meas", "K_meas")
 
 
 def khats_audit():
@@ -1245,6 +1261,23 @@ def khats_audit():
         meas = sorted(x for x in names if any(m.lower() in x.lower() for m in KHATS_MEAS))
         bad += len(meas)
         print("KHATS AUDIT fn=%s names=%s meas=%s" % (fn.__name__, ",".join(sorted(names)), ",".join(meas) or "-"))
+    for fn in KHATS_TARGET_FNS:
+        names = set()
+        for n in ast.walk(ast.parse(inspect.getsource(fn))):
+            if isinstance(n, ast.Name):
+                names.add(n.id)
+            elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+                names.add(n.value)
+        meas = sorted(x for x in names if any(m.lower() in x.lower() for m in KHATS_TARGET_BAN))
+        bad += len(meas)
+        print("KHATS AUDIT target fn=%s meas=%s" % (fn.__name__, ",".join(meas) or "-"))
+    r0 = dict(site_ms_log=5.0, L_hat=1.0, N_hat=0.5, launches=2, L_meas=1.2, N_meas=0.4)
+    if khats_target_t(r0) != khats_target_t(dict(r0, L_meas=1e9, N_meas=-1e9, K_meas=1e9)):
+        bad += 1
+        print("KHATS AUDIT poison target changed")
+    if khats_cls_form(dict(alpha=1.0, form="max"), "sum") != "max" or khats_cls_form(dict(alpha=1.0), "sum") != "sum":
+        bad += 1
+        print("KHATS AUDIT class form fallback wrong")
     # poison: the prediction of a static row must not change when measured fields are added
     st = dict(launches=4, core_hat_ms=2.0, dw_hat_ms=0.3, ovl_hat=0.4)
     p = dict(alpha=1.1, gamma=0.9, beta=0.5, t0=0.01, kfirst=0.02)
@@ -1255,6 +1288,16 @@ def khats_audit():
             print("KHATS AUDIT poison form=%s changed" % form)
     print("KHATS AUDIT meas_at_predict=%d" % bad)
     return bad == 0
+
+
+KHATS_LP_OPTS = dict(presolve=True, time_limit=60.0, primal_feasibility_tolerance=1e-10,
+                     dual_feasibility_tolerance=1e-10)   # fixed: deterministic fit
+
+
+def khats_body(p, form, f):
+    """the argument of khats_predict's max(0, .) (the clamp is active iff < 0)"""
+    a, g = p["alpha"] * f["core_l"], p["gamma"] * f["dw_l"]
+    return (a + g if form == "sum" else max(a, g)) - p["beta"] * f["ovl_l"]
 
 
 def _khats_lp(g, form, branch=None):
@@ -1280,7 +1323,12 @@ def _khats_lp(g, form, branch=None):
             d = [f["core_l"], -f["dw_l"]] if branch[i] == "a" else [-f["core_l"], f["dw_l"]]
             A.append([-d[0], -d[1], 0.0, 0.0, 0.0, 0.0])
             b.append(0.0)
-    r = linprog([0.0] * n + [1.0], A_ub=A, b_ub=b, bounds=[(0, None)] * (n + 1), method="highs")
+        # M3.1.2.2 PK clamp row: body = a core + g dw - b ovl >= 0 (max form: its chosen branch), so the
+        # max(0, body) of khats_predict is never active on a fit site and the LP models what predict computes
+        A.append([-row[0], -row[1], -row[2], 0.0, 0.0, 0.0])
+        b.append(0.0)
+    r = linprog([0.0] * n + [1.0], A_ub=A, b_ub=b, bounds=[(0, None)] * (n + 1), method="highs",
+                options=KHATS_LP_OPTS)
     if r.status != 0:
         return None
     return {k: float(r.x[j]) for j, k in enumerate(KHATS_PNAMES)}
@@ -1368,8 +1416,10 @@ def khat_static(a):
     if not ok or any(kl.norm_run(Path(p).name) != "a" for _c, p in kl.parse_logs(a.fit)):
         print("KHATS fit join failed or a --fit log is not run a")
         return 2
+    obj = getattr(a, "khat_obj", None) or "k"
     params, out, cap_all = {}, [], True
     for cfg in dict.fromkeys(r["cfg"] for r in rows):
+        print("KHATS OBJ cfg=%s obj=%s fit=a" % (cfg, obj))
         st = stat[cfg]
         g_all = []
         for r in rows:
@@ -1379,23 +1429,42 @@ def khat_static(a):
             if s["site"] != r["site"] or s["launches"] != r["launches"]:
                 raise ValueError("static vs log mismatch %s part %d" % (cfg, r["part"]))
             n = r["launches"]
-            g_all.append(dict(part=r["part"], cls=s["cls"], f=khats_feat(s), K=kl.k_meas(r, "log") / n,
-                              w=n / r["site_ms_log"]))
+            kt = khats_target_t(r) if obj == "t" else kl.k_meas(r, "log") / n
+            g_all.append(dict(part=r["part"], cls=s["cls"], f=khats_feat(s), K=kt, w=n / r["site_ms_log"]))
         classes = sorted({s["cls"] for s in g_all})
-        cand = {}
+        cand, ccand = {}, {}
         for form in KHATS_FORMS:
             pc, loo, lmax = {}, {}, 0.0
             for c in classes:
                 g = [s for s in g_all if s["cls"] == c]
                 pc[c] = khats_fit(g, form)
+                cl = 0.0
                 for s, kl_ in zip(g, khats_loo(g, form)):
                     loo[s["part"]] = kl_
-                    lmax = max(lmax, abs(kl_ - s["K"]) * s["w"])
+                    cl = max(cl, abs(kl_ - s["K"]) * s["w"])
+                lmax = max(lmax, cl)
+                ccand[(c, form)] = (cl, khats_err(pc[c], form, g), pc[c])
             amax = max(khats_err(pc[c], form, [s for s in g_all if s["cls"] == c]) for c in classes)
             cand[form] = (lmax, amax, pc, loo)
             print("KHATSFORM cfg=%s form=%s fit_kshare_max=%.4f loo_kshare_max=%.4f" % (cfg, form, amax, lmax))
         form = min(KHATS_FORMS, key=lambda f: (round(cand[f][0], 12), round(cand[f][1], 12)))
-        _lm, _am, pc, loo = cand[form]
+        # M3.1.2.2 PK: form per (cfg, cls) = the smaller run-a LOO of that class (ties: fit error, then cfg form)
+        pc, cform = {}, {}
+        for c in classes:
+            fc = min(KHATS_FORMS, key=lambda f: (round(ccand[(c, f)][0], 12), round(ccand[(c, f)][1], 12),
+                                                 f != form))
+            cform[c] = fc
+            pc[c] = dict(ccand[(c, fc)][2], form=fc)
+            print("KHATS FORM cfg=%s cls=%s form=%s loo_sum=%.4f loo_max=%.4f"
+                  % (cfg, c, fc, ccand[(c, "sum")][0], ccand[(c, "max")][0]))
+        loo = {}
+        for c in classes:
+            loo.update({p_: v for p_, v in cand[cform[c]][3].items()
+                        if any(s["part"] == p_ and s["cls"] == c for s in g_all)})
+        for c in classes:
+            g = [s for s in g_all if s["cls"] == c]
+            ncl = sum(khats_body(pc[c], cform[c], s["f"]) < 0 for s in g)
+            print("KHATS CLAMP cfg=%s cls=%s fit_sites=%d clamped=%d" % (cfg, c, len(g), ncl))
         npar = 0
         for c in classes:
             k = len(KHATS_PNAMES)
@@ -1404,13 +1473,13 @@ def khat_static(a):
             cap_all &= ok_c
             print("KCAP cfg=%s cls=%s params=%d cap=%d ok=%d" % (cfg, c, k, kcap(c), int(ok_c)))
             print("KHATSCLS cfg=%s cls=%s sites=%d form=%s %s" % (
-                cfg, c, sum(s["cls"] == c for s in g_all), form,
+                cfg, c, sum(s["cls"] == c for s in g_all), cform[c],
                 " ".join("%s=%.6g" % (k_, pc[c][k_]) for k_ in KHATS_PNAMES)))
         params[cfg] = dict(form=form, classes={c: pc[c] for c in classes})
         for run in runs:
             for part in sorted(st):
                 s = st[part]
-                kh = khats_predict(pc[s["cls"]], form, khats_feat(s))
+                kh = khats_predict(pc[s["cls"]], cform[s["cls"]], khats_feat(s))
                 kloo = loo.get(part, float("nan")) if kl.norm_run(run) == "a" else float("nan")
                 out.append((cfg, kl.norm_run(run), part, s, kh, kloo))
         nfit = len(g_all)
@@ -1422,8 +1491,12 @@ def khat_static(a):
         Path(a.out_params).parent.mkdir(parents=True, exist_ok=True)
         doc = dict(model="K_hat static (M3.1.1.2c PK): per launch max(0, alpha core_hat/L + gamma dw_hat - beta "
                          "ovl_hat/L) [sum] or max(0, max(alpha core, gamma dw) - beta ovl) [max] + t0 + kfirst/L",
-                   board="palmyra213", fit_runs=["a"], objective="minimax |K_hat - K_meas| x launches / site_ms",
-                   inputs=dict(core=a.core_tsv, dw=a.dwhat, ovl=a.npred), cfg=params)
+                   board="palmyra213", fit_runs=["a"],
+                   objective=("minimax |K_hat - (site_ms - L_hat - N_hat)/L| x launches / site_ms, body >= 0, "
+                              "form per cls by run-a LOO" if obj == "t"
+                              else "minimax |K_hat - K_meas| x launches / site_ms"),
+                   inputs=dict(core=str(Path(a.core_tsv).resolve()), dw=str(Path(a.dwhat).resolve()),
+                               ovl=str(Path(a.npred).resolve())), cfg=params)
         Path(a.out_params).write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n")
         print("KHATS params=%s" % a.out_params)
     return 0 if cap_all else 1
@@ -2022,6 +2095,9 @@ def main(argv=None):
     ap.add_argument("--khat-static", action="store_true",
                     help="M3.1.1.2c PK: all-static K_hat per launch (core_hat + dw_hat - ovl_hat, sum|max by run-a "
                          "LOO, + t0 + kfirst/L per cls) fitted on the --fit run-a logs -> --khat-tsv (a/b/c rows)")
+    ap.add_argument("--khat-obj", choices=("k", "t"), default="k",
+                    help="--khat-static fit target: k = K_meas (default, old), t = (site_ms - L_hat - N_hat)/L "
+                         "(predicted L, N from --lpred/--npred)")
     ap.add_argument("--khats-audit", action="store_true", help="AST audit of the --khat-static predict path")
     ap.add_argument("--dwhat", metavar="TSV", help="--khat-static: k_dmafeat dw_hat TSV (per launch)")
     ap.add_argument("--npred", metavar="TSV", help="--khat-static: n_fit npred TSV (ovl_hat, N)")
