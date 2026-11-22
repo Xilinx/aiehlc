@@ -45,6 +45,14 @@ BOARD_RE = re.compile(r"^BOARD machine=(\S+) midr=(0x[0-9a-f]+) board=(\S+)$")
 KTSV = "/scratch/staff/huaj/aiengineers/arthur/tasks/2026-11-19_costmodel/kernels.tsv"
 CAL_KEYS = ("chunk_ovh_cyc", "ddr_bw_scale", "ddr_run0_b", "b_prefetch_b", "round_fixed_cyc", "compute_exposed")
 DDR_MODEL = "bytes"
+# --form m5 (M5 P3): the default DES plus the host side of the wait window, all from structural counts / host inputs:
+#  * wait_call_cyc x waits_per_launch: per __Runtime_wait_io call cost, waits_per_launch = executed wait_io calls per
+#    launch (a call COUNT of the log, = host.cc host_counts('__Runtime_wait') - 1: 12/round, but 4 for R=1 launches);
+#  * compute_exposed fixed 0 (core compute runs before the host enters wait_io, PERFIO split);
+#  * least squares of log(pred/meas) (every kernel weight 1) instead of minimax.
+M5_KEYS = ("round_fixed_cyc", "ddr_bw_scale", "ddr_run0_b", "b_prefetch_b", "wait_call_cyc")
+M5_SCALE = {"round_fixed_cyc": 1e3, "b_prefetch_b": 1e3, "wait_call_cyc": 1e3}
+M5_X0 = ([17.0, 1.5, 45.0, 178.0, 0.5], [10.0, 1.5, 40.0, 100.0, 1.0], [40.0, 1.0, 20.0, 0.0, 0.1])
 
 
 def board_marker(path):
@@ -56,7 +64,7 @@ def board_marker(path):
     return None
 
 
-def load_point(path, kern, kind, name=None):
+def load_point(path, kern, kind, name=None, form="default"):
     r = parse(path)
     sd = r["split_detail"]
     if sd is None or "wait_io" not in sd["rt"]:
@@ -64,6 +72,9 @@ def load_point(path, kern, kind, name=None):
     perf = [p for p in r["perf"] if p["rc_bad"] == 0 and p["compute_max"] is not None]
     inst = kern["instance"]
     op = {"instance": inst, "host": des.host_from_split(sd, inst["ntile"])}
+    if form == "m5":
+        L = float(sd["other"].get("launches") or sd["calls"].get("coreen") or 1)
+        op["host"]["waits_per_launch"] = sd["calls"]["wait_io"] / L   # a call count, not a time
     n = len(perf)
     return {
         "name": name or kern["kernel"], "kernel": kern["kernel"], "kind": kind, "recipe": kern["recipe"], "op": op,
@@ -126,7 +137,42 @@ def fit_wait(points, params, cal):
     return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in c.items()}
 
 
-def calibrate(points, params):
+def fit_wait_m5(points, params, cal, keys=M5_KEYS):
+    """--form m5: free constants `keys` by least squares of log(pred/meas), compute_exposed = 0."""
+    import numpy as np
+    from scipy.optimize import minimize
+
+    def unpack(x):
+        c = dict(cal, compute_exposed=0.0, k_form="m5")
+        c.update({k: abs(v) * M5_SCALE.get(k, 1.0) for k, v in zip(keys, x)})
+        return c
+
+    def obj(x):
+        p2 = dict(params, ddr_model=DDR_MODEL)
+        p2.update(unpack(x))
+        e = np.array([math.log(max(des.predict_launch(p["op"], p2, p["cycles"])["wait_ms"], 1e-9) / p["meas_ms"])
+                      for p in points])
+        return float(np.mean(e ** 2))
+
+    best = None
+    for x0 in M5_X0:
+        x = list(x0[:len(keys)])
+        for _rs in range(6):
+            o = minimize(obj, x, method="Nelder-Mead", options={"maxiter": 4000, "maxfev": 4000, "xatol": 1e-6,
+                                                                "fatol": 1e-10, "adaptive": True})
+            improved = best is None or o.fun < best.fun - 1e-9
+            if improved:
+                best = o
+            x = list(best.x)
+            if not improved:
+                break
+    c = unpack(best.x)
+    return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in c.items()}
+
+
+def calibrate(points, params, form="default"):
+    if form == "m5":
+        return dict(fit_wait_m5(points, params, nnls_compute(points, params)), ddr_model=DDR_MODEL)
     return dict(fit_wait(points, params, nnls_compute(points, params)), ddr_model=DDR_MODEL)
 
 
@@ -147,7 +193,7 @@ def des_terms(op, params, d):
             "overlap": -R * overlap * to_ms}
 
 
-def loo_maxrel(points, params, detail=None):
+def loo_maxrel(points, params, detail=None, form="default", worst_out=None):
     """Leave-one-kernel-out: refit all calibrated constants without the kernel, predict it.
     detail = full-fit cal dict -> also print one KLOO line per held-out kernel (signed rel, the calibrated constant
     with the largest relative change vs the full fit, the largest |DES term| of the held-out prediction)."""
@@ -155,11 +201,15 @@ def loo_maxrel(points, params, detail=None):
     for i, q in enumerate(points):
         rest = [p for p in points if p["kernel"] != q["kernel"]]
         p2 = dict(params, ddr_model=DDR_MODEL)
-        cl = calibrate(rest, params)
+        cl = calibrate(rest, params, form)
         p2.update(cl)
         d = des.predict_launch(q["op"], p2, q["cycles"])
         rel = abs(d["wait_ms"] / q["meas_ms"] - 1.0)
         print("[fit] loo %-26s rel=%.3f" % (q["kernel"], rel))
+        if worst_out is not None and (not worst_out or rel > worst):
+            t = des_terms(q["op"], p2, d)
+            worst_out.update(kernel=q["kernel"], rel=d["wait_ms"] / q["meas_ms"] - 1.0, terms=t,
+                             term=max(t, key=lambda k: abs(t[k])))
         worst = max(worst, rel)
         if detail is not None:
             dc = {k: (cl[k] - float(detail[k])) / max(abs(float(detail[k])), 1e-9)
@@ -206,6 +256,9 @@ def main():
     ap.add_argument("--loo-detail", action="store_true",
                     help="print a KLOO line per held-out kernel (rel, dcal = largest relative change of a calibrated "
                          "constant vs the full fit, term = largest DES term of the held-out prediction)")
+    ap.add_argument("--form", default="default", choices=["default", "m5"],
+                    help="K wait form: default (K2c DES, 6 constants, minimax) or m5 (DES + per-wait_io call cost "
+                         "from the structural wait count, compute_exposed=0, log least squares)")
     a = ap.parse_args()
 
     params = json.load(open(a.params))
@@ -238,7 +291,7 @@ def main():
         if name not in kmap:
             print("[fit] skip %s: kernel not in %s" % (path, a.cycles))
             continue
-        p = load_point(path, kmap[name], "stored")
+        p = load_point(path, kmap[name], "stored", form=a.form)
         if p is None:
             print("[fit] skip %s: no LAUNCH split_detail rt_wait_io" % path)
             continue
@@ -268,7 +321,7 @@ def main():
         else:
             n_board += 1
             print(m.group(0))
-            rerun_pt = load_point(rlog, kmap[kern], "rerun", name=kern + "_rerun")
+            rerun_pt = load_point(rlog, kmap[kern], "rerun", name=kern + "_rerun", form=a.form)
             if rerun_pt and kern in kbmap and not rerun_pt["board_compute_cyc"]:
                 rerun_pt["board_compute_cyc"] = kbmap[kern]
             if rerun_pt:
@@ -279,7 +332,7 @@ def main():
     if a.cal:
         cal = json.load(open(a.cal))
     else:
-        cal = calibrate(points, params)
+        cal = calibrate(points, params, a.form)
         cal_out = a.cal_out or os.path.join(os.path.dirname(os.path.abspath(a.params)), board_name + "_kcal.json")
         json.dump(dict(cal, fitted_on=sorted(p["kernel"] for p in points), n=len(points),
                        meas="rt_wait_io", src_params=os.path.abspath(a.params)),
@@ -290,6 +343,8 @@ def main():
     p2.update({k: v for k, v in cal.items() if k in des.CAL_DEFAULTS})
     if "ddr_model" in cal:
         p2["ddr_model"] = cal["ddr_model"]
+    if "k_form" in cal:
+        p2["k_form"] = cal["k_form"]
     cal_params = len([k for k in cal if k in des.CAL_DEFAULTS])
     print("[fit] ddr model=%s (ddr_burst_cyc0=%s ddr_burst_b_per_cyc=%s)" % (
         "per-burst" if des.burst_model(p2) else "bytes-only", p2.get("ddr_burst_cyc0"), p2.get("ddr_burst_b_per_cyc")))
@@ -341,7 +396,12 @@ def main():
     st = [abs(p["pred"]["stall_ms"] - p["board_stall_cyc"] / clk_khz) * 1e3 for p in rows if p["board_stall_cyc"]]
     print("[fit] report DES stall vs board lock+stream stall: abs err max=%.1f us mean=%.1f us n=%d "
           "(board stall includes core idle during host issue; profiling on)" % (max(st), sum(st) / len(st), len(st)))
-    loo = loo_maxrel(points, params, detail=cal if a.loo_detail else None)
+    wl = {} if a.form == "m5" else None
+    loo = loo_maxrel(points, params, detail=cal if a.loo_detail else None, form=a.form, worst_out=wl)
+    if wl:
+        # remaining LOO error: the worst held-out kernel and the DES term that dominates its prediction
+        print("KRESID worst=%s rel=%+.3f term=%s %s" % (wl["kernel"], wl["rel"], wl["term"],
+                                                         " ".join("%s_ms=%.4f" % kv for kv in wl["terms"].items())))
     print("COSTMODEL K fit: R2=%.3f maxrel=%.3f n=%d kernels=%d logs=%d board_logs=%d meas=rt_wait_io"
           " cal_params=%d loo_maxrel=%.3f" % (r2, mr, len(rows), kernels, n_logs, n_board, cal_params, loo))
     print("DES compute: maxrel=%.3f n=%d src=perfctr" % (cmr, len(comp)))
