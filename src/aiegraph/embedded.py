@@ -928,6 +928,19 @@ def embedded_convert(model, target: str = "a78", quantize: str = "int8", calib=N
             set_current(emod)
             return emod
     _clean(workdir)
+    from . import convert_cache as _cc               # opt-in: AIEGRAPH_CONVERT_CACHE=<dir>
+    ckey = cparts = None
+    if _cc.cache_dir() and not force:
+        ckey, cparts = _cc.key(m, quantize, calib, image, _env.repo_root())
+        hit = _cc.restore(ckey, workdir, image)
+        if hit:
+            full = json.loads(stamp.read_text())
+            print(f"[aiegraph] convert cache HIT {ckey} -> {workdir} ({hit['restore_s']} s, "
+                  f"{hit['relocated_files']} files relocated)")
+            emod = EmbeddedModel(workdir, m, target, image, full)
+            set_current(emod)
+            return emod
+        print(f"[aiegraph] convert cache MISS {ckey}")
     workdir.mkdir(parents=True, exist_ok=True)
     stamp.write_text(json.dumps({**state, "complete": False}, indent=2))
 
@@ -947,6 +960,8 @@ def embedded_convert(model, target: str = "a78", quantize: str = "int8", calib=N
             "cpu_top": res.get("cpu_top"), "quantizer": res.get("quantizer"),
             "layer_count": res.get("layer_count"), "arm_sources": bool(arm.get("makefile"))}
     stamp.write_text(json.dumps(full, indent=2, default=str))
+    if ckey:
+        _cc.store(ckey, cparts, workdir, image)
     emod = EmbeddedModel(workdir, m, target, image, full)
     set_current(emod)
     return emod
