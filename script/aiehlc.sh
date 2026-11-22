@@ -205,7 +205,6 @@ aiehlc_libcache_inputs() {
         # `gcc -v` (the task's toolchain identity); temp-file names it prints are masked
         "$compiler" -v 2>&1 | sed -E 's#/tmp/[A-Za-z0-9._-]+#/tmp/X#g'
         "$archiver" --version 2>&1 | head -1
-        "${CC:-gcc}" -v 2>&1 | sed -E 's#/tmp/[A-Za-z0-9._-]+#/tmp/X#g'
         git -C "$rt" ls-files -s
         git -C "$rt" diff HEAD --binary
         (cd "$rt" && git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum)

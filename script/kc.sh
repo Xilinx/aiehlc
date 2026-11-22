@@ -240,6 +240,17 @@ strip_kernel_debug_loc() {
         if command -v "$cand" >/dev/null 2>&1; then objcopy="$cand"; break; fi
     done
     if [ -z "$objcopy" ]; then
+        # Not on PATH on the build hosts: use the llvm-objcopy shipped with aietools (next to xchessmk).
+        local chess vroot c
+        chess=$(command -v xchessmk 2>/dev/null)
+        for vroot in ${XILINX_VITIS:-} ${chess:+$(dirname "$(dirname "$(dirname "$(dirname "$chess")")")")} \
+                /proj/xbuilds/SWIP/9999.0_0331_2018/installs/lin64/2026.1/Vitis; do
+            for c in "$vroot"/aietools/tps/lnx64/clangd-*/bin/llvm-objcopy; do
+                if [ -x "$c" ]; then objcopy="$c"; break 2; fi
+            done
+        done
+    fi
+    if [ -z "$objcopy" ]; then
         echo "Warning: no llvm-objcopy found; keeping full DWARF in $elf"
         return 0
     fi
