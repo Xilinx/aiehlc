@@ -8,6 +8,14 @@ Shared helpers (imported by m3_site / k_diag / k_dmafeat / kln_site / n_fit via 
   run_re(net)          '<net>_<cfg>.<run>.log' -> run regex (the old kln_site _RUN 'unet_' regex)
   build_dir(root, net, cfg) = root/<net>_<cfg>
   set_net(net, *mods)  sets mod.NET and mod._CMP (if the module has one) for each module
+  aiek_dir(net)        AIE kernel family dir under ag_work/aiek: resnet18/unet -> aiek_cnn, yolo26n -> aiek_cnnconv
+  kpar_dir(root, net, cfg) = build_dir/ag_work/aiek/<aiek_dir>/worklocal/build/kpar
+  sites(root, net, cfg)    static AIE site table [(part, kind, cid, (A,B,C), launches)] sorted by part (M4.2 P0):
+      resnet18/unet: build log 'aie conv|linear <cid> ... inst=AxBxC launches=n' joined with graph_driver.c
+                     'GRAPH_PROF_END(<part>, "aie aiednn_<conv|dense> <cid>")' (= kcore_net.sites at d8144cdb);
+      yolo26n:       build log 'aie conv <cid> <name> -> call <part> M= N= K= ... dw= ... -> AxBxC split=3 launches=n'
+                     (dw=0 and dw=1 sites alike; part = call number = board 'PROF part=<part> op=aie_host_conv<cid>').
+  inst_dir(kpar, inst)     the one kpar/gemm_kacc__A_B_C_* dir of an instance (ValueError if not exactly one)
 
 CLI (census, reads only the board log):
   net_sites.py [--net NET] LOG...      one line per log, sum_ok last:
@@ -19,6 +27,8 @@ CLI (census, reads only the board log):
   net_sites.py --selftest
 """
 import argparse
+import glob
+import os
 import re
 import sys
 from pathlib import Path
@@ -56,6 +66,59 @@ def set_net(net, *mods):
         if hasattr(m, "_CMP"):
             m._CMP = cmp_re(net)
     return net
+
+
+AIEK = {"unet": "aiek_cnn", "resnet18": "aiek_cnn", "yolo26n": "aiek_cnnconv"}
+_BL = re.compile(r"aie (conv|linear)\s+(\d+) .*?\binst=(\d+)x(\d+)x(\d+) launches=(\d+)")
+_GD = re.compile(r'GRAPH_PROF_END\((\d+), "aie aiednn_(conv|dense) (\d+)"\)')
+_YBL = re.compile(r"aie conv\s+(\d+) (\S+) -> call (\d+) M=(\d+) N=(\d+) K=(\d+) .*?\bdw=([01]) .*?"
+                  r"-> (\d+)x(\d+)x(\d+) split=\d+ launches=(\d+)\s*$", re.M)
+
+
+def aiek_dir(net):
+    return AIEK[check_net(net)]
+
+
+def kpar_dir(root, net, cfg):
+    return os.path.join(build_dir(root, net, cfg), "ag_work", "aiek", aiek_dir(net), "worklocal", "build", "kpar")
+
+
+def inst_dir(kpar, inst):
+    g = [x for x in sorted(glob.glob(os.path.join(kpar, "gemm_kacc__%d_%d_%d_*" % tuple(inst)))) if os.path.isdir(x)]
+    if len(g) != 1:
+        raise ValueError("%s: %d dirs for instance %s" % (kpar, len(g), inst))
+    return g[0]
+
+
+def parse_yolo_log(txt):
+    """yolo build-log text -> [(part, 'conv', cid, (A,B,C), launches, dw)]"""
+    out = []
+    for m in _YBL.finditer(txt):
+        out.append((int(m.group(3)), "conv", int(m.group(1)),
+                    (int(m.group(8)), int(m.group(9)), int(m.group(10))), int(m.group(11)), int(m.group(7))))
+    return out
+
+
+def sites(build_root, net, cfg, with_dw=False):
+    """[(part, kind, cid, (A,B,C), launches)] in part order ((..., dw) for yolo26n if with_dw)"""
+    bdir = build_dir(build_root, net, cfg)
+    txt = open(bdir + ".build.log", errors="replace").read()
+    if net == "yolo26n":
+        out = parse_yolo_log(txt)
+        if len(set(x[0] for x in out)) != len(out):
+            raise ValueError("%s: duplicate call/part numbers" % bdir)
+        return sorted(out) if with_dw else sorted(x[:5] for x in out)
+    bl = {}
+    for m in _BL.finditer(txt):
+        kind = "conv" if m.group(1) == "conv" else "dense"
+        bl[(kind, int(m.group(2)))] = ((int(m.group(3)), int(m.group(4)), int(m.group(5))), int(m.group(6)))
+    gd = open(os.path.join(bdir, "ag_work", "arm_build", "graph_driver.c"), errors="replace").read()
+    out = []
+    for m in _GD.finditer(gd):
+        part, kind, cid = int(m.group(1)), m.group(2), int(m.group(3))
+        inst, ln = bl[(kind, cid)]
+        out.append((part, kind, cid, inst, ln))
+    return sorted(out)
 
 
 _NAME = re.compile(r"^(?P<net>[a-z0-9]+)_(?P<cfg>[\w-]+)\.(?P<run>[a-z])\.log$")
@@ -102,6 +165,14 @@ def selftest():
         == [("b1", "7", "0")])
     chk("cmp_other_net", cmp_re("unet").findall("CMP resnet18 board=b1 x aie_launches=7 y run_rc=0\n") == [])
     chk("build_dir", build_dir("/r", "yolo26n", "aot") == "/r/yolo26n_aot")
+    chk("aiek_dir", (aiek_dir("resnet18"), aiek_dir("unet"), aiek_dir("yolo26n")) ==
+        ("aiek_cnn", "aiek_cnn", "aiek_cnnconv"))
+    yl = ("[build_yolov26]   aie conv  35 /model.10/m/m.0/attn/pe/conv/Conv -> call 59 M=400 N=128 K=1152 s=1 p=1 "
+          "dw=1 act=0 -> 128x3456x256 split=3 launches=2\n"
+          "[build_yolov26]   aie conv   0 /model.0/conv/Conv -> call 1 M=102400 N=16 K=27 s=2 p=1 dw=0 act=1 "
+          "-> 64x192x256 split=3 launches=400\n")
+    chk("yolo_parse", parse_yolo_log(yl) == [(59, "conv", 35, (128, 3456, 256), 2, 1),
+                                           (1, "conv", 0, (64, 192, 256), 400, 0)])
     try:
         check_net("vgg")
         chk("unknown_net", False)
