@@ -321,15 +321,122 @@ def estimate_sites(spec: Dict[str, Any], board: str = "palmyra213", params: str 
             "model": "K+L+N frozen (M34 PZ): T_hat = (K_hat x launches + L_hat + N_hat) / launches"}
 
 
+# ------------------------------------------------------------------ M6 net mode: one entry for the 3 nets
+# {"net": unet|resnet18|yolo26n, "build": ROOT, "cfg": ..., "sites": None|[...]}.  unet -> estimate_sites (M34 PZ,
+# params "m3122"); resnet18 / yolo26n -> k_net's predict path (k_net.static_rows + k_net.k_predict) with the frozen
+# set listed in script/perf/params/<md5 file> (M4.1 / M4.2 PF), T_hat rounded like the KSITE line (%.4f).
+NET_PARAMS = {"palmyra213": {
+    "resnet18": {"m41": ("m41_frozen.md5", "resnet18", ("off", "aot-kco"))},
+    "yolo26n": {"m42": ("m42_frozen.md5", "yolo26n", ("off", "aot"))},
+}}
+NET_DEFAULT = {"unet": "m3122", "resnet18": "m41", "yolo26n": "m42"}
+
+
+def _frozen_files(md5file: Path, root: Path) -> Dict[str, Path]:
+    """{role: path} from a 'md5  relpath' file; role from the file name (l_/n_/kcyc_/k_/board), md5 checked"""
+    out = {}
+    for ln in md5file.read_text().splitlines():
+        if not ln.strip():
+            continue
+        m, rp = ln.split(None, 1)
+        f = root / rp.strip()
+        if _md5(f) != m:
+            raise ValueError("frozen file %s md5 %s != %s (%s)" % (f, _md5(f), m, md5file))
+        b = f.name
+        role = ("l" if b.startswith("l_") else "n" if b.startswith("n_") else "kcyc" if b.startswith("kcyc_")
+                else "k" if b.startswith("k_") else "board" if b == "palmyra213.json" else None)
+        if role is None:
+            raise ValueError("unknown frozen file role %s in %s" % (b, md5file))
+        out[role] = f
+    return out
+
+
+def estimate_net(spec: Dict[str, Any], board: str = "palmyra213", params: Optional[str] = None,
+                 params_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Net mode: frozen board-validated K+L+N per site of one build cfg of a net.
+        spec = {"net": "unet"|"resnet18"|"yolo26n", "build": ROOT (holding <net>_<cfg>/), "cfg": ..., "sites": None|[...]}
+    Sites: unet "conv0"... (estimate_sites); resnet18 / yolo26n "part<N>" with "part": N.  T_hat ms per launch."""
+    net = spec.get("net")
+    if net not in NET_DEFAULT:
+        raise ValueError("unknown net %r (known: %s)" % (net, ", ".join(sorted(NET_DEFAULT))))
+    pname = params or NET_DEFAULT[net]
+    if net == "unet":
+        r = estimate_sites({"unet_build": spec["build"], "cfg": spec.get("cfg"), "sites": spec.get("sites")},
+                           board, pname, params_dir)
+        r["net"] = net
+        return r
+    import sys
+    pd = Path(params_dir) if params_dir else PARAMS_DIR
+    perf = str(pd.parent)
+    if perf not in sys.path:
+        sys.path.insert(0, perf)
+    try:
+        md5f, _n, cfgs = NET_PARAMS[board][net][pname]
+    except KeyError:
+        raise ValueError("no frozen K+L+N params %r for net %r board %r" % (pname, net, board))
+    cfg = spec.get("cfg")
+    if cfg not in cfgs:
+        raise ValueError("cfg for %s must be one of %s, got %r" % (net, cfgs, cfg))
+    build = Path(spec["build"])
+    if build.name == "%s_%s" % (net, cfg):
+        build = build.parent
+    bdir = build / ("%s_%s" % (net, cfg))
+    if not bdir.is_dir():
+        raise FileNotFoundError("no %s build dir %s" % (net, bdir))
+    wt = pd.parents[2]
+    P = _frozen_files(pd / md5f, wt)
+    rel = lambda p: str(Path(p).resolve().relative_to(wt))  # noqa: E731
+    pmd5 = {rel(f): _md5(f) for f in P.values()}
+    import k_net
+    import l_net
+    import n_fit
+    import net_sites
+    from . import launch_l
+    saved = [(m, m.NET, getattr(m, "_CMP", None)) for m in (n_fit, l_net)]
+    try:
+        net_sites.set_net(net, n_fit)
+        lprm = launch_l.load_params(str(P["l"]))
+        nprm = json.loads(P["n"].read_text())
+        kcyc = json.loads(P["kcyc"].read_text())
+        brd = json.loads(P["board"].read_text())
+        th = json.loads(P["k"].read_text())["cfgs"][cfg]["theta"]
+        rows = k_net.static_rows(str(bdir), cfg, lprm, nprm, kcyc, brd)
+    finally:
+        for m, nn, c in saved:
+            m.NET = nn
+            if c is not None:
+                m._CMP = c
+    want = set(spec.get("sites") or [])
+    r4 = lambda x: float("%.4f" % x)  # noqa: E731  (KSITE line rounding)
+    out = []
+    for r in rows:
+        name = "part%d" % r["part"]
+        if want and name not in want:
+            continue
+        t, k, dma, ovl = k_net.k_predict(th, k_net.k_view(r))
+        n = int(r["launches"])
+        out.append(dict(site=name, part=r["part"], op=r["op"], cid=r["cid"], inst=r["inst"], launches=n,
+                        T_hat=r4(t), L_hat=r4(r["L_hat"]), N_hat=r4(r["N_hat"]), K_hat=r4(k), core=r4(r["core"]),
+                        dma=r4(dma), N_ovl=r4(ovl)))
+    if want - {r["site"] for r in out}:
+        raise KeyError("unknown sites %s for %s cfg %s" % (sorted(want - {r["site"] for r in out}), net, cfg))
+    return {"sites": out, "total_ms": sum(r["T_hat"] * r["launches"] for r in out), "params": pmd5, "aux": {},
+            "unpriced": [], "cfg": cfg, "board": board, "net": net,
+            "model": "K+L+N frozen (k_net %s): T_hat = L_hat + N_hat + K_hat per launch" % pname}
+
+
 def estimate(group: Any, board: str = "palmyra213", params: Any = None,
              cycles: Optional[str] = None) -> Dict[str, Any]:
     """Predicted ms of one execution of ``group`` (see module docstring for the schema).
     ``group = {"unet_build": dir, "cfg": ..., "sites": ...}`` selects site mode (estimate_sites; params = name of
-    the frozen set, default "m3122")."""
+    the frozen set, default "m3122").  ``group = {"net": unet|resnet18|yolo26n, "build": ROOT, "cfg": ...}`` selects
+    net mode (estimate_net; params default per net: unet m3122, resnet18 m41, yolo26n m42)."""
     if isinstance(group, dict) and "unet_build" in group:
         return estimate_sites(group, board, params if isinstance(params, str) else "m3122")
+    if isinstance(group, dict) and "net" in group:
+        return estimate_net(group, board, params if isinstance(params, str) else None)
     if isinstance(params, str):
-        raise ValueError("params name %r is only valid in site mode (group with 'unet_build')" % params)
+        raise ValueError("params name %r is only valid in site/net mode (group with 'unet_build' or 'net')" % params)
     prm = params if params is not None else board_params(board)
     if "bdgraph_bd_us" not in prm:
         from .bdgraph import BD_US_FIT, BD_US_FIT_PATH, ISSUE_FIT

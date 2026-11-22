@@ -1099,3 +1099,45 @@ def test_estimate_site_missing_build(tmp_path):
     with pytest.raises(FileNotFoundError) as e:
         estimate({"unet_build": str(missing), "cfg": "off", "sites": None})
     assert str(missing) in str(e.value)
+
+
+# ------------------------------------------------------------------ M6 P1: estimate() net mode (unet / resnet18 / yolo26n)
+M6_BUILD = os.environ.get("COSTMODEL_NET_BUILD", "/scratch/staff/huaj/tmp/costmodel_m40")
+# golden = KSITE T_hat of k_net --params (frozen m41 / m42), M4.2 PF pf_{r18,yolo}_knet.out, 1 row per (cfg, part)
+M6_GOLDEN = {"resnet18": (DATA / "m6_golden_r18.tsv", 42), "yolo26n": (DATA / "m6_golden_yolo26n.tsv", 204)}
+
+
+def _m6_golden_check(net):
+    from aiegraph.costmodel import estimate
+    path, nrows = M6_GOLDEN[net]
+    with open(path) as f:
+        gold = {(r["cfg"], r["site"]): (int(r["launches"]), float(r["T_hat"]))
+                for r in csv.DictReader(f, delimiter="\t")}
+    assert len(gold) == nrows
+    n = 0
+    for cfg in dict.fromkeys(c for c, _s in gold):
+        r = estimate({"net": net, "build": M6_BUILD, "cfg": cfg})
+        assert r["unpriced"] == [] and r["net"] == net and r["cfg"] == cfg
+        assert len(r["params"]) == 5 and all(len(m) == 32 for m in r["params"].values())
+        got = {s["site"]: s for s in r["sites"]}
+        want = {s: v for (c, s), v in gold.items() if c == cfg}
+        assert set(got) == set(want)
+        for site, (launches, t_hat) in want.items():
+            assert got[site]["launches"] == launches, site
+            assert abs(got[site]["T_hat"] - t_hat) <= 5e-5, (cfg, site, got[site]["T_hat"], t_hat)
+            n += 1
+    assert n == nrows
+
+
+def test_estimate_net_r18_golden():
+    _m6_golden_check("resnet18")
+
+
+def test_estimate_net_yolo_golden():
+    _m6_golden_check("yolo26n")
+
+
+def test_estimate_net_unknown():
+    from aiegraph.costmodel import estimate
+    with pytest.raises(ValueError):
+        estimate({"net": "vgg16", "build": M6_BUILD, "cfg": "off"})
