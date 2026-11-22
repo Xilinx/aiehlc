@@ -12,6 +12,7 @@
   NAB ALL cfgs=.. nsum_pass=.. smaller=.. PASS|FAIL                    (PASS = all NSRC ok and all NSUM PASS)
   n_fit.py --net resnet18 --build-root DIR --ap [--out JSON | --params JSON] CFG=A.log,B.log,C.log [...]
 --ap (M4.1 P2, ap_gemm nets): static sites = aiegraph/costmodel/ap_sites.py (AP_FEATS, one kind, <=7 features);
+  yolo26n (M4.2 P2): aiegraph/costmodel/cc_sites.py (CC_FEATS, cnn_aie_conv sites, cfgs off aot);
   NFLOOR net= cfg= n= feats= floor= PASS|FAIL   (all AP_FEATS NNLS on a, max per-site rel error on b/c, <=0.150)
   NFIT / NLOO net= cfg= run=a ... loo_maxrel=  (fit on a only; LOO on a with the subset frozen, <=0.200)
   NCHK net= cfg= run=b|c sites= maxrel= PASS|FAIL  (static prediction, no measured field: NAUDIT, <=0.200)
@@ -624,7 +625,7 @@ def predict_mode(a, root):
 # aiek_cnn.cc + kernel host.cc), all sites one kind 'conv' (ap_gemm runs conv AND dense: op=aie_host_conv).
 AP_MAXF = 7
 AP_RUNS = "abcdefgh"
-_AP_PROF = re.compile(r"^PROF part=(\d+) op=aie_host_conv ms=([\d.]+) .*site_ms=([\d.]+) aie_ms=([\d.]+)", re.M)
+_AP_PROF = re.compile(r"^PROF part=(\d+) op=aie_host_conv\d* ms=([\d.]+) .*site_ms=([\d.]+) aie_ms=([\d.]+)", re.M)
 
 
 def ap_measure(srows, log):
@@ -699,9 +700,13 @@ def ap_mode(a, root):
     """--ap CFG=A.log,B.log[,C.log] ...: per cfg NSRC per log, NFLOOR (all AP_FEATS NNLS on a, maxrel on b/c),
     fit on a only (subset <= AP_MAXF, fit_kind) or --params frozen, NLOO on a (frozen subset), NCHK per non-a run
     (prediction from static rows only), NAUDIT, NALL; --out writes the params json."""
-    from aiegraph.costmodel import ap_sites
     import net_sites
-    feats = ap_sites.AP_FEATS
+    if NET == "yolo26n":   # M4.2 P2: cnn_aie_conv (aiek_cnnconv) sites, op=aie_host_conv<cid>
+        from aiegraph.costmodel import cc_sites as ap_sites
+        feats = ap_sites.CC_FEATS
+    else:
+        from aiegraph.costmodel import ap_sites
+        feats = ap_sites.AP_FEATS
     prm = json.load(open(a.params)) if a.params else {}
     out, ok = {}, True
     floors, loos, chks = [], [], []

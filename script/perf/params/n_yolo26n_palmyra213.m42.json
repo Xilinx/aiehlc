@@ -1,0 +1,88 @@
+{
+ "aot": {
+  "feats_all": [
+   "wpack_elems",
+   "xpack_elems",
+   "xload_elems",
+   "sync_bytes",
+   "scatter_elems",
+   "silu_elems",
+   "add_elems",
+   "glue_bd",
+   "glue_w",
+   "kfirst",
+   "launches"
+  ],
+  "fit": {
+   "log": "/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks/2026-11-22_M40/yolo26n_aot.a.log",
+   "run": "a"
+  },
+  "kinds": {
+   "conv": {
+    "coef": {
+     "add_elems": 4.37898256e-06,
+     "launches": 0.403918906,
+     "sync_bytes": 2.7125741e-06,
+     "wpack_elems": 2.27140417e-05,
+     "xload_elems": 2.44347664e-05
+    },
+    "d": 0.0,
+    "feats": [
+     "wpack_elems",
+     "xload_elems",
+     "sync_bytes",
+     "add_elems",
+     "launches"
+    ],
+    "loo_a": 0.104129484,
+    "n": 102
+   }
+  },
+  "model": "N=sum(coef[f]*f)+d (ms) per site, f = ap_sites static features, nnls on relative error, <=7 features, fit on run a only"
+ },
+ "off": {
+  "feats_all": [
+   "wpack_elems",
+   "xpack_elems",
+   "xload_elems",
+   "sync_bytes",
+   "scatter_elems",
+   "silu_elems",
+   "add_elems",
+   "glue_bd",
+   "glue_w",
+   "kfirst",
+   "launches"
+  ],
+  "fit": {
+   "log": "/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks/2026-11-22_M40/yolo26n_off.a.log",
+   "run": "a"
+  },
+  "kinds": {
+   "conv": {
+    "coef": {
+     "add_elems": 1.09749327e-05,
+     "glue_w": 0.000476019767,
+     "silu_elems": 1.45760184e-05,
+     "sync_bytes": 1.20386456e-06,
+     "wpack_elems": 2.24283348e-05,
+     "xload_elems": 1.60586835e-05,
+     "xpack_elems": 1.09144521e-05
+    },
+    "d": 0.130901571,
+    "feats": [
+     "wpack_elems",
+     "xpack_elems",
+     "xload_elems",
+     "sync_bytes",
+     "silu_elems",
+     "add_elems",
+     "glue_w"
+    ],
+    "loo_a": 0.104601254,
+    "n": 102
+   }
+  },
+  "model": "N=sum(coef[f]*f)+d (ms) per site, f = ap_sites static features, nnls on relative error, <=7 features, fit on run a only"
+ }
+}
