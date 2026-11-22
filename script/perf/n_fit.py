@@ -338,7 +338,11 @@ def npred_site(pc, s, corr_ms=0.0):
     if "ovl" not in pc:
         return nh, None
     o = pc["ovl"]
-    return nh, o["ovl_k"] * (predict(o["kinds"][s["kind"]], s) + corr_ms)
+    gh = predict(o["kinds"][s["kind"]], s) + corr_ms
+    if o.get("form") == "cls":
+        c = o["cls"][s["kind"]]
+        return nh, c["k"] * gh + c["c"]
+    return nh, o["ovl_k"] * gh
 
 
 def ovl_meas(perf, launches):
@@ -361,6 +365,77 @@ def _fit_ovl(fr, perf, corr):
     q = h / o
     return {"kinds": kinds, "ovl_k": sig(float(q.sum() / (q * q).sum())),
             "model": "ovl_hat = ovl_k * (glue_hat + corr_ms); glue_hat = sum(coef[f]*f)+d on AHS glue_ms (a log)"}
+
+
+def _fit_cls(x, y):
+    """(k, c) of y ~ k*x + c, least squares on the relative error (weight 1/y)"""
+    w = 1.0 / y
+    k, c = np.linalg.lstsq(np.c_[x, np.ones_like(x)] * w[:, None], y * w, rcond=None)[0]
+    return float(k), float(c)
+
+
+def fit_ovl_cls(fr, perf, corr, ovl):
+    """--fit-ovl cls: one overlap term per kind, ovl_hat = k_kind * (glue_hat + corr_ms) + c_kind, with glue_hat the
+    frozen static glue component ovl['kinds'] (unchanged) and (k, c) relative LSQ of ovl_meas on the a log's
+    launches>0 rows fr. Returns (new ovl dict, LOO max relative error of the cls fit on fr)."""
+    x = np.array([predict(ovl["kinds"][r["kind"]], r) + c for r, c in zip(fr, corr)])
+    y = np.array([ovl_meas(perf[r["part"]], r["launches"]) for r in fr])
+    kind_of = np.array([r["kind"] for r in fr])
+    cls, worst = {}, 0.0
+    for kind in KINDS:
+        m = kind_of == kind
+        if not m.any():
+            continue
+        xk, yk = x[m], y[m]
+        k, c = _fit_cls(xk, yk)
+        cls[kind] = {"k": sig(k), "c": sig(c), "n": int(m.sum())}
+        for i in range(len(xk)):
+            keep = np.arange(len(xk)) != i
+            ki, ci = _fit_cls(xk[keep], yk[keep])
+            worst = max(worst, abs(ki * xk[i] + ci - yk[i]) / yk[i])
+    o = {"kinds": ovl["kinds"], "form": "cls", "cls": cls, "fit_runs": ["a"],
+         "model": "ovl_hat = cls[kind].k * (glue_hat + corr_ms) + cls[kind].c; glue_hat = sum(coef[f]*f)+d "
+                  "(kinds, frozen); (k, c) relative LSQ on ovl_meas of the a log (n_fit --fit-ovl cls)"}
+    return o, worst
+
+
+def fit_ovl_mode(a, root):
+    """--fit-ovl cls --params JSON --out-params OUT CFG=A.log ...: N kinds/coefficients copied unchanged, each cfg's
+    'ovl' replaced by the per-kind overlap term fitted on the a log. Prints OVLFIT / OVLLOO per cfg."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from k_diag import parse_perf
+    prm = json.load(open(a.params))
+    out = json.loads(json.dumps(prm))
+    ok = True
+    for cfg, lg in pairs(a.runs):
+        lg = lg.split(",")[0]
+        if cfg not in prm or "ovl" not in prm[cfg]:
+            print("OVLFIT cfg=%s no ovl params FAIL" % cfg)
+            ok = False
+            continue
+        build = "%s/unet_%s" % (root, cfg)
+        srows = static_rows(build)
+        rows, txt = measure(build, lg)
+        if [(r["kind"], r["cid"]) for r in rows] != [(s["kind"], s["cid"]) for s in srows]:
+            raise ValueError("%s: log sites vs static sites differ" % lg)
+        ok &= src_line(cfg, lg, txt, sites=sum(1 for r in rows if r["launches"] > 0))
+        fr = [r for r in rows if r["launches"] > 0]
+        corr = [0.0] * len(fr)
+        if cfg == "off":
+            cs = _off_corr(build, a.off_corr)
+            if [(k, c) for k, c, _ in cs] != [(s["kind"], s["cid"]) for s in fr]:
+                raise ValueError("off-corr sites vs n_feat sites differ")
+            corr = [ms for _k, _c, ms in cs]
+        o, lv = fit_ovl_cls(fr, parse_perf(txt), corr, prm[cfg]["ovl"])
+        out[cfg]["ovl"] = o
+        print("OVLFIT cfg=%s run=a form=cls %s" % (cfg, " ".join(
+            "%s:k=%.6g,c=%.6g,n=%d" % (k, v["k"], v["c"], v["n"]) for k, v in sorted(o["cls"].items()))))
+        print("OVLLOO cfg=%s run=a loo_maxrel=%.4f" % (cfg, lv))
+    with open(a.out_params, "w") as f:
+        json.dump(out, f, sort_keys=True, indent=1)
+        f.write("\n")
+    print("OVLFIT_OUT path=%s %s" % (a.out_params, "PASS" if ok else "FAIL"))
+    return 0 if ok else 1
 
 
 def fit_minimax(rows, sub):
@@ -559,10 +634,16 @@ def main(argv=None):
     ap.add_argument("--refit-method", choices=("minimax", "nnls"), default="minimax",
                     help="--predict refit coefficients: minimax (max relative error, default) or nnls (fit_kind)")
     ap.add_argument("--off-corr", default=str(L_PARAMS), help="--predict --ovl: l_palmyra213 params for cfg=off")
+    ap.add_argument("--fit-ovl", choices=("cls",), help="per-kind overlap term on the a log (CFG=A.log positionals)")
+    ap.add_argument("--out-params", help="--fit-ovl: output params json (N part copied unchanged)")
     ap.add_argument("runs", nargs="*", metavar="CFG=A.log,B.log,C.log", help="--predict logs per cfg")
     a = ap.parse_args(argv)
     root = a.build_root.rstrip("/")
     ok = True
+    if a.fit_ovl:
+        if not a.params or not a.out_params or not a.runs:
+            ap.error("--fit-ovl needs --params, --out-params and CFG=A.log positionals")
+        return fit_ovl_mode(a, root)
     if a.predict:
         if not a.params or not a.runs:
             ap.error("--predict needs --params and CFG=LOG[,LOG...] positionals")

@@ -4,10 +4,11 @@
 #   LOGDIR/unet_{off,aot-kco}.{a,b,c}.log  board logs
 #   OUTDIR  all outputs: lpred.tsv npred.tsv kcore.tsv kdelta_core.tsv dwhat.tsv khat.tsv site_pairs.tsv + *.out
 # Env: KLN_K_JSON = K params json (default script/perf/params/k_palmyra213.m3112c.json; relative = repo root;
-#      a missing/empty file -> rc=2).  KLN_PY = python.
+#      a missing/empty file -> rc=2).  KLN_N_JSON = N params json (default script/perf/params/n_unet_palmyra213.m3121.json;
+#      same rules).  KLN_PY = python.
 # Steps (frozen params from script/perf/params, md5 printed as KLNFROZEN PARAMS):
 #   1 L  m3_site --lpred --kfirst site --params l_palmyra213.m3121.json
-#   2 N  n_fit --predict --ovl --refit-a no --params n_unet_palmyra213.m3121.json (NCHK passed through)
+#   2 N  n_fit --predict --ovl --refit-a no --params $KLN_N_JSON (default n_unet_palmyra213.m3121.json) (NCHK passed through)
 #   3 core k_diag --kdelta core (kcyc_unet, default --iss-unet kcyc_unet_iss.json)
 #   4 dw k_dmafeat --perch --ddrt --dwpredict --dw-params kdw_palmyra213.m3112c.json
 #   5 K  k_diag --khat-static --params $KLN_K_JSON --check a,b,c
@@ -22,7 +23,7 @@ B=$(readlink -m "$1"); D=$(readlink -m "$2"); O=$(readlink -m "$3")
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); ROOT=$(cd "$HERE/../.." && pwd)
 PY=${KLN_PY:-/scratch/staff/huaj/aiehlc/.venv/bin/python3}
 PR=script/perf/params
-J_L=$PR/l_palmyra213.m3121.json; J_N=$PR/n_unet_palmyra213.m3121.json; J_C=$PR/kcyc_unet_iss.json
+J_L=$PR/l_palmyra213.m3121.json; J_N=${KLN_N_JSON:-$PR/n_unet_palmyra213.m3121.json}; J_C=$PR/kcyc_unet_iss.json
 J_DW=$PR/kdw_palmyra213.m3112c.json; J_K=${KLN_K_JSON:-$PR/k_palmyra213.m3112c.json}
 case "$O/" in "$B/kln/"*|"$B/kln/") echo "KLNFROZEN ERR outdir=$O is under BUILD_ROOT/kln"; exit 2;; esac
 cd "$ROOT" || exit 2
