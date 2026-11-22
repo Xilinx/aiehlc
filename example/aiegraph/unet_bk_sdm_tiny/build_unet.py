@@ -41,6 +41,8 @@ def main(argv=None) -> int:
     ap.add_argument("--runtime-io", action="store_true", help="inputs in the .aiehlc_io ELF section")
     ap.add_argument("--dump-out", action="store_true", help="--runtime-io: dump the output (AIO_*) on the board")
     ap.add_argument("--fast", action="store_true", help="-fast: reuse kernel .o from the shared cache (AIEHLC_FAST=1)")
+    ap.add_argument("--sched-only", action="store_true",
+                    help="-fast F5: compile kernels + generate the driver/weights.bin, skip the ARM make (no main.elf)")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
     log = lambda msg: print(f"[build_unet] {msg}", flush=True)
@@ -114,14 +116,18 @@ def main(argv=None) -> int:
     rep = emod.build(target="a78", verbose=a.verbose, main_c=main_c,
                      extra_sources=[bm.cmp_source(), real_io / "p1_ref.h", hdr],
                      extra_cflags=f"{bm.CMP_CFLAGS} {bm.HEAP_LDFLAG}", layer_cflags=layer_cflags,
-                     runtime_io=rio, dump_out=a.dump_out, launch=a.launch_opt)
+                     runtime_io=rio, dump_out=a.dump_out, launch=a.launch_opt, make=not a.sched_only)
     if not rep.ok:
         log(f"build FAILED: {rep.reason}")
         return 1
     for ln in rep.io_info.splitlines():
         log(ln)
+    arm_dir = Path(emod.workdir) / "arm_build"
     if n_patched is not None:
-        unet_offload.check_driver((Path(rep.elf).parent / "graph_driver.c").read_text(), n_patched)
+        unet_offload.check_driver((arm_dir / "graph_driver.c").read_text(), n_patched)
+    if a.sched_only:
+        log(f"sched-only: kernels + driver in {arm_dir}; ARM make skipped, no main.elf")
+        return 0
     elf, wb = out / "main.elf", Path(rep.elf).parent / "weights.bin"
     shutil.copy2(rep.elf, elf)
     if wb.is_file():   # the blob netload streams to the board, beside the ELF
