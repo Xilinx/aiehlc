@@ -4,7 +4,13 @@ Opt-in: ``AIEGRAPH_CONVERT_CACHE=<dir>``, or ``AIEHLC_FAST=1`` (aiehlc.sh -fast 
 build_unet.py --fast), which uses ``${XDG_CACHE_HOME:-~/.cache}/aiehlc/convert`` when
 AIEGRAPH_CONVERT_CACHE is unset (same rule as the F2 kernel .o cache in hostcompile.sh).
 An explicit AIEGRAPH_CONVERT_CACHE wins. Neither set = nothing is read or written and
-the conversion behaves exactly as before. No size cap yet: a UNet entry is ~4.3 GB.
+the conversion behaves exactly as before.
+
+Size cap: ``AIEGRAPH_CONVERT_CACHE_MAX_GB`` (default 20; 0 = no cap). After every store
+the least-recently-used entries are deleted until the cache fits (a UNet entry is
+~4.3 GB, ResNet18 ~0.1 GB). A restore marks the entry used. The entry just stored is
+never evicted, even when it alone is bigger than the cap. Leftover ``.*.tmp`` dirs of
+crashed stores older than a day are removed by the same prune.
 
 The in-workdir reuse in ``embedded_convert`` only helps when the same workdir is
 converted twice; the build scripts wipe ``ag_work`` first, so every build redoes the
@@ -37,7 +43,10 @@ ENV = "AIEGRAPH_CONVERT_CACHE"
 _KEY_VERSION = 1
 _ENV_PREFIXES = ("AIEGRAPH_", "AIE_", "AIEK_", "AIEHLC_")
 _ENV_EXACT = ("CC", "CROSS", "HOST_CC", "EXTRA_DEFS")
-_ENV_SKIP = {ENV, "AIEHLC_KOBJ_CACHE", "AIEHLC_ROOT", "AIEHLC_FAST"}
+MAX_ENV = "AIEGRAPH_CONVERT_CACHE_MAX_GB"
+_MAX_GB_DEFAULT = 20.0
+_ENV_SKIP = {ENV, MAX_ENV, "AIEHLC_KOBJ_CACHE", "AIEHLC_ROOT", "AIEHLC_FAST"}
+_TMP_STALE_S = 86400
 _TEXT_MAX = 64 << 20            # do not try to relocate text files bigger than this
 
 
@@ -118,9 +127,14 @@ def restore(k: str, workdir: Path, image) -> dict:
         return None
     meta = json.loads((ent / "meta.json").read_text())
     t0 = time.time()
+    _touch(ent)
     if workdir.exists():
         shutil.rmtree(workdir)
-    shutil.copytree(ent / "tree", workdir, symlinks=True)
+    try:
+        shutil.copytree(ent / "tree", workdir, symlinks=True)
+    except (OSError, shutil.Error):                    # entry pruned under us -> miss
+        shutil.rmtree(workdir, ignore_errors=True)
+        return None
     now = time.time()
     for p in workdir.rglob("*"):                       # fresh mtimes, like the KOBJ cache
         if p.is_file() and not p.is_symlink():
@@ -149,9 +163,98 @@ def store(k: str, parts: dict, workdir: Path, image) -> float:
     shutil.copytree(workdir, tmp / "tree", symlinks=True)
     (tmp / "meta.json").write_text(json.dumps(
         {"key": k, "parts": parts, "workdir": str(workdir),
-         "image": str(image) if image else None, "stored": time.time()}, indent=2))
+         "image": str(image) if image else None, "stored": time.time(),
+         "bytes": _du(tmp / "tree")}, indent=2))
+    _touch(tmp)
     try:
         os.rename(tmp, ent)                            # atomic; loser of a race drops its copy
     except OSError:
         shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        prune(keep=k)
+    except Exception as e:                             # noqa: BLE001 -- never fail a build on prune
+        print(f"aiegraph convert cache: prune failed: {e}")
     return time.time() - t0
+
+
+def max_bytes():
+    """Cap in bytes from AIEGRAPH_CONVERT_CACHE_MAX_GB (default 20); None = no cap."""
+    v = os.environ.get(MAX_ENV, "").strip()
+    try:
+        gb = float(v) if v else _MAX_GB_DEFAULT
+    except ValueError:
+        gb = _MAX_GB_DEFAULT
+    return int(gb * (1 << 30)) if gb > 0 else None
+
+
+def _du(root: Path) -> int:
+    n = 0
+    for p in root.rglob("*"):
+        if p.is_file() and not p.is_symlink():
+            n += p.stat().st_size
+    return n
+
+
+def _touch(ent: Path):
+    """Mark an entry used (LRU clock = mtime of <entry>/used)."""
+    try:
+        (ent / "used").touch()
+    except OSError:
+        pass
+
+
+def _entry_info(ent: Path):
+    """(last-used time, bytes) of a finished entry; bytes from meta.json when present."""
+    used = ent / "used"
+    t = (used if used.is_file() else ent / "meta.json").stat().st_mtime
+    try:
+        b = int(json.loads((ent / "meta.json").read_text()).get("bytes", -1))
+    except (OSError, ValueError):
+        b = -1
+    return t, (b if b >= 0 else _du(ent / "tree"))
+
+
+def prune(keep: str = None, cap: int = None) -> list:
+    """Delete least-recently-used entries until the cache is <= cap; returns deleted keys."""
+    cd = cache_dir()
+    if not cd or not cd.is_dir():
+        return []
+    now = time.time()
+    for t in cd.glob(".*.tmp"):                        # crashed stores
+        try:
+            if now - t.stat().st_mtime > _TMP_STALE_S:
+                shutil.rmtree(t, ignore_errors=True)
+        except OSError:
+            pass
+    cap = max_bytes() if cap is None else cap
+    if not cap:
+        return []
+    ents = []
+    for ent in cd.iterdir():
+        if ent.name.startswith(".") or not (ent / "meta.json").is_file():
+            continue
+        try:
+            t, b = _entry_info(ent)
+        except OSError:                                # deleted by a concurrent prune
+            continue
+        ents.append((t, b, ent))
+    total = sum(b for _, b, _ in ents)
+    gone = []
+    for t, b, ent in sorted(ents, key=lambda e: e[0]):
+        if total <= cap:
+            break
+        if ent.name == keep:
+            continue
+        # rename first so a concurrent restore never sees a half-deleted entry
+        dead = cd / f".{ent.name}.{os.getpid()}.del.tmp"
+        try:
+            os.rename(ent, dead)
+        except OSError:
+            continue
+        shutil.rmtree(dead, ignore_errors=True)
+        total -= b
+        gone.append(ent.name)
+    if gone:
+        print(f"aiegraph convert cache: pruned {len(gone)} LRU entr{'y' if len(gone) == 1 else 'ies'}"
+              f", now {total / (1 << 30):.1f} GB (cap {cap / (1 << 30):.1f} GB)")
+    return gone
