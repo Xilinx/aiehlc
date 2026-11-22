@@ -2112,7 +2112,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     import net_sites
     import n_fit as _nf
-    net_sites.set_net(a.net, sys.modules[__name__], _nf)
+    net_sites.set_net(a.net, net_sites.this_mod(globals()), _nf)
     if a.khats_audit:
         return 0 if khats_audit() else 1
     if a.params and a.fit:

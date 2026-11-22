@@ -877,7 +877,7 @@ def main(argv=None):
     import net_sites
     import n_fit as _nf
     import k_diag
-    net_sites.set_net(a.net, sys.modules[__name__], _nf, k_diag)
+    net_sites.set_net(a.net, net_sites.this_mod(globals()), _nf, k_diag)
     if a.selftest:
         return selftest()
     if a.dwpredict_audit:

@@ -59,6 +59,29 @@ def build_dir(root, net, cfg):
     return str(Path(root) / ("%s_%s" % (check_net(net), cfg)))
 
 
+class _Globals:
+    """Module stand-in over a globals() dict: scripts loaded via spec_from_file_location
+    under an alias are not in sys.modules, so sys.modules[__name__] raises KeyError."""
+    def __init__(self, g):
+        object.__setattr__(self, "_g", g)
+
+    def __getattr__(self, k):
+        try:
+            return self._g[k]
+        except KeyError:
+            raise AttributeError(k)
+
+    def __setattr__(self, k, v):
+        self._g[k] = v
+
+
+def this_mod(g):
+    """The module whose globals() is g: sys.modules entry if registered, else a proxy."""
+    import sys
+    m = sys.modules.get(g.get("__name__"))
+    return m if m is not None and getattr(m, "__dict__", None) is g else _Globals(g)
+
+
 def set_net(net, *mods):
     check_net(net)
     for m in mods:

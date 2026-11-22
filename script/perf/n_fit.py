@@ -815,7 +815,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     sys.path.append(str(Path(__file__).resolve().parent))   # net_sites (run with -I)
     import net_sites
-    net_sites.set_net(a.net, sys.modules[__name__], sys.modules.get("n_fit", sys.modules[__name__]))
+    net_sites.set_net(a.net, net_sites.this_mod(globals()), sys.modules.get("n_fit") or net_sites.this_mod(globals()))
     root = a.build_root.rstrip("/")
     ok = True
     if a.ap:

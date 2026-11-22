@@ -627,7 +627,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     import net_sites
     import n_fit as _nf
-    net_sites.set_net(a.net, sys.modules[__name__], _nf)
+    net_sites.set_net(a.net, net_sites.this_mod(globals()), _nf)
     if a.kl:
         if not a.cycles or not a.check or bool(a.fit) == bool(a.params) or (a.fit and not a.out):
             ap.error("--kl needs --cycles, --check and either --fit + --out or --params")

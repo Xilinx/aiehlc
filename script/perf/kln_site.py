@@ -684,7 +684,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     import net_sites
     import n_fit as _nf
-    net_sites.set_net(a.net, sys.modules[__name__], _nf)
+    net_sites.set_net(a.net, net_sites.this_mod(globals()), _nf)
     if a.site_tsv and not (a.k_tsv or a.kswap):
         ap.error("--site-tsv needs --k-tsv or --kswap")
     if a.dump_kmeas and not a.oracle_k:
