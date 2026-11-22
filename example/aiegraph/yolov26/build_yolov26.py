@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """yolo26n (end2end ONNX, trained) -> aiegraph -> A78 main.elf, every Conv (incl. depthwise) on the AIE.
 
-  $PY build_yolov26.py --onnx yolo26n_e2e_trained_op17.onnx --out <dir> [--input images.bin]
+  $PY build_yolov26.py --onnx yolo26n_e2e_trained_op17.onnx --out <dir> [--input images.bin] [--ctrlpkt aot] [--site-perf]
 
 This file only declares the model: where its post-processing tail starts (TopK: cut before it, the
 TopK / GatherElements selection runs on the host from the pre-TopK head), its input, and which calls go
@@ -21,6 +21,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parents[2] / "src")]   # this checkout's aiegraph (gate: plain $PY)
 MODEL, KPREFIX, ENTRY, TAIL_OP = "yolo26n", "cnn", "aiek_cnnconv", "TopK"
+SITE_PERF_DEF = "-DAIEHLC_SITE_PERF=1"   # M3.1 site-perf (aie_runtime.c / aie_host_split.h / site_prof.c)
 
 
 def main(argv=None) -> int:
@@ -31,6 +32,10 @@ def main(argv=None) -> int:
     ap.add_argument("--mc", type=int, default=256, help="output pixels per AIE launch")
     ap.add_argument("--split", type=int, default=3, choices=(1, 3), help="3: bf16 hi/lo GEMM (~fp32), 1: bf16")
     ap.add_argument("--selfcheck", action="store_true", help="debug: every AIE launch checked on the A78")
+    ap.add_argument("--ctrlpkt", choices=("off", "aot"), default="off", help="control-packet plan")
+    ap.add_argument("--site-perf", action="store_true",
+                    help="M3.1 diagnostic: -DAIEHLC_SITE_PERF=1, one PROF aie_site_perf core-counter line per "
+                         "launches>0 part (counter setup adds MMIO per launch: not for L)")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
     log = lambda msg: print(f"[build_yolov26] {msg}", flush=True)
@@ -50,7 +55,10 @@ def main(argv=None) -> int:
     os.environ.setdefault("HOSTCOMPILE_HOST_OPT", "-O2")
     bm.profiling_env()
     opts = bm.launch_env("warm")
-    log(f"aiegraph from {ag.__file__}; onnx {a.onnx}; launch warm ({opts})")
+    if a.site_perf:  # runtime + kernel host archives (EXTRA_DEFS); graph_driver.c gets it via extra_cflags
+        os.environ["EXTRA_DEFS"] = (os.environ.get("EXTRA_DEFS", "") + " " + SITE_PERF_DEF).strip()
+    log(f"aiegraph from {ag.__file__}; onnx {a.onnx}; launch warm ({opts}) ctrlpkt={a.ctrlpkt} "
+        f"defs={os.environ.get('EXTRA_DEFS', '')}")
 
     # 1. the offloaded model: everything before the TopK tail (output = the pre-TopK head)
     cut, tensor = cut_before(onnx.load(str(a.onnx)), TAIL_OP, out=out / f"{MODEL}_cut.onnx")
@@ -95,7 +103,7 @@ def main(argv=None) -> int:
     lidx, car = cnn.pick_carrier(plans, Path(emod.workdir) / "layers")
     proto = emod.offload_prototype(lidx, entry=ENTRY)
     kcc = cnn.write_kernel(out / "aiek_src", proto.spec(), plans, kprefix=KPREFIX, entry=ENTRY, warm=True,
-                           selfcheck=a.selfcheck)
+                           ctrlpkt=a.ctrlpkt, selfcheck=a.selfcheck)
     log(f"carrier layer {lidx} ({car.symbol}); kernel source {kcc}")
     planned = cnn.offload_convs(emod, groups, plans, kcc, kprefix=KPREFIX, log=log)
     emod.driver_template(**bm.driver_glue(kprefix=KPREFIX, bf16_expand=wdt == "bf16"))
@@ -110,13 +118,13 @@ def main(argv=None) -> int:
     hdr = out / f"{MODEL}_inputs.h"
     gin = emod.input_names      # the converted graph's name of the ONNX input
     bm.inputs_header(hdr, MODEL, [(gin[0], iname, x.reshape(-1))], dict(AIE_MODE="conv", WDTYPE=wdt), origin=xin)
-    bm.append_defines(hdr, MODEL, dict(LAUNCH_WARM=1, LAUNCH_OPTS=bm.LAUNCH_OPTS_WARM, CTRLPKT="off",
+    bm.append_defines(hdr, MODEL, dict(LAUNCH_WARM=1, LAUNCH_OPTS=bm.LAUNCH_OPTS_WARM, CTRLPKT=a.ctrlpkt,
                                        AIE_PLANNED_LAUNCHES=planned, AIE_PLANNED_CALLS=len(plans),
                                        TOTAL_GEMM_MACS=(total, "ULL")))
     refh = bm.ref_header(out / "p1_ref.h", MODEL, ref, crc, data="build-input")
     main_c = bm.main_c(MODEL, [iname], aie=True, runtime_io=True, kprefix=KPREFIX)
     rep = emod.build(target="a78", verbose=a.verbose, main_c=main_c, extra_sources=[bm.cmp_source(), refh, hdr],
-                     extra_cflags=f"{bm.CMP_CFLAGS} {bm.HEAP_LDFLAG}", runtime_io=[(iname, xin)], dump_out=True,
+                     extra_cflags=f"{bm.CMP_CFLAGS} {bm.HEAP_LDFLAG}" + (f" {SITE_PERF_DEF}" if a.site_perf else ""), runtime_io=[(iname, xin)], dump_out=True,
                      launch="warm")
     if not rep.ok:
         log(f"build FAILED: {rep.reason}")

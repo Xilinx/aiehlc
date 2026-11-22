@@ -23,6 +23,7 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parents[2] / "src")]   # this checkout's aiegraph / aiednn
+SITE_PERF_DEF = "-DAIEHLC_SITE_PERF=1"   # M3.1 site-perf (aie_runtime.c / aie_host_split.h / site_prof.c)
 
 
 def main(argv=None) -> int:
@@ -32,6 +33,9 @@ def main(argv=None) -> int:
     ap.add_argument("--input", type=Path, default=None, help="raw fp32 1x3x224x224 (default: seeded N(0,1))")
     ap.add_argument("--ctrlpkt", choices=("off", "aot", "aot-kco"), default="aot-kco", help="control-packet plan")
     ap.add_argument("--launch-opt", choices=("cold", "warm"), default="warm", help="warm: kernels loaded once")
+    ap.add_argument("--site-perf", action="store_true",
+                    help="M3.1 diagnostic: -DAIEHLC_SITE_PERF=1, one PROF aie_site_perf core-counter line per "
+                         "launches>0 part (counter setup adds MMIO per launch: not for L)")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
     log = lambda msg: print(f"[build_resnet18] {msg}", flush=True)
@@ -41,6 +45,8 @@ def main(argv=None) -> int:
     from aiegraph import boardmain as bm, cnn
     bm.profiling_env()
     opts = bm.launch_env(a.launch_opt)
+    if a.site_perf:  # runtime + kernel host archives (EXTRA_DEFS); graph_driver.c gets it via extra_cflags
+        os.environ["EXTRA_DEFS"] = (os.environ.get("EXTRA_DEFS", "") + " " + SITE_PERF_DEF).strip()
     log(f"launch_opt={a.launch_opt} ({opts}) ctrlpkt={a.ctrlpkt} defs={os.environ.get('EXTRA_DEFS', '')}")
     out = a.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -82,7 +88,7 @@ def main(argv=None) -> int:
     main_c = bm.main_c("resnet18", ["input"], aie=True, runtime_io=True)
     rep = emod.build(target="a78", verbose=a.verbose, main_c=main_c,
                      extra_sources=[bm.cmp_source(), out / "p1_ref.h", hdr],
-                     extra_cflags=f"{bm.CMP_CFLAGS} {bm.HEAP_LDFLAG}",
+                     extra_cflags=f"{bm.CMP_CFLAGS} {bm.HEAP_LDFLAG}" + (f" {SITE_PERF_DEF}" if a.site_perf else ""),
                      runtime_io=[("input", inb)], dump_out=True, launch=a.launch_opt)
     if not rep.ok:
         log(f"build FAILED: {rep.reason}")
