@@ -109,7 +109,14 @@ def aiehlc_compile(spec, out_dir, aie_version: int = 5, verbose: bool = True) ->
 
     # Scratch next to the cache, not in /tmp: aiehlc's aout/ is large and /tmp
     # is often a small shared volume (a full one fails the build mid-way).
-    scratch = Path(tempfile.mkdtemp(prefix="aiehlc_run_", dir=work))
+    # AIEHLC_RUN_FIXED=1: fixed scratch name (aiehlc_run_fixed) instead of a random mkdtemp suffix, so
+    # rebuilds at one output path embed the same absolute paths in the AIE ELFs (reproducible main.elf).
+    if os.environ.get("AIEHLC_RUN_FIXED") == "1":
+        scratch = work / "aiehlc_run_fixed"
+        shutil.rmtree(scratch, ignore_errors=True)
+        scratch.mkdir()
+    else:
+        scratch = Path(tempfile.mkdtemp(prefix="aiehlc_run_", dir=work))
     # AIEHLC_SH_ARGS: extra aiehlc.sh options (e.g. --skip-bss), part of the stamp.
     cmd = (f'source "{REPO}/script/aiehlc.sh" --aie-version {aie_version} '
            f'--runtime-source-file "{spec.source}" {os.environ.get("AIEHLC_SH_ARGS", "")}').rstrip()
