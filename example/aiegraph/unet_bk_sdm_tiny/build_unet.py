@@ -40,7 +40,7 @@ def main(argv=None) -> int:
     ap.add_argument("--arm-layer-cflags-file", type=Path, default=None, help="extra CFLAGS of the TVM layer objects")
     ap.add_argument("--runtime-io", action="store_true", help="inputs in the .aiehlc_io ELF section")
     ap.add_argument("--dump-out", action="store_true", help="--runtime-io: dump the output (AIO_*) on the board")
-    ap.add_argument("--fast", action="store_true", help="-fast: reuse kernel .o from the shared cache (AIEHLC_FAST=1)")
+    ap.add_argument("--fast", action="store_true", help="-fast: reuse kernel .o (~/.cache/aiehlc/kobj) and the converted front end (~/.cache/aiehlc/convert) across build dirs (AIEHLC_FAST=1)")
     ap.add_argument("--sched-only", action="store_true",
                     help="-fast F5: compile kernels + generate the driver/weights.bin, skip the ARM make (no main.elf)")
     ap.add_argument("--verbose", action="store_true")
@@ -80,7 +80,7 @@ def main(argv=None) -> int:
     os.environ["AIEGRAPH_PARAMS_INPLACE"] = "1"         # 1.29 GB weights read in place from the linked blob
     os.environ["AIEGRAPH_WDTYPE"] = a.wdtype
     if a.fast:
-        os.environ["AIEHLC_FAST"] = "1"                 # hostcompile.sh: kernel .o cache on, default dir + prune
+        os.environ["AIEHLC_FAST"] = "1"                 # kernel .o cache (hostcompile.sh) + convert cache (aiegraph), default dirs + prune
     os.environ.setdefault("HOSTCOMPILE_HOST_OPT", "-O2")  # aiek host.cc (im2col / scatter glue inside graph_run)
     log(f"aiegraph from {ag.__file__} (repo {root}); HOSTCOMPILE_HOST_OPT={os.environ['HOSTCOMPILE_HOST_OPT']}")
 
