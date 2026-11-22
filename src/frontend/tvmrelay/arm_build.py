@@ -2179,6 +2179,9 @@ def _aie_link_vars(repo_root: Path, kernel_src: Path, build: Path,
     # thirdparty/alib/.aiehlc_alib.lock while it wipes and rebuilds alib/lib.
     # Copying without that lock let a parallel build (another net/cfg on the
     # same tree) catch lib/ mid-wipe -> no libxaienginea78.a -> link fails.
+    # This side only READS alib/lib, so a shared lock is enough (it still waits
+    # out a writer's exclusive lock) and does not block on AIEHLC_LIBCACHE
+    # builds that hold the alib lock shared.
     lock_fh = None
     try:
         import fcntl
@@ -2187,7 +2190,7 @@ def _aie_link_vars(repo_root: Path, kernel_src: Path, build: Path,
         deadline = time.monotonic() + 1800
         while True:
             try:
-                fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lock_fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
                 if time.monotonic() > deadline:
