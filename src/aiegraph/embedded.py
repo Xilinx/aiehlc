@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -931,7 +932,9 @@ def embedded_convert(model, target: str = "a78", quantize: str = "int8", calib=N
     from . import convert_cache as _cc               # opt-in: AIEGRAPH_CONVERT_CACHE=<dir>
     ckey = cparts = None
     if _cc.cache_dir() and not force:
+        _t = time.time()
         ckey, cparts = _cc.key(m, quantize, calib, image, _env.repo_root())
+        ckey_s = time.time() - _t
         hit = _cc.restore(ckey, workdir, image)
         if hit:
             full = json.loads(stamp.read_text())
@@ -940,7 +943,7 @@ def embedded_convert(model, target: str = "a78", quantize: str = "int8", calib=N
             emod = EmbeddedModel(workdir, m, target, image, full)
             set_current(emod)
             return emod
-        print(f"[aiegraph] convert cache MISS {ckey}")
+        print(f"[aiegraph] convert cache MISS {ckey} (key {ckey_s:.1f} s)")
     workdir.mkdir(parents=True, exist_ok=True)
     stamp.write_text(json.dumps({**state, "complete": False}, indent=2))
 
@@ -961,7 +964,8 @@ def embedded_convert(model, target: str = "a78", quantize: str = "int8", calib=N
             "layer_count": res.get("layer_count"), "arm_sources": bool(arm.get("makefile"))}
     stamp.write_text(json.dumps(full, indent=2, default=str))
     if ckey:
-        _cc.store(ckey, cparts, workdir, image)
+        st = _cc.store(ckey, cparts, workdir, image)
+        print(f"[aiegraph] convert cache STORE {ckey} ({st:.1f} s)")
     emod = EmbeddedModel(workdir, m, target, image, full)
     set_current(emod)
     return emod

@@ -5,7 +5,7 @@ the conversion behaves exactly as before.
 
 The in-workdir reuse in ``embedded_convert`` only helps when the same workdir is
 converted twice; the build scripts wipe ``ag_work`` first, so every build redoes the
-ONNX -> TVM -> per-layer C step (~2.5 min ResNet18, ~6 min UNet). This cache keys
+ONNX -> TVM -> per-layer C step (~20 s ResNet18, ~6-7.5 min UNet). This cache keys
 the converted tree by CONTENT, so a fresh build dir with the same inputs restores it.
 
 Key (sha256 over):
@@ -128,13 +128,15 @@ def restore(k: str, workdir: Path, image) -> dict:
     return meta
 
 
-def store(k: str, parts: dict, workdir: Path, image) -> None:
+def store(k: str, parts: dict, workdir: Path, image) -> float:
+    """Copy the converted workdir into the cache; returns the seconds spent (0 if skipped)."""
     cd = cache_dir()
     if not cd:
-        return
+        return 0.0
     ent = cd / k
     if (ent / "meta.json").is_file():
-        return
+        return 0.0
+    t0 = time.time()
     cd.mkdir(parents=True, exist_ok=True)
     tmp = cd / f".{k}.{os.getpid()}.tmp"
     shutil.rmtree(tmp, ignore_errors=True)
@@ -146,3 +148,4 @@ def store(k: str, parts: dict, workdir: Path, image) -> None:
         os.rename(tmp, ent)                            # atomic; loser of a race drops its copy
     except OSError:
         shutil.rmtree(tmp, ignore_errors=True)
+    return time.time() - t0
