@@ -45,7 +45,11 @@ _ENV_PREFIXES = ("AIEGRAPH_", "AIE_", "AIEK_", "AIEHLC_")
 _ENV_EXACT = ("CC", "CROSS", "HOST_CC", "EXTRA_DEFS")
 MAX_ENV = "AIEGRAPH_CONVERT_CACHE_MAX_GB"
 _MAX_GB_DEFAULT = 20.0
-_ENV_SKIP = {ENV, MAX_ENV, "AIEHLC_KOBJ_CACHE", "AIEHLC_ROOT", "AIEHLC_FAST"}
+# EXTRA_DEFS / AIEHLC_SH_ARGS are read only at offload (aiekernel/build.py stamp,
+# boardmain); convert (deploy_flow + arm_build run_make=False) never reads them, and
+# the cached tree is pre-offload, so launch/profiling options must not miss the cache.
+_ENV_SKIP = {ENV, MAX_ENV, "AIEHLC_KOBJ_CACHE", "AIEHLC_ROOT", "AIEHLC_FAST",
+             "EXTRA_DEFS", "AIEHLC_SH_ARGS"}
 _TMP_STALE_S = 86400
 _TEXT_MAX = 64 << 20            # do not try to relocate text files bigger than this
 

@@ -59,3 +59,19 @@ def test_fast_flag_not_in_key(monkeypatch, tmp_path):
     monkeypatch.setenv("AIEGRAPH_WDTYPE", "int8")     # a real knob still changes the key
     k2, _ = cc.key(model, None, None, None, repo)
     assert k2 != k1
+
+
+def test_offload_only_env_not_in_key(monkeypatch, tmp_path):
+    _clear(monkeypatch)
+    for k in ("EXTRA_DEFS", "AIEHLC_SH_ARGS"):
+        monkeypatch.delenv(k, raising=False)
+    onnx = tmp_path / "m.onnx"
+    onnx.write_bytes(b"not really onnx")
+    model = SimpleNamespace(onnx_path=onnx)
+    repo = SRC.parent
+    k0, _ = cc.key(model, None, None, None, repo)
+    monkeypatch.setenv("EXTRA_DEFS", "-DAIEHLC_PM_WARM_SKIP=1 -DAIEHLC_PROFILING=1")
+    monkeypatch.setenv("AIEHLC_SH_ARGS", "--skip-bss")
+    k1, parts = cc.key(model, None, None, None, repo)
+    assert k0 == k1
+    assert "EXTRA_DEFS" not in parts["env"] and "AIEHLC_SH_ARGS" not in parts["env"]
