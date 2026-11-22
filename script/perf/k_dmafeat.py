@@ -57,6 +57,22 @@ CORRCLS nan (feature constant inside a class) is reported, not a failure.
   KDMAF ALL sites=<n> feats=dmach+ddrt PASS|FAIL  (also FAIL if any ddr_t is not finite or the conv ddr_t TGT fails)
   --tsv: cfg part site cls launches ddr_b dom_bytes maxch_t ddr_t_ms rw_ratio bd_n, one row per site (parent mkdir -p)
 
+--perch --ddrt --dwfit --fit-run a --dw-tsv F --delta-tsv G  cfg=<log_a>,<log_b>,<log_c> (M3.1.1.2c PW):
+  static data-wait model dw_hat (ms per launch) = max(0, sum_f w_f x_f + b) per (cfg, cls in conv/linear/fa),
+  w >= 0, b signed, <= DW_MAXF=2 features of DW_FEATS (ddr_t_ms, maxch_ms, dom_mb, shim_ch, rw_ratio, bd_k; build
+  dir only) -> <= 3 params per class. Target dw = KSITE (lock + stream) / launches; fit = weighted LS
+  (wt = launches / site_ms, residual = T share) on the fit run only; subset = min LOO share_max on the fit run.
+  The R+W 7.4 / RO 9.9 GB/s numbers are ASSUMED and not used.
+  KDWSRC cfg log board launches run_rc sites perf_sites            (one per log)
+  KDW cfg cls fit=a sites feats params w b r2_a maxrel_a loo_maxrel loo_share
+  KDWCHK cfg run=b|c fit=0 sites r2 sum_rel share_max static_same PASS|FAIL  (r2 >= 0.9, share_max <= 0.20;
+         share_max = max |dw_hat - dw_meas| * launches / site_ms, site_ms = K + L + N of m3_site.site_rows)
+  KDW121 cfg run lock_ms stream_ms dw_hat_ms ddr_t_ms rel           (conv121, every run)
+  KDW AUDIT meas_at_predict=0|1  (1 if a measured field reaches dw_predict / poisoning them changes dw_hat)
+  KDELTA term=dw rows tsv;  KDW ALL dwrows deltarows PASS|FAIL (rc 0 PASS, 1 fit/check miss; TSVs always written)
+  TSVs: DW_TSV cfg part site cls launches ddr_t_ms dw_hat_ms (fit-run table, 1 row per cfg x site);
+        DELTA_TSV cfg run part site delta_ms (= dw_hat - dw_meas per launch, every run)
+
 usage: k_dmafeat.py --build-root DIR --resid KSITE.out off=<log> aot-kco=<log>
        k_dmafeat.py --perch --build-root DIR off=<log> aot-kco=<log>
        k_dmafeat.py --perch --ddrt [--tsv FILE] --build-root DIR off=<log> aot-kco=<log>
@@ -408,6 +424,190 @@ def main_perch(a):
     return 0 if ok else 1
 
 
+# ------------------------------------------------------------------ --dwfit (M3.1.1.2c PW): static data-wait model
+DW_FEATS = ("ddr_t_ms", "maxch_ms", "dom_mb", "shim_ch", "rw_ratio", "bd_k")
+DW_MEAS = ("dwait", "dwait_ms", "lock", "stream", "site_ms", "K", "L", "N", "perf", "resid", "dma")
+DW_MAXF = 2            # features per class; + the signed offset b -> <= 3 params per class
+DW_CLS = ("conv", "linear", "fa")
+DW_R2_MIN = 0.9        # KDWCHK per (cfg, run b|c) over all 138 sites, per-launch dw
+DW_SHARE_MAX = 0.20    # KDWCHK share_max = max |dw_hat - dw_meas| * launches / site_ms
+DW_TSV = ("cfg", "part", "site", "cls", "launches", "ddr_t_ms", "dw_hat_ms")
+DELTA_TSV = ("cfg", "run", "part", "site", "delta_ms")
+_RUN = re.compile(r"\.([A-Za-z0-9]+)\.log$")
+
+
+def dw_static(s):
+    """the static per-launch DW_FEATS of one site_table row (build dir only): ddr_t ms, maxch_t ms, dom_bytes MB,
+    shim_ch, rw_ratio, bd_n / 1e3"""
+    return dict(ddr_t_ms=float(s["ddr_t"]), maxch_ms=float(s["maxch_t"]) / 1e3, dom_mb=float(s["dom_bytes"]) / 1e6,
+                shim_ch=float(s["shim_ch"]), rw_ratio=float(s["rw_ratio"]), bd_k=float(s["bd_n"]) / 1e3)
+
+
+def dw_predict(p, x):
+    """dw_hat (ms per launch) = max(0, sum_f w_f * x_f + b); x = static features only (KeyError on anything else
+    is impossible: only p['feats'] are read)"""
+    return max(0.0, sum(w * x[f] for f, w in zip(p["feats"], p["w"])) + p["b"])
+
+
+def dw_fit_lin(pts, feats):
+    """non-negative w (signed offset b) by weighted LS on pts = [(x, y, wt)] (wt = launches / site_ms, so the
+    residual is the site's T share); returns dict(feats, w, b)"""
+    import numpy as np
+    from scipy.optimize import nnls
+    A = np.array([[x[f] for f in feats] + [1.0, -1.0] for x, _y, _w in pts])
+    y = np.array([y for _x, y, _w in pts])
+    wt = np.array([w for _x, _y, w in pts])
+    sol, _ = nnls(A * wt[:, None], y * wt)
+    return dict(feats=tuple(feats), w=[float(v) for v in sol[:-2]], b=float(sol[-2] - sol[-1]))
+
+
+def dw_errs(p, pts):
+    """(max |err| * wt, max |err| / y) over pts"""
+    sh, mr = 0.0, 0.0
+    for x, y, w in pts:
+        e = abs(dw_predict(p, x) - y)
+        sh, mr = max(sh, e * w), max(mr, e / y if y > 0 else (0.0 if e == 0 else float("inf")))
+    return sh, mr
+
+
+def dw_loo(pts, feats):
+    """leave-one-out (share_max, maxrel) of dw_fit_lin(feats) on pts"""
+    sh, mr = 0.0, 0.0
+    for i in range(len(pts)):
+        p = dw_fit_lin(pts[:i] + pts[i + 1:], feats)
+        s, m = dw_errs(p, [pts[i]])
+        sh, mr = max(sh, s), max(mr, m)
+    return sh, mr
+
+
+def dw_select(pts, feats_all=DW_FEATS, maxf=DW_MAXF):
+    """the feature subset (1..maxf of feats_all, fewer if n is small) with the smallest LOO share_max on pts (fit run
+    only), refitted on all pts; ties -> fewer features, then feats_all order. Adds loo_share, loo_maxrel."""
+    import itertools
+    best = None
+    for k in range(1, maxf + 1):
+        if len(pts) < k + 3:
+            break
+        for fs in itertools.combinations(feats_all, k):
+            sh, mr = dw_loo(pts, fs)
+            if best is None or sh < best[0] - 1e-12:
+                best = (sh, mr, fs)
+    if best is None:
+        p = dw_fit_lin(pts, ()) if pts else dict(feats=(), w=[], b=0.0)
+        return dict(p, loo_share=float("nan"), loo_maxrel=float("nan"))
+    return dict(dw_fit_lin(pts, best[2]), loo_share=best[0], loo_maxrel=best[1])
+
+
+def r2_score(y, p):
+    my = sum(y) / len(y) if y else float("nan")
+    sst = sum((v - my) ** 2 for v in y)
+    return 1.0 - sum((a - b) ** 2 for a, b in zip(y, p)) / sst if sst > 0 else float("nan")
+
+
+def run_name(log, i):
+    """run name from unet_<cfg>.<run>.log, else a, b, c by position"""
+    m = _RUN.search(os.path.basename(log))
+    return m.group(1) if m else "abcdefghij"[i]
+
+
+def dw_audit(p, s):
+    """dw_hat from the static features of s, and 1 if poisoning every measured field of s changes it
+    (or the static dict carries a measured key), else 0"""
+    x = dw_static(s)
+    bad = int(any(k in x for k in DW_MEAS))
+    poison = dict(s, **{k: float("nan") for k in DW_MEAS})
+    return dw_predict(p, x), bad | int(dw_predict(p, dw_static(poison)) != dw_predict(p, x))
+
+
+def write_rows(path, cols, rows):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        f.write("\t".join(cols) + "\n")
+        for r in rows:
+            f.write("\t".join(r) + "\n")
+
+
+def main_dwfit(a):
+    """--perch --ddrt --dwfit: per (cfg, cls) dw_hat on the fit run, KDWCHK on the others, dwhat/kdelta TSVs"""
+    from k_diag import _CMP, parse_perf, split_site
+    from m3_site import site_rows
+    ok = True
+    audit = 0
+    dwrows, delta = [], []
+    for spec in a.runs:
+        cfg, logs = spec.split("=", 1)
+        runs = []
+        for i, log in enumerate(logs.split(",")):
+            txt = open(log).read()
+            m = _CMP.findall(txt)
+            board, nl, rc = m[-1] if m else ("-", "-1", "-1")
+            sites = site_table(cfg, log, a.build_root)
+            pf = parse_perf(txt)
+            rows, _ = site_rows(str(Path(a.build_root) / ("unet_" + cfg)), log)
+            sms = {r["part"]: r["K"] + r["L"] + r["N"] for r in rows}
+            for s in sites:
+                d = split_site(0.0, 0.0, pf[s["part"]]) if s["part"] in pf else dict(lock=float("nan"),
+                                                                                      stream=float("nan"))
+                s.update(lock=d["lock"], stream=d["stream"], site_ms=sms.get(s["part"], float("nan")),
+                         dwait_ms=(d["lock"] + d["stream"]) / s["launches"])
+            print("KDWSRC cfg=%s log=%s board=%s launches=%s run_rc=%s sites=%d perf_sites=%d"
+                  % (cfg, log, board, nl, rc, len(sites), sum(s["part"] in pf for s in sites)))
+            ok &= bool(m) and rc == "0"
+            runs.append((run_name(log, i), log, sites))
+        fit = [r for r in runs if r[0] == a.fit_run]
+        if len(fit) != 1:
+            raise ValueError("cfg %s: fit run %r not exactly once in %s" % (cfg, a.fit_run, [r[0] for r in runs]))
+        fsites = fit[0][2]
+        params = {}
+        for c in DW_CLS:
+            ss = [s for s in fsites if s["kind"] == c]
+            pts = [(dw_static(s), s["dwait_ms"], s["launches"] / s["site_ms"]) for s in ss]
+            p = params[c] = dw_select(pts)
+            ya = [y for _x, y, _w in pts]
+            pa = [dw_predict(p, x) for x, _y, _w in pts]
+            _sh, mr = dw_errs(p, pts)
+            print("KDW cfg=%s cls=%s fit=%s sites=%d feats=%s params=%d w=%s b=%.4f r2_a=%.4f maxrel_a=%.4f "
+                  "loo_maxrel=%.4f loo_share=%.4f"
+                  % (cfg, c, a.fit_run, len(ss), ",".join(p["feats"]) or "-", len(p["feats"]) + 1,
+                     ",".join("%.6g" % w for w in p["w"]) or "-", p["b"], r2_score(ya, pa) if pts else float("nan"),
+                     mr, p["loo_maxrel"], p["loo_share"]))
+        hat = {}
+        for s in fsites:
+            h, bad = dw_audit(params[s["kind"]], s)
+            audit |= bad
+            hat[s["part"]] = h
+            dwrows.append((cfg, str(s["part"]), s["site"], s["kind"], str(s["launches"]), "%.6g" % s["ddr_t"],
+                           "%.6g" % h))
+        for run, _log, sites in runs:
+            same = all(s["part"] in hat and dw_audit(params[s["kind"]], s)[0] == hat[s["part"]] for s in sites)
+            ok &= same and len(sites) == len(fsites)
+            y = [s["dwait_ms"] for s in sites]
+            p = [hat[s["part"]] for s in sites]
+            for s, ph in zip(sites, p):
+                delta.append((cfg, run, str(s["part"]), s["site"], "%.6g" % (ph - s["dwait_ms"])))
+                if s["site"] == "conv121":
+                    print("KDW121 cfg=%s run=%s lock_ms=%.4f stream_ms=%.4f dw_hat_ms=%.4f ddr_t_ms=%.4f rel=%.4f"
+                          % (cfg, run, s["lock"] / s["launches"], s["stream"] / s["launches"], ph, s["ddr_t"],
+                             (ph - s["dwait_ms"]) / s["dwait_ms"] if s["dwait_ms"] > 0 else float("nan")))
+            if run == a.fit_run:
+                continue
+            r2 = r2_score(y, p)
+            tm = sum(v * s["launches"] for v, s in zip(y, sites))
+            sr = (sum(v * s["launches"] for v, s in zip(p, sites)) - tm) / tm if tm > 0 else float("nan")
+            sh = max(abs(ph - v) * s["launches"] / s["site_ms"] for ph, v, s in zip(p, y, sites))
+            good = same and r2 >= DW_R2_MIN and sh <= DW_SHARE_MAX
+            ok &= good
+            print("KDWCHK cfg=%s run=%s fit=0 sites=%d r2=%.4f sum_rel=%.4f share_max=%.4f static_same=%d %s"
+                  % (cfg, run, len(sites), r2, sr, sh, int(same), "PASS" if good else "FAIL"))
+    write_rows(a.dw_tsv, DW_TSV, dwrows)
+    write_rows(a.delta_tsv, DELTA_TSV, delta)
+    print("KDW AUDIT meas_at_predict=%d" % audit)
+    print("KDELTA term=dw rows=%d tsv=%s" % (len(delta), a.delta_tsv))
+    ok &= audit == 0
+    print("KDW ALL dwrows=%d deltarows=%d %s" % (len(dwrows), len(delta), "PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
 def _site_ch(kch, r, ks):
     """{channel: bytes per launch} summed over the site's distinct kernels (one launch shape each)"""
     tot = {}
@@ -512,6 +712,20 @@ def selftest():
     chk("dwait_ms_ksite", abs(load_dwait_ms("PROF aie_site_perf part=3 kind=conv launches=2 perf_n=2 io_act_cyc=9 "
                                             "lock_stall_cyc=2000000 stream_stall_cyc=1000000\n")[3] - 1.5) < 1e-12)
     chk("ddrt_ratio", ddrt_ratio(2.0, 4.0) == 0.5 and math.isnan(ddrt_ratio(1.0, 0.0)))
+    # --dwfit: exact non-negative recovery, clip at 0, LOO selection, run names, predict ignores measured fields
+    xs = [dict(zip(DW_FEATS, (v, 2.0 * v % 3, 1.0, 4.0, 0.5, 0.1 * v))) for v in range(1, 9)]
+    pts = [(x, max(0.0, 0.8 * x["ddr_t_ms"] - 1.0), 1.0) for x in xs]
+    p = dw_fit_lin(pts[1:], ("ddr_t_ms",))
+    chk("dw_fit_recover", abs(p["w"][0] - 0.8) < 1e-9 and abs(p["b"] + 1.0) < 1e-9 and dw_errs(p, pts)[0] < 1e-9)
+    chk("dw_clip_nonneg", dw_predict(dict(feats=("a",), w=[1.0], b=-5.0), dict(a=2.0)) == 0.0
+        and min(dw_fit_lin([(dict(a=1.0), 3.0, 1.0), (dict(a=2.0), 1.0, 1.0)], ("a",))["w"]) >= 0.0)
+    sel = dw_select([(x, 0.3 * x["bd_k"] * 10 + 0.2, 1.0) for x in xs], ("shim_ch", "bd_k", "dom_mb"), 2)
+    chk("dw_select_loo", sel["feats"] == ("bd_k",) and sel["loo_share"] < 1e-9)
+    chk("dw_run_name", run_name("/x/unet_aot-kco.b.log", 0) == "b" and run_name("/x/foo.log", 2) == "c")
+    s = dict(ddr_t=2.0, maxch_t=500.0, dom_bytes=1e6, shim_ch=3.0, rw_ratio=0.5, bd_n=100.0, lock=9.0,
+             stream=1.0, dwait_ms=10.0, site_ms=20.0)
+    h, bad = dw_audit(dict(feats=("ddr_t_ms", "maxch_ms"), w=[1.0, 2.0], b=0.5), s)
+    chk("dw_audit_static", bad == 0 and abs(h - 3.5) < 1e-12 and r2_score([1, 2, 3], [1, 2, 3]) == 1.0)
     k = sum(cases)
     print("KDMAF SELFTEST %s (%d/%d)" % ("PASS" if k == len(cases) else "FAIL", k, len(cases)))
     return 0 if k == len(cases) else 1
@@ -525,13 +739,21 @@ def main(argv=None):
     ap.add_argument("--perch", action="store_true", help="per-channel features vs the logged data wait (no --resid)")
     ap.add_argument("--ddrt", action="store_true", help="with --perch: ddr_t = sum_ch bytes/BW(run_b) vs KSITE dwait")
     ap.add_argument("--tsv", help="with --perch --ddrt: per-site TSV (TSV_COLS)")
-    ap.add_argument("runs", nargs="*", help="cfg=log")
+    ap.add_argument("--dwfit", action="store_true", help="with --perch --ddrt: static data-wait model per class")
+    ap.add_argument("--fit-run", default="a", help="with --dwfit: the run the dw params are fitted on")
+    ap.add_argument("--dw-tsv", help="with --dwfit: per-site dw_hat TSV (DW_TSV)")
+    ap.add_argument("--delta-tsv", help="with --dwfit: per run/site dw_hat - dw_meas TSV (DELTA_TSV)")
+    ap.add_argument("runs", nargs="*", help="cfg=log (with --dwfit: cfg=log_a,log_b,log_c)")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
     if a.perch:
         if not (a.build_root and a.runs):
             ap.error("--perch needs --build-root and cfg=log runs")
+        if a.dwfit:
+            if not (a.ddrt and a.dw_tsv and a.delta_tsv):
+                ap.error("--dwfit needs --ddrt, --dw-tsv and --delta-tsv")
+            return main_dwfit(a)
         return main_perch(a)
     if not (a.build_root and a.resid and a.runs):
         ap.error("--build-root, --resid and cfg=log runs are required")
