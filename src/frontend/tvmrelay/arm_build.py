@@ -265,15 +265,28 @@ def f32_to_bf16_rne(a):
 
 
 def write_aligned_blob(params_path: Path, offsets: dict, out_path: Path,
-                       align: int = 64, bf16_names=()) -> dict:
+                       align: int = 64, bf16_names=(), order=()) -> dict:
     """Raw weights, each at an ``align``-byte offset, into ``out_path``.
     Returns the new ``{name: (offset, nbytes)}``. Bytes are copied verbatim,
     except names in ``bf16_names`` (fp32 tensors) which are written as bf16 RNE
-    (nbytes halves)."""
+    (nbytes halves).
+
+    Packing order is deterministic: names in ``order`` (the graph's node
+    order) first, then any remaining names sorted. It does NOT follow the
+    source blob, whose ``save_param_dict`` order changes run to run -- that
+    made two builds of the same config lay weights out differently and
+    shifted per-call timings by a few ms (arm J vs K0, 11-22)."""
     data = params_path.read_bytes()
+    rank = {}
+    for name in order:
+        if name in offsets and name not in rank:
+            rank[name] = len(rank)
+    keys = sorted(offsets, key=lambda n: (0, rank[n], "") if n in rank
+                  else (1, 0, n))
     new, pos = {}, 0
     with open(out_path, "wb") as f:
-        for name, (off, nbytes) in sorted(offsets.items(), key=lambda kv: kv[1][0]):
+        for name in keys:
+            off, nbytes = offsets[name]
             pad = (-pos) % align
             f.write(b"\0" * pad)
             pos += pad
@@ -782,7 +795,9 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         elif params_wdtype() != "fp32":
             raise ValueError(f"AIEGRAPH_WDTYPE={params_wdtype()!r}: fp32|bf16")
         offsets = write_aligned_blob(params_path, offsets, out_dir / "weights.bin",
-                                     bf16_names=bf16_names)
+                                     bf16_names=bf16_names,
+                                     order=[n["name"] for n in nodes
+                                            if n.get("op") == "null"])
         param_eids = {row_ptr[i] for i, node in enumerate(nodes)
                       if node.get("op") == "null" and node["name"] in offsets}
         bf16_eids = {row_ptr[i]: (offsets[node["name"]][0], offsets[node["name"]][1] // 2)
