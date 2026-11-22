@@ -59,9 +59,10 @@ static inline const float *ap_y8(const float *Y, int n, int m8, int Ng, int P, i
  * yout[(n / yb) * M * yb + p * yb + n % yb] (M = OH * OW). */
 static int ap_gemm(const float *xin, int C, int H, int W, int cb, int KH, int KW, int sh, int sw, int ph, int pw,
                    int OH, int OW, const uint16_t *wbf, int N, void *const *argv, int nargs, float *yout, int yb,
-                   int act, int PX, int Kg) {
+                   int act, int PX, int Kg, int hs_kind) {
     XTime ut0;
     XTime_GetTime(&ut0);
+    ahs_begin(&g_ahs, hs_kind); /* per-site host split + site perf (aie_host_split.h, as kacc_conv_host.cc) */
     const int M = OH * OW, K = C * KH * KW, KK = KH * KW;
     const int Ng = (N + 63) & ~63;
     int kch = 0, tr = 0, Kp = 0;
@@ -123,6 +124,8 @@ static int ap_gemm(const float *xin, int C, int H, int W, int cb, int KH, int KW
         uc_ysentinel(g_ky, ybytes);
         XTime lt0, lt1;
         XTime_GetTime(&lt0);
+        const unsigned long long hw0 = uc_hs_wait();
+        ahs_add_span(&g_ahs, AHS_PACK, ut0, lt0);
 #if UC_WARM
         unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
         __Runtime_pm_warm_stats(&seg0, &cold0);
@@ -141,7 +144,9 @@ static int ap_gemm(const float *xin, int C, int H, int W, int cb, int KH, int KW
             g_uc_cold_tiles += cold1 - cold0;
         }
 #endif
+        const unsigned long long hw1 = uc_hs_wait();
         XTime_GetTime(&lt1);
+        ahs_add_window(&g_ahs, (unsigned long long)(lt1 - lt0), hw1 - hw0); /* + site-perf snapshot (SITE_PERF) */
         if (lrc != 0) {
             printf("[aiednn] launch N=%d K=%d PX=%d rc=%d\n", Ng, Kg, PX, lrc);
             return lrc;
@@ -150,6 +155,12 @@ static int ap_gemm(const float *xin, int C, int H, int W, int cb, int KH, int KW
         g_sp_call += sp2 - sp1;
         g_sp_glue += (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL;
         g_sp_post += sp3 - sp2;
+        ahs_add(&g_ahs, AHS_GLUE, (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL);
+        ahs_add(&g_ahs, AHS_FLUSH, sp1 - sp0);
+        ahs_add(&g_ahs, AHS_INVAL, sp3 - sp2);
+        ahs_launch(&g_ahs);
+        ahs_cal(&g_ahs, sp0, (unsigned long long)lt0);
+        ahs_cal(&g_ahs, sp3, (unsigned long long)lt1);
         g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
         g_aie_launches++;
         g_uc_macs += (unsigned long long)mv * N * K;
@@ -197,7 +208,11 @@ static int ap_gemm(const float *xin, int C, int H, int W, int cb, int KH, int KW
                 }
             }
         }
-        (void)ut0;
+        {
+            XTime ut3;
+            XTime_GetTime(&ut3);
+            ahs_add_span(&g_ahs, AHS_SCATTER, lt1, ut3);
+        }
     }
     if (bad) {
         printf("[aiednn] %d nonfinite AIE outputs (N=%d K=%d M=%d)\n", bad, N, K, M);
@@ -243,7 +258,7 @@ extern "C" int aiednn_conv(int cid, void *args, int nargs, const uint16_t *wbf, 
         return ap_done("aiednn_conv", cid, -3);
     return ap_done("aiednn_conv", cid,
                    ap_gemm((const float *)x->data, C, H, W, cb, KH, KW, sh, sw, ph, pw, OH, OW, wbf, N, argv, nargs,
-                           (float *)y->data, yb, act, px, kg));
+                           (float *)y->data, yb, act, px, kg, AHS_KIND_CONV));
 }
 
 extern "C" int aiednn_dense(int cid, void *args, int nargs, const uint16_t *wbf, int act, int px, int kg) {
@@ -259,5 +274,5 @@ extern "C" int aiednn_dense(int cid, void *args, int nargs, const uint16_t *wbf,
     /* x [M][K] = NCHWc (C = K, H = 1, W = M, cb = K); y [M][N] = NCHWc (OH = 1, OW = M, yb = N) */
     return ap_done("aiednn_dense", cid,
                    ap_gemm((const float *)x->data, K, 1, M, K, 1, 1, 1, 1, 0, 0, 1, M, wbf, N, argv, nargs,
-                           (float *)y->data, N, act, px, kg));
+                           (float *)y->data, N, act, px, kg, AHS_KIND_LINEAR));
 }

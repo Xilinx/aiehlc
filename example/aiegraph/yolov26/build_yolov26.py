@@ -124,7 +124,8 @@ def main(argv=None) -> int:
     refh = bm.ref_header(out / "p1_ref.h", MODEL, ref, crc, data="build-input")
     main_c = bm.main_c(MODEL, [iname], aie=True, runtime_io=True, kprefix=KPREFIX)
     rep = emod.build(target="a78", verbose=a.verbose, main_c=main_c, extra_sources=[bm.cmp_source(), refh, hdr],
-                     extra_cflags=f"{bm.CMP_CFLAGS} {bm.HEAP_LDFLAG}" + (f" {SITE_PERF_DEF}" if a.site_perf else ""), runtime_io=[(iname, xin)], dump_out=True,
+                     extra_cflags=f"{bm.CMP_CFLAGS} {bm.HEAP_LDFLAG}" + (f" {SITE_PERF_DEF}" if a.site_perf else ""), runtime_io=[(iname, xin)],
+                     dump_out=not a.site_perf,  # site-perf: no 2.8 MB AIO dump (562 s console); CMP is on board
                      launch="warm")
     if not rep.ok:
         log(f"build FAILED: {rep.reason}")
