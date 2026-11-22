@@ -48,8 +48,10 @@ _MAX_GB_DEFAULT = 20.0
 # EXTRA_DEFS / AIEHLC_SH_ARGS are read only at offload (aiekernel/build.py stamp,
 # boardmain); convert (deploy_flow + arm_build run_make=False) never reads them, and
 # the cached tree is pre-offload, so launch/profiling options must not miss the cache.
+# AIEHLC_WL_CACHE (F6 worklocal cache) and AIEHLC_ARM_JOBS (F7 make -j) only change
+# where/how fast offload and the ARM make run, never the converted tree.
 _ENV_SKIP = {ENV, MAX_ENV, "AIEHLC_KOBJ_CACHE", "AIEHLC_ROOT", "AIEHLC_FAST",
-             "EXTRA_DEFS", "AIEHLC_SH_ARGS"}
+             "EXTRA_DEFS", "AIEHLC_SH_ARGS", "AIEHLC_WL_CACHE", "AIEHLC_ARM_JOBS"}
 _TMP_STALE_S = 86400
 _TEXT_MAX = 64 << 20            # do not try to relocate text files bigger than this
 

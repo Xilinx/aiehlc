@@ -2996,6 +2996,21 @@ def write_runtime_io(out_dir, inputs, dump_out: bool = False, verbose: bool = Tr
     return [pc, ph]
 
 
+def _make_jobs(jobs: int = 0) -> int:
+    """Parallel ``make -j`` for the ARM link (F7).  Explicit ``jobs`` wins, then
+    ``AIEHLC_ARM_JOBS``; under ``AIEHLC_FAST=1`` (-fast) default to min(16, nproc);
+    otherwise 0 = serial, as before.  UNet: -j1 116.6 s -> -j16 54.8 s at load ~185,
+    main.elf byte-identical (tasks/2026-11-22_fast-build-F7-armjobs.md)."""
+    if jobs:
+        return jobs
+    env = os.environ.get("AIEHLC_ARM_JOBS", "").strip()
+    if env.isdigit():
+        return int(env)
+    if os.environ.get("AIEHLC_FAST", "0").strip() == "1":
+        return min(16, os.cpu_count() or 1)
+    return 0
+
+
 def build_arm_elf(out_dir, repo_root=None, c_name=None,
                   run_make: bool = True, jobs: int = 0, image=None,
                   local: bool = False, local_run: bool = True,
@@ -3032,6 +3047,7 @@ def build_arm_elf(out_dir, repo_root=None, c_name=None,
     under ``["local"]``. Never raises for a missing toolchain -- a box without
     the Vitis cross compiler is a normal place to run the earlier stages.
     """
+    jobs = _make_jobs(jobs)
     out_dir = Path(out_dir).resolve()
     repo_root = Path(repo_root) if repo_root else Path(__file__).resolve().parents[3]
     if c_name is None:   # the one <stem>_graph.json the deploy flow wrote -> <stem>.c
