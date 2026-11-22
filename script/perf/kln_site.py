@@ -43,10 +43,14 @@ Output:
   KLNHAT cfg= run= k= sites= r2= maxrel= sum_rel= PASS|FAIL[ fit]       (fit = run a, not in ALL)
   KLNHAT LOO cfg= run=a k= sites= loo_maxrel= PASS|FAIL                 (--k-tsv: K_loo_ms of the run-a rows,
           nan when the column is missing or all nan; --kswap: the swapped K itself, nothing is fitted)
+  KLNHAT LOO cfg= run=a k= sites= loo=n/a     (no --loo and every run-a K_loo is nan, e.g. frozen K; with --loo X
+          a nan LOO still FAILs)
   KLNHAT121 cfg= k= part= runs=b,c K_hat_ms= K_meas_ms= lock_ms= dw_hat_ms= rel_T=   (conv121 mean over b/c,
           per launch; rel_T = |mean (T_hat - T) / T| (magnitude, like maxrel; sign = K_hat_ms vs K_meas_ms); dw_hat_ms from the K TSV, nan without the column)
   KLNHAT ALL k= logs= sites= r2_min= maxrel= loo_max= PASS|FAIL  (b/c only; loo_max = max of the LOO lines, with
-          --loo X PASS also needs loo_max <= X, nan = FAIL); rc=1 when ALL FAILs.  Uncomputable metrics print nan.
+          --loo X PASS also needs loo_max <= X, nan = FAIL; loo_max=n/a when every LOO line is n/a); rc=1 when ALL
+          FAILs.  Uncomputable metrics print nan.  Logs given as --check (no --fit) are all in ALL.
+  --site-tsv PATH: per-site TSV cfg run site launches T T_hat rel (run = log basename), KLNSITES tsv= rows=
 --audit: AST check of the predict path (PREDICT_FNS): no measured field name may appear in it (MEAS_FIELDS);
   prints 'KLN AUDIT fn=.. names=.. meas=..' per function and 'KLN AUDIT meas_at_predict=<n>' last (rc=1 if n>0).
 """
@@ -350,10 +354,15 @@ def read_kswap(paths):
     return out, sites
 
 
-def khat_eval(rows, src, kmap, label, r2_gate, rel_gate, loo_gate, ls=None):
+SITE_COLS = ("cfg", "run", "site", "launches", "T", "T_hat", "rel")
+
+
+def khat_eval(rows, src, kmap, label, r2_gate, rel_gate, loo_gate, ls=None, site_tsv=None):
     """KLNHAT / LOO / 121 / ALL; kmap[(cfg, run, part)] = dict(K=site-total K or None, K_loo=site total or nan,
-    dw=per-launch or nan).  True iff ALL PASS."""
+    dw=per-launch or nan).  LOO prints loo=n/a (not a FAIL) when no --loo gate is given and every run-a K_loo is
+    nan (frozen K: nothing was fitted).  site_tsv: per-site rows SITE_COLS (run = log basename).  True iff ALL PASS."""
     nan = float("nan")
+    site_rows = []
     groups = {}
     for r in rows:
         groups.setdefault((r["cfg"], r["run"]), []).append(r)
@@ -363,9 +372,12 @@ def khat_eval(rows, src, kmap, label, r2_gate, rel_gate, loo_gate, ls=None):
         pairs, miss = [], 0
         for r in rs:
             km = kmap.get((cfg, run, r["part"]))
+            t = r["site_ms_" + src] / r["launches"]
             if km is None or km["K"] is None or math.isnan(km["K"]):
                 miss += 1
+                site_rows.append((r, t, nan))
                 continue
+            site_rows.append((r, t, predict_launch(km["K"], pred_view(r))))
             pairs.append((r["site_ms_" + src] / r["launches"], predict_launch(km["K"], pred_view(r)),
                           r["launches"], r["site"]))
         if miss or len(pairs) < 2:
@@ -376,6 +388,14 @@ def khat_eval(rows, src, kmap, label, r2_gate, rel_gate, loo_gate, ls=None):
         print("KLNHAT cfg=%s run=%s k=%s sites=%d r2=%s maxrel=%s sum_rel=%s %s%s"
               % (cfg, run, label, len(rs), _f(r2), _f(mr), _f(sr), "PASS" if ok else "FAIL", " fit" if fit else ""))
         if run == "a":
+            if loo_gate is None and all(math.isnan((kmap.get((cfg, run, r["part"])) or dict(K_loo=nan))["K_loo"])
+                                        for r in rs):
+                print("KLNHAT LOO cfg=%s run=a k=%s sites=%d loo=n/a" % (cfg, label, len(rs)))
+                loos.append(None)
+                rs_loo = None
+            else:
+                rs_loo = rs
+        if run == "a" and rs_loo is not None:
             lp = []
             for r in rs:
                 km = kmap.get((cfg, run, r["part"]))
@@ -416,6 +436,8 @@ def khat_eval(rows, src, kmap, label, r2_gate, rel_gate, loo_gate, ls=None):
               % (cfg, label, rs[0]["part"], ",".join(r["run"] for r in rs), _f(m(kh)), _f(m(kmv)), _f(m(lk)),
                  _f(m(dw)), _f(abs(m(rt)))))
     any_nan = lambda v: (not v) or any(math.isnan(x) for x in v)
+    loo_na = bool(loos) and all(x is None for x in loos)
+    loos = [x for x in loos if x is not None]
     loo_max = nan if any_nan(loos) else max(loos)
     r2_min = nan if any_nan(r2s) else min(r2s)
     rel_max = nan if any_nan(rels) else max(rels)
@@ -423,8 +445,23 @@ def khat_eval(rows, src, kmap, label, r2_gate, rel_gate, loo_gate, ls=None):
     if loo_gate is not None:
         ok_all &= not math.isnan(loo_max) and loo_max <= loo_gate
     print("KLNHAT ALL k=%s logs=%d sites=%d r2_min=%s maxrel=%s loo_max=%s %s"
-          % (label, nlog, nsite, _f(r2_min), _f(rel_max), _f(loo_max), "PASS" if ok_all else "FAIL"))
+          % (label, nlog, nsite, _f(r2_min), _f(rel_max), "n/a" if loo_na else _f(loo_max),
+             "PASS" if ok_all else "FAIL"))
+    if site_tsv:
+        print("KLNSITES tsv=%s rows=%d" % (site_tsv, write_site_tsv(site_tsv, site_rows)))
     return ok_all
+
+
+def write_site_tsv(path, site_rows):
+    """--site-tsv: cfg run site launches T T_hat rel (per launch ms, rel = (T_hat - T) / T signed; run = log
+    basename; repr floats)"""
+    with open(path, "w") as f:
+        f.write("\t".join(SITE_COLS) + "\n")
+        for r, t, th in site_rows:
+            run = Path(r["log"]).name if r.get("log") else r["run"]
+            f.write("\t".join([r["cfg"], run, r["site"], str(r["launches"]), repr(t), repr(th),
+                               repr((th - t) / t)]) + "\n")
+    return len(site_rows)
 
 
 def kmap_tsv(rows, kt):
@@ -582,6 +619,27 @@ def selftest():
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         a_ok = audit()
     chk("audit_clean", a_ok and buf.getvalue().splitlines()[-1] == "KLN AUDIT meas_at_predict=0")
+    # frozen K (K_loo all nan), all logs --check: LOO n/a without --loo, FAIL with --loo; site TSV
+    import tempfile
+    rws = [dict(cfg="off", run=rn, part=i, site="s%d" % i, launches=2, site_ms_log=10.0 + i, L_meas=1.0,
+                L_hat=1.0, N_meas=1.0, N_hat=1.0, fit=False, log="/x/unet_off.%s.log" % rn)
+           for rn in "ab" for i in range(3)]
+    km = {(r["cfg"], r["run"], r["part"]): dict(K=r["site_ms_log"] - 2.0, K_loo=float("nan"), dw=float("nan"))
+          for r in rws}
+    with tempfile.TemporaryDirectory() as td:
+        tp = str(Path(td) / "s.tsv")
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            ok_na = khat_eval(rws, "log", km, "frozen", 0.9, 0.2, None, site_tsv=tp)
+        o = buf.getvalue().splitlines()
+        trows = read_tsv(tp)
+    chk("loo_na", ok_na and "KLNHAT LOO cfg=off run=a k=frozen sites=3 loo=n/a" in o and not any("nan" in l for l in o)
+        and o[-2].startswith("KLNHAT ALL k=frozen logs=2 sites=6 r2_min=1.0000 maxrel=0.0000 loo_max=n/a PASS"))
+    chk("site_tsv", len(trows) == 6 and list(trows[0]) == list(SITE_COLS) and trows[0]["run"] == "unet_off.a.log"
+        and float(trows[0]["rel"]) == 0.0 and float(trows[0]["T"]) == 5.0)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        ok_g = khat_eval(rws, "log", km, "frozen", 0.9, 0.2, 0.5)
+    chk("loo_gate_nan_fails", not ok_g and "loo_maxrel=nan FAIL" in buf.getvalue()
+        and "loo_max=nan FAIL" in buf.getvalue())
     n = sum(ok for _, ok in res)
     for name, ok in res:
         if not ok:
@@ -601,6 +659,7 @@ def main(argv=None):
     md.add_argument("--kswap", metavar="D1[,D2..]")
     ap.add_argument("--k-label")
     ap.add_argument("--loo", type=float)
+    ap.add_argument("--site-tsv", metavar="PATH")
     ap.add_argument("--dump-kmeas", metavar="PATH")
     ap.add_argument("--site-src", choices=("log", "lpred"), default="log")
     ap.add_argument("--khat")
@@ -614,6 +673,8 @@ def main(argv=None):
     ap.add_argument("--fit", nargs="*", default=[])
     ap.add_argument("--check", nargs="*", default=[])
     a = ap.parse_args(argv)
+    if a.site_tsv and not (a.k_tsv or a.kswap):
+        ap.error("--site-tsv needs --k-tsv or --kswap")
     if a.dump_kmeas and not a.oracle_k:
         ap.error("--dump-kmeas needs --oracle-k")
     if a.selftest:
@@ -646,7 +707,8 @@ def main(argv=None):
             kmap, label = kmap_tsv(rows, read_ktsv(a.k_tsv)), a.k_label or "hat"
         else:
             kmap, label = kmap_swap(rows, a.site_src, *read_kswap(a.kswap)), a.k_label or "swap"
-        ok = khat_eval(rows, a.site_src, kmap, label, a.r2, a.max_rel, a.loo, lock_stream(rows))
+        ok = khat_eval(rows, a.site_src, kmap, label, a.r2, a.max_rel, a.loo, lock_stream(rows),
+                       a.site_tsv)
         return 0 if ok else 1
     ok = oracle(rows, a.site_src, a.r2, a.max_rel)
     if a.dump_kmeas:

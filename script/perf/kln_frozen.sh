@@ -2,14 +2,17 @@
 # kln_frozen.sh BUILD_ROOT LOGDIR OUTDIR -- M3.1.2.2.3.2 PFZ: frozen K+L+N per-launch prediction, nothing refit.
 #   BUILD_ROOT/unet_{off,aot-kco}  build dirs (read only; BUILD_ROOT/kln is never written)
 #   LOGDIR/unet_{off,aot-kco}.{a,b,c}.log  board logs
-#   OUTDIR  all outputs: lpred.tsv npred.tsv kcore.tsv kdelta_core.tsv dwhat.tsv khat.tsv + per-step *.out
+#   OUTDIR  all outputs: lpred.tsv npred.tsv kcore.tsv kdelta_core.tsv dwhat.tsv khat.tsv site_pairs.tsv + *.out
+# Env: KLN_K_JSON = K params json (default script/perf/params/k_palmyra213.m3112c.json; relative = repo root;
+#      a missing/empty file -> rc=2).  KLN_PY = python.
 # Steps (frozen params from script/perf/params, md5 printed as KLNFROZEN PARAMS):
 #   1 L  m3_site --lpred --kfirst site --params l_palmyra213.m3121.json
 #   2 N  n_fit --predict --ovl --refit-a no --params n_unet_palmyra213.m3121.json (NCHK passed through)
 #   3 core k_diag --kdelta core (kcyc_unet, default --iss-unet kcyc_unet_iss.json)
 #   4 dw k_dmafeat --perch --ddrt --dwpredict --dw-params kdw_palmyra213.m3112c.json
-#   5 K  k_diag --khat-static --params k_palmyra213.m3112c.json --check a,b,c
-#   6 kln_site --k-tsv khat.tsv --k-label frozen (--fit off=a aot-kco=a is a label only; no --loo)
+#   5 K  k_diag --khat-static --params $KLN_K_JSON --check a,b,c
+#   6 kln_site --k-tsv khat.tsv --k-label frozen --check all 6 logs (no --fit, nothing is fitted: ALL = 6 logs /
+#     828 sites; no --loo -> LOO loo=n/a) --site-tsv site_pairs.tsv
 # Prints: KLNFROZEN PARAMS file= md5= (one per json), step output, KLNFROZEN rc_l= rc_n= rc_core= rc_dw= rc_k= rc_kln=
 # rc: 0 ok; 1 kln_site missed its metric targets; 2 any step rc>1 (or bad args / missing inputs).
 # This chain is the inside of M6 estimate().
@@ -20,7 +23,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); ROOT=$(cd "$HERE/../.." && p
 PY=${KLN_PY:-/scratch/staff/huaj/aiehlc/.venv/bin/python3}
 PR=script/perf/params
 J_L=$PR/l_palmyra213.m3121.json; J_N=$PR/n_unet_palmyra213.m3121.json; J_C=$PR/kcyc_unet_iss.json
-J_DW=$PR/kdw_palmyra213.m3112c.json; J_K=$PR/k_palmyra213.m3112c.json
+J_DW=$PR/kdw_palmyra213.m3112c.json; J_K=${KLN_K_JSON:-$PR/k_palmyra213.m3112c.json}
 case "$O/" in "$B/kln/"*|"$B/kln/") echo "KLNFROZEN ERR outdir=$O is under BUILD_ROOT/kln"; exit 2;; esac
 cd "$ROOT" || exit 2
 for c in off aot-kco; do for r in a b c; do
@@ -52,8 +55,8 @@ grep -E '^KDWP ' "$O/dw.out"
 $PY -I script/perf/k_diag.py --khat-static --params $J_K --core-tsv "$O/kcore.tsv" --dwhat "$O/dwhat.tsv" --npred "$O/npred.tsv" --lpred "$O/lpred.tsv" --khat-tsv "$O/khat.tsv" --build-root "$B" $CHK3 > "$O/k.out" 2>&1; rk=$?
 grep -E '^KHATS ' "$O/k.out"
 # 6 kln_site
-$PY -I script/perf/kln_site.py --k-tsv "$O/khat.tsv" --k-label frozen --site-src log --r2 0.90 --max-rel 0.20 --lpred "$O/lpred.tsv" --npred "$O/npred.tsv" --build-root "$B" $FIT $CHK > "$O/kln.out" 2>&1; rq=$?
-grep -E '^(KLNSRC|KLNHAT|KLN AUDIT) ' "$O/kln.out"
+$PY -I script/perf/kln_site.py --k-tsv "$O/khat.tsv" --k-label frozen --site-src log --r2 0.90 --max-rel 0.20 --lpred "$O/lpred.tsv" --npred "$O/npred.tsv" --site-tsv "$O/site_pairs.tsv" --build-root "$B" $CHK3 > "$O/kln.out" 2>&1; rq=$?
+grep -E '^(KLNSRC|KLNHAT|KLNSITES|KLN AUDIT) ' "$O/kln.out"
 echo "KLNFROZEN rc_l=$rl rc_n=$rn rc_core=$rc_ rc_dw=$rd rc_k=$rk rc_kln=$rq"
 for x in $rl $rn $rc_ $rd $rk $rq; do [ "$x" -gt 1 ] && exit 2; done
 [ "$rq" = 1 ] && exit 1

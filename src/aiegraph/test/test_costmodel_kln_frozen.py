@@ -69,6 +69,28 @@ def test_never_writes_build_root_kln(env):
         assert str(b / "kln") not in c
     assert "--refit-a no" in calls[1] and "--dwpredict" in calls[3] and "--params" in calls[4]
     assert "--loo" not in calls[5] and "--k-label frozen" in calls[5]
+    # all 6 logs are --check (no --fit): ALL covers 6 logs / 828 sites; per-site TSV in OUTDIR
+    assert "--fit" not in calls[5].split() and "--site-tsv %s" % (o / "site_pairs.tsv") in calls[5]
+    chk = calls[5].split("--check", 1)[1]
+    assert all("unet_%s.%s.log" % (c, r) in chk for c in ("off", "aot-kco") for r in "abc")
+
+
+def test_k_json_env_default_and_override(env, tmp_path):
+    b, d, o, e = env
+    rc, out = _run(b, d, o, e)
+    assert rc == 0 and "KLNFROZEN PARAMS file=script/perf/params/k_palmyra213.m3112c.json md5=" in out
+    alt = tmp_path / "k_alt.json"
+    alt.write_text((ROOT / "script/perf/params/k_palmyra213.m3112c.json").read_text())
+    rc, out = _run(b, d, o, dict(e, KLN_K_JSON=str(alt)))
+    assert rc == 0 and "KLNFROZEN PARAMS file=%s md5=" % alt in out
+    calls = Path(e["STUB_LOG"]).read_text().splitlines()
+    assert "--params %s" % alt in calls[-2]
+
+
+def test_k_json_missing_rc2(env):
+    b, d, o, e = env
+    rc, out = _run(b, d, o, dict(e, KLN_K_JSON="/nonexistent.json"))
+    assert rc == 2 and "missing params /nonexistent.json" in out and not Path(e["STUB_LOG"]).exists()
 
 
 def test_outdir_under_build_root_kln_refused(env):
