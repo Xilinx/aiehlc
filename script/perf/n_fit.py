@@ -626,12 +626,15 @@ def predict_mode(a, root):
 AP_MAXF = 7
 AP_RUNS = "abcdefgh"
 _AP_PROF = re.compile(r"^PROF part=(\d+) op=aie_host_conv\d* ms=([\d.]+) .*site_ms=([\d.]+) aie_ms=([\d.]+)", re.M)
+# host '[HH:MM:SS LEVEL] ...' message spliced mid board line (M4.2 yolo26n_off.e.log:384 part=151 'bf16_exp[12:44:57 DEBUG]
+# main: program_done ...\nand_ms=...'): same rule as net_kdiag.unsplice, only text after a non-newline char is removed
+_AP_HOSTMSG = re.compile(r"(?<=[^\n])\[\d{2}:\d{2}:\d{2} [A-Z]+\] [^\n]*\n")
 
 
 def ap_measure(srows, log):
     """measured N per static site of an ap_gemm build: N = PROF part ms (site_ms - aie_ms) + glue + flush + inval
     (PROF aie_host_split). Alignment: part order and split launches == static launches, else raises."""
-    txt = read(log)
+    txt = _AP_HOSTMSG.sub("", read(log))
     prof = _AP_PROF.findall(txt)
     split = {int(p): (float(g), float(f), float(i), int(n)) for p, _k, g, f, i, n in _SPLIT.findall(txt)}
     if len(prof) != len(srows):
