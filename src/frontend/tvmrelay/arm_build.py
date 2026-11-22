@@ -2175,9 +2175,36 @@ def _aie_link_vars(repo_root: Path, kernel_src: Path, build: Path,
     staged = build / "aielib"
     staged.mkdir(parents=True, exist_ok=True)
     copied = 0
-    for lib in sorted(alib.glob("*.a")):
-        shutil.copy2(lib, staged / lib.name)
-        copied += 1
+    # GAP-ALIB-RACE (staging side): aiehlc.sh holds an exclusive flock on
+    # thirdparty/alib/.aiehlc_alib.lock while it wipes and rebuilds alib/lib.
+    # Copying without that lock let a parallel build (another net/cfg on the
+    # same tree) catch lib/ mid-wipe -> no libxaienginea78.a -> link fails.
+    lock_fh = None
+    try:
+        import fcntl
+        lock_fh = open(alib.parent / ".aiehlc_alib.lock", "a")
+        import time
+        deadline = time.monotonic() + 1800
+        while True:
+            try:
+                fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise OSError("alib lock busy for 1800 s")
+                time.sleep(2)
+    except (ImportError, OSError) as exc:
+        print(f"  [arm] warning: no alib lock ({exc}); staging unlocked")
+        if lock_fh is not None:
+            lock_fh.close()
+        lock_fh = None
+    try:
+        for lib in sorted(alib.glob("*.a")):
+            shutil.copy2(lib, staged / lib.name)
+            copied += 1
+    finally:
+        if lock_fh is not None:
+            lock_fh.close()
     if not (staged / "libxaienginea78.a").is_file():
         print(f"  [arm] warning: libxaienginea78.a not found in {alib} "
               f"(it is wiped between runs) -- {hint}, then re-run this build "
