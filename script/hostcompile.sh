@@ -100,6 +100,13 @@ kobj_cache_key() {
     } | sha256sum | cut -d' ' -f1
 }
 
+# -fast (AIEHLC_FAST=1, set by aiehlc.sh -fast): turn the cache on in a default per-user dir that all
+# build dirs and checkouts share, and prune it to AIEHLC_KOBJ_CACHE_MAX_MB (default 4096) after
+# each store. An explicit AIEHLC_KOBJ_CACHE wins. Without -fast and without AIEHLC_KOBJ_CACHE: off.
+if [ "${AIEHLC_FAST:-0}" = "1" ] && [ -z "${AIEHLC_KOBJ_CACHE:-}" ]; then
+    AIEHLC_KOBJ_CACHE="${XDG_CACHE_HOME:-${HOME}/.cache}/aiehlc/kobj"
+fi
+
 # kobj_cache_get <fn> <key>: restore an entry into BUILD_DIR / cwd. rc 0 = hit.
 kobj_cache_get() {
     local fn="$1" e="${AIEHLC_KOBJ_CACHE}/$2" f
@@ -110,7 +117,8 @@ kobj_cache_get() {
     if [ -d "$e/cwd" ]; then
         for f in "$e/cwd"/* ; do
             [ -e "$f" ] || continue
-            rm -rf "./$(basename "$f")"; cp -r "$f" ./
+            # a concurrent prune may rename the entry away mid-copy: treat as a miss (compile rewrites these)
+            rm -rf "./$(basename "$f")"; cp -r "$f" ./ || return 1
         done
     fi
     touch "$e/DONE"   # LRU hint for a later prune
@@ -247,6 +255,9 @@ compile_one_kernel() {
     if [ ${kc_rc} -eq 0 ] && [ -f "${BUILD_DIR}/kernel.o" ]; then
         echo "${kstamp}" > "${BUILD_DIR}/kernel.stamp"
         [ -n "${kobj_key}" ] && (cd "${WORKLOCAL_DIR}" && kobj_cache_put "${kernel_func_name}" "${kobj_key}")
+        if [ -n "${kobj_key}" ] && [ "${AIEHLC_FAST:-0}" = "1" ]; then
+            bash "${AIEHLC_ROOT}/script/kobj_cache_prune.sh" "${AIEHLC_KOBJ_CACHE}" || true
+        fi
     fi
     return ${kc_rc}
 }

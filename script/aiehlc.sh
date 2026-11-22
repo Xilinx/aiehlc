@@ -20,13 +20,15 @@ run_cmd() {
 }
 
 usage() {
-    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss]"
+    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss] [-fast]"
     echo "  --platform    baremetal (default) | sim | linux | baremetal_debug"
     echo "                'baremetal_debug' builds a baremetal ELF and writes sim_config.sh so the debug"
     echo "                UI can run either a hardware test or a simulator run from one build."
     echo "  --profiling   build the host with the PMU profiling layer (-DAIEHLC_PROFILING=1)"
     echo "  --skip-bss    skip ALL .bss zero-init on kernel load (-DAIEHLC_SKIP_BSS_DEFAULT=1; unsafe if the kernel reads zeroed statics)"
     echo "  --skip-port-bss  skip zero-init only for DMA port-buffer .bss (buf_in_*/buf_out_*), keep it for the rest (-DAIEHLC_SKIP_BSS_DEFAULT=2)"
+    echo "  -fast         faster rebuilds, same output: share compiled kernel .o across build dirs (AIEHLC_FAST=1;"
+    echo "                cache AIEHLC_KOBJ_CACHE, default ~/.cache/aiehlc/kobj, capped at AIEHLC_KOBJ_CACHE_MAX_MB=4096)"
     return 1
 }
 
@@ -203,6 +205,7 @@ GDB_MODE=0
 # in the same shell would otherwise persist.
 PROFILING=0
 SKIP_BSS=0
+FAST=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -help)
@@ -263,6 +266,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-bss)
             SKIP_BSS=1
+            shift
+            ;;
+        -fast|--fast)
+            FAST=1
             shift
             ;;
         *)
@@ -593,6 +600,7 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
     WORKLOCAL_DIR="${WORKLOCAL_DIR}" AIE_VERSION="${aie_version}" PLATFORM="${platform}" \
         SIM_TILES="${SIM_TILES:-}" DEBUG_SYMS="${DEBUG_SYMS}" \
         AIEHLC_PROFILING="${PROFILING}" EXTRA_DEFS="${hc_extra_defs}" \
+        AIEHLC_FAST="${FAST:-${AIEHLC_FAST:-0}}" \
         USE_LLVM_AIE="${use_llvm_aie}" LLVM_AIE_PATH="${LLVM_AIE_PATH:-}" \
         bash "${AIEHLC_DIR}/script/hostcompile.sh"
     TILING_RC=$?
