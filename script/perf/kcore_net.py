@@ -2,7 +2,7 @@
 """kcore_net -- static per-launch core cycles (K_core) for every AIE site of a gemm_kacc net vs measured compute_cyc
 (costmodel M4.1 P5; no simulator).
 
-  kcore_net.py --net resnet18 --build-root DIR --cc-root DIR [--fit-run a] [--params-out JSON] [--max-rel X]
+  kcore_net.py --net resnet18|yolo26n --build-root DIR --cc-root DIR [--fit-run a] [--params-out JSON] [--max-rel X]
                CFG=LOG_A,LOG_B[,LOG_C] ...
 
 Static source per site (DIR/<net>_<cfg>.build.log 'aie conv|linear <cid> ... inst=NxKxM launches=n' + the
@@ -11,7 +11,7 @@ Static source per site (DIR/<net>_<cfg>.build.log 'aie conv|linear <cid> ... ins
   compile-only kc.sh chess flow) -> kcyc_lst.analyse: total = core main (incl. the aot-kco register-write prelude)
   + kernel, issued bundles x static trip counts; pre = cycles before the kernel's first input-window ACQ
   (prologue + first-tile accumulator memset). Cross-checked (KCORE_LSTCHK) against the board build's own
-  ag_work/aiek/aiek_cnn/worklocal/build/kpar/<inst>/build/kernel.lst: kernel cycles must be equal.
+  ag_work/aiek/<net_sites.aiek_dir(net)>/worklocal/build/kpar/<inst>/build/kernel.lst: kernel cycles must be equal.
 Window: compute_cyc is counted from launch window A (host snapshot, off: before the first startio; aot-kco: before the
   first wait_io's commit), but the core starts at core enable, so the first ~W cycles of the launch (all inside the
   pre-input part: prologue + memset of tile 0) are outside the counter window:
@@ -45,12 +45,17 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import kcyc_lst  # noqa: E402
+import net_sites  # noqa: E402
 
+# resnet18 only (kept = d8144cdb); other nets take sites/kpar from net_sites (M4.2 P5)
 _BL = re.compile(r"aie (conv|linear)\s+(\d+) .*?\binst=(\d+)x(\d+)x(\d+) launches=(\d+)")
 _GD = re.compile(r'GRAPH_PROF_END\((\d+), "aie aiednn_(conv|dense) (\d+)"\)')
 _PERF = re.compile(r"^PROF aie_site_perf part=(\d+) kind=(\w+) launches=(\d+) perf_n=(\d+) .*?\bcompute_cyc=(\d+)", re.M)
 _SITE = re.compile(r"^PROF part=(\d+) op=aie_host_\w+ ", re.M)
 _RUN = re.compile(r"\.([a-z])\.log$")
+# board-runner message spliced into the UART stream mid-line, e.g. 'pre_io_act_c[07:35:23 DEBUG] main: program_done
+# detected, draining trailing output...\nyc=1414904 ...' (M40 yolo26n_off.a / yolo26n_aot.c): drop it, rejoin the line
+_INJ = re.compile(r"\[\d\d:\d\d:\d\d [A-Z]+\] [^\n]*\n")
 
 
 def md5(p):
@@ -58,7 +63,10 @@ def md5(p):
 
 
 def sites(build_root, net, cfg):
-    """[(part, kind, cid, (N,K,M), launches)] in part order"""
+    """[(part, kind, cid, (N,K,M), launches)] in part order (resnet18: build log + graph_driver.c; other nets:
+    net_sites.sites, e.g. yolo26n build log '-> call <part> ... -> AxBxC split=3 launches=n', dw=0 and dw=1)"""
+    if net != "resnet18":
+        return net_sites.sites(build_root, net, cfg)
     bdir = os.path.join(build_root, "%s_%s" % (net, cfg))
     bl = {}
     for m in _BL.finditer(open(bdir + ".build.log", errors="replace").read()):
@@ -82,7 +90,7 @@ def inst_dir(root, inst):
 
 
 def meas(log):
-    txt = open(log, errors="replace").read()
+    txt = _INJ.sub("", open(log, errors="replace").read())
     per = {}
     for m in _PERF.finditer(txt):
         part, launches, pn, cc = int(m.group(1)), int(m.group(3)), int(m.group(4)), int(m.group(5))
@@ -97,7 +105,7 @@ def fnum(x):
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--net", default="resnet18")
+    ap.add_argument("--net", default="resnet18", choices=net_sites.NETS)
     ap.add_argument("--build-root", required=True)
     ap.add_argument("--cc-root", required=True)
     ap.add_argument("--fit-run", default="a")
@@ -113,8 +121,7 @@ def main(argv=None):
         cfg, logs = spec.split("=", 1)
         logs = logs.split(",")
         st = sites(a.build_root, a.net, cfg)
-        kpar = os.path.join(a.build_root, "%s_%s" % (a.net, cfg), "ag_work", "aiek", "aiek_cnn", "worklocal", "build",
-                            "kpar")
+        kpar = net_sites.kpar_dir(a.build_root, a.net, cfg)  # ag_work/aiek/<aiek_cnn|aiek_cnnconv>/worklocal/build/kpar
         stat = {}
         for inst in sorted({s[3] for s in st}):
             d = inst_dir(os.path.join(a.cc_root, cfg), inst)
