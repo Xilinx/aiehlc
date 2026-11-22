@@ -995,3 +995,71 @@ def test_m3_lrefit_rc_strict_and_off(monkeypatch, capsys, tmp_path):
     rc = m2.main(_lrefit_argv(prm2, tmp_path))
     out = capsys.readouterr().out
     assert rc == 1 and "LCHK cfg=off logs=1 sites=2" in out and "Tshare_max=0.1800 FAIL" in out, out
+
+
+# ------------------------------------------------------------------ M6.1: public estimate() site mode (frozen M34 PZ)
+import csv  # noqa: E402
+import os  # noqa: E402
+
+M61_BUILD = os.environ.get("COSTMODEL_UNET_BUILD", "/scratch/staff/huaj/tmp/costmodel_m31223")
+M61_GOLDEN = DATA / "m61_golden_that.tsv"
+# the 5 frozen K+L+N parameter files of M34 PZ (script/perf/kln_frozen.sh KLN_K_JSON=k m3122)
+M61_PZ_MD5 = {
+    "script/perf/params/k_palmyra213.m3122.json": "3f9f2123fd09ee34100028c64fef1dc4",
+    "script/perf/params/l_palmyra213.m3121.json": "ade402695101ca3816935dd78c9800e9",
+    "script/perf/params/n_unet_palmyra213.m3121.json": "951402a1beafb38a698c2462d6129e8b",
+    "script/perf/params/kcyc_unet_iss.json": "599a25137259750b85a9431551525536",
+    "script/perf/params/kdw_palmyra213.m3112c.json": "786032f24141823c59c8abb5d61a984d",
+}
+_M61_CACHE = {}
+
+
+def _m61_run(cfg):
+    from aiegraph.costmodel import estimate
+    if cfg not in _M61_CACHE:
+        _M61_CACHE[cfg] = estimate({"unet_build": M61_BUILD, "cfg": cfg, "sites": None}, board="palmyra213",
+                                   params="m3122")
+    return _M61_CACHE[cfg]
+
+
+def _m61_golden():
+    with open(M61_GOLDEN) as f:
+        return {(r["cfg"], r["site"]): (int(r["launches"]), float(r["T_hat"]))
+                for r in csv.DictReader(f, delimiter="\t")}
+
+
+def test_estimate_site_golden():
+    gold = _m61_golden()
+    assert len(gold) == 276
+    n = 0
+    for cfg in ("off", "aot-kco"):
+        r = _m61_run(cfg)
+        assert r["params"] == M61_PZ_MD5
+        assert r["unpriced"] == [] and r["cfg"] == cfg
+        got = {s["site"]: s for s in r["sites"]}
+        want = {s: v for (c, s), v in gold.items() if c == cfg}
+        assert set(got) == set(want)
+        for site, (launches, t_hat) in want.items():
+            assert got[site]["launches"] == launches, site
+            assert abs(got[site]["T_hat"] - t_hat) <= 1e-6, (cfg, site, got[site]["T_hat"], t_hat)
+            n += 1
+    assert n == 276
+
+
+def test_estimate_site_components():
+    n = 0
+    for cfg in ("off", "aot-kco"):
+        for s in _m61_run(cfg)["sites"]:
+            busy = s["core"] + s["dma"] if s["form"] == "sum" else max(s["core"], s["dma"])
+            tot = s["L"] + s["N_pre"] + max(busy, s["N_ovl"]) + s["N_post"]
+            assert abs(tot / s["launches"] - s["T_hat"]) <= 1e-9, (cfg, s["site"], tot, s["T_hat"])
+            n += 1
+    assert n == 276
+
+
+def test_estimate_site_missing_build(tmp_path):
+    from aiegraph.costmodel import estimate
+    missing = tmp_path / "no_such_build"
+    with pytest.raises(FileNotFoundError) as e:
+        estimate({"unet_build": str(missing), "cfg": "off", "sites": None})
+    assert str(missing) in str(e.value)
