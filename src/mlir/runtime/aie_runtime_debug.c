@@ -1958,6 +1958,7 @@ void AieRt_PrintStreamSwitchConfigAll(XAie_DevInst *dev, const XAie_LocType *til
 void AieRt_DebugSnapshotFromCoords(XAie_DevInst *dev, const uint8_t *io_cols, const uint8_t *io_rows,
                                    const uint8_t *io_chs, const uint8_t *io_bds, const int *io_dirs, uint32_t num_ios,
                                    const uint8_t *tile_cols, const uint8_t *tile_rows, uint32_t num_tiles) {
+    unsigned long long __ld_t0 = __Runtime_log_dump_now(); /* see __Runtime_log_dump_ticks */
     /* Stack-allocated arrays — avoids calloc which fails on baremetal */
     struct_io ios[AIERT_SNAPSHOT_MAX_IOS];
     XAie_LocType tiles[AIERT_SNAPSHOT_MAX_TILES];
@@ -1986,6 +1987,7 @@ void AieRt_DebugSnapshotFromCoords(XAie_DevInst *dev, const uint8_t *io_cols, co
     }
 
     AieRt_DebugSnapshot(dev, ios, num_ios, tiles, num_tiles);
+    __Runtime_log_dump_account(__Runtime_log_dump_now() - __ld_t0);
 }
 
 /* --------------------------------------------------------------------------

@@ -21,6 +21,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+// runtime counter: host ticks spent in klog / debug dumps (aie_runtime.h)
+void __Runtime_log_dump_ticks(unsigned long long *ticks, unsigned int *calls);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Conv2d Parameters

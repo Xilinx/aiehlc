@@ -40,6 +40,12 @@ if [ -z "${WORKLOCAL_DIR:-}" ]; then
     fi
 fi
 BUILD_DIR="${WORKLOCAL_DIR}/build"
+# kc.sh reads kernel_build_flags.sh (klog pragma) from $KERNEL_DIR, else ./aout/.
+# Every kernel compile below runs with cwd = WORKLOCAL_DIR or BUILD_DIR/kpar/<k>,
+# so ./aout/ never matches there: default KERNEL_DIR to the aout that holds this
+# worklocal (aiehlc writes the file next to worklocal/), and export it so the
+# parallel per-kernel compiles see it too.
+export KERNEL_DIR="${KERNEL_DIR:-${WORKLOCAL_DIR}/../}"
 _HOSTCOMPILE_ORIG_PWD="$(pwd)"
 
 OPT_FLAGS="-Os"
@@ -53,12 +59,13 @@ HOST_OPT_FLAGS="${HOSTCOMPILE_HOST_OPT:-${OPT_FLAGS}}"
 KERNEL_FUNC_NAME="computekernel"   # default fallback; overridden by auto-detection below
 
 # Hash of everything build/kernel.o is made from: kernel.cc, the bcf/prx the
-# linker places it with, kc.sh itself, and the knobs that change its output.
+# linker places it with, kc.sh itself, kernel_build_flags.sh (klog on/off), and
+# the knobs that change its output.
 kernel_stamp() {
     local f
     {
         for f in "${WORKLOCAL_DIR}/kernel.cc" "${WORKLOCAL_DIR}/aieml.bcf" "${WORKLOCAL_DIR}/aieml.prx" \
-                 "${AIEHLC_ROOT}/script/kc.sh"; do
+                 "${AIEHLC_ROOT}/script/kc.sh" "${KERNEL_DIR%/}/kernel_build_flags.sh"; do
             [ -f "$f" ] && sha256sum < "$f"
         done
         echo "$1 ${AIE_VERSION:-5} ${PLATFORM:-baremetal} ${USE_LLVM_AIE:-false} ${DEBUG_SYMS:-0}"
@@ -201,12 +208,15 @@ if [ ${#MULTI_KERNEL_FILES[@]} -gt 0 ]; then
         echo "[Multi-kernel] Compiling kernel: ${kname} (${kfname})"
         # Reuse kernel_<name>.o when it is newer than everything it is built from (aiekernel install
         # re-runs this script on aiehlc's own worklocal copy; the single-kernel path reuses kernel.o
-        # by kernel.stamp, which the rename below defeats). HOSTCOMPILE_KERNEL_REBUILD=1 forces it.
+        # by kernel.stamp, which the rename below defeats). kernel_build_flags.sh (klog on/off) and kc.sh
+        # count too, like in kernel_stamp. HOSTCOMPILE_KERNEL_REBUILD=1 forces it.
         if [ "${HOSTCOMPILE_KERNEL_REBUILD:-0}" != "1" ] && [ -f "${BUILD_DIR}/kernel_${kname}.o" ] &&
             [ "${BUILD_DIR}/kernel_${kname}.o" -nt "$kf" ] &&
             { [ ! -f "${WORKLOCAL_DIR}/aieml_${kname}.prx" ] || [ "${BUILD_DIR}/kernel_${kname}.o" -nt "${WORKLOCAL_DIR}/aieml_${kname}.prx" ]; } &&
-            { [ ! -f "${WORKLOCAL_DIR}/aieml_${kname}.bcf" ] || [ "${BUILD_DIR}/kernel_${kname}.o" -nt "${WORKLOCAL_DIR}/aieml_${kname}.bcf" ]; }; then
-            echo "[Multi-kernel] Reusing ${BUILD_DIR}/kernel_${kname}.o (newer than ${kfname}, prx, bcf)"
+            { [ ! -f "${WORKLOCAL_DIR}/aieml_${kname}.bcf" ] || [ "${BUILD_DIR}/kernel_${kname}.o" -nt "${WORKLOCAL_DIR}/aieml_${kname}.bcf" ]; } &&
+            { [ ! -f "${KERNEL_DIR%/}/kernel_build_flags.sh" ] || [ "${BUILD_DIR}/kernel_${kname}.o" -nt "${KERNEL_DIR%/}/kernel_build_flags.sh" ]; } &&
+            [ "${BUILD_DIR}/kernel_${kname}.o" -nt "${AIEHLC_ROOT}/script/kc.sh" ]; then
+            echo "[Multi-kernel] Reusing ${BUILD_DIR}/kernel_${kname}.o (newer than ${kfname}, prx, bcf, kernel_build_flags.sh, kc.sh)"
             KERNEL_OBJ_LIST="${KERNEL_OBJ_LIST} ${BUILD_DIR}/kernel_${kname}.o"
             continue
         fi

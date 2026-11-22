@@ -135,6 +135,9 @@ static inline unsigned long long __rt_prof_now(void) { return __rt_pmccntr() - g
 /* GAP-RT1: always-on wait_io time in generic-timer ticks (XTime clock), independent of AIEHLC_PROFILING */
 static unsigned long long g_hs_wait_ticks = 0ULL;
 static unsigned int g_hs_wait_calls = 0U;
+/* always-on log-dump time (klog + debug snapshot), same tick axis as g_hs_wait_ticks */
+static unsigned long long g_log_dump_ticks = 0ULL;
+static unsigned int g_log_dump_calls = 0U;
 static unsigned long long g_wait_io_cycles = 0ULL;
 static unsigned int g_wait_io_calls = 0U;
 static unsigned long long g_wait_io_iters = 0ULL;
@@ -213,6 +216,17 @@ void __Runtime_host_split_wait_ticks(unsigned long long *ticks, unsigned int *ca
         *ticks = g_hs_wait_ticks;
     if (calls)
         *calls = g_hs_wait_calls;
+}
+void __Runtime_log_dump_ticks(unsigned long long *ticks, unsigned int *calls) {
+    if (ticks)
+        *ticks = g_log_dump_ticks;
+    if (calls)
+        *calls = g_log_dump_calls;
+}
+unsigned long long __Runtime_log_dump_now(void) { return ahs_now(); }
+void __Runtime_log_dump_account(unsigned long long ticks) {
+    g_log_dump_ticks += ticks;
+    g_log_dump_calls++;
 }
 void __Runtime_wait_io_iters(unsigned long long *iters) {
     if (iters)
@@ -335,6 +349,13 @@ __attribute__((unused)) static void rt_core_perf_snap_at_startio(void) {
 
 AieRC __Runtime_core_perf_setup(XAie_DevInst *dev, XAie_LocType tile) {
     AieRC rc;
+    /* XAie_LoadElfMem (EccStatus on by default) programs core counter 0 for ECC
+     * scrubbing: event value 1,000,000 and reset-on-own-event. Clear the reset
+     * event, or counter 0 reads (count mod 1e6). See
+     * jane/knowledge/2026-11-10-aie-rt-ecc-owns-core-perf-ctr0.md */
+    rc = XAie_PerfCounterResetControlSet(dev, tile, XAIE_CORE_MOD, 0, XAIE_EVENT_NONE_CORE);
+    if (rc != XAIE_OK)
+        return rc;
     rc = XAie_PerfCounterSet(dev, tile, XAIE_CORE_MOD, 0, 0);
     if (rc != XAIE_OK)
         return rc;
@@ -2459,9 +2480,11 @@ void __Runtime_read_kernel_log(XAie_DevInst *dev, XAie_LocType tile) {
 }
 
 void __Runtime_read_kernel_logs(XAie_DevInst *dev, const uint8_t *cols, const uint8_t *rows, uint32_t n) {
+    unsigned long long __ld_t0 = ahs_now();
     printf("[kernel_log] ===== Kernel Log (DM offset 0x%X, %u core tiles) =====\n", KLOG_DM_OFFSET, (unsigned)n);
     for (uint32_t i = 0; i < n; i++)
         __Runtime_read_kernel_log(dev, XAie_TileLoc(cols[i], rows[i]));
+    __Runtime_log_dump_account(ahs_now() - __ld_t0);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2870,6 +2893,26 @@ void __Runtime_perfcnt_read_mm2s_bd_finished_partition(XAie_DevInst *dev, uint8_
     }
 }
 
+/* Every VAddr cache sync goes through here so a failure is never silent.
+ * On the board (xaie_baremetal.c) both VAddr syncs are an unconditional
+ * Xil_DCache{Flush,Invalidate}Range and always return XAIE_OK; only the sim
+ * backend can fail (XAIE_INVALID_ADDRESS when the VA is not an XAie_MemAllocate
+ * block), and then the DMA reads/writes an unmapped address with no other sign.
+ * Count every failure (g_sync_err_n, readable by JTAG/host) and print the first
+ * RT_SYNC_ERR_PRINT, independent of AIEHLC_LOG. Cost on the board: one compare. */
+#define RT_SYNC_ERR_PRINT 4U
+unsigned long long g_sync_err_n;
+static inline AieRC rt_sync_rc(AieRC rc, const char *dir, const void *ptr, uint64_t n) {
+    if (rc != XAIE_OK) {
+        if (g_sync_err_n < RT_SYNC_ERR_PRINT)
+            printf("[aie_runtime] ERROR sync_for_%s(%p, %llu) rc=%d: range not synced%s\n", dir, ptr,
+                   (unsigned long long)n, (int)rc,
+                   g_sync_err_n + 1 == RT_SYNC_ERR_PRINT ? " (further errors only counted)" : "");
+        g_sync_err_n++;
+    }
+    return rc;
+}
+
 void __Runtime_sync_for_dev(XAie_DevInst *dev, void *ptr, size_t size) {
     if (rt_nc_covers((uintptr_t)ptr, (uintptr_t)ptr + size)) {
         __asm__ volatile("dsb sy" ::: "memory"); /* drain the write buffer; nothing is cached */
@@ -2877,7 +2920,7 @@ void __Runtime_sync_for_dev(XAie_DevInst *dev, void *ptr, size_t size) {
     }
     unsigned long long __sd_t0 = RT_PROF_TIC();
     if (dev) {
-        AieRC rc = XAie_MemSyncForDevVAddr(dev, ptr, (uint64_t)size);
+        AieRC rc = rt_sync_rc(XAie_MemSyncForDevVAddr(dev, ptr, (uint64_t)size), "dev", ptr, size);
         AIEHLC_LOG(printf("[aie_runtime] sync_for_dev(%p, %zu) via VAddr rc=%d\n", ptr, size, rc););
     } else {
         Xil_DCacheFlushRange((UINTPTR)ptr, size);
@@ -2891,8 +2934,12 @@ void __Runtime_sync_for_cpu(XAie_DevInst *dev, void *ptr, size_t size) {
      * control-packet ack token, so draining here ran the whole deferred queue
      * inside the kernel-ELF load (measured: kload 28 -> 84 us). The emitted
      * __aie_launch drains after host_canonicalized instead. */
+    if (rt_nc_covers((uintptr_t)ptr, (uintptr_t)ptr + size)) {
+        __asm__ volatile("dsb sy" ::: "memory"); /* uncached: nothing to invalidate */
+        return;
+    }
     if (dev) {
-        AieRC rc = XAie_MemSyncForCPUVAddr(dev, ptr, (uint64_t)size);
+        AieRC rc = rt_sync_rc(XAie_MemSyncForCPUVAddr(dev, ptr, (uint64_t)size), "cpu", ptr, size);
         AIEHLC_LOG(printf("[aie_runtime] sync_for_cpu(%p, %zu) via VAddr rc=%d\n", ptr, size, rc););
     } else {
         Xil_DCacheInvalidateRange((UINTPTR)ptr, size);
@@ -2943,6 +2990,17 @@ static inline void rt_wait_hook_step(void) {
 #define RT_DSYNC_MAX 16
 #define RT_DSYNC_CHUNK 16384U /* bytes of maintenance per wait_io poll step */
 #define RT_DEVWR_MAX 8
+/* A78 D-cache line. A registered range must own every line it touches: if an
+ * edge shared a line with CPU data, a CPU write to the neighbour would dirty a
+ * line holding OLD range bytes and its later write-back (eviction, or the
+ * neighbour's own clean) would land on top of what the array wrote. So both
+ * registrations refuse ranges whose ptr or size is not line aligned; the range
+ * then keeps the conservative per-launch maintenance. __Runtime_alloc blocks
+ * are always line aligned (64 B base, size rounded to 64 B). */
+#define RT_CACHE_LINE 64u
+static int rt_line_aligned(uintptr_t lo, size_t size) {
+    return ((lo | (uintptr_t)size) & (RT_CACHE_LINE - 1u)) == 0;
+}
 typedef struct {
     XAie_DevInst *dev;
     uintptr_t cur, end;
@@ -2959,6 +3017,11 @@ void __Runtime_buffer_device_written(void *ptr, size_t size) {
     if (!ptr || !size)
         return;
     uintptr_t lo = (uintptr_t)ptr, hi = lo + size;
+    if (!rt_line_aligned(lo, size)) {
+        printf("[aie_runtime] buffer_device_written: %p+%zu not %u B aligned; keeps clean+invalidate\n", ptr, size,
+               RT_CACHE_LINE);
+        return;
+    }
     for (int i = 0; i < g_devwr_n; i++)
         if (g_devwr[i].lo == lo && g_devwr[i].hi == hi)
             return;
@@ -2973,12 +3036,69 @@ void __Runtime_buffer_device_written(void *ptr, size_t size) {
     g_devwr_n++;
 }
 
+/* Device-only ranges: the CPU neither writes nor reads them after registration,
+ * so no line of them can be dirty (cleaned here, never written since) and no
+ * stale clean line can be consumed (the CPU does not read; the non-coherent DMA
+ * reads DDR). A launch arg inside one needs no maintenance at all. This is the
+ * "weights CIVAC once at load" + "device-only activation arena" class from
+ * steve/tasks/2026-11-13_launch-arg-cache-maintenance-price.md. */
+#define RT_DEVONLY_MAX 8
+static struct {
+    uintptr_t lo, hi;
+} g_devonly[RT_DEVONLY_MAX];
+static int g_devonly_n;
+static unsigned long long g_devonly_skip_bytes;
+
+int __Runtime_buffer_device_only(void *ptr, size_t size) {
+    if (!ptr || !size)
+        return -1;
+    uintptr_t lo = (uintptr_t)ptr, hi = lo + size;
+    if (hi < lo)
+        return -1;
+    if (!rt_line_aligned(lo, size)) {
+        printf("[aie_runtime] buffer_device_only: %p+%zu not %u B aligned; keeps per-launch clean\n", ptr, size,
+               RT_CACHE_LINE);
+        return -1;
+    }
+    int i = 0;
+    while (i < g_devonly_n && !(g_devonly[i].lo == lo && g_devonly[i].hi == hi))
+        i++;
+    if (i == g_devonly_n && g_devonly_n == RT_DEVONLY_MAX) {
+        printf("[aie_runtime] buffer_device_only: table full; %p keeps per-launch clean\n", ptr);
+        return -1;
+    }
+    /* Clean BEFORE the range is published: a launch that sees it registered may
+     * skip its maintenance, so no dirty line may exist at that point. Also done
+     * on a repeat registration (the caller wrote it again). */
+    Xil_DCacheFlushRange((UINTPTR)ptr, size);
+    if (i == g_devonly_n) {
+        g_devonly[i].lo = lo;
+        g_devonly[i].hi = hi;
+        g_devonly_n++;
+    }
+    return 0;
+}
+
+unsigned long long __Runtime_buffer_device_only_skipped(void) { return g_devonly_skip_bytes; }
+
+static int rt_devonly_covers(uintptr_t lo, uintptr_t hi) {
+    for (int i = 0; i < g_devonly_n; i++)
+        if (lo >= g_devonly[i].lo && hi <= g_devonly[i].hi)
+            return 1;
+    return 0;
+}
+
 void __Runtime_buffer_forget(void *ptr) {
     int k = 0;
     for (int i = 0; i < g_devwr_n; i++)
         if (g_devwr[i].lo != (uintptr_t)ptr)
             g_devwr[k++] = g_devwr[i];
     g_devwr_n = k;
+    k = 0;
+    for (int i = 0; i < g_devonly_n; i++)
+        if (g_devonly[i].lo != (uintptr_t)ptr)
+            g_devonly[k++] = g_devonly[i];
+    g_devonly_n = k;
 }
 
 static int rt_devwr_covers(uintptr_t lo, uintptr_t hi) {
@@ -3001,9 +3121,11 @@ static void rt_dsync_run(int inputs_only, size_t budget) {
             unsigned long long t0 = RT_PROF_TIC();
             size_t n = (size_t)(r->end - r->cur) < budget ? (size_t)(r->end - r->cur) : budget;
             if (r->inval_only)
-                (void)XAie_MemSyncForCPUVAddr(r->dev, (void *)r->cur, (uint64_t)n);
+                (void)rt_sync_rc(XAie_MemSyncForCPUVAddr(r->dev, (void *)r->cur, (uint64_t)n), "cpu",
+                                 (void *)r->cur, n);
             else
-                (void)XAie_MemSyncForDevVAddr(r->dev, (void *)r->cur, (uint64_t)n);
+                (void)rt_sync_rc(XAie_MemSyncForDevVAddr(r->dev, (void *)r->cur, (uint64_t)n), "dev",
+                                 (void *)r->cur, n);
             r->cur += n;
             budget -= n;
             RT_PROF_ADD(g_sync_dev_cyc, g_sync_dev_n, t0);
@@ -3034,9 +3156,71 @@ static inline void rt_dsync_drain_inputs(void) {
         rt_dsync_run(1, (size_t)-1);
 }
 
+/* Post-DMA invalidate (opt-in, AIEHLC_POST_DMA_INVAL).
+ *
+ * The queue above cleans/invalidates every argument BEFORE (or, for ranges
+ * registered with __Runtime_buffer_device_written, DURING) the data-plane DMA,
+ * and nothing after it. On ARMv8 Normal cacheable memory a line may be
+ * allocated speculatively at any time (hardware prefetch, speculative loads),
+ * and a line that shares a 64-B granule with CPU-touched data (a 16-B aligned
+ * XAie_MemAllocate buffer's head/tail) is refilled on purpose. A line refilled
+ * after its invalidate but before the S2MM wrote it holds the PRE-DMA bytes,
+ * and the CPU reads those after the launch. Linux arm64 invalidates again on
+ * dma_unmap(FROM_DEVICE) for exactly this reason; rt_dmabuf (runtime design
+ * note R5) does to_cpu after the S2MM wait.
+ *   0 (default) = old behaviour, nothing after the DMA
+ *   1           = invalidate every __Runtime_buffer_device_written range of
+ *                 this launch after the DMA (outputs the caller declared)
+ *   2           = invalidate EVERY queued argument after the DMA (the runtime
+ *                 cannot tell inputs from outputs; conservative)
+ * Cost = one more DC CIVAC pass over the chosen bytes on clean/absent lines;
+ * counted in g_post_inval_cyc / g_post_inval_bytes. */
+#ifndef AIEHLC_POST_DMA_INVAL
+#define AIEHLC_POST_DMA_INVAL 0
+#endif
+#if AIEHLC_POST_DMA_INVAL
+static rt_dsync_rng g_post[RT_DSYNC_MAX];
+static int g_post_n;
+unsigned long long g_post_inval_cyc, g_post_inval_n, g_post_inval_bytes;
+
+static void rt_post_record(XAie_DevInst *dev, uintptr_t lo, uintptr_t hi, int dev_written) {
+    if (AIEHLC_POST_DMA_INVAL == 1 && !dev_written)
+        return;
+    for (int i = 0; i < g_post_n; i++)
+        if (g_post[i].dev == dev && g_post[i].cur == lo && g_post[i].end == hi)
+            return;
+    if (g_post_n == RT_DSYNC_MAX) {
+        printf("[aie_runtime] post_dma_inval: table full; %p not re-invalidated\n", (void *)lo);
+        return;
+    }
+    g_post[g_post_n].dev = dev;
+    g_post[g_post_n].cur = lo;
+    g_post[g_post_n].end = hi;
+    g_post[g_post_n].inval_only = 1;
+    g_post_n++;
+}
+
+/* Runs after the launch's DMA is complete (called from __Runtime_dsync_drain,
+ * which the emitted __aie_launch calls after host_canonicalized returns). */
+static void rt_post_inval_run(void) {
+    for (int i = 0; i < g_post_n; i++) {
+        unsigned long long t0 = RT_PROF_TIC();
+        size_t n = (size_t)(g_post[i].end - g_post[i].cur);
+        __Runtime_sync_for_cpu(g_post[i].dev, (void *)g_post[i].cur, n);
+        g_post_inval_bytes += n;
+        RT_PROF_ADD(g_post_inval_cyc, g_post_inval_n, t0);
+    }
+    g_post_n = 0;
+}
+#else
+#define rt_post_record(dev, lo, hi, dev_written) ((void)0)
+#define rt_post_inval_run() ((void)0)
+#endif
+
 void __Runtime_dsync_drain(void) {
     if (g_dsync_n)
         rt_dsync_run(0, (size_t)-1);
+    rt_post_inval_run();
 }
 
 void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size) {
@@ -3046,7 +3230,16 @@ void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size) 
 #endif
     if (!ptr || !size)
         return;
+    if (rt_devonly_covers((uintptr_t)ptr, (uintptr_t)ptr + size)) {
+        g_devonly_skip_bytes += size; /* cleaned at registration; CPU has not touched it since */
+        return;
+    }
     if (!dev || g_dsync_n == RT_DSYNC_MAX) {
+#if AIEHLC_POST_DMA_INVAL
+        if (!rt_nc_covers((uintptr_t)ptr, (uintptr_t)ptr + size))
+            rt_post_record(dev, (uintptr_t)ptr, (uintptr_t)ptr + size,
+                           rt_devwr_covers((uintptr_t)ptr, (uintptr_t)ptr + size));
+#endif
         __Runtime_sync_for_dev(dev, ptr, size);
         return;
     }
@@ -3059,6 +3252,7 @@ void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size) 
     g_dsync[g_dsync_n].cur = lo;
     g_dsync[g_dsync_n].end = hi;
     g_dsync[g_dsync_n].inval_only = rt_devwr_covers(lo, hi);
+    rt_post_record(dev, lo, hi, g_dsync[g_dsync_n].inval_only);
     g_dsync_n++;
 }
 
@@ -7348,10 +7542,27 @@ static void rt_pm_warm_verify(XAie_DevInst *dev, XAie_LocType loc, const unsigne
 #endif
 #endif
 
-/* mode 1: skip every zero-filled (.bss-only) segment (unsafe if the kernel
- *         reads a zero-initialised static before writing it).
+/* mode 1: skip every zero-filled (.bss-only) segment larger than
+ *         AIEHLC_SKIP_BSS_KEEP_SMALL bytes. Smaller ones are still zero-filled:
+ *         chess gives each scalar static its own tiny .bss segment (e.g. the
+ *         4-byte aiehlc_blk_cursor of every load_buffer port), and those rely on
+ *         C zero-init. Skipping them left the cursor at whatever the previous
+ *         ELF had in that word, so blk checks ran at a wrong round phase (false
+ *         BLKE on every block). Big segments (port buffers, scratch arrays) are
+ *         still skipped; they are unsafe only if the kernel reads them before
+ *         writing them.
  * mode 2: skip only .bss segments made entirely of DMA port buffers; all other
  *         .bss is still zero-filled. */
+#ifndef AIEHLC_SKIP_BSS_KEEP_SMALL
+#define AIEHLC_SKIP_BSS_KEEP_SMALL 64U
+#endif
+static int __Runtime_bss_seg_skippable(const unsigned char *elfmem, const Elf32_Phdr *phdr, int mode) {
+    if (phdr->p_filesz != 0U)
+        return 0;
+    if (mode == 1)
+        return phdr->p_memsz > (u32)(AIEHLC_SKIP_BSS_KEEP_SMALL);
+    return __Runtime_elf_range_is_port_bufs(elfmem, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz);
+}
 static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc, const unsigned char *elfmem,
                                              int mode) {
     g_elf_load_seq++;
@@ -7367,8 +7578,7 @@ static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc
         const Elf32_Phdr *phdr = (const Elf32_Phdr *)(elfmem + ehdr->e_phoff + (u64)ph * sizeof(Elf32_Phdr));
         if (phdr->p_type != (u32)PT_LOAD)
             continue;
-        if (phdr->p_filesz == 0U &&
-            (mode == 1 || __Runtime_elf_range_is_port_bufs(elfmem, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz))) {
+        if (__Runtime_bss_seg_skippable(elfmem, phdr, mode)) {
             skipped++;
             skipped_bytes += phdr->p_memsz;
             continue;

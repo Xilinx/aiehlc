@@ -445,6 +445,13 @@ inline void __Runtime_wait(struct_ioevent ev) { __Runtime_wait_io(g_DevInst, ev)
 void __Runtime_read_kernel_log(XAie_DevInst *dev, XAie_LocType tile);
 // Same for n core tiles given as parallel (col, row) arrays.
 void __Runtime_read_kernel_logs(XAie_DevInst *dev, const uint8_t *cols, const uint8_t *rows, uint32_t n);
+// Always-on host time spent dumping logs (kernel klog + AIE_DEBUG_LOG snapshot), in the
+// same generic-timer ticks as __Runtime_host_split_wait_ticks / XTime. aiehlc emits the
+// dump at the end of the generated launch function, so a caller timing the launch can
+// subtract this delta: real_ticks = (t1 - t0) - (log_ticks_after - log_ticks_before).
+void __Runtime_log_dump_ticks(unsigned long long *ticks, unsigned int *calls);
+void __Runtime_log_dump_account(unsigned long long ticks);
+unsigned long long __Runtime_log_dump_now(void);
 
 // ---------------------------------------------------------------------------
 // Performance counter APIs for core tile memory module
@@ -1004,9 +1011,25 @@ void __Runtime_dsync_drain(void);
 // Contract: the array writes [ptr, ptr+size) and the CPU does not write it
 // between launches (it only reads it after a launch returns). Flushes it once;
 // afterwards its deferred maintenance is invalidate-only and may overlap the
-// launch's own DMA.
+// launch's own DMA. ptr/size not 64 B aligned: ignored (keeps clean+invalidate).
 void __Runtime_buffer_device_written(void *ptr, size_t size);
-// Drop a __Runtime_buffer_device_written registration (call before freeing it).
+// Contract: after this call the CPU neither writes NOR reads [ptr, ptr+size)
+// until __Runtime_buffer_forget(ptr): the array is its only user (weights after
+// load, device-written/device-read activation arenas). Cleans+invalidates it
+// ONCE now; afterwards __Runtime_sync_for_dev_deferred does no maintenance at
+// all for a launch arg contained in it. Call AFTER the last CPU write (calling
+// it again on the same range = "I wrote it again", cleans again). Explicit
+// __Runtime_sync_for_dev/_for_cpu still do their work (debug reads, reloads).
+// ptr and size must be 64 B (cache-line) multiples -- a whole __Runtime_alloc
+// block is; a range sharing a line with CPU data could be overwritten by that
+// line's write-back.
+// Returns 0, or -1 (bad args / unaligned / table full: the range keeps
+// per-launch CIVAC).
+int __Runtime_buffer_device_only(void *ptr, size_t size);
+// Bytes of launch-arg maintenance skipped because of device_only (stats).
+unsigned long long __Runtime_buffer_device_only_skipped(void);
+// Drop a __Runtime_buffer_device_written or _device_only registration whose
+// range starts at ptr (call before freeing it or handing it back to the CPU).
 void __Runtime_buffer_forget(void *ptr);
 // Allocate a CPU-written DMA buffer (<= 2 MB) mapped Normal Non-cacheable: the
 // CPU's stores reach DDR directly and launches skip its cache maintenance. Falls

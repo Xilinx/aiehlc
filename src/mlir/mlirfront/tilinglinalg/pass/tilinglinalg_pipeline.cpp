@@ -1716,13 +1716,22 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
             // whatever is still queued before control returns to the caller.
             auto emitSyncCalls = [&](llvm::raw_fd_ostream &os, unsigned nDdrArgs, const std::string &indent,
                                      bool beforeLaunch) {
-                if (!beforeLaunch) {
-                    os << indent << "__Runtime_dsync_drain();\n";
-                    return;
-                }
                 unsigned limit = nDdrArgs;
                 if (limit > tensors.size())
                     limit = tensors.size();
+                if (!beforeLaunch) {
+                    os << indent << "__Runtime_dsync_drain();\n";
+                    // The pre-launch clean+invalidate is NOT enough for outputs: while the
+                    // array runs, the A78 may speculatively (pre)fetch output lines back
+                    // into the cache, and the CPU would then read the old bytes (palmyra
+                    // 2026-11-15: FA D40 read 64 B lines of its 0xff memset; the same
+                    // lines were correct in DDR after a fresh invalidate). Invalidate every
+                    // output after the launch has completed, before control returns.
+                    for (unsigned i = 0; i < limit; ++i)
+                        if (!tensors[i].isInput)
+                            os << indent << "__Runtime_sync_for_cpu(dev, _t" << i << ", _s" << i << ");\n";
+                    return;
+                }
                 for (unsigned i = 0; i < limit; ++i) {
                     os << indent << "__Runtime_sync_for_dev_deferred(dev, _t" << i << ", _s" << i << ");\n";
                 }
@@ -1744,7 +1753,7 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
                 for (unsigned i = 0; i < numDdrArgs; ++i)
                     stream << ", _t" << i;
                 stream << ");\n";
-                // No post-launch sync needed (cache lines already invalidated)
+                // Post-launch: drain the deferred queue, then invalidate the outputs
                 emitSyncCalls(stream, numDdrArgs, "    ", /*beforeLaunch=*/false);
                 stream << "}\n";
 
@@ -1769,7 +1778,7 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
                 for (unsigned i = 0; i < numDdrArgs; ++i)
                     stream << ", _t" << i;
                 stream << ");\n";
-                // No post-launch sync needed (cache lines already invalidated)
+                // Post-launch: drain the deferred queue, then invalidate the outputs
                 emitSyncCalls(stream, numDdrArgs, "    ", /*beforeLaunch=*/false);
                 stream << "    __Runtime_explicit_teardown(dev);\n";
                 stream << "}\n";
@@ -1896,7 +1905,17 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
                 stream << ", buf_" << i;
             }
             stream << ");\n";
-            // No post-launch sync needed — cache lines already invalidated by SyncForDev
+            // Invalidate outputs after the run: lines may have been speculatively refetched
+            // while the array wrote DDR (see emitSyncCalls).
+            for (unsigned i = 0; i < tensors.size(); ++i) {
+                if (tensors[i].isInput)
+                    continue;
+                int64_t totalElements = 1;
+                for (auto dim : tensors[i].shape)
+                    totalElements *= dim;
+                int64_t totalBytes = totalElements * (tensors[i].elementBitWidth / 8);
+                stream << "    __Runtime_sync_for_cpu(dev, buf_" << i << ", " << totalBytes << ");\n";
+            }
             stream << "\n";
 
             stream << "    printf(\"------------after matmul--------\\n\");\n\n";
