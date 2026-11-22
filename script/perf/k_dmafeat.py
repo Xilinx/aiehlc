@@ -76,6 +76,12 @@ CORRCLS nan (feature constant inside a class) is reported, not a failure.
 usage: k_dmafeat.py --build-root DIR --resid KSITE.out off=<log> aot-kco=<log>
        k_dmafeat.py --perch --build-root DIR off=<log> aot-kco=<log>
        k_dmafeat.py --perch --ddrt [--tsv FILE] --build-root DIR off=<log> aot-kco=<log>
+       k_dmafeat.py --perch --ddrt --dwfit ... --out-params J   (also write the fitted params json)
+       k_dmafeat.py --perch --ddrt --dwpredict --dw-params J --dw-tsv F --build-root DIR off=<log> aot-kco=<log>
+             (M3.1.2.2 PD: dw_hat = max(0, sum w*f + b) from the frozen json, static features only, no fit;
+              KDWP cfg=<c> sites=<n> params=<md5 of J>; KDWP ALL rows tsv PASS|FAIL; DW_TSV like --dwfit)
+       k_dmafeat.py --dwpredict-audit   (AST: no DW_MEAS name / fit fn in the predict path; last line
+             KDWP AUDIT meas_at_predict=<n>)
        k_dmafeat.py --selftest      (last line: KDMAF SELFTEST PASS (k/n))
 """
 from __future__ import annotations
@@ -534,6 +540,7 @@ def main_dwfit(a):
     ok = True
     audit = 0
     dwrows, delta = [], []
+    allp = {}
     for spec in a.runs:
         cfg, logs = spec.split("=", 1)
         runs = []
@@ -571,6 +578,8 @@ def main_dwfit(a):
                   % (cfg, c, a.fit_run, len(ss), ",".join(p["feats"]) or "-", len(p["feats"]) + 1,
                      ",".join("%.6g" % w for w in p["w"]) or "-", p["b"], r2_score(ya, pa) if pts else float("nan"),
                      mr, p["loo_maxrel"], p["loo_share"]))
+        allp[cfg] = {c: dict(feats=list(params[c]["feats"]), w=list(params[c]["w"]), b=params[c]["b"],
+                             fit_runs=[a.fit_run]) for c in DW_CLS}
         hat = {}
         for s in fsites:
             h, bad = dw_audit(params[s["kind"]], s)
@@ -601,11 +610,102 @@ def main_dwfit(a):
                   % (cfg, run, len(sites), r2, sr, sh, int(same), "PASS" if good else "FAIL"))
     write_rows(a.dw_tsv, DW_TSV, dwrows)
     write_rows(a.delta_tsv, DELTA_TSV, delta)
+    if getattr(a, "out_params", None):
+        write_dw_params(a.out_params, allp, [a.fit_run])
+        print("KDWPARAMS out=%s md5=%s" % (a.out_params, file_md5(a.out_params)))
     print("KDW AUDIT meas_at_predict=%d" % audit)
     print("KDELTA term=dw rows=%d tsv=%s" % (len(delta), a.delta_tsv))
     ok &= audit == 0
     print("KDW ALL dwrows=%d deltarows=%d %s" % (len(dwrows), len(delta), "PASS" if ok else "FAIL"))
     return 0 if ok else 1
+
+
+# ------------------------------------------------------------------ frozen dw params: --out-params / --dwpredict
+DW_FIT_FNS = ("dw_fit_lin", "dw_select", "dw_loo", "dw_errs", "nnls", "main_dwfit", "lstsq")
+
+
+def file_md5(path):
+    import hashlib
+    return hashlib.md5(open(path, "rb").read()).hexdigest()
+
+
+def write_dw_params(path, allp, fit_runs):
+    """kdw json: {model, board, fit_runs, feats_all, params: {cfg: {cls: {feats, w, b, fit_runs}}}}; floats are
+    written with repr (json) so --dwpredict reproduces dw_hat bit for bit"""
+    import json
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    doc = dict(model="k_dmafeat dw_hat = max(0, sum_f w_f x_f + b) per (cfg, cls); M3.1.1.2c PW (5f0117f5)",
+               board="palmyra213", fit_runs=list(fit_runs), feats_all=list(DW_FEATS), params=allp)
+    with open(path, "w") as f:
+        json.dump(doc, f, indent=1, sort_keys=True)
+        f.write("\n")
+
+
+def dw_load_params(path):
+    """{cfg: {cls: dict(feats, w, b)}} from a kdw json (static parameters only)"""
+    import json
+    doc = json.load(open(path))
+    return {cfg: {c: dict(feats=tuple(q["feats"]), w=[float(v) for v in q["w"]], b=float(q["b"]))
+                  for c, q in by.items()} for cfg, by in doc["params"].items()}
+
+
+def dwp_rows(cfg, sites, pc):
+    """DW_TSV rows of one cfg: dw_hat from the static features (dw_static) and the frozen params only"""
+    rows = []
+    for s in sites:
+        x = dw_static(s)
+        h = dw_predict(pc[s["kind"]], x)
+        rows.append((cfg, str(s["part"]), s["site"], s["kind"], str(s["launches"]), "%.6g" % s["ddr_t"],
+                     "%.6g" % h))
+    return rows
+
+
+def main_dwpredict(a):
+    """--dwpredict --dw-params J: dw_hat per site from the frozen json, no fit; build dir + the log's site table"""
+    pp = dw_load_params(a.dw_params)
+    md5 = file_md5(a.dw_params)
+    ok = True
+    out = []
+    for spec in a.runs:
+        cfg, logs = spec.split("=", 1)
+        log = logs.split(",")[0]
+        sites = site_table(cfg, log, a.build_root)
+        good = cfg in pp and all(s["kind"] in pp[cfg] for s in sites)
+        rows = dwp_rows(cfg, sites, pp[cfg]) if good else []
+        ok &= good and len(rows) == len(sites) > 0
+        out += rows
+        print("KDWP cfg=%s sites=%d params=%s" % (cfg, len(rows), md5))
+    write_rows(a.dw_tsv, DW_TSV, out)
+    print("KDWP ALL rows=%d tsv=%s %s" % (len(out), a.dw_tsv, "PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
+def dwpredict_audit():
+    """AST check of the --dwpredict path: no measured name (DW_MEAS, exact) and no fit function (DW_FIT_FNS) may
+    appear in DWP_FNS. Last line: KDWP AUDIT meas_at_predict=<n>"""
+    import ast
+    import inspect
+    bad = 0
+    for fn in DWP_FNS:
+        names = set()
+        for n in ast.walk(ast.parse(inspect.getsource(fn))):
+            if isinstance(n, ast.Name):
+                names.add(n.id)
+            elif isinstance(n, ast.Attribute):
+                names.add(n.attr)
+            elif isinstance(n, ast.arg):
+                names.add(n.arg)
+            elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+                names.add(n.value)
+        meas = sorted(names & set(DW_MEAS))
+        fit = sorted(names & set(DW_FIT_FNS))
+        bad += len(meas) + len(fit)
+        print("KDWP AUDIT fn=%s meas=%s fit=%s" % (fn.__name__, ",".join(meas) or "-", ",".join(fit) or "-"))
+    print("KDWP AUDIT meas_at_predict=%d" % bad)
+    return bad
+
+
+DWP_FNS = (dw_static, dw_predict, dw_load_params, dwp_rows, main_dwpredict)
 
 
 def _site_ch(kch, r, ks):
@@ -726,6 +826,22 @@ def selftest():
              stream=1.0, dwait_ms=10.0, site_ms=20.0)
     h, bad = dw_audit(dict(feats=("ddr_t_ms", "maxch_ms"), w=[1.0, 2.0], b=0.5), s)
     chk("dw_audit_static", bad == 0 and abs(h - 3.5) < 1e-12 and r2_score([1, 2, 3], [1, 2, 3]) == 1.0)
+    # frozen params: json round trip reproduces dw_hat exactly; the predict path audit is clean
+    import io
+    import contextlib
+    import tempfile
+    pf = dict(feats=("ddr_t_ms", "bd_k"), w=[0.1 + 0.2, 1.0 / 3.0], b=-0.07)
+    with tempfile.TemporaryDirectory() as td:
+        jp = os.path.join(td, "kdw.json")
+        write_dw_params(jp, {"off": {c: dict(feats=list(pf["feats"]), w=pf["w"], b=pf["b"], fit_runs=["a"])
+                                     for c in DW_CLS}}, ["a"])
+        lp = dw_load_params(jp)
+        rr = dwp_rows("off", [dict(s, part=3, site="conv3", kind="conv", launches=2)], lp["off"])
+    chk("dwp_roundtrip", lp["off"]["fa"]["w"] == pf["w"] and rr[0][-1] == "%.6g" % dw_predict(pf, dw_static(s)))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        na = dwpredict_audit()
+    chk("dwp_audit_clean", na == 0 and buf.getvalue().splitlines()[-1] == "KDWP AUDIT meas_at_predict=0")
     k = sum(cases)
     print("KDMAF SELFTEST %s (%d/%d)" % ("PASS" if k == len(cases) else "FAIL", k, len(cases)))
     return 0 if k == len(cases) else 1
@@ -743,13 +859,23 @@ def main(argv=None):
     ap.add_argument("--fit-run", default="a", help="with --dwfit: the run the dw params are fitted on")
     ap.add_argument("--dw-tsv", help="with --dwfit: per-site dw_hat TSV (DW_TSV)")
     ap.add_argument("--delta-tsv", help="with --dwfit: per run/site dw_hat - dw_meas TSV (DELTA_TSV)")
+    ap.add_argument("--out-params", help="with --dwfit: write the fitted per (cfg, cls) params json (kdw)")
+    ap.add_argument("--dwpredict", action="store_true", help="with --perch --ddrt: dw_hat from --dw-params, no fit")
+    ap.add_argument("--dw-params", help="with --dwpredict: frozen kdw params json")
+    ap.add_argument("--dwpredict-audit", action="store_true", help="AST audit of the --dwpredict path")
     ap.add_argument("runs", nargs="*", help="cfg=log (with --dwfit: cfg=log_a,log_b,log_c)")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
+    if a.dwpredict_audit:
+        return 0 if dwpredict_audit() == 0 else 1
     if a.perch:
         if not (a.build_root and a.runs):
             ap.error("--perch needs --build-root and cfg=log runs")
+        if a.dwpredict:
+            if not (a.ddrt and a.dw_params and a.dw_tsv):
+                ap.error("--dwpredict needs --ddrt, --dw-params and --dw-tsv")
+            return main_dwpredict(a)
         if a.dwfit:
             if not (a.ddrt and a.dw_tsv and a.delta_tsv):
                 ap.error("--dwfit needs --ddrt, --dw-tsv and --delta-tsv")
