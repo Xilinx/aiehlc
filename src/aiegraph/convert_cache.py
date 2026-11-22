@@ -1,7 +1,10 @@
 """Content-addressed cache of ``embedded_convert`` output across build dirs (P3 of -fast).
 
-Opt-in: ``AIEGRAPH_CONVERT_CACHE=<dir>``. Unset = nothing is read or written and
-the conversion behaves exactly as before.
+Opt-in: ``AIEGRAPH_CONVERT_CACHE=<dir>``, or ``AIEHLC_FAST=1`` (aiehlc.sh -fast /
+build_unet.py --fast), which uses ``${XDG_CACHE_HOME:-~/.cache}/aiehlc/convert`` when
+AIEGRAPH_CONVERT_CACHE is unset (same rule as the F2 kernel .o cache in hostcompile.sh).
+An explicit AIEGRAPH_CONVERT_CACHE wins. Neither set = nothing is read or written and
+the conversion behaves exactly as before. No size cap yet: a UNet entry is ~4.3 GB.
 
 The in-workdir reuse in ``embedded_convert`` only helps when the same workdir is
 converted twice; the build scripts wipe ``ag_work`` first, so every build redoes the
@@ -15,7 +18,7 @@ Key (sha256 over):
   * TVM: python dir git HEAD + libtvm.so size/mtime
   * the repo root path (generated Makefiles point into it)
   * env vars AIEGRAPH_* / AIE_* / AIEK_* / AIEHLC_* / CC / CROSS / HOST_CC / EXTRA_DEFS,
-    except the cache knobs themselves and AIEHLC_ROOT (covered by the repo root)
+    except the cache knobs themselves (incl. AIEHLC_FAST) and AIEHLC_ROOT (covered by the repo root)
 
 Entry = the workdir right after conversion (before any offload), plus meta.json with
 the original workdir and image paths. On restore, text files that mention the old
@@ -34,12 +37,15 @@ ENV = "AIEGRAPH_CONVERT_CACHE"
 _KEY_VERSION = 1
 _ENV_PREFIXES = ("AIEGRAPH_", "AIE_", "AIEK_", "AIEHLC_")
 _ENV_EXACT = ("CC", "CROSS", "HOST_CC", "EXTRA_DEFS")
-_ENV_SKIP = {ENV, "AIEHLC_KOBJ_CACHE", "AIEHLC_ROOT"}
+_ENV_SKIP = {ENV, "AIEHLC_KOBJ_CACHE", "AIEHLC_ROOT", "AIEHLC_FAST"}
 _TEXT_MAX = 64 << 20            # do not try to relocate text files bigger than this
 
 
 def cache_dir():
     d = os.environ.get(ENV, "").strip()
+    if not d and os.environ.get("AIEHLC_FAST", "0").strip() == "1":
+        xdg = os.environ.get("XDG_CACHE_HOME", "").strip() or str(Path.home() / ".cache")
+        d = str(Path(xdg) / "aiehlc" / "convert")
     return Path(d).resolve() if d else None
 
 
