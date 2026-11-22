@@ -97,6 +97,96 @@ def _stamp(spec) -> str:
     return h.hexdigest()
 
 
+# -fast: share the aiehlc output tree (worklocal) across build dirs, keyed by _stamp (everything
+# aiehlc reads, incl. AIEHLC_SH_ARGS/EXTRA_DEFS and the aiehlc binary). UNet: the aiehlc stage is
+# ~395 s of a 698 s warm --fast build even with every kernel .o cached; an entry is ~1.3 GB.
+# AIEHLC_WL_CACHE=<dir> or AIEHLC_FAST=1 (default ${XDG_CACHE_HOME:-~/.cache}/aiehlc/wl);
+# LRU-pruned to AIEHLC_WL_CACHE_MAX_MB (default 8192) after each store.
+_WL_ENV, _WL_MAX_ENV = "AIEHLC_WL_CACHE", "AIEHLC_WL_CACHE_MAX_MB"
+
+
+def _wl_cache_dir():
+    d = os.environ.get(_WL_ENV, "").strip()
+    if not d and os.environ.get("AIEHLC_FAST", "0").strip() == "1":
+        xdg = os.environ.get("XDG_CACHE_HOME", "").strip() or str(Path.home() / ".cache")
+        d = str(Path(xdg) / "aiehlc" / "wl")
+    return Path(d).resolve() if d else None
+
+
+def _wl_cache_get(stamp: str, dest: Path, log: Path) -> bool:
+    c = _wl_cache_dir()
+    e = c / stamp if c else None
+    if e is None or not (e / "DONE").is_file() or not (e / "worklocal" / "host.cc").is_file():
+        return False
+    tmp = dest.with_name(dest.name + f".get{os.getpid()}")
+    try:
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.copytree(e / "worklocal", tmp, symlinks=True)
+        if (e / "aiehlc.log").is_file():
+            shutil.copy2(e / "aiehlc.log", log)
+    except (OSError, shutil.Error):                 # entry pruned under us -> miss
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+    if dest.exists():
+        shutil.rmtree(dest)
+    tmp.rename(dest)
+    (e / "DONE").touch()                            # LRU hint
+    return True
+
+
+def _wl_cache_put(stamp: str, dest: Path, log: Path) -> None:
+    c = _wl_cache_dir()
+    if c is None:
+        return
+    e = c / stamp
+    if (e / "DONE").is_file():
+        return
+    tmp = c / f".tmp-{stamp}-{os.getpid()}"
+    try:
+        c.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(dest, tmp / "worklocal", symlinks=True)
+        if log.is_file():
+            shutil.copy2(log, tmp / "aiehlc.log")
+        (tmp / "DONE").write_text(stamp + "\n")
+        tmp.rename(e)
+    except OSError as ex:                           # never fail a build on the cache
+        print(f"  [build] aiehlc wl cache: store failed: {ex}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return
+    try:
+        _wl_cache_prune(c, keep=stamp)
+    except Exception as ex:                         # noqa: BLE001
+        print(f"  [build] aiehlc wl cache: prune failed: {ex}")
+
+
+def _du(p: Path) -> int:
+    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file() and not f.is_symlink())
+
+
+def _wl_cache_prune(c: Path, keep: str = None) -> list:
+    cap = int(os.environ.get(_WL_MAX_ENV, "8192")) << 20
+    now, gone = time.time(), []
+    for t in c.glob(".tmp-*"):                      # crashed stores
+        if now - t.stat().st_mtime > 86400:
+            shutil.rmtree(t, ignore_errors=True)
+    ents = sorted(((e / "DONE").stat().st_mtime, e) for e in c.iterdir()
+                  if not e.name.startswith(".") and (e / "DONE").is_file())
+    sizes = {e: _du(e) for _, e in ents}
+    total = sum(sizes.values())
+    for _, e in ents:                               # oldest first
+        if total <= cap:
+            break
+        if e.name == keep:
+            continue
+        shutil.rmtree(e, ignore_errors=True)
+        total -= sizes[e]
+        gone.append(e.name)
+    if gone:
+        print(f"  [build] aiehlc wl cache: pruned {len(gone)} entr{'y' if len(gone) == 1 else 'ies'}, "
+              f"now {total >> 20} MB")
+    return gone
+
+
 def aiehlc_compile(spec, out_dir, aie_version: int = 5, verbose: bool = True) -> dict:
     """Run aiehlc on the kernel source. Returns ``{"ok", "worklocal"|"reason", "log", "cached"}``."""
     work = Path(out_dir) / "aiek" / spec.name
@@ -106,6 +196,11 @@ def aiehlc_compile(spec, out_dir, aie_version: int = 5, verbose: bool = True) ->
     if (dest / "host.cc").is_file() and stamp_file.is_file() \
             and stamp_file.read_text().strip() == stamp:
         return {"ok": True, "worklocal": dest, "log": str(log), "cached": True}
+    t_get = time.time()
+    if _wl_cache_get(stamp, dest, log):
+        stamp_file.write_text(stamp + "\n")
+        print(f"  [build] aiehlc wl cache hit {stamp} -> {dest} ({time.time() - t_get:.1f}s)")
+        return {"ok": True, "worklocal": dest, "log": str(log), "cached": "wl"}
 
     # Scratch next to the cache, not in /tmp: aiehlc's aout/ is large and /tmp
     # is often a small shared volume (a full one fails the build mid-way).
@@ -135,6 +230,7 @@ def aiehlc_compile(spec, out_dir, aie_version: int = 5, verbose: bool = True) ->
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     stamp_file.write_text(stamp + "\n")
+    _wl_cache_put(stamp, dest, log)
     if verbose:
         print(f"  [build] aiehlc {spec.source.name} -> {dest} ({time.time() - start:.0f}s)")
     return {"ok": True, "worklocal": dest, "log": str(log), "cached": False}
