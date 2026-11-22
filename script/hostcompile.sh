@@ -65,6 +65,77 @@ kernel_stamp() {
     } | sha256sum | cut -d' ' -f1
 }
 
+# --- F2 (-fast): content-addressed kernel object cache, shared across build dirs ------------------
+# AIEHLC_KOBJ_CACHE=<dir> turns it on (unset/empty = off, behaviour unchanged). The key extends
+# kernel_stamp with what kc.sh reads besides kernel.cc: the bcf the prx names (bridge.cfg), the
+# ctrl-packet sites/manifest and host.cc (aot-kco writes host_ctrlpkt_<f>.h from them), every header
+# on kc.sh's include path that can change per checkout (worklocal *.h minus generated ctrl-packet
+# headers, src/mlir/runtime, include/) and the AIE tool path. An entry stores build/kernel.o, the
+# linked build/kernel ELF, kernel.calltree and the files kc.sh writes into its cwd for this kernel
+# (host_ctrlpkt_<f>.h, kernel_<f>_ctrlpkt.h, ctrlpkt_<f>/). Measured 2026-11-22 on UNet m3121 vs
+# m31223: same key -> loaded sections of all 88 .o identical (only .debug_* differ by path).
+kobj_cache_key() {
+    local fn="$1" f bcfname
+    {
+        kernel_stamp "$fn"
+        bcfname=$(sed -nE 's/.*id="bridge.cfg" value="([^"]+)".*/\1/p' "${WORKLOCAL_DIR}/aieml.prx" 2>/dev/null | head -1)
+        for f in ${bcfname:+"${WORKLOCAL_DIR}/${bcfname}"} \
+                 "${WORKLOCAL_DIR}/ctrlpkt_sites_${fn}.txt" "${WORKLOCAL_DIR}/ctrlpkt_manifest_${fn}.json" \
+                 "${WORKLOCAL_DIR}/ctrlpkt_sites.txt" "${WORKLOCAL_DIR}/ctrlpkt_manifest.json"; do
+            [ -f "$f" ] && { echo "$(basename "$f")"; sha256sum < "$f"; }
+        done
+        if [ -f "${WORKLOCAL_DIR}/ctrlpkt_sites_${fn}.txt" ] || [ -f "${WORKLOCAL_DIR}/ctrlpkt_sites.txt" ]; then
+            echo host.cc; sha256sum < "${WORKLOCAL_DIR}/host.cc" 2>/dev/null
+        fi
+        for f in "${WORKLOCAL_DIR}"/*.h; do
+            case "$(basename "$f")" in host_ctrlpkt*.h|kernel_*_ctrlpkt.h) continue ;; esac
+            [ -f "$f" ] && { echo "$(basename "$f")"; sha256sum < "$f"; }
+        done
+        find "${AIEHLC_ROOT}/src/mlir/runtime" "${AIEHLC_ROOT}/include" -type f \( -name '*.h' -o -name '*.hpp' \) \
+            2>/dev/null | LC_ALL=C sort | xargs -r sha256sum | sed "s#${AIEHLC_ROOT}/##"
+        for f in "${AIEHLC_ROOT}/script/build_ctrlpkt_tool.sh" "${AIEHLC_ROOT}/script/hostcompile.sh"; do
+            [ -f "$f" ] && sha256sum < "$f"
+        done
+        echo "${XILINX_VITIS_AIETOOLS:-} ${XILINX_VITIS:-} ${LLVM_AIE_PATH:-}"
+    } | sha256sum | cut -d' ' -f1
+}
+
+# kobj_cache_get <fn> <key>: restore an entry into BUILD_DIR / cwd. rc 0 = hit.
+kobj_cache_get() {
+    local fn="$1" e="${AIEHLC_KOBJ_CACHE}/$2" f
+    [ -f "$e/kernel.o" ] && [ -f "$e/DONE" ] || return 1
+    cp -p "$e/kernel.o" "${BUILD_DIR}/kernel.o" || return 1
+    for f in kernel kernel.calltree; do [ -f "$e/$f" ] && cp -p "$e/$f" "${BUILD_DIR}/$f"; done
+    if [ -d "$e/cwd" ]; then
+        for f in "$e/cwd"/* ; do
+            [ -e "$f" ] || continue
+            rm -rf "./$(basename "$f")"; cp -rp "$f" ./
+        done
+    fi
+    touch "$e/DONE"   # LRU hint for a later prune
+    echo "[hostcompile] KOBJ cache hit ${fn} ($2)"
+    return 0
+}
+
+# kobj_cache_put <fn> <key>: store after a good compile (tmp dir + rename = atomic for parallel builds).
+kobj_cache_put() {
+    local fn="$1" e="${AIEHLC_KOBJ_CACHE}/$2" t f
+    [ -f "$e/DONE" ] && return 0
+    mkdir -p "${AIEHLC_KOBJ_CACHE}" || return 0
+    t="$(mktemp -d "${AIEHLC_KOBJ_CACHE}/.tmp.XXXXXX")" || return 0
+    cp -p "${BUILD_DIR}/kernel.o" "$t/" || { rm -rf "$t"; return 0; }
+    for f in kernel kernel.calltree; do [ -f "${BUILD_DIR}/$f" ] && cp -p "${BUILD_DIR}/$f" "$t/"; done
+    mkdir -p "$t/cwd"
+    for f in "./host_ctrlpkt_${fn}.h" "./kernel_${fn}_ctrlpkt.h" "./ctrlpkt_${fn}"; do
+        [ -e "$f" ] && [ ! -L "$f" ] && cp -rp "$f" "$t/cwd/"
+    done
+    echo "${fn}" > "$t/FUNC"
+    touch "$t/DONE"
+    mv -T "$t" "$e" 2>/dev/null || rm -rf "$t"   # lost a race: another build stored the same key
+    echo "[hostcompile] KOBJ cache store ${fn} ($2)"
+    return 0
+}
+
 # check_kernel_stack <prx>: the BCF stack is [0x70000, buffer area start). CoreMemAllocator
 # shrinks it from the default 32 KB when the port buffers do not fit above 0x78000, so
 # compare chess's "Maximum stack size" (kernel.calltree) with the BCF _stack size.
@@ -111,6 +182,15 @@ compile_one_kernel() {
         return 0
     fi
     rm -f "${BUILD_DIR}/kernel.stamp"
+
+    local kobj_key=""
+    if [ -n "${AIEHLC_KOBJ_CACHE:-}" ] && [ "${HOSTCOMPILE_KERNEL_REBUILD:-0}" != "1" ]; then
+        kobj_key="$(cd "${WORKLOCAL_DIR}" && kobj_cache_key "${kernel_func_name}")"
+        if (cd "${WORKLOCAL_DIR}" && kobj_cache_get "${kernel_func_name}" "${kobj_key}"); then
+            echo "${kstamp}" > "${BUILD_DIR}/kernel.stamp"
+            return 0
+        fi
+    fi
 
     if [ -f "${AIEHLC_ROOT}/script/setup.sh" ]; then
         local saved_pwd
@@ -164,6 +244,7 @@ compile_one_kernel() {
     fi
     if [ ${kc_rc} -eq 0 ] && [ -f "${BUILD_DIR}/kernel.o" ]; then
         echo "${kstamp}" > "${BUILD_DIR}/kernel.stamp"
+        [ -n "${kobj_key}" ] && (cd "${WORKLOCAL_DIR}" && kobj_cache_put "${kernel_func_name}" "${kobj_key}")
     fi
     return ${kc_rc}
 }
