@@ -1207,7 +1207,23 @@ def khats_predict(p, form, f):
     return max(0.0, base - p["beta"] * f["ovl_l"]) + p["t0"] + p["kfirst"] * f["inv_launches"]
 
 
-KHATS_PREDICT_FNS = (khats_feat, khats_predict)
+def khats_params_rows(doc, stat, runs, cfgs):
+    """--params: frozen per cfg x cls K_hat of every static row (no fit; json floats used as read)"""
+    out = []
+    for cfg in cfgs:
+        pc, form = doc["cfg"][cfg]["classes"], doc["cfg"][cfg]["form"]
+        if form not in KHATS_FORMS:
+            raise ValueError("params cfg %s: form %r" % (cfg, form))
+        st = stat[cfg]
+        for run in runs:
+            for part in sorted(st):
+                s = st[part]
+                p = {k: float(pc[s["cls"]][k]) for k in KHATS_PNAMES}
+                out.append((cfg, run, part, s, khats_predict(p, form, khats_feat(s)), float("nan")))
+    return out
+
+
+KHATS_PREDICT_FNS = (khats_feat, khats_predict, khats_params_rows)
 
 
 def khats_audit():
@@ -1346,6 +1362,8 @@ def khat_static(a):
     """--khat-static: fit per cfg x cls (alpha gamma beta t0 kfirst >= 0) on run a, form by run-a LOO; write TSV"""
     import json
     stat, runs = khats_static_rows(a.core_tsv, a.dwhat, a.npred)
+    if getattr(a, "params", None):
+        return khat_static_params(a, stat, runs)
     rows, ok, kl = khats_fit_rows(a)
     if not ok or any(kl.norm_run(Path(p).name) != "a" for _c, p in kl.parse_logs(a.fit)):
         print("KHATS fit join failed or a --fit log is not run a")
@@ -1399,15 +1417,7 @@ def khat_static(a):
         print("KHATS cfg=%s fit=a sites=%d params=%d form=%s core=static dw=static ovl=static tsv=%s"
               % (cfg, nfit, npar, form, a.khat_tsv))
     print("KCAP ALL ok=%d" % int(cap_all and bool(params)))
-    Path(a.khat_tsv).unlink(missing_ok=True)
-    Path(a.khat_tsv).parent.mkdir(parents=True, exist_ok=True)
-    with open(a.khat_tsv, "w") as f:
-        f.write("\t".join(KHATS_COLS) + "\n")
-        for cfg, run, part, s, kh, kloo in out:
-            f.write("\t".join([cfg, run, str(part), s["site"], s["cls"], str(s["launches"]), repr(kh),
-                               "nan" if math.isnan(kloo) else repr(kloo), repr(s["dw_hat_ms"]),
-                               "static", "static", "static"]) + "\n")
-    print("KHATS rows=%d tsv=%s" % (len(out), a.khat_tsv))
+    khats_write(a.khat_tsv, out)
     if a.out_params:
         Path(a.out_params).parent.mkdir(parents=True, exist_ok=True)
         doc = dict(model="K_hat static (M3.1.1.2c PK): per launch max(0, alpha core_hat/L + gamma dw_hat - beta "
@@ -1417,6 +1427,56 @@ def khat_static(a):
         Path(a.out_params).write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n")
         print("KHATS params=%s" % a.out_params)
     return 0 if cap_all else 1
+
+
+def khats_write(path, out):
+    Path(path).unlink(missing_ok=True)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        f.write("\t".join(KHATS_COLS) + "\n")
+        for cfg, run, part, s, kh, kloo in out:
+            f.write("\t".join([cfg, run, str(part), s["site"], s["cls"], str(s["launches"]), repr(kh),
+                               "nan" if math.isnan(kloo) else repr(kloo), repr(s["dw_hat_ms"]),
+                               "static", "static", "static"]) + "\n")
+    print("KHATS rows=%d tsv=%s" % (len(out), path))
+
+
+def khat_static_params(a, stat, runs):
+    """--khat-static --params JSON: frozen K_hat (fit=0), K_loo=nan; cfgs of --check (else all json cfgs);
+    --check logs only joined (alignment) and reported as KHATSCHK (never fitted)"""
+    import hashlib
+    import json
+    raw = Path(a.params).read_bytes()
+    doc = json.loads(raw)
+    print("KHATS PARAMS src=%s md5=%s fit=0" % (a.params, hashlib.md5(raw).hexdigest()))
+    import kln_site as kl
+    logs = kl.parse_logs(a.check)
+    cfgs = list(dict.fromkeys(c for c, _p in logs)) or sorted(doc["cfg"])
+    miss = [c for c in cfgs if c not in doc["cfg"] or c not in stat]
+    if miss:
+        print("KHATS params: cfg missing in params json or static TSVs: %s" % ",".join(miss))
+        return 2
+    out = khats_params_rows(doc, stat, [kl.norm_run(r) for r in runs], cfgs)
+    for cfg in cfgs:
+        print("KHATS cfg=%s fit=0 sites=%d form=%s core=static dw=static ovl=static tsv=%s"
+              % (cfg, len(stat[cfg]), doc["cfg"][cfg]["form"], a.khat_tsv))
+    khats_write(a.khat_tsv, out)
+    if logs:
+        lp = kl.tsv_map(kl.read_tsv(a.lpred), ("launches", "site_ms", "L_meas", "L_hat"))
+        np_ = kl.tsv_map(kl.read_tsv(a.npred), ("launches", "site_ms", "N_meas", "N_hat"))
+        rows, ok = kl.join(lp, np_, [(c, p, False) for c, p in logs])
+        if not ok:
+            print("KHATS check join failed")
+            return 2
+        kh = {(c, r, p): k for c, r, p, _s, k, _l in out}
+        for cfg in cfgs:
+            for run in sorted({r["run"] for r in rows if r["cfg"] == cfg}):
+                g = [r for r in rows if r["cfg"] == cfg and r["run"] == run]
+                e = [abs(kh[(cfg, run, r["part"])] * r["launches"] - kl.k_meas(r, "log")) / r["site_ms_log"]
+                     for r in g]
+                print("KHATSCHK cfg=%s run=%s sites=%d kshare_max=%.4f kshare_mean=%.4f"
+                      % (cfg, run, len(g), max(e), sum(e) / len(e)))
+    return 0
 
 
 # ------------------------------------------------------------------ selftest (synthetic, known answer)
@@ -1967,13 +2027,21 @@ def main(argv=None):
     ap.add_argument("--npred", metavar="TSV", help="--khat-static: n_fit npred TSV (ovl_hat, N)")
     ap.add_argument("--lpred", metavar="TSV", help="--khat-static: m3_site lpred TSV (L, for K_meas of run a)")
     ap.add_argument("--out-params", metavar="JSON", help="--khat-static: fitted class params")
+    ap.add_argument("--params", metavar="JSON",
+                    help="--khat-static: frozen class params (k_palmyra213.*.json) instead of --fit; no fit, "
+                         "K_loo=nan; prints KHATS PARAMS src= md5= fit=0")
     ap.add_argument("runs", nargs="*", metavar="CFG=LOG_A[,LOG_B,LOG_C]")
     a = ap.parse_args(argv)
     if a.khats_audit:
         return 0 if khats_audit() else 1
+    if a.params and a.fit:
+        print("KHATS --params and --fit are exclusive (frozen params are never refitted)", file=sys.stderr)
+        return 2
+    if a.params and not a.khat_static:
+        ap.error("--params needs --khat-static")
     if a.khat_static:
-        if not (a.core_tsv and a.dwhat and a.npred and a.lpred and a.khat_tsv and a.fit):
-            ap.error("--khat-static needs --core-tsv --dwhat --npred --lpred --khat-tsv --fit")
+        if not (a.core_tsv and a.dwhat and a.npred and a.lpred and a.khat_tsv and (a.fit or a.params)):
+            ap.error("--khat-static needs --core-tsv --dwhat --npred --lpred --khat-tsv and --fit or --params")
         return khat_static(a)
     if a.fit:  # --fit cfg=A --check cfg=B  ==  positional cfg=A,B
         chk = dict(x.split("=", 1) for x in (a.check or []))
