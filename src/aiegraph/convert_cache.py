@@ -8,7 +8,7 @@ the conversion behaves exactly as before.
 
 Size cap: ``AIEGRAPH_CONVERT_CACHE_MAX_GB`` (default 20; 0 = no cap). After every store
 the least-recently-used entries are deleted until the cache fits (a UNet entry is
-~4.3 GB, ResNet18 ~0.1 GB). A restore marks the entry used. The entry just stored is
+~4.3 GB, ResNet18 ~0.17 GB). A restore marks the entry used. The entry just stored is
 never evicted, even when it alone is bigger than the cap. Leftover ``.*.tmp`` dirs of
 crashed stores older than a day are removed by the same prune.
 
