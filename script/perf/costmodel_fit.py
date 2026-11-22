@@ -167,10 +167,11 @@ def loo_maxrel(points, params, detail=None):
             kmax = max(dc, key=lambda k: abs(dc[k]))
             t = des_terms(q["op"], p2, d)
             tmax = max(t, key=lambda k: abs(t[k]))
-            print("KLOO kernel=%s rel=%+.3f pred_ms=%.4f meas_ms=%.4f dcal=%s:%s->%s(%+.2f) term=%s %s"
+            print("KLOO kernel=%s rel=%+.3f pred_ms=%.4f meas_ms=%.4f dcal=%s:%s->%s(%+.2f) term=%s %s dall=%s"
                   % (q["kernel"], d["wait_ms"] / q["meas_ms"] - 1.0, d["wait_ms"], q["meas_ms"], kmax,
                      detail[kmax], cl[kmax], dc[kmax], tmax,
-                     " ".join("%s_ms=%.4f" % (k, v) for k, v in t.items())))
+                     " ".join("%s_ms=%.4f" % (k, v) for k, v in t.items()),
+                     ",".join("%s:%+.3f" % (k, dc[k]) for k in CAL_KEYS if k in dc)))
     return worst
 
 
