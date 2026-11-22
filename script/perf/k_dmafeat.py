@@ -247,9 +247,16 @@ def shim_ch_eff(chs):
 
 def site_table(cfg, log, build_root):
     from m3_site import site_rows
-    from site_feat import bd_shape_rows
     build = str(Path(build_root) / ("unet_" + cfg))
     rows, _ = site_rows(build, log)
+    return site_table_rows(cfg, rows, build_root)
+
+
+def site_table_rows(cfg, rows, build_root):
+    """site_table on given site rows (kind, cid, part, launches, kernels): the log's m3_site.site_rows, or the
+    static launches>0 rows of n_feat.sites (part = lpart) for estimate() site mode"""
+    from site_feat import bd_shape_rows
+    build = str(Path(build_root) / ("unet_" + cfg))
     bds, _ = bd_shape_rows(build, rows, build + ".build.log")
     bd = {(f["kind"], f["cid"]): f for f in bds}
     kch = kernel_shim_ch(build)

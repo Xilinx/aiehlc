@@ -22,6 +22,9 @@ Input schema (settled in the cost channel: Steve's form, field ``recipe`` not ``
                                                       # -> counts only + issue_ms + ddr floor (report only,
                                                       #    bdgraph.ddr_floor); K terms listed in "unpriced"
 
+Site mode (M6.1): ``estimate({"unet_build": dir, "cfg": "off"|"aot-kco", "sites": None|[...]}, board="palmyra213",
+params="m3122")`` returns the frozen board-validated K+L+N model per UNet site (see estimate_sites).
+
 Output (ms per group execution; per-op rows in "ops"):
 
     {"kload", "cfg", "start", "wait", "glue", "compute", "ddr", "total_ms", "bound", "launches",
@@ -170,9 +173,163 @@ def _sum(rows: List[Dict[str, Any]], key: str) -> Optional[float]:
     return sum(v) if v else None
 
 
-def estimate(group: Any, board: str = "palmyra213", params: Optional[Dict[str, Any]] = None,
+# ------------------------------------------------------------------ M6.1 site mode: frozen K+L+N (M34 PZ)
+# The board-validated model of script/perf/kln_frozen.sh with KLN_K_JSON=k m3122 (M34 PZ), run in-process on the
+# build dir only.  Frozen parameter sets: {board: {name: {role: params-relative path}}}.
+KLN_PARAMS = {"palmyra213": {"m3122": {
+    "k": "k_palmyra213.m3122.json",            # K_hat static (k_diag --khat-static --params)
+    "l": "l_palmyra213.m3121.json",            # L (m3_site --lpred --kfirst site --params)
+    "n": "n_unet_palmyra213.m3121.json",       # N + ovl (n_fit --predict --ovl --refit-a no --params)
+    "kcyc": "kcyc_unet_iss.json",              # core cycles (kcyc_unet --iss-unet)
+    "kdw": "kdw_palmyra213.m3112c.json",       # dw_hat (k_dmafeat --dwpredict --dw-params)
+}}}
+# fixed (non-fitted) side inputs the chain also reads: n_fit --off-corr default (cfg=off in-window rt bdcfg/startio
+# coefficients) and the kernel ISS table of k_core_check.ISS
+KLN_AUX = {"off_corr": "l_palmyra213.json"}
+KLN_CFGS = ("off", "aot-kco")
+
+
+def _md5(path: Path) -> str:
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
+
+
+def _kcyc_sites(build: str, iss: str, iss_unet: str) -> Dict[Any, Dict[str, Any]]:
+    """kcyc_unet static core cycles per site {(kind, cid): rec} (= k_core_check.kcyc with --iss-unet explicit)"""
+    import contextlib
+    import io
+    import os
+    import tempfile
+    import kcyc_unet
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "kcyc.json")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = kcyc_unet.main(["--build-root", build, "--iss", iss, "--iss-unet", iss_unet, "--out", out])
+        doc = json.loads(Path(out).read_text()) if os.path.exists(out) else dict(sites=[])
+    if rc != 0:
+        raise RuntimeError("kcyc_unet rc=%d on %s" % (rc, build))
+    return {(r["kind"], r["cid"]): r for r in doc["sites"]}
+
+
+def estimate_sites(spec: Dict[str, Any], board: str = "palmyra213", params: str = "m3122",
+                   params_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Site mode: the frozen, board-validated K+L+N model (M34 PZ) for every launches>0 site of one UNet build cfg,
+    from the build dir only (no board log).
+
+        spec = {"unet_build": BUILD_ROOT (holding unet_<cfg>/) or the unet_<cfg> dir itself,
+                "cfg": "off" | "aot-kco", "sites": None | ["conv0", "linear3", ...]}
+
+    Per site (ms; totals over the site's launches unless marked per launch):
+        L      = L_hat   (m3_site.l_sites + offset/kswitch terms of the L json)
+        N      = N_hat   (n_fit.npred_site), N_ovl = beta * ovl_hat (the glue that overlaps the AIE window)
+        core   = alpha * core_hat (kcyc_unet ISS cycles x launches), dma = gamma * dw_hat x launches (k_dmafeat)
+        K      = K_hat x launches, K_hat = max(0, body - N_ovl/launches) + t0 + kfirst/launches,
+                 body = core + dma (form sum) or max(core, dma) (form max), per launch
+        N_pre  = N - N_ovl, N_post = (t0 x launches + kfirst) (fixed K terms outside the overlap)
+        so  T_hat x launches = L + N_pre + max(busy, N_ovl) + N_post  when busy >= N_ovl (busy = body x launches),
+        and T_hat = (K + L + N) / launches  (ms per launch) always -- kln_site.predict_launch.
+    Every value goes through the same text rounding as the kln_frozen.sh TSV chain (L/N/ovl %.4f, core %.6f,
+    dw %.6g) so the result equals the frozen model's T_hat bit for bit.  Nothing is fitted.
+    Returns {"sites": [...], "total_ms", "params": {relpath: md5} (the 5 frozen files), "aux": {relpath: md5},
+             "unpriced": [], "cfg", "board", "model"}."""
+    import sys
+    pd = Path(params_dir) if params_dir else PARAMS_DIR
+    perf = str(pd.parent)
+    if perf not in sys.path:
+        sys.path.insert(0, perf)
+    try:
+        files = KLN_PARAMS[board][params]
+    except KeyError:
+        raise ValueError("no frozen K+L+N params %r for board %r" % (params, board))
+    cfg = spec.get("cfg")
+    if cfg not in KLN_CFGS:
+        raise ValueError("cfg must be one of %s, got %r" % (KLN_CFGS, cfg))
+    root = Path(spec["unet_build"])
+    if root.name == "unet_" + cfg:
+        root = root.parent
+    build = str(root / ("unet_" + cfg))
+    if not Path(build).is_dir():
+        raise FileNotFoundError("no UNet build dir %s" % build)
+    P = {k: pd / v for k, v in files.items()}
+    rel = lambda p: str(Path(p).resolve().relative_to(pd.parents[2]))  # noqa: E731
+    pmd5 = {rel(P[k]): _md5(P[k]) for k in ("k", "l", "n", "kcyc", "kdw")}
+    aux = {rel(pd / v): _md5(pd / v) for v in KLN_AUX.values()}
+
+    import k_core_check
+    import k_diag
+    import k_dmafeat
+    import m3_site
+    import n_fit
+    r4 = lambda x: float("%.4f" % x)  # noqa: E731  (lpred / npred TSV)
+    # static site list: launches>0 sites of n_feat.sites in graph_run order, part = the log's PROF part (lpart)
+    srows = n_fit.static_rows(build)
+    live = [s for s in srows if s["launches"] > 0]
+    # L (m3_site --lpred --kfirst site)
+    lprm = json.loads(P["l"].read_text())
+    cp = lprm["cfg"].get(cfg, {})
+    coef, terms = cp.get("coef", {}), bool(cp.get("fit_runs"))
+    lh = m3_site.l_sites(build, cfg, str(P["l"]), "site")
+    lf = m3_site.site_launch_feats(build) if terms else {}
+    # N + ovl (n_fit --predict --ovl --refit-a no)
+    npc = json.loads(P["n"].read_text())[cfg]
+    if "ovl" not in npc:
+        raise ValueError("N params %s cfg %s have no ovl term" % (P["n"], cfg))
+    corr = [0.0] * len(live)
+    if cfg == "off":
+        cs = n_fit._off_corr(build, str(pd / KLN_AUX["off_corr"]))
+        if [(k, c) for k, c, _ in cs] != [(s["kind"], s["cid"]) for s in live]:
+            raise ValueError("off-corr sites vs n_feat sites differ")
+        corr = [ms for _k, _c, ms in cs]
+    # core (k_diag --kdelta core: kcyc_unet core_cyc x launches)
+    kc = _kcyc_sites(build, k_core_check.ISS, str(P["kcyc"]))
+    # dw (k_dmafeat --dwpredict): site_table on the static rows
+    rows = [dict(s, part=s["lpart"]) for s in live]
+    dwp = k_dmafeat.dw_load_params(str(P["kdw"]))[cfg]
+    dws = {r[1]: float(r[6]) for r in k_dmafeat.dwp_rows(cfg, k_dmafeat.site_table_rows(cfg, rows, str(root)), dwp)}
+    # K (k_diag --khat-static --params)
+    kdoc = json.loads(P["k"].read_text())
+    kcls, kform = kdoc["cfg"][cfg]["classes"], kdoc["cfg"][cfg]["form"]
+    want = set(spec.get("sites") or [])
+    out = []
+    for j, s in enumerate(live):
+        key, name, n = (s["kind"], s["cid"]), "%s%d" % (s["kind"], s["cid"]), int(s["launches"])
+        if want and name not in want:
+            continue
+        L = r4(lh[key] + (m3_site.l_terms(coef, lf[key]) if terms else 0.0))
+        nh, oh = n_fit.npred_site(npc, s, corr[j])
+        N, ovl = r4(nh), r4(oh)
+        kr = kc.get(key)
+        if kr is None:
+            raise KeyError("site %s: no kcyc_unet core cycles" % name)
+        core_hat = float("%.6f" % (float(kr["core_cyc"]) * n / k_diag.AIE_MHZ / 1e3))
+        st = dict(launches=n, core_hat_ms=core_hat, dw_hat_ms=dws[str(s["lpart"])], ovl_hat=ovl)
+        cls = k_diag.khats_cls(k_diag.site_class(s["kind"], s.get("kernels") or []))
+        pk = {k: float(kcls[cls][k]) for k in k_diag.KHATS_PNAMES}
+        fc = k_diag.khats_cls_form(kcls[cls], kform)
+        f = k_diag.khats_feat(st)
+        kh = k_diag.khats_predict(pk, fc, f)
+        K = kh * n
+        core, dma, novl = pk["alpha"] * f["core_l"] * n, pk["gamma"] * f["dw_l"] * n, pk["beta"] * f["ovl_l"] * n
+        out.append(dict(site=name, part=s["lpart"], cls=cls, form=fc, launches=n, L=L, N=N,
+                        N_pre=N - novl, N_ovl=novl, N_post=pk["t0"] * n + pk["kfirst"],
+                        core=core, dma=dma, K=K, T_hat=(K + L + N) / n))
+    if want - {r["site"] for r in out}:
+        raise KeyError("unknown sites %s for cfg %s" % (sorted(want - {r["site"] for r in out}), cfg))
+    return {"sites": out, "total_ms": sum(r["T_hat"] * r["launches"] for r in out), "params": pmd5, "aux": aux,
+            "unpriced": [], "cfg": cfg, "board": board,
+            "model": "K+L+N frozen (M34 PZ): T_hat = (K_hat x launches + L_hat + N_hat) / launches"}
+
+
+def estimate(group: Any, board: str = "palmyra213", params: Any = None,
              cycles: Optional[str] = None) -> Dict[str, Any]:
-    """Predicted ms of one execution of ``group`` (see module docstring for the schema)."""
+    """Predicted ms of one execution of ``group`` (see module docstring for the schema).
+    ``group = {"unet_build": dir, "cfg": ..., "sites": ...}`` selects site mode (estimate_sites; params = name of
+    the frozen set, default "m3122")."""
+    if isinstance(group, dict) and "unet_build" in group:
+        return estimate_sites(group, board, params if isinstance(params, str) else "m3122")
+    if isinstance(params, str):
+        raise ValueError("params name %r is only valid in site mode (group with 'unet_build')" % params)
     prm = params if params is not None else board_params(board)
     if "bdgraph_bd_us" not in prm:
         from .bdgraph import BD_US_FIT, BD_US_FIT_PATH, ISSUE_FIT
