@@ -40,16 +40,45 @@ from aiegraph.costmodel.kswitch import parse_host  # noqa: E402
 from aiegraph.costmodel.launch_split import lines, parse  # noqa: E402
 from aiegraph.costmodel.rst_static import AIE_TILE_ROW_START, rst_static  # noqa: E402
 
+sys.path.insert(0, str(HERE))
+import net_sites  # noqa: E402
+
 LSUM_TOL = 0.20
 CALLS = ("kload", "bdcfg", "startio", "coreen", "core_reset")
-WL = os.path.join("ag_work", "aiek", "aiek_cnn", "worklocal")
+NET = "resnet18"
+
+
+def wl(net=None):
+    """kernel worklocal dir under the build: ag_work/aiek/<net_sites.aiek_dir(net)>/worklocal"""
+    return os.path.join("ag_work", "aiek", net_sites.aiek_dir(net or NET), "worklocal")
 _CALL = re.compile(r"\baiednn_(conv|dense)\((\d+), args, \d+, [^;]*?, (\d+), (\d+)\);\s*/\* \[(\d+)\] group")
 _ROW = re.compile(r"^\| (\d+) \|.*\|\s*([^|]*)\|[^|]*\|\s*$")
 _SHAPE = re.compile(r"\[([0-9,]+)\]`")
 
 
+def sites_yolo(build):
+    """yolo26n: net_sites.sites (build log 'aie conv <cid> .. -> call <part> .. -> AxBxC .. launches=n'), kernel =
+    the one host_canonicalized_gemm_kacc__A_B_C_* in host.cc"""
+    host = open(os.path.join(build, wl(), "host.cc")).read()
+    kern = sorted(set(re.findall(r"void host_canonicalized_(gemm_kacc__\w+)\(", host)))
+    root, base = os.path.split(os.path.normpath(build))
+    cfg = base[len(NET) + 1:]
+    out = []
+    for part, kind, cid, inst, n in net_sites.sites(root, NET, cfg):
+        ks_ = [k for k in kern if k.startswith("gemm_kacc__%d_%d_%d_" % inst)]
+        if len(ks_) != 1:
+            raise ValueError("part %d: instance %s matches %s" % (part, inst, ks_))
+        out.append(dict(part=part, kind=kind, cid=cid, px=inst[2], kg=inst[1], N=None, M=None, launches=n,
+                        kernel=ks_[0]))
+    if not out:
+        raise ValueError("no aie conv site in %s.build.log" % build)
+    return out
+
+
 def sites(build):
     """[dict(part, kind, cid, px, kg, N, M, launches, kernel)] in graph order, build products only"""
+    if NET == "yolo26n":
+        return sites_yolo(build)
     drv = open(os.path.join(build, "ag_work", "arm_build", "graph_driver.c")).read()
     outs = {}
     for ln in open(os.path.join(build, "ag_work", "network.md")):
@@ -58,7 +87,7 @@ def sites(build):
             sh = _SHAPE.findall(m.group(2))
             if sh:
                 outs[int(m.group(1))] = [int(x) for x in sh[-1].split(",")]
-    host = open(os.path.join(build, WL, "host.cc")).read()
+    host = open(os.path.join(build, wl(), "host.cc")).read()
     kern = sorted(set(re.findall(r"void host_canonicalized_(gemm_kacc__\w+)\(", host)))
     out = []
     for kind, cid, px, kg, part in _CALL.findall(drv):
@@ -83,15 +112,15 @@ def launch_feats(build):
     """per-launch static dicts in launch order + per-cfg rst info"""
     b = Path(build)
     st = sites(build)
-    wl = os.path.join(build, WL)
-    host = os.path.join(wl, "host.cc")
+    wl_ = os.path.join(build, wl())
+    host = os.path.join(wl_, "host.cc")
     txt = open(host).read()
     per = {}
     for s in st:
         k = s["kernel"]
         if k not in per:
             c = sf.host_counts(host, "host_canonicalized_" + k, txt)
-            f = sf.feat_of_counts(c, os.path.join(wl, "host_ctrlpkt_%s.h" % k))
+            f = sf.feat_of_counts(c, os.path.join(wl_, "host_ctrlpkt_%s.h" % k))
             f["ctrl"] = bool(c.get("__Runtime_load_kernel_group_16t_ctrl", 0) or c.get("__Runtime_load_kernel_group_8t_ctrl", 0)
                              or c.get("__Runtime_load_kernel_group_4t_ctrl", 0))
             per[k] = f
@@ -99,7 +128,7 @@ def launch_feats(build):
     defs = ks.build_defs(b)
     warm = bool(defs.get("PM_WARM_SKIP"))
     elf, tiles = parse_host(txt)
-    objdir = b / WL / "build"
+    objdir = b / wl() / "build"
     cache, res = {}, {}
     seq = []
     i = 0
@@ -151,6 +180,8 @@ def main(argv=None):
     ap.add_argument("--build-root", required=True)
     ap.add_argument("runs", nargs="+", help="CFG=LOG[,LOG...]")
     a = ap.parse_args(argv)
+    global NET
+    NET = net_sites.check_net(a.net)
     prm = launch_l.load_params(a.params)
     md5 = hashlib.md5(open(a.params, "rb").read()).hexdigest()
     print("LPARAMS file=%s md5=%s rst_off=%s rst_aot-kco=%s" % (a.params, md5, prm["cfg"]["off"]["coef"].get("rst"),
