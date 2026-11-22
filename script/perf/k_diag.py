@@ -72,6 +72,14 @@ Output:
           K_hat nan); the old file is removed first, the new one written once after all cfgs; one line per cfg
           KHAT cfg=<c> src=<koracle_dma7|koracle_bw> fit=a sites=<n> compute=<meas|none|mixed> ovl=<..> tsv=<path>
           (probe only, no gate)
+  --kdelta core --core-tsv T1 --delta-tsv T2 (M3.1.1.2c PS, no fit): core_hat = kcyc_unet static core_cyc x
+          launches (ISS first, the k_core_check.kcyc path; never the logged compute_cyc) -> T1 (tab, header)
+          cfg part site cls launches core_hat_ms src (core_hat_ms = whole site, all launches); KCORE ALL as
+          k_core_check.py (meas = median over runs a,b,c of compute_cyc/perf_n*launches); per run T2 (tab, header)
+          cfg run part site cls launches core_hat_ms compute_meas_ms delta_ms src, delta_ms = (core_hat -
+          compute_meas[run]) / launches (ms per launch); lines KDSRC per log, KDELTA term=core cfg run sites sum_rel
+          maxrel src per run, KCORE ALL ..., KDELTA term=core rows=<n> tsv=, KDELTA term=core static_rows=<n> tsv=;
+          rc=0 iff KCORE ALL PASS and both TSVs written
   KFLOOR  cfg ... tol_fail PASS|FAIL (gates on KTOL; maxrel printed only);
   KFLOOR ALL src cfgs sites perf_sites r2_min maxrel loo_maxrel act_over_k_max PASS|FAIL tol_fail=<n>  (last line)
 --map-only (no counter lines needed):
@@ -904,6 +912,151 @@ def write_khat(path, rows_by_cfg, src):
     return len(lines) - 1
 
 
+# ------------------------------------------------------------------ M3.1.1.2c PS: --kdelta core
+KCORE_COLS = ("cfg", "part", "site", "cls", "launches", "core_hat_ms", "src")
+KDELTA_COLS = ("cfg", "run", "part", "site", "cls", "launches", "core_hat_ms", "compute_meas_ms", "delta_ms", "src")
+KCORE_SITES = 138
+
+
+def _kcyc_static(build, iss):
+    """static core cycles per site (kcyc_unet; ISS first, the k_core_check.kcyc path) -> (rc, {(kind, cid): rec})"""
+    import k_core_check
+    return k_core_check.kcyc(build, iss)
+
+
+def _meas_cyc(s):
+    """one run's compute cycles of a site over all its launches (compute_cyc / perf_n * launches), nan without
+    the ovl tail -- the k_core_check.py:115-118 per-run value (never io_act - stalls)"""
+    p = s.get("perf")
+    if not p or not p.get("has_ovl") or p["perf_n"] <= 0:
+        return float("nan")
+    return p["compute_cyc"] / p["perf_n"] * s["launches"]
+
+
+def kdelta_core_cfg(cfg, pred, runs):
+    """one cfg: pred {(kind, cid): kcyc rec}, runs = [sites of run a, b, c, ...] ->
+    dict(static=[rows], delta=[rows], kcore=[(pred_cyc, meas_med_cyc, rel, src, cls)], runs=[per-run stats]).
+    core_hat = core_cyc * launches (static only); KCORE meas = median over the runs (k_core_check); delta per run:
+    delta_ms = (core_hat - compute_meas[run]) / launches, ms per launch"""
+    import statistics
+    by = [{(s["kind"], int(s["site"][len(s["kind"]):])): s for s in ss} for ss in runs]
+    keys = sorted(by[0], key=lambda k: by[0][k]["part"])
+    out = dict(static=[], delta=[], kcore=[], runs=[], same_sites=all(set(b) == set(by[0]) for b in by))
+    for k in keys:
+        s0 = by[0][k]
+        r = pred.get(k)
+        pc = float(r["core_cyc"]) * s0["launches"] if r else float("nan")
+        src = r["src"] if r else "-"
+        out["static"].append(dict(cfg=cfg, part=s0["part"], site=s0["site"], cls=s0["cls"], kind=s0["kind"],
+                                  launches=s0["launches"], core_hat_ms=pc / AIE_MHZ / 1e3, src=src))
+        ms = [m for m in (_meas_cyc(b[k]) for b in by if k in b) if math.isfinite(m)]
+        mc = float(statistics.median(ms)) if ms else float("nan")
+        rel = abs(pc - mc) / mc if ms and mc > 0 and math.isfinite(pc) else float("nan")
+        out["kcore"].append((pc, mc, rel, src, s0["cls"], s0["kind"]))
+    for i, b in enumerate(by):
+        run = chr(ord("a") + i)
+        st = dict(run=run, hat=0.0, meas=0.0, rels=[], src=[])
+        for srow in out["static"]:
+            k = (srow["kind"], int(srow["site"][len(srow["kind"]):]))
+            s = b.get(k)
+            if s is None:
+                continue
+            pc = srow["core_hat_ms"] * AIE_MHZ * 1e3
+            mc = _meas_cyc(s)
+            n = srow["launches"]
+            d = (pc - mc) / AIE_MHZ / 1e3 / n if n > 0 else float("nan")
+            out["delta"].append(dict(cfg=cfg, run=run, part=srow["part"], site=srow["site"], cls=srow["cls"],
+                                     launches=n, core_hat_ms=srow["core_hat_ms"],
+                                     compute_meas_ms=mc / AIE_MHZ / 1e3, delta_ms=d, src=srow["src"]))
+            st["src"].append(srow["src"])
+            if math.isfinite(pc) and math.isfinite(mc) and mc > 0:
+                st["hat"] += pc
+                st["meas"] += mc
+                st["rels"].append(abs(pc - mc) / mc)
+        out["runs"].append(st)
+    return out
+
+
+def _f(x, fmt="%.6f"):
+    return fmt % x if isinstance(x, float) and math.isfinite(x) else "nan"
+
+
+def _write_tsv(path, cols, rows, fmts):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["\t".join(cols)]
+    for r in rows:
+        lines.append("\t".join(_f(r[c], fmts[c]) if c in fmts else str(r[c]) for c in cols))
+    path.write_text("\n".join(lines) + "\n")
+    return len(rows)
+
+
+def kdelta_core(a):
+    """--kdelta core: static core (kcyc_unet ISS x launches) per site -> --core-tsv; per run delta_ms ->
+    --delta-tsv; KCORE ALL (meas = median over runs a, b, c, the k_core_check.py rule) + KDELTA lines.
+    rc 0 iff KCORE ALL PASS, every KDSRC ok, and both TSVs written; no fit"""
+    from k_core_check import ISS, src_cls
+    import statistics
+    for p in (a.core_tsv, a.delta_tsv):
+        if p and Path(p).exists():
+            Path(p).unlink()
+    ok = True
+    static, delta, allk, fa_src, cls_stat = [], [], [], [], {}
+    n_sites = cover = 0
+    finite = True
+    for spec in a.runs:
+        cfg, logs = spec.split("=", 1)
+        logs = logs.split(",")
+        rc, pred = _kcyc_static(str(Path(a.build_root) / ("unet_" + cfg)), a.iss or ISS)
+        if rc != 0:
+            print("KDELTA_ERR cfg=%s kcyc_unet rc=%d" % (cfg, rc))
+            ok = False
+        runs = []
+        for lg in logs:
+            ss, tx = load(cfg, lg, a.build_root)
+            ps = [s for s in ss if perf_ok(s)]
+            ok &= kdsrc_line(cfg, lg, ss, ps, tx) and len(ss) == KCORE_SITES
+            runs.append(ss)
+        o = kdelta_core_cfg(cfg, pred, runs)
+        if not o["same_sites"]:
+            print("KDELTA_ERR cfg=%s site sets differ between logs" % cfg)
+            ok = False
+        static += o["static"]
+        delta += o["delta"]
+        for pc, mc, rel, src, cls, kind in o["kcore"]:
+            n_sites += 1
+            cover += math.isfinite(pc)
+            finite &= math.isfinite(pc) and pc > 0
+            if kind == "fa":
+                fa_src.append(src)
+            if math.isfinite(rel):
+                allk.append(rel)
+                k = "%s:%s" % (cfg, cls)
+                cls_stat[k] = max(cls_stat.get(k, 0.0), rel)
+        for st in o["runs"]:
+            sr = (st["hat"] - st["meas"]) / st["meas"] if st["meas"] > 0 else float("nan")
+            print("KDELTA term=core cfg=%s run=%s sites=%d sum_rel=%s maxrel=%s src=%s"
+                  % (cfg, st["run"], len(st["src"]), _f(sr, "%.4f"),
+                     _f(max(st["rels"]) if st["rels"] else float("nan"), "%.4f"), src_cls(st["src"])))
+    fa = src_cls(fa_src) if fa_src else "none"
+    mx = max(allk) if allk else float("nan")
+    worst = max((v, k) for k, v in cls_stat.items())[1] if cls_stat else "-"
+    kok = ok and finite and cover == n_sites and fa == "iss" and n_sites == KCORE_SITES * len(a.runs)
+    print("KCORE ALL sites=%d cover=%d finite=%d maxrel=%s med_rel=%s worst_cls=%s fa_src=%s %s"
+          % (n_sites, cover, int(finite), _f(mx, "%.4f"), _f(statistics.median(allk), "%.4f") if allk else "nan",
+             worst, fa, "PASS" if kok else "FAIL"))
+    nc = nk = 0
+    if a.core_tsv:
+        nc = _write_tsv(a.core_tsv, KCORE_COLS, static, dict(core_hat_ms="%.6f"))
+    if a.delta_tsv:
+        nk = _write_tsv(a.delta_tsv, KDELTA_COLS, delta,
+                        dict(core_hat_ms="%.6f", compute_meas_ms="%.6f", delta_ms="%.6f"))
+        print("KDELTA term=core rows=%d tsv=%s" % (nk, a.delta_tsv))
+    if a.core_tsv:
+        print("KDELTA term=core static_rows=%d tsv=%s" % (nc, a.core_tsv))
+    return 0 if kok and a.core_tsv and a.delta_tsv else 1
+
+
 def full(a):
     """rc: 0 PASS, 1 FAIL, 2 --model ovl on a log without the ovl fields.
     CFG=LA[,LB,LC,...]: fit on LA (run a), every other log is a check run (b, c, ...). Per-cfg PASS needs KTOL
@@ -1480,6 +1633,42 @@ def selftest():
     ln = buf.getvalue().strip()
     chk("ksem_negfail", not kb["ok"] and kb["neg"] == 1 and kb["bad"] == 1
         and ln == "KSEM cfg=synth runs=2 site_runs=2 neg_compute=1 dact_bad=1 dact_tol=0.05 FAIL", ln)
+    # 25 kdelta_core (M3.1.1.2c PS): static core = kcyc core_cyc x launches (stubbed kcyc, ISS), KCORE meas = median
+    #    of the 3 runs' compute_cyc/perf_n*launches, delta per run = (core_hat - meas_run)/launches ms; TSVs 2 / 6 rows
+    def _kd_perf(cc, n):
+        return dict(kind="x", launches=n, perf_n=n, io_act=0, lock=0, stream=0, pre_io_act=0, gap=0, short=False,
+                    has_ovl=True, compute_cyc=cc, ovl_cyc=0, dact_cyc=0)
+    kd_meas = {"a.log": (1.0e6, 4.4e6), "b.log": (1.1e6, 4.0e6), "c.log": (0.9e6, 4.2e6)}
+
+    def _kd_load(cfg, log, build_root, need_perf=True):
+        l, f = kd_meas[log]
+        return ([dict(cfg=cfg, site="linear3", part=5, kind="linear", launches=2, cls="linear", perf=_kd_perf(l, 2)),
+                 dict(cfg=cfg, site="fa7", part=9, kind="fa", launches=4, cls="fa16", perf=_kd_perf(f, 4))],
+                "CMP unet board=palmyra213 x aie_launches=258 y run_rc=0\n")
+    real_kc, real_ks = g["_kcyc_static"], g["KCORE_SITES"]
+    g["load"], g["KCORE_SITES"] = _kd_load, 2
+    g["_kcyc_static"] = lambda build, iss: (0, {("linear", 3): dict(core_cyc=500000.0, src="iss"),
+                                                ("fa", 7): dict(core_cyc=1.0e6, src="iss")})
+    buf = io.StringIO()
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            ct, dt = Path(td) / "kc.tsv", Path(td) / "kd.tsv"
+            with contextlib.redirect_stdout(buf):
+                rc_kd = main(["--kdelta", "core", "--core-tsv", str(ct), "--delta-tsv", str(dt), "--build-root", "/x",
+                              "--fit", "s=a.log", "--check", "s=b.log,c.log"])
+            ctl, dtl = ct.read_text().splitlines(), dt.read_text().splitlines()
+    finally:
+        g["load"], g["_kcyc_static"], g["KCORE_SITES"] = real_load, real_kc, real_ks
+    kdo = buf.getvalue().splitlines()
+    # linear: hat 1e6 vs median 1e6 -> rel 0; fa: hat 4e6 vs median 4.2e6 -> rel 0.0476; run a fa delta (4-4.4)/4 ms
+    d_fa_a = [x.split("\t") for x in dtl if x.startswith("s\ta\t9\t")]
+    chk("kdelta_core", rc_kd == 0 and len(ctl) == 3 and len(dtl) == 7
+        and ctl[0] == "\t".join(KCORE_COLS) and ctl[2] == "s\t9\tfa7\tfa16\t4\t4.000000\tiss"
+        and len(d_fa_a) == 1 and d_fa_a[0][8] == "-0.100000"
+        and "KCORE ALL sites=2 cover=2 finite=1 maxrel=0.0476 med_rel=0.0238 worst_cls=s:fa16 fa_src=iss PASS" in kdo
+        and "KDELTA term=core cfg=s run=a sites=2 sum_rel=-0.0741 maxrel=0.0909 src=iss" in kdo
+        and sum(x.startswith("KDSRC") for x in kdo) == 3 and "KDELTA term=core rows=6 tsv=%s" % dt in kdo,
+        "rc=%d %s" % (rc_kd, " | ".join(x for x in kdo if x.startswith(("KCORE", "KDELTA term=core cfg=s run=a")))))
     n = sum(res)
     ok = n == len(res)
     print("KDIAG SELFTEST %s (%d/%d)" % ("PASS" if ok else "FAIL", n, len(res)))
@@ -1508,6 +1697,12 @@ def main(argv=None):
     ap.add_argument("--dmafeat", action="store_true",
                     help="KORACLE over the 7 static DMA features (k_dmafeat.site_dma_feats), conv one class + tkw; "
                          "KCAP per class (conv <= 7, others <= 5 params)")
+    ap.add_argument("--kdelta", choices=("core",),
+                    help="M3.1.1.2c PS: static core (kcyc_unet ISS x launches) -> --core-tsv, per-run K delta "
+                         "(core_hat - compute_meas) / launches -> --delta-tsv; KCORE ALL (meas median a,b,c) + KDELTA")
+    ap.add_argument("--core-tsv", metavar="TSV", help="--kdelta core: cfg part site cls launches core_hat_ms src")
+    ap.add_argument("--delta-tsv", metavar="TSV", help="--kdelta core: per (cfg, run, site) delta_ms per launch")
+    ap.add_argument("--iss", help="--kdelta core: ISS json for kcyc_unet (default k_core_check.ISS)")
     ap.add_argument("runs", nargs="*", metavar="CFG=LOG_A[,LOG_B,LOG_C]")
     a = ap.parse_args(argv)
     if a.fit:  # --fit cfg=A --check cfg=B  ==  positional cfg=A,B
@@ -1524,6 +1719,8 @@ def main(argv=None):
         return 0 if map_only(a) else 1
     if a.sanity_only:
         return sanity_only(a)
+    if a.kdelta == "core":
+        return kdelta_core(a)
     return full(a)
 
 
