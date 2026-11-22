@@ -10,7 +10,7 @@ Per (set, cfg, site): spread = max(T)/min(T) - 1 over the runs.  A site key is (
 is the site column.
 
 Output (stdlib only, so it runs under python -I):
-  TNOISE cfg=<c> set=<s> sites=<n> runs=<n> spread_max=<x> spread_med=<x> worst=<site> n_ge3pct=<n>
+  TNOISE cfg=<c> set=<s> sites=<n> runs=<n> keys_equal=<0|1> spread_max=<x> spread_med=<x> worst=<site> n_ge3pct=<n>
   TNOISE SITE cfg=<c> set=<s> site=<site> T=<a>,<b>,<c> spread=<x>      (per --site, per set; T in run order)
   TNOISE MARGIN spread_max=<x over all sets/cfgs> margin=<m> margin_ok=<1 if spread_max <= margin>
 margin_ok=0 is NOT an error (it is the finding).  rc=1 on unparsable input, duplicated (cfg, run, part, site)
@@ -74,19 +74,24 @@ def analyse(sets, sites, margin, out):
     for sname, data in sets:
         for cfg in sorted(data, key=lambda c: (c != "off", c)):
             per = data[cfg]
-            runsets = {tuple(sorted(v)) for v in per.values()}
-            if len(runsets) != 1:
-                raise Bad("set=%s cfg=%s: sites have different run sets %s" % (sname, cfg, sorted(runsets)))
-            runs = runsets.pop()
+            allruns = sorted({r for v in per.values() for r in v})
+            # keys_equal: every run has the same (part, site) key set (a missing / renamed site in one run -> 0)
+            keys_equal = int(all(len(v) == len(allruns) for v in per.values()))
+            runs = tuple(allruns)
             if len(runs) < 2:
                 raise Bad("set=%s cfg=%s: need >= 2 runs, got %d" % (sname, cfg, len(runs)))
-            sp = {k: spread([v[r] for r in runs]) for k, v in per.items()}
-            wk = max(sp, key=lambda k: (sp[k], k))
-            smax = sp[wk]
-            gmax = max(gmax, smax)
-            out.append("TNOISE cfg=%s set=%s sites=%d runs=%d spread_max=%.4f spread_med=%.4f worst=%s n_ge3pct=%d"
-                       % (cfg, sname, len(sp), len(runs), smax, statistics.median(sp.values()), wk[1],
-                          sum(1 for x in sp.values() if x >= GE)))
+            common = {k: v for k, v in per.items() if len(v) == len(runs)}
+            sp = {k: spread([v[r] for r in runs]) for k, v in common.items()}
+            if sp:
+                wk = max(sp, key=lambda k: (sp[k], k))
+                smax = sp[wk]
+                gmax = max(gmax, smax)
+                out.append("TNOISE cfg=%s set=%s sites=%d runs=%d keys_equal=%d spread_max=%.4f spread_med=%.4f worst=%s "
+                           "n_ge3pct=%d" % (cfg, sname, len(sp), len(runs), keys_equal, smax,
+                                            statistics.median(sp.values()), wk[1], sum(1 for x in sp.values() if x >= GE)))
+            if not keys_equal:
+                bad = sorted("%s:%s" % (k[0], k[1]) for k, v in per.items() if len(v) != len(runs))
+                raise Bad("set=%s cfg=%s: sites have different run sets (keys_equal=0): %s" % (sname, cfg, ",".join(bad)))
     for cfg, site in sites:
         for sname, data in sets:
             hits = [(k, v) for k, v in data.get(cfg, {}).items() if k[1] == site]
@@ -179,7 +184,7 @@ def selftest():
         o = buf.getvalue().splitlines()
         chk("rc0", rc == 0)
         exp = 1.02 / 0.99 - 1
-        chk("cfg line off", "TNOISE cfg=off set=x sites=2 runs=3 spread_max=%.4f spread_med=%.4f worst=s1 n_ge3pct=1"
+        chk("cfg line off", "TNOISE cfg=off set=x sites=2 runs=3 keys_equal=1 spread_max=%.4f spread_med=%.4f worst=s1 n_ge3pct=1"
             % (exp, exp / 2) in o)
         chk("site T order a,b,c", "TNOISE SITE cfg=aot-kco set=x site=s1 T=2.0000,2.0400,1.9800 spread=%.4f" % exp in o)
         chk("margin ok", o[-1] == "TNOISE MARGIN spread_max=%.4f margin=0.05 margin_ok=1" % exp)
