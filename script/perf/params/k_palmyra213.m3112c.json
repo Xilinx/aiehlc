@@ -1,0 +1,81 @@
+{
+ "board": "palmyra213",
+ "cfg": {
+  "aot-kco": {
+   "classes": {
+    "conv": {
+     "alpha": 0.4244284935426835,
+     "beta": 0.4147541097117134,
+     "gamma": 1.0662917980221938,
+     "kfirst": 0.0,
+     "t0": 0.07924891599335449
+    },
+    "fa16": {
+     "alpha": 2.146295852233978,
+     "beta": 0.0,
+     "gamma": 0.0,
+     "kfirst": 0.036755158135490414,
+     "t0": 0.0035036326773234825
+    },
+    "fa_d160": {
+     "alpha": 5.09078861858149,
+     "beta": 0.02287938038797779,
+     "gamma": 0.0,
+     "kfirst": 0.0,
+     "t0": 0.0
+    },
+    "linear": {
+     "alpha": 0.7427911342349156,
+     "beta": 0.47793797009830874,
+     "gamma": 0.9458796271994147,
+     "kfirst": 0.0,
+     "t0": 0.0
+    }
+   },
+   "form": "sum"
+  },
+  "off": {
+   "classes": {
+    "conv": {
+     "alpha": 0.0,
+     "beta": 1.2723862213840966,
+     "gamma": 1.418800014469338,
+     "kfirst": 0.0,
+     "t0": 0.0
+    },
+    "fa16": {
+     "alpha": 0.4614676896040005,
+     "beta": 0.355311375470688,
+     "gamma": 0.0,
+     "kfirst": 0.0,
+     "t0": 0.25130872287583794
+    },
+    "fa_d160": {
+     "alpha": 0.0,
+     "beta": 0.0,
+     "gamma": 0.0,
+     "kfirst": 0.0,
+     "t0": 0.01000065632458218
+    },
+    "linear": {
+     "alpha": 0.8961117676014825,
+     "beta": 0.5630205515175921,
+     "gamma": 0.6854971846377499,
+     "kfirst": 0.15378328029127336,
+     "t0": 0.0
+    }
+   },
+   "form": "sum"
+  }
+ },
+ "fit_runs": [
+  "a"
+ ],
+ "inputs": {
+  "core": "/scratch/staff/huaj/tmp/costmodel_m3121/kln/kcore_static.tsv",
+  "dw": "/scratch/staff/huaj/tmp/costmodel_m3121/kln/dwhat.tsv",
+  "ovl": "/scratch/staff/huaj/tmp/costmodel_m3121/kln/npred.tsv"
+ },
+ "model": "K_hat static (M3.1.1.2c PK): per launch max(0, alpha core_hat/L + gamma dw_hat - beta ovl_hat/L) [sum] or max(0, max(alpha core, gamma dw) - beta ovl) [max] + t0 + kfirst/L",
+ "objective": "minimax |K_hat - K_meas| x launches / site_ms"
+}
