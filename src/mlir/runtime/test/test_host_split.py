@@ -865,3 +865,67 @@ def test_core_perf_launch_window():
                      r"ovl_cyc=102000 dact_cyc=152000$", out, re.M), out
     # AIEHLC_CORE_PERF_WIN=1 still compiles (diagnostic per-wait path)
     _lw_lib(win=True)
+
+
+# ---------------------------------------------------------------- 6. cnn_chunk (yolo) board glue
+CHUNK_STUBS = {
+    "aie_user_kernel.h": "#pragma once\n#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n"
+                         "#include <stddef.h>\n"
+                         "struct aieMesh {};\nstruct aieArray { aieMesh partition(const int (&)[4], int, int) "
+                         "{ return aieMesh(); } };\nstatic inline void aieSetDevice(int) {}\n"
+                         "void *__Runtime_Alloc(size_t n);\ntypedef struct { void *data; } aiek_tensor;\n"
+                         "#define AIEK_ERR_KERNEL (-4)\n"
+                         "#define AIEK_ENTRY(name) extern \"C\" int name(const aiek_tensor *args, int num_args)\n",
+    "xil_cache.h": "#pragma once\n#include <stdint.h>\ntypedef uintptr_t UINTPTR;\n"
+                   "void Xil_DCacheFlushRange(UINTPTR a, unsigned long n);\n"
+                   "void Xil_DCacheInvalidateRange(UINTPTR a, unsigned long n);\n",
+    "aie_timer.h": "#pragma once\ntypedef unsigned long long XTime;\n#define COUNTS_PER_SECOND 100000000ULL\n"
+                   "void XTime_GetTime(XTime *t);\n",
+}
+
+CHUNK_DISPATCH = "    (void)mesh; (void)kw; (void)kx; (void)ky;\n    if (N == 64 && K == 64 && M == 64)\n        return 0;"
+
+
+def test_chunk_board_host_split():
+    """aiegraph.cnn_chunk board glue (yolo): <K>_aie_host_split_site/_line are wired to aie_host_split.h (no empty
+    bodies), every chunk launch books dma/wait + glue/flush/inval + launches, and the archive text
+    (board + kacc_chunk_conv + entry, as cnn_chunk.write_kernel concatenates it) compiles under
+    -DAIEHLC_SITE_PERF=1 with x86 g++ (no skip: g++ is required)."""
+    import shutil
+    sys.path.insert(0, str(ROOT / "src"))
+    import aiednn
+    board = aiednn.render("conv2d/kacc_chunk_board.cc", K="cnn", WARM=1, CTRLPKT=1, PART_C0=2, MAXW=4096,
+                          MAXX=4096, MAXY=4096, DISPATCH=CHUNK_DISPATCH, SELFCHECK=0)
+    assert "(void)buf" not in board and "(void)site" not in board, "empty host_split body"
+    assert "ahs_format(&g_ahs, site," in board and "ahs_set_site(&g_ahs, site);" in board
+    assert board.count('extern "C" void cnn_aie_host_split_site(int site)') == 1
+    assert board.count('extern "C" int cnn_aie_host_split_line(int site') == 1
+    # the symbols are the ones site_prof.c (boardmain.prof_c, retargeted to the archive prefix) calls
+    from aiegraph import boardmain
+    sp = boardmain.prof_c(kprefix="cnn")
+    assert "cnn_aie_host_split_site(int site)" in sp and "cnn_aie_host_split_line(int site" in sp, sp[:800]
+    assert "#ifndef UC_HS_DEFINED" in board and "static ahs_table g_ahs;" in board
+    assert board.count("g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);") == \
+        board.count("ahs_add_window(&g_ahs, (unsigned long long)(lt1 - lt0), hw1 - hw0);") == 1
+    for a in ("ahs_add(&g_ahs, AHS_GLUE, (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL);",
+              "ahs_add(&g_ahs, AHS_FLUSH, sp1 - sp0);", "ahs_add(&g_ahs, AHS_INVAL, sp3 - sp2);",
+              "ahs_launch(&g_ahs);", "ahs_cal(&g_ahs, sp0, (unsigned long long)lt0);",
+              "ahs_begin(&g_ahs, AHS_KIND_CONV);", "ahs_add_span(&g_ahs, AHS_PACK,"):
+        assert board.count(a) == 1, a
+    conv = aiednn.template("conv2d/kacc_chunk_conv.cc")
+    entry = aiednn.render("conv2d/kacc_chunk_entry.cc", K="cnn", E="aiek_cnntest", SPEC="")
+    assert conv.count("uc_hs_mark(AHS_SCATTER);") == 1 and entry.count("uc_hs_enter();") == 1
+    # sp1..sp2 (the launch call) holds no console I/O
+    w = board[board.index("sp1 = uc_pmc();"):board.index("sp2 = uc_pmc()")]
+    assert "printf" not in w and "fflush" not in w, w
+    gxx = shutil.which("g++")
+    assert gxx, "g++ not found: test_chunk_board_host_split needs x86 g++"
+    d = Path(tempfile.mkdtemp(prefix="hs_chunk_"))
+    for n, s in CHUNK_STUBS.items():
+        (d / n).write_text(s)
+    f = d / "aiek_cnntest.cc"
+    f.write_text(board + conv + entry)
+    r = subprocess.run([gxx, "-fsyntax-only", "-std=c++17", "-Wall", "-Werror", "-Wno-unused-function",
+                        "-Wno-unused-variable", "-DAIEHLC_SITE_PERF=1", f"-I{d}", f"-I{RT}", str(f)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-3000:]

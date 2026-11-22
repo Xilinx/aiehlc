@@ -1,6 +1,7 @@
 /* aiednn/conv2d/kacc_chunk_board.cc -- board glue of kacc_chunk_conv.cc (A78 + aiehlc runtime): port buffers,
  * cache sync, the gemm_kacc dispatch of every (Np, Kk, MC) instance, and the host ABI the generated board
- * main / driver read (<K>_aie_stats, <K>_aie_launch_stats, <K>_aie_split_stats, <K>_aie_host_split_*).
+ * main / driver read (<K>_aie_stats, <K>_aie_launch_stats, <K>_aie_split_stats, <K>_aie_host_split_*), and the
+ * per-site split hooks uc_hs_enter / uc_hs_mark the chunk loop and the entry call.
  * Parameters (aiegraph.cnn_chunk.write_kernel): K host ABI prefix, WARM warm launch, CTRLPKT control-packet aot,
  * PART_C0 first mesh column, MAXW / MAXX / MAXY port sizes (elements), DISPATCH the instance switch,
  * SELFCHECK sampled A78 check of every launch. */
@@ -103,12 +104,40 @@ extern "C" int @K@_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_
         *cold_tiles = g_uc_cold_tiles;
     return 0;
 }
-extern "C" void @K@_aie_host_split_site(int site) { (void)site; }
+/* GAP-RT1 / M3.1: per-site aie_host split (pack / scatter / dma / wait + glue / flush / inval / launches) and, under
+ * -DAIEHLC_SITE_PERF=1, the per-site core counter line -> PROF aie_host_split / aie_site_perf (aie_host_split.h).
+ * The site index comes from graph_driver's UP_AIE_BEGIN (site_prof.c); wait = the runtime's always-on wait_io ticks.
+ * Per chunk: pack = host time before its launch (W re-tile on the first chunk + im2col), scatter = after it. */
+#ifndef UC_HS_DEFINED
+#define UC_HS_DEFINED 1
+#include "aie_host_split.h"
+void __Runtime_host_split_wait_ticks(unsigned long long *ticks, unsigned int *calls); /* C++ linkage, aie_runtime.h */
+static ahs_table g_ahs;
+static inline unsigned long long uc_hs_wait(void) {
+    unsigned long long t = 0ULL;
+    unsigned int n = 0U;
+    __Runtime_host_split_wait_ticks(&t, &n);
+    return t;
+}
+#endif
+static unsigned long long g_uc_hs_t = 0ULL; /* XTime of the site's last split point (call entry / launch end) */
+/* entry of an offloaded conv call: counts the site call and opens its pack span */
+static inline void uc_hs_enter(void) {
+    XTime t;
+    XTime_GetTime(&t);
+    ahs_begin(&g_ahs, AHS_KIND_CONV);
+    g_uc_hs_t = (unsigned long long)t;
+}
+/* host time since the last split point -> phase ph (AHS_SCATTER after a chunk's output scatter) */
+static inline void uc_hs_mark(int ph) {
+    XTime t;
+    XTime_GetTime(&t);
+    ahs_add_span(&g_ahs, ph, g_uc_hs_t, (unsigned long long)t);
+    g_uc_hs_t = (unsigned long long)t;
+}
+extern "C" void @K@_aie_host_split_site(int site) { ahs_set_site(&g_ahs, site); }
 extern "C" int @K@_aie_host_split_line(int site, char *buf, int n) {
-    (void)site;
-    (void)buf;
-    (void)n;
-    return 0;
+    return ahs_format(&g_ahs, site, (double)COUNTS_PER_SECOND, buf, (size_t)n);
 }
 extern "C" int @K@_aie_stats(int *launches, int *run_rc, int *calls, unsigned long long *macs) {
     if (launches)
@@ -148,6 +177,8 @@ static int uc_launch(int N, int K, int M, int first, unsigned long long macs) {
     memset(g_ky, 0xff, yb); /* sentinel: unwritten -> NaN -> counted by the scatter */
     XTime lt0, lt1;
     XTime_GetTime(&lt0);
+    const unsigned long long hw0 = uc_hs_wait();
+    ahs_add_span(&g_ahs, AHS_PACK, g_uc_hs_t, (unsigned long long)lt0);
     const unsigned long long sp0 = uc_pmc();
 #if UC_WARM
     unsigned seg0 = 0, cold0 = 0, seg1 = 0, cold1 = 0;
@@ -169,7 +200,10 @@ static int uc_launch(int N, int K, int M, int first, unsigned long long macs) {
     }
 #endif
     const unsigned long long sp3 = uc_pmc();
+    const unsigned long long hw1 = uc_hs_wait();
     XTime_GetTime(&lt1);
+    g_uc_hs_t = (unsigned long long)lt1;
+    ahs_add_window(&g_ahs, (unsigned long long)(lt1 - lt0), hw1 - hw0); /* + site-perf snapshot (SITE_PERF) */
     if (lrc != 0) {
         printf("[aie_conv] launch N=%d K=%d M=%d rc=%d (no instance)\n", N, K, M, lrc);
         return lrc;
@@ -178,6 +212,13 @@ static int uc_launch(int N, int K, int M, int first, unsigned long long macs) {
     g_sp_call += sp2 - sp1;
     g_sp_glue += (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL;
     g_sp_post += sp3 - sp2;
+    /* M2 N segment: the same in-launch host glue per site (PMU cycles; ahs_cal pairs them with XTime) */
+    ahs_add(&g_ahs, AHS_GLUE, (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL);
+    ahs_add(&g_ahs, AHS_FLUSH, sp1 - sp0);
+    ahs_add(&g_ahs, AHS_INVAL, sp3 - sp2);
+    ahs_launch(&g_ahs);
+    ahs_cal(&g_ahs, sp0, (unsigned long long)lt0);
+    ahs_cal(&g_ahs, sp3, (unsigned long long)lt1);
     g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
     g_aie_launches++;
     g_uc_macs += macs;
