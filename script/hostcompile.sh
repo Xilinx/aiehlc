@@ -127,7 +127,8 @@ kobj_cache_put() {
     for f in kernel kernel.calltree; do [ -f "${BUILD_DIR}/$f" ] && cp -p "${BUILD_DIR}/$f" "$t/"; done
     mkdir -p "$t/cwd"
     for f in "./host_ctrlpkt_${fn}.h" "./kernel_${fn}_ctrlpkt.h" "./ctrlpkt_${fn}"; do
-        [ -e "$f" ] && [ ! -L "$f" ] && cp -rp "$f" "$t/cwd/"
+        # -L: in the parallel path these may be links into the worklocal that kc.sh wrote through
+        [ -e "$f" ] && cp -rpL "$f" "$t/cwd/"
     done
     echo "${fn}" > "$t/FUNC"
     touch "$t/DONE"
