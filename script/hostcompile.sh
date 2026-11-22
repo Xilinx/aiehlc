@@ -104,12 +104,13 @@ kobj_cache_key() {
 kobj_cache_get() {
     local fn="$1" e="${AIEHLC_KOBJ_CACHE}/$2" f
     [ -f "$e/kernel.o" ] && [ -f "$e/DONE" ] || return 1
-    cp -p "$e/kernel.o" "${BUILD_DIR}/kernel.o" || return 1
-    for f in kernel kernel.calltree; do [ -f "$e/$f" ] && cp -p "$e/$f" "${BUILD_DIR}/$f"; done
+    # no -p: restored files must look new to the mtime-based reuse checks and make
+    cp "$e/kernel.o" "${BUILD_DIR}/kernel.o" || return 1
+    for f in kernel kernel.calltree; do [ -f "$e/$f" ] && cp "$e/$f" "${BUILD_DIR}/$f"; done
     if [ -d "$e/cwd" ]; then
         for f in "$e/cwd"/* ; do
             [ -e "$f" ] || continue
-            rm -rf "./$(basename "$f")"; cp -rp "$f" ./
+            rm -rf "./$(basename "$f")"; cp -r "$f" ./
         done
     fi
     touch "$e/DONE"   # LRU hint for a later prune
