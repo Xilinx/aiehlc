@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""k_net -- static K overlap model of a gemm_kacc net (resnet18) + frozen L + N per launch (costmodel M4.1 P6).
+"""k_net -- static K overlap model of a gemm_kacc net (resnet18, yolo26n) + frozen L + N per launch (costmodel M4.1 P6).
 
   k_net.py --net resnet18 --build-root R --lparams L.json --nparams N.json --kcyc KCYC.json --board BOARD.json
            [--out K.json | --params K.json] [--spread CFG=X,CFG=X] [--gate 0.20] [--r2 0.90] CFG=A.log,B.log,C.log ...
@@ -17,7 +17,7 @@ Per launch (ms), every input static (build dir + frozen params), the board log i
   L_hat = l_net (P1, frozen l_palmyra213.m3121), N_hat = n_fit --ap predict (P2, frozen n_resnet18 m4)
 Fitted per cfg on run a only (scipy least_squares on the relative T error, bounds s_*, o* >= 0): s_rd s_wr o0 o1 c.
   LOO (run a): refit without site i, predict site i -> KLOO loo_maxrel; with --params (frozen) LOO = n/a.
-Check runs (b, c; never fitted): per launch T = site_ms / launches, r2 and maxrel over the 21 sites;
+Check runs (b, c; never fitted): per launch T = site_ms / launches, r2 and maxrel over the net's sites (resnet18 21, yolo26n 102);
   KCHK PASS iff r2 >= --r2 and maxrel + spread_med <= --gate (spread_med = P3 t_noise, --spread CFG=X).
 Output:
   KSRC net cfg run log board launches sites
@@ -49,6 +49,7 @@ sys.path.insert(0, str(HERE.parents[1] / "src"))
 import l_net  # noqa: E402
 import n_fit  # noqa: E402
 import net_kdiag  # noqa: E402
+import net_sites  # noqa: E402
 from aiegraph.costmodel import ap_sites, launch_l  # noqa: E402
 
 PARAMS = ("s_rd", "s_wr", "o0", "o1", "c")
@@ -62,10 +63,22 @@ def md5(p):
     return hashlib.md5(open(p, "rb").read()).hexdigest()
 
 
+def site_mod(net):
+    """(static site module, N feature names) of the net: yolo26n -> cc_sites (cnn_aie_conv, M4.2 P2),
+    resnet18 -> ap_sites (ap_gemm); site count = len(rows), kcore = --kcyc sites by part (net_sites order)"""
+    if net == "yolo26n":
+        from aiegraph.costmodel import cc_sites
+        return cc_sites, cc_sites.CC_FEATS
+    return ap_sites, ap_sites.AP_FEATS
+
+
 # ------------------------------------------------------------------ static rows (build + frozen params only)
 def static_rows(build, cfg, lprm, nprm, kcyc, board):
     """[dict] per site in part order: launches + every static per-launch term the predict path needs"""
-    srows = ap_sites.sites(build)
+    net = n_fit.NET
+    sm, feats = site_mod(net)
+    l_net.NET = net
+    srows = sm.sites(build)
     st, seq, _rs = l_net.launch_feats(build)
     lh, i = {}, 0
     for s in st:
@@ -76,8 +89,12 @@ def static_rows(build, cfg, lprm, nprm, kcyc, board):
         lh[s["part"]] = tot
         i += s["launches"]
     kc = {s["part"]: s["pred_cyc"] for s in kcyc["cfgs"][cfg]["sites"]}
-    si = net_kdiag.site_inst(build)
-    kb = net_kdiag.kernel_bds(os.path.join(build, net_kdiag.CNN_WL, "host.cc"))
+    if net == "yolo26n":   # M4.2: site -> instance from the build log (net_sites.sites)
+        root, base = os.path.split(os.path.normpath(build))
+        si = net_kdiag.site_inst_log(root, net, base[len(net) + 1:])
+    else:
+        si = net_kdiag.site_inst(build)
+    kb = net_kdiag.kernel_bds(os.path.join(build, net_kdiag.cnn_wl(net), "host.cc"))
     npc = nprm[cfg]["kinds"]["conv"]
     f = board["aie_clk_mhz"] * 1e3            # cycles per ms
     out = []
@@ -91,7 +108,7 @@ def static_rows(build, cfg, lprm, nprm, kcyc, board):
         wr = fe["ddr_b"] - rd
         out.append(dict(part=p, op=s["op"], cid=s["cid"], launches=n, inst=ks[0],
                         L_hat=lh[p] / n,
-                        N_hat=n_fit.ap_predict(npc, n_fit.ap_view(s, ap_sites.AP_FEATS)) / n,
+                        N_hat=n_fit.ap_predict(npc, n_fit.ap_view(s, feats)) / n,
                         core=kc[p] / f,
                         rd_ms=rd / (board["ddr_rd_gbps"] * 1e6), wr_ms=wr / (board["ddr_wr_gbps"] * 1e6),
                         bd_ms=fe["bd_n"] * board["bd_switch_cyc"] / f / max(1, fe["shim_ch_n"]),
@@ -204,7 +221,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.audit:
         return 0 if audit() == 0 else 1
-    n_fit.NET = a.net
+    net_sites.set_net(a.net, n_fit)
     lprm = launch_l.load_params(a.lparams)
     nprm = json.load(open(a.nparams))
     kcyc = json.load(open(a.kcyc))
