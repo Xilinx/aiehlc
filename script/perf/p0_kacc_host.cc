@@ -17,6 +17,11 @@ void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls);
 void __Runtime_core_perf_report(int tag);
 void __Runtime_launch_words(unsigned long long *mmio_w, unsigned long long *cp_w, unsigned long long *ph_w,
                             unsigned int *bd_n, unsigned int *rst_n, unsigned long long *miss);
+/* pmu_hz fallback when XTime does not advance (VEK385 A78: CNTPCT frozen unless the SCNTRS is started): the A78
+ * PMCCNTR rate measured against XTime on vek385-12 (1.8675 GHz). Palmyra always takes the xtime branch. */
+#ifndef P0_A78_FALLBACK_HZ
+#define P0_A78_FALLBACK_HZ 1867500000ULL
+#endif
 int g_runtime_debug_level = 0x100; /* AIE_DEBUG_FLAG_CORE_PERF_COUNTER (aie_runtime.h:69); overrides the weak 0 */
 
 static inline unsigned long long p0_pmc(void) {
@@ -103,7 +108,7 @@ int main() {
 
     unsigned long long ph0[4] = {0, 0, 0, 0}, ph1[4] = {0, 0, 0, 0}, wio0 = 0, wio1 = 0;
     unsigned int phn0[4] = {0, 0, 0, 0}, phn1[4] = {0, 0, 0, 0}, wion0 = 0, wion1 = 0;
-    unsigned long long sp_pre = 0, sp_call = 0, sp_glue = 0, sp_post = 0, ticks = 0;
+    unsigned long long sp_pre = 0, sp_call = 0, sp_glue = 0, sp_post = 0, ticks = 0, pmc_wall = 0;
     __Runtime_phase_cycles(ph0, phn0);
     __Runtime_wait_io_cycles(&wio0, &wion0);
     unsigned long long wm0 = 0, wc0 = 0, wp0[4] = {0, 0, 0, 0}, wx0 = 0;
@@ -137,6 +142,7 @@ int main() {
             sp_glue += (a2 - a1) > (r1 - r0) ? (a2 - a1) - (r1 - r0) : 0ULL;
             sp_post += a3 - a2;
             ticks += (unsigned long long)(lt1 - lt0);
+            pmc_wall += a3 - a0;
             /* outside the timed regions: the counters armed at this launch (core done: wait_io returned) */
             __Runtime_core_perf_report(launches);
             launches++;
@@ -158,10 +164,13 @@ int main() {
     const unsigned long long wio = wio1 - wio0;
     const unsigned int wion = wion1 - wion0;
     const double g_s = (double)(g1 - g0) / (double)COUNTS_PER_SECOND;
-    const unsigned long long pmu_hz = g_s > 0.0 ? (unsigned long long)((double)(pmc1 - pmc0) / g_s + 0.5) : 0ULL;
+    const int pmu_xtime = g_s > 0.0;
+    const unsigned long long pmu_hz = pmu_xtime ? (unsigned long long)((double)(pmc1 - pmc0) / g_s + 0.5) : P0_A78_FALLBACK_HZ;
+    printf("[P0] pmu_src=%s pmu_hz=%llu\n", pmu_xtime ? "xtime" : "fallback", pmu_hz);
     const double cms = pmu_hz ? 1000.0 / (double)pmu_hz : 0.0;
     const double nl = launches ? (double)launches : 1.0;
-    const double aie_ms = 1000.0 * (double)ticks / (double)COUNTS_PER_SECOND;
+    const double aie_ms = pmu_xtime ? 1000.0 * (double)ticks / (double)COUNTS_PER_SECOND
+                                    : 1000.0 * (double)pmc_wall / (double)pmu_hz;
     const unsigned long long c_kl = ph[0], c_bd = ph[1] + sp_glue, c_si = ph[3] + sp_pre, c_ce = ph[2],
                              c_wi = wio + sp_post;
     const double rt_ms = (double)(ph[0] + ph[1] + ph[2] + ph[3] + wio) * cms;
