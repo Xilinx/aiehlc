@@ -34,7 +34,11 @@ Bandwidth references (not used by any number here): palmyra213 whole-array shim<
   measured 2026-11-14: amit/tasks/2026-11-14_palmyra-ddr-cap/board_palmyra213/run_ddrbw_0.log:42 (cfg=R4
   B/cyc=9.910) and :50 (cfg=RW4 B/cyc=7.429); README.md:24 table. Printed as KBWREF.
 
-usage: net_kdiag.py --net resnet18 --build-root ROOT off=<log_a> aot-kco=<log_a>   (rc 0 iff every cfg has
+  yolo26n (M4.2): site -> instance from the build log (net_sites.sites: 'aie conv .. -> call P .. -> AxBxC
+  launches=L'), instance = gemm_kacc__A_B_C_* in ag_work/aiek/aiek_cnnconv/worklocal/host.cc
+  (net_sites.aiek_dir), launches_static = L.
+
+usage: net_kdiag.py --net resnet18|yolo26n --build-root ROOT off=<log_a> aot-kco|aot=<log_a>   (rc 0 iff every cfg has
        dma+core == sites and missing == 0)
        net_kdiag.py --selftest
 """
@@ -51,7 +55,14 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1] / "src"))
 
-CNN_WL = os.path.join("ag_work", "aiek", "aiek_cnn", "worklocal")
+import net_sites  # noqa: E402
+
+
+def cnn_wl(net):
+    """worklocal dir of the net's aiek (net_sites.aiek_dir: aiek_cnn for resnet18/unet, aiek_cnnconv for yolo26n)"""
+    return os.path.join("ag_work", "aiek", net_sites.aiek_dir(net), "worklocal")
+
+
 BURST_MAX_B = 256   # = site_feat.BURST_MAX_B (ASSUMED)
 BWREF = ("KBWREF R=9.9GBps src=amit/tasks/2026-11-14_palmyra-ddr-cap/board_palmyra213/run_ddrbw_0.log:42 "
          "RW=7.4GBps src=amit/tasks/2026-11-14_palmyra-ddr-cap/board_palmyra213/run_ddrbw_0.log:50 used=0")
@@ -95,6 +106,25 @@ def site_inst(build):
         out[part] = dict(kind="conv" if kind == "conv" else "linear", px=px, kg=kg, N=n, M=m,
                          inst="gemm_kacc__%d_%d_%d_" % (ceil64(n), kg, px), launches_static=-(-m // px))
     return out
+
+
+def site_inst_log(build_root, net, cfg):
+    """yolo26n: {part: dict(kind, inst_prefix, launches_static)} from the build log's 'aie conv .. -> call P ..
+    -> AxBxC launches=L' (net_sites.sites); instance = gemm_kacc__A_B_C_*"""
+    out = {}
+    for part, kind, _cid, inst, ln in net_sites.sites(build_root, net, cfg):
+        out[part] = dict(kind=kind, inst="gemm_kacc__%d_%d_%d_" % tuple(inst), launches_static=ln)
+    return out
+
+
+_HOSTMSG = re.compile(r"(?<=[^\n])\[\d{2}:\d{2}:\d{2} [A-Z]+\] [^\n]*\n")
+
+
+def unsplice(txt):
+    """drop a host-side '[HH:MM:SS LEVEL] ...' message the log capture spliced into the middle of a board line
+    (yolo26n_off.a.log:386 'pre_io_act_c[07:35:23 DEBUG] main: program_done ...' + :387 'yc=1414904 ...'):
+    rejoins the board line, which parse_perf would otherwise miss (bound=none)"""
+    return _HOSTMSG.sub("", txt)
 
 
 _STARTIO = re.compile(r"__Runtime_startio\(\w+, \w+, -?\d+, (\d+)\)")
@@ -195,8 +225,7 @@ def feats_of(ch):
 # ------------------------------------------------------------------ per cfg
 def run_cfg(net, cfg, log, build_root):
     from k_diag import parse_perf
-    import net_sites
-    txt = Path(log).read_text(errors="replace")
+    txt = unsplice(Path(log).read_text(errors="replace"))
     cen = net_sites.census(log, net)
     perf = parse_perf(txt)
     split = {int(p): (k, int(n)) for p, k, n in net_sites._SPLIT.findall(txt)}
@@ -212,8 +241,8 @@ def run_cfg(net, cfg, log, build_root):
                                                     ("%.3f" % (c / w)) if w else "inf", b))
     print("KDIAG net=%s cfg=%s sites=%d dma_bound=%d core_bound=%d" % (net, cfg, len(split), nb["dma"], nb["core"]))
     build = net_sites.build_dir(build_root, net, cfg)
-    si = site_inst(build)
-    kb = kernel_bds(os.path.join(build, CNN_WL, "host.cc"))
+    si = site_inst(build) if net in ("resnet18", "unet") else site_inst_log(build_root, net, cfg)
+    kb = kernel_bds(os.path.join(build, cnn_wl(net), "host.cc"))
     miss = 0
     for part in sorted(split):
         kind, n = split[part]
@@ -261,6 +290,8 @@ def selftest():
                   (2, "MM2S", 1): dict(bytes=0, bd_n=0, run_min=0, run_max=0, nd=0)})
     chk("feats", f["rw_ratio"] == 0.75 and f["shim_ch_n"] == 2 and f["run_b_min"] == 64 and f["burst_b"] == 64
         and f["num_dims"] == 3 and f["shim_cols"] == 2 and f["ddr_b"] == 400 and f["run_b_max"] == 4096)
+    chk("unsplice", unsplice("a=1 b_c[07:35:23 DEBUG] main: x\nyc=2\n[07:35:24 DEBUG] keep\n")
+        == "a=1 b_cyc=2\n[07:35:24 DEBUG] keep\n")
     chk("ceil64", ceil64(1000) == 1024 and ceil64(64) == 64)
     print("NETKDIAG SELFTEST %s (%d/%d)" % ("PASS" if bad == 0 else "FAIL", n - bad, n))
     return bad == 0
@@ -269,7 +300,7 @@ def selftest():
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--net", default="resnet18", choices=("resnet18",))
+    ap.add_argument("--net", default="resnet18", choices=net_sites.NETS)
     ap.add_argument("--build-root")
     ap.add_argument("runs", nargs="*", help="cfg=log (run a)")
     a = ap.parse_args(argv)
