@@ -273,7 +273,9 @@ def write_aligned_blob(params_path: Path, offsets: dict, out_path: Path,
     data = params_path.read_bytes()
     new, pos = {}, 0
     with open(out_path, "wb") as f:
-        for name, (off, nbytes) in sorted(offsets.items(), key=lambda kv: kv[1][0]):
+        # name order, not params.bin order: TVM's save_param_dict (a Map) orders the params
+        # differently run to run, which made weights.bin / graph_driver.c / main.elf irreproducible.
+        for name, (off, nbytes) in sorted(offsets.items(), key=lambda kv: kv[0]):
             pad = (-pos) % align
             f.write(b"\0" * pad)
             pos += pad
