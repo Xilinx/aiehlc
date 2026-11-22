@@ -130,16 +130,47 @@ def calibrate(points, params):
     return dict(fit_wait(points, params, nnls_compute(points, params)), ddr_model=DDR_MODEL)
 
 
-def loo_maxrel(points, params):
-    """Leave-one-kernel-out: refit all calibrated constants without the kernel, predict it."""
+def des_terms(op, params, d):
+    """Split the predicted wait (ms/launch) into the DES terms of des.predict_launch:
+    compute = core compute + locks on the round's critical path (aie - stall), dma = DMA/DDR-paced idle + c drain
+    (stall), fixed = round_fixed_cyc + wait_call_cyc*waits, overlap = -(overlap_bd*bd + b_overlap_cyc*b share)."""
+    g = des.geometry(op)
+    clk_mhz = float(params["aie_clk_mhz"])
+    host = op.get("host") or {}
+    bd_cyc = float(host.get("bd_us", params.get("host_bd_us", 5.0))) * clk_mhz
+    R = g["R"]
+    wpr = float(host.get("waits_per_launch", 12 * R)) / R
+    to_ms = 1.0 / (clk_mhz * 1e3)
+    fixed = des._p(params, "round_fixed_cyc") + des._p(params, "wait_call_cyc") * wpr
+    overlap = des._p(params, "overlap_bd") * bd_cyc + des._p(params, "b_overlap_cyc") * g["b_b"] / (g["a_b"] + g["b_b"])
+    return {"compute": d["aie_ms"] - d["stall_ms"], "dma": d["stall_ms"], "fixed": R * fixed * to_ms,
+            "overlap": -R * overlap * to_ms}
+
+
+def loo_maxrel(points, params, detail=None):
+    """Leave-one-kernel-out: refit all calibrated constants without the kernel, predict it.
+    detail = full-fit cal dict -> also print one KLOO line per held-out kernel (signed rel, the calibrated constant
+    with the largest relative change vs the full fit, the largest |DES term| of the held-out prediction)."""
     worst = 0.0
     for i, q in enumerate(points):
         rest = [p for p in points if p["kernel"] != q["kernel"]]
         p2 = dict(params, ddr_model=DDR_MODEL)
-        p2.update(calibrate(rest, params))
-        rel = abs(des.predict_launch(q["op"], p2, q["cycles"])["wait_ms"] / q["meas_ms"] - 1.0)
+        cl = calibrate(rest, params)
+        p2.update(cl)
+        d = des.predict_launch(q["op"], p2, q["cycles"])
+        rel = abs(d["wait_ms"] / q["meas_ms"] - 1.0)
         print("[fit] loo %-26s rel=%.3f" % (q["kernel"], rel))
         worst = max(worst, rel)
+        if detail is not None:
+            dc = {k: (cl[k] - float(detail[k])) / max(abs(float(detail[k])), 1e-9)
+                  for k in CAL_KEYS if k in cl and k in detail}
+            kmax = max(dc, key=lambda k: abs(dc[k]))
+            t = des_terms(q["op"], p2, d)
+            tmax = max(t, key=lambda k: abs(t[k]))
+            print("KLOO kernel=%s rel=%+.3f pred_ms=%.4f meas_ms=%.4f dcal=%s:%s->%s(%+.2f) term=%s %s"
+                  % (q["kernel"], d["wait_ms"] / q["meas_ms"] - 1.0, d["wait_ms"], q["meas_ms"], kmax,
+                     detail[kmax], cl[kmax], dc[kmax], tmax,
+                     " ".join("%s_ms=%.4f" % (k, v) for k, v in t.items())))
     return worst
 
 
@@ -171,6 +202,9 @@ def main():
                     help="board_compute.json (kboard_from_logs): board compute counters per kernel for the compute "
                          "calibration and the DES compute check (else the logs' PERF lines, mean over launches)")
     ap.add_argument("--rerun-dir", default=None)
+    ap.add_argument("--loo-detail", action="store_true",
+                    help="print a KLOO line per held-out kernel (rel, dcal = largest relative change of a calibrated "
+                         "constant vs the full fit, term = largest DES term of the held-out prediction)")
     a = ap.parse_args()
 
     params = json.load(open(a.params))
@@ -306,7 +340,7 @@ def main():
     st = [abs(p["pred"]["stall_ms"] - p["board_stall_cyc"] / clk_khz) * 1e3 for p in rows if p["board_stall_cyc"]]
     print("[fit] report DES stall vs board lock+stream stall: abs err max=%.1f us mean=%.1f us n=%d "
           "(board stall includes core idle during host issue; profiling on)" % (max(st), sum(st) / len(st), len(st)))
-    loo = loo_maxrel(points, params)
+    loo = loo_maxrel(points, params, detail=cal if a.loo_detail else None)
     print("COSTMODEL K fit: R2=%.3f maxrel=%.3f n=%d kernels=%d logs=%d board_logs=%d meas=rt_wait_io"
           " cal_params=%d loo_maxrel=%.3f" % (r2, mr, len(rows), kernels, n_logs, n_board, cal_params, loo))
     print("DES compute: maxrel=%.3f n=%d src=perfctr" % (cmr, len(comp)))
