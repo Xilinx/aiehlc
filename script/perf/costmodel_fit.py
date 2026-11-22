@@ -400,7 +400,9 @@ def main():
     loo = loo_maxrel(points, params, detail=cal if a.loo_detail else None, form=a.form, worst_out=wl)
     if wl:
         # remaining LOO error: the worst held-out kernel and the DES term that dominates its prediction
-        print("KRESID worst=%s rel=%+.3f term=%s %s" % (wl["kernel"], wl["rel"], wl["term"],
+        # rel is |held-out rel| (same convention as loo_maxrel); dir= keeps the sign (over/under-prediction)
+        print("KRESID worst=%s rel=%.3f term=%s dir=%s %s" % (wl["kernel"], abs(wl["rel"]), wl["term"],
+                                                              "over" if wl["rel"] >= 0 else "under",
                                                          " ".join("%s_ms=%.4f" % kv for kv in wl["terms"].items())))
     print("COSTMODEL K fit: R2=%.3f maxrel=%.3f n=%d kernels=%d logs=%d board_logs=%d meas=rt_wait_io"
           " cal_params=%d loo_maxrel=%.3f" % (r2, mr, len(rows), kernels, n_logs, n_board, cal_params, loo))
