@@ -70,6 +70,7 @@ _PROF = re.compile(r"^PROF part=(\d+) op=aie_host_(conv|linear|attn)(\d+) ms=([\
                    r"aie_ms=([\d.]+)", re.M)
 _SPLIT = re.compile(r"^PROF aie_host_split part=(\d+) kind=(\w+) .*glue_ms=([\d.]+) flush_ms=([\d.]+) "
                     r"inval_ms=([\d.]+) launches=(\d+)$", re.M)
+NET = "unet"   # --net (net_sites.set_net)
 _CMP = re.compile(r"^CMP unet board=(\S+) .*aie_launches=(\d+) .*run_rc=(-?\d+)", re.M)
 _DETAIL = re.compile(r"^LAUNCH split_detail .*host_glue_bdcfg=([\d.]+)", re.M)
 _LAUNCH = re.compile(r"^LAUNCH (?:warm|cold) .*?\blaunches=(\d+)", re.M)
@@ -250,8 +251,8 @@ def ab_mode(a, root):
     ref = {}
     for cfg, lg in pairs(a.ab_ref):
         la, _, lb = lg.partition(",")
-        ra = measure("%s/unet_%s" % (rroot, cfg), la)[0]
-        rb = measure("%s/unet_%s" % (rroot, cfg), lb)[0]
+        ra = measure("%s/%s_%s" % (rroot, NET, cfg), la)[0]
+        rb = measure("%s/%s_%s" % (rroot, NET, cfg), lb)[0]
         g = _glue_ab(ra, rb, a.ab_metric)
         ref[cfg] = float(np.percentile(g, 95)) if len(g) else float("nan")
     ncfg, npass, nsmall, ok = 0, 0, 0, True
@@ -259,7 +260,7 @@ def ab_mode(a, root):
         la, _, lb = lg.partition(",")
         rows = []
         for log in (la, lb):
-            r, txt = measure("%s/unet_%s" % (root, cfg), log)
+            r, txt = measure("%s/%s_%s" % (root, NET, cfg), log)
             ok &= src_line(cfg, log, txt)
             s = sum_line(cfg, r, txt)
             npass += int(s)
@@ -291,9 +292,9 @@ def floor_mode(a, root):
             print("NFLOOR cfg=%s no --check log FAIL" % cfg)
             ok = False
             continue
-        rows, txt = measure("%s/unet_%s" % (root, cfg), log)
+        rows, txt = measure("%s/%s_%s" % (root, NET, cfg), log)
         ok &= src_line(cfg, log, txt)
-        rows_b, txt_b = measure("%s/unet_%s" % (root, cfg), checks[cfg])
+        rows_b, txt_b = measure("%s/%s_%s" % (root, NET, cfg), checks[cfg])
         ok &= src_line(cfg, checks[cfg], txt_b)
         for kind in KINDS:
             ka = [r for r in rows if r["kind"] == kind and r["launches"] > 0]
@@ -413,7 +414,7 @@ def fit_ovl_mode(a, root):
             print("OVLFIT cfg=%s no ovl params FAIL" % cfg)
             ok = False
             continue
-        build = "%s/unet_%s" % (root, cfg)
+        build = "%s/%s_%s" % (root, NET, cfg)
         srows = static_rows(build)
         rows, txt = measure(build, lg)
         if [(r["kind"], r["cid"]) for r in rows] != [(s["kind"], s["cid"]) for s in srows]:
@@ -500,7 +501,7 @@ def predict_mode(a, root):
     specs = [(c, lg.split(",")) for c, lg in pairs(a.runs)]
     ok, data = True, {}
     for cfg, logs in specs:
-        build = "%s/unet_%s" % (root, cfg)
+        build = "%s/%s_%s" % (root, NET, cfg)
         srows = static_rows(build)
         corr = [0.0] * sum(1 for s in srows if s["launches"] > 0)
         if a.ovl and cfg == "off":
@@ -637,7 +638,11 @@ def main(argv=None):
     ap.add_argument("--fit-ovl", choices=("cls",), help="per-kind overlap term on the a log (CFG=A.log positionals)")
     ap.add_argument("--out-params", help="--fit-ovl: output params json (N part copied unchanged)")
     ap.add_argument("runs", nargs="*", metavar="CFG=A.log,B.log,C.log", help="--predict logs per cfg")
+    ap.add_argument("--net", default="unet", choices=("unet", "resnet18", "yolo26n"), help="net: builds BUILD_ROOT/<net>_<cfg>, CMP <net> (default unet)")
     a = ap.parse_args(argv)
+    sys.path.append(str(Path(__file__).resolve().parent))   # net_sites (run with -I)
+    import net_sites
+    net_sites.set_net(a.net, sys.modules[__name__], sys.modules.get("n_fit", sys.modules[__name__]))
     root = a.build_root.rstrip("/")
     ok = True
     if a.fit_ovl:
@@ -659,7 +664,7 @@ def main(argv=None):
     if a.lower_bound:
         worst, ncfg = 0.0, 0
         for cfg, log in pairs(a.check):
-            rows, txt = measure("%s/unet_%s" % (root, cfg), log)
+            rows, txt = measure("%s/%s_%s" % (root, NET, cfg), log)
             ok &= src_line(cfg, log, txt)
             worst = max(worst, lower_bound(cfg, rows))
             ncfg += 1
@@ -674,7 +679,7 @@ def main(argv=None):
         prm, looruns = {}, []
         checks = dict(pairs(a.check))
         for cfg, log in pairs(a.fit):
-            rows, txt = measure("%s/unet_%s" % (root, cfg), log)
+            rows, txt = measure("%s/%s_%s" % (root, NET, cfg), log)
             ok &= src_line(cfg, log, txt)
             ok &= sum_line(cfg, rows, txt)
             kinds = {}
@@ -688,7 +693,7 @@ def main(argv=None):
             # LOO with the subset chosen on the fit run, once on the fit log (a) and once on the check log (b)
             runs = [("a", rows)]
             if cfg in checks:
-                runs.append(("b", measure("%s/unet_%s" % (root, cfg), checks[cfg])[0]))
+                runs.append(("b", measure("%s/%s_%s" % (root, NET, cfg), checks[cfg])[0]))
             for run, rr in runs:
                 worst_run = 0.0
                 for kind in KINDS:
@@ -710,7 +715,7 @@ def main(argv=None):
                 f.write("\n")
     allsites, r2s, worst, ncfg = 0, [], 0.0, 0
     for cfg, log in pairs(a.check):
-        rows, txt = measure("%s/unet_%s" % (root, cfg), log)
+        rows, txt = measure("%s/%s_%s" % (root, NET, cfg), log)
         ok &= src_line(cfg, log, txt)
         ok &= sum_line(cfg, rows, txt)
         if cfg not in prm:

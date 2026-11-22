@@ -71,7 +71,15 @@ KLN_SITE = "conv121"
 MEAS_FIELDS = ("K_meas", "L_meas", "N_meas", "ovl_meas", "compute_cyc", "lock", "stream", "wait", "site_ms")
 PRED_KEYS = ("L_hat", "N_hat", "launches")   # the only TSV fields handed to the predict path
 TOL_BINS = (0.15, 0.30, 0.50)
+NET = "unet"   # --net (net_sites.set_net): log names <net>_<cfg>.<run>.log, CMP <net>
 _RUN = re.compile(r"^(?:.*/)?(?:unet_[\w-]+\.)?([a-z])(?:\.log)?$")
+
+
+def _run_re():
+    if NET == "unet":
+        return _RUN
+    import net_sites
+    return net_sites.run_re(NET)
 
 
 def _prof_re():
@@ -86,7 +94,7 @@ def _cmp_re():
 
 def norm_run(name):
     """'unet_off.a.log' | '/x/unet_aot-kco.b.log' | 'a' -> 'a'"""
-    m = _RUN.match(str(name).strip())
+    m = _run_re().match(str(name).strip())
     if not m:
         raise ValueError("cannot unify run name %r" % name)
     return m.group(1)
@@ -672,7 +680,11 @@ def main(argv=None):
     ap.add_argument("--build-root")
     ap.add_argument("--fit", nargs="*", default=[])
     ap.add_argument("--check", nargs="*", default=[])
+    ap.add_argument("--net", default="unet", choices=("unet", "resnet18", "yolo26n"), help="net: builds BUILD_ROOT/<net>_<cfg>, logs <net>_<cfg>.<run>.log, CMP <net> (default unet)")
     a = ap.parse_args(argv)
+    import net_sites
+    import n_fit as _nf
+    net_sites.set_net(a.net, sys.modules[__name__], _nf)
     if a.site_tsv and not (a.k_tsv or a.kswap):
         ap.error("--site-tsv needs --k-tsv or --kswap")
     if a.dump_kmeas and not a.oracle_k:

@@ -93,6 +93,7 @@ import re
 import sys
 from pathlib import Path
 
+NET = "unet"   # --net (net_sites.set_net)
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1] / "src"))
@@ -247,7 +248,7 @@ def shim_ch_eff(chs):
 
 def site_table(cfg, log, build_root):
     from m3_site import site_rows
-    build = str(Path(build_root) / ("unet_" + cfg))
+    build = str(Path(build_root) / ("%s_%s" % (NET, cfg)))
     rows, _ = site_rows(build, log)
     return site_table_rows(cfg, rows, build_root)
 
@@ -256,7 +257,7 @@ def site_table_rows(cfg, rows, build_root):
     """site_table on given site rows (kind, cid, part, launches, kernels): the log's m3_site.site_rows, or the
     static launches>0 rows of n_feat.sites (part = lpart) for estimate() site mode"""
     from site_feat import bd_shape_rows
-    build = str(Path(build_root) / ("unet_" + cfg))
+    build = str(Path(build_root) / ("%s_%s" % (NET, cfg)))
     bds, _ = bd_shape_rows(build, rows, build + ".build.log")
     bd = {(f["kind"], f["cid"]): f for f in bds}
     kch = kernel_shim_ch(build)
@@ -557,7 +558,7 @@ def main_dwfit(a):
             board, nl, rc = m[-1] if m else ("-", "-1", "-1")
             sites = site_table(cfg, log, a.build_root)
             pf = parse_perf(txt)
-            rows, _ = site_rows(str(Path(a.build_root) / ("unet_" + cfg)), log)
+            rows, _ = site_rows(str(Path(a.build_root) / ("%s_%s" % (NET, cfg))), log)
             sms = {r["part"]: r["K"] + r["L"] + r["N"] for r in rows}
             for s in sites:
                 d = split_site(0.0, 0.0, pf[s["part"]]) if s["part"] in pf else dict(lock=float("nan"),
@@ -871,7 +872,12 @@ def main(argv=None):
     ap.add_argument("--dw-params", help="with --dwpredict: frozen kdw params json")
     ap.add_argument("--dwpredict-audit", action="store_true", help="AST audit of the --dwpredict path")
     ap.add_argument("runs", nargs="*", help="cfg=log (with --dwfit: cfg=log_a,log_b,log_c)")
+    ap.add_argument("--net", default="unet", choices=("unet", "resnet18", "yolo26n"), help="net: builds BUILD_ROOT/<net>_<cfg>, logs <net>_<cfg>.<run>.log, CMP <net> (default unet)")
     a = ap.parse_args(argv)
+    import net_sites
+    import n_fit as _nf
+    import k_diag
+    net_sites.set_net(a.net, sys.modules[__name__], _nf, k_diag)
     if a.selftest:
         return selftest()
     if a.dwpredict_audit:

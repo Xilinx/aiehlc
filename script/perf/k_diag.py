@@ -115,6 +115,7 @@ _PERF = re.compile(r"^PROF aie_site_perf part=(\d+) kind=(\w+) launches=(\d+) pe
 _SPLIT = re.compile(r"^PROF aie_host_split part=(\d+) kind=(\w+) .*wait_ms=([\d.]+) .*inval_ms=([\d.]+) "
                     r"launches=(\d+)$", re.M)
 _FA_D = re.compile(r"_d(\d+)_")
+NET = "unet"   # --net (net_sites.set_net)
 _CMP = re.compile(r"^CMP unet board=(\S+) .*aie_launches=(\d+) .*run_rc=(-?\d+)", re.M)
 
 
@@ -236,7 +237,7 @@ def load(cfg, log, build_root, need_perf=True):
     """site dicts of one cfg/log: m3_site rows + split + perf + BD shape"""
     from m3_site import site_rows
     from site_feat import bd_shape_rows
-    build = str(Path(build_root) / ("unet_" + cfg))
+    build = str(Path(build_root) / ("%s_%s" % (NET, cfg)))
     rows, txt = site_rows(build, log)
     bds, _ = bd_shape_rows(build, rows, build + ".build.log")
     bd = {(f["kind"], f["cid"]): f for f in bds}
@@ -800,7 +801,7 @@ def kdsrc_line(cfg, lg, ss, ps, tx):
 
 def ref_sites(a, cfg, log):
     from m3_site import site_rows
-    rrows, rtxt = site_rows(str(Path(a.build_root) / ("unet_" + cfg)), log)
+    rrows, rtxt = site_rows(str(Path(a.build_root) / ("%s_%s" % (NET, cfg))), log)
     rsp = parse_split(rtxt)
     return [dict(K=rsp[r["part"]][0] - rsp[r["part"]][1]) for r in rrows]
 
@@ -1007,7 +1008,7 @@ def kdelta_core(a):
     for spec in a.runs:
         cfg, logs = spec.split("=", 1)
         logs = logs.split(",")
-        rc, pred = _kcyc_static(str(Path(a.build_root) / ("unet_" + cfg)), a.iss or ISS)
+        rc, pred = _kcyc_static(str(Path(a.build_root) / ("%s_%s" % (NET, cfg))), a.iss or ISS)
         if rc != 0:
             print("KDELTA_ERR cfg=%s kcyc_unet rc=%d" % (cfg, rc))
             ok = False
@@ -2107,7 +2108,11 @@ def main(argv=None):
                     help="--khat-static: frozen class params (k_palmyra213.*.json) instead of --fit; no fit, "
                          "K_loo=nan; prints KHATS PARAMS src= md5= fit=0")
     ap.add_argument("runs", nargs="*", metavar="CFG=LOG_A[,LOG_B,LOG_C]")
+    ap.add_argument("--net", default="unet", choices=("unet", "resnet18", "yolo26n"), help="net: builds BUILD_ROOT/<net>_<cfg>, logs <net>_<cfg>.<run>.log, CMP <net> (default unet)")
     a = ap.parse_args(argv)
+    import net_sites
+    import n_fit as _nf
+    net_sites.set_net(a.net, sys.modules[__name__], _nf)
     if a.khats_audit:
         return 0 if khats_audit() else 1
     if a.params and a.fit:

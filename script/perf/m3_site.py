@@ -81,6 +81,7 @@ KL_TOL = 0.01        # KL_rel = |K_site+L_site-rt_phase_sum_ms|/rt_phase_sum_ms
 
 _SPLIT = re.compile(r"^PROF aie_host_split part=(\d+) kind=(\w+) .*dma_ms=([\d.]+) wait_ms=([\d.]+) "
                     r"glue_ms=([\d.]+) flush_ms=([\d.]+) inval_ms=([\d.]+) launches=(\d+)$", re.M)
+NET = "unet"   # --net (net_sites.set_net)
 _CMP = re.compile(r"^CMP unet board=(\S+) .*aie_launches=(\d+) .*run_rc=(-?\d+)", re.M)
 _LSPLIT = re.compile(r"^LAUNCH split kload=([\d.]+) .*coreen=([\d.]+) ", re.M)
 _DETAIL = re.compile(r"^LAUNCH split_detail .*rt_bdcfg=([\d.]+) rt_startio=([\d.]+) rt_wait_io=([\d.]+) .*"
@@ -335,7 +336,7 @@ def kl_main(a):
 
     def kc_of(cfg):
         if cfg not in kcs:
-            kcs[cfg] = KLCfg(cfg, "%s/unet_%s" % (root, cfg), cyc, prm)
+            kcs[cfg] = KLCfg(cfg, "%s/%s_%s" % (root, NET, cfg), cyc, prm)
         return kcs[cfg]
 
     if a.fit:
@@ -489,7 +490,7 @@ def lpred_main(a):
     off_ok, run_ok, run_n = None, True, 0
     for spec in a.runs:
         cfg, logs = spec.split("=", 1)
-        build = "%s/unet_%s" % (root, cfg)
+        build = "%s/%s_%s" % (root, NET, cfg)
         cp = prm["cfg"].get(cfg, {})
         coef = cp.get("coef", {})
         refit = a.lrefit == cfg
@@ -622,7 +623,11 @@ def main(argv=None):
     ap.add_argument("--tshare-max", nargs="+", metavar="CFG=X")
     ap.add_argument("--out-params")
     ap.add_argument("runs", nargs="*", metavar="CFG=LOG[,LOG...]")
+    ap.add_argument("--net", default="unet", choices=("unet", "resnet18", "yolo26n"), help="net: builds BUILD_ROOT/<net>_<cfg>, logs <net>_<cfg>.<run>.log, CMP <net> (default unet)")
     a = ap.parse_args(argv)
+    import net_sites
+    import n_fit as _nf
+    net_sites.set_net(a.net, sys.modules[__name__], _nf)
     if a.kl:
         if not a.cycles or not a.check or bool(a.fit) == bool(a.params) or (a.fit and not a.out):
             ap.error("--kl needs --cycles, --check and either --fit + --out or --params")
@@ -641,7 +646,7 @@ def main(argv=None):
         cfg, logs = spec.split("=", 1)
         for log in logs.split(","):
             try:
-                o, s, u = probe(cfg, log, "%s/unet_%s" % (root, cfg))
+                o, s, u = probe(cfg, log, "%s/%s_%s" % (root, NET, cfg))
             except (ValueError, KeyError, OSError) as e:
                 print("M3ERR cfg=%s log=%s %s: %s" % (cfg, log, type(e).__name__, e))
                 o, s, u = False, 0, 1
