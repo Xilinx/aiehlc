@@ -212,6 +212,42 @@ def test_des_ddr_model_select():
     assert d["wait_ms"] == pytest.approx(des.predict_launch(op, dict(_HAND_PARAMS), {"core_cyc": 1000})["wait_ms"])
 
 
+def test_costmodel_fit_form_m5():
+    # M5 P3 --form m5 on synthetic data: kernels generated from a known m5 calibration (wait_call_cyc x structural
+    # wait_io count, compute_exposed 0) are fit back to ~0 error; the default form keeps its 6-constant shape.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("costmodel_fit_m5", SRC.parent / "script" / "perf" / "costmodel_fit.py")
+    fit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fit)
+    params = dict(_HAND_PARAMS)
+    true = {"chunk_ovh_cyc": 50.0, "round_fixed_cyc": 3000.0, "ddr_bw_scale": 1.2, "ddr_run0_b": 30.0,
+            "b_prefetch_b": 20000.0, "wait_call_cyc": 400.0, "compute_exposed": 0.0, "ddr_model": fit.DDR_MODEL}
+    pts = []
+    for i, (k, nt, S, core, wpl) in enumerate([(64, 1, 1, 1000, 4), (128, 1, 1, 3000, 12), (256, 2, 2, 8000, 12),
+                                               (320, 4, 4, 2000, 4), (640, 4, 4, 30000, 12), (1280, 2, 2, 6000, 12),
+                                               (96, 1, 1, 500, 4)]):
+        op = {"instance": _inst(k=k, kch=32, ntile=nt, S=S), "host": {"bd_us": 5.0}}
+        op["host"]["waits_per_launch"] = wpl * des.geometry(op)["R"] if wpl == 12 else wpl
+        cyc = {"core_cyc": core}
+        meas = des.predict_launch(op, dict(params, **true), cyc)["wait_ms"]
+        pts.append({"name": "k%d" % i, "kernel": "k%d" % i, "op": op, "cycles": cyc, "meas_ms": meas,
+                    "board_compute_cyc": core + true["chunk_ovh_cyc"] * des.geometry(op)["chunks"]})
+    cal = fit.calibrate(pts, params, "m5")
+    assert cal["k_form"] == "m5" and cal["compute_exposed"] == 0.0 and cal["ddr_model"] == "bytes"
+    assert set(fit.M5_KEYS) <= set(cal) and cal["chunk_ovh_cyc"] == pytest.approx(50.0, abs=0.01)
+    p2 = dict(params, **cal)
+    rel = [abs(des.predict_launch(p["op"], p2, p["cycles"])["wait_ms"] / p["meas_ms"] - 1.0) for p in pts]
+    assert max(rel) < 0.02
+    # des_terms splits the m5 prediction; fixed = round_fixed_cyc + wait_call_cyc x waits per round
+    t0 = fit.des_terms(pts[0]["op"], p2, des.predict_launch(pts[0]["op"], p2, pts[0]["cycles"]))
+    assert t0["fixed"] > 0 and set(t0) == {"compute", "dma", "fixed", "overlap"}
+    assert fit.loo_maxrel(pts, params, form="m5") < 0.1
+    # default form untouched: no k_form, compute_exposed is a fitted constant, all 6 CAL_KEYS present
+    cd = fit.calibrate(pts, params)
+    assert "k_form" not in cd and set(fit.CAL_KEYS) <= set(cd) and "wait_call_cyc" not in cd
+
+
 # ---- L segment (launch overhead), M1.1 P4 ----
 from aiegraph.costmodel import launch_l  # noqa: E402
 
