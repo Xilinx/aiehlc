@@ -1,0 +1,90 @@
+{
+ "aot-kco": {
+  "feats_all": [
+   "pack_bytes",
+   "wpack_bytes",
+   "xpack_bytes",
+   "tail_elems",
+   "scatter_bytes",
+   "scatter_add_bytes",
+   "sync_bytes",
+   "glue_bd",
+   "glue_w",
+   "kfirst",
+   "launches"
+  ],
+  "fit": {
+   "log": "/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks/2026-11-22_M40/resnet18_aot-kco.a.log",
+   "run": "a"
+  },
+  "kinds": {
+   "conv": {
+    "coef": {
+     "glue_bd": 0.00603321362,
+     "kfirst": 0.123283131,
+     "launches": 0.229878245,
+     "pack_bytes": 4.7089742e-06,
+     "scatter_bytes": 2.12770627e-06,
+     "tail_elems": 7.24736716e-07,
+     "xpack_bytes": 3.1853627e-06
+    },
+    "d": 0.0,
+    "feats": [
+     "pack_bytes",
+     "xpack_bytes",
+     "tail_elems",
+     "scatter_bytes",
+     "glue_bd",
+     "kfirst",
+     "launches"
+    ],
+    "loo_a": 0.0814776778,
+    "n": 21
+   }
+  },
+  "model": "N=sum(coef[f]*f)+d (ms) per site, f = ap_sites static features, nnls on relative error, <=7 features, fit on run a only"
+ },
+ "off": {
+  "feats_all": [
+   "pack_bytes",
+   "wpack_bytes",
+   "xpack_bytes",
+   "tail_elems",
+   "scatter_bytes",
+   "scatter_add_bytes",
+   "sync_bytes",
+   "glue_bd",
+   "glue_w",
+   "kfirst",
+   "launches"
+  ],
+  "fit": {
+   "log": "/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks/2026-11-22_M40/resnet18_off.a.log",
+   "run": "a"
+  },
+  "kinds": {
+   "conv": {
+    "coef": {
+     "glue_bd": 0.00351965845,
+     "pack_bytes": 4.70892343e-06,
+     "scatter_bytes": 4.04440753e-06,
+     "sync_bytes": 1.10340231e-07,
+     "tail_elems": 4.9621482e-07,
+     "xpack_bytes": 3.15457008e-06
+    },
+    "d": 0.0,
+    "feats": [
+     "pack_bytes",
+     "xpack_bytes",
+     "tail_elems",
+     "scatter_bytes",
+     "sync_bytes",
+     "glue_bd"
+    ],
+    "loo_a": 0.145274588,
+    "n": 21
+   }
+  },
+  "model": "N=sum(coef[f]*f)+d (ms) per site, f = ap_sites static features, nnls on relative error, <=7 features, fit on run a only"
+ }
+}

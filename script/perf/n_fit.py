@@ -10,6 +10,13 @@
   NAB cfg=.. sites=.. glue_ab_max=.. glue_ab_p95=.. ref_p95=.. smaller=0|1   (|glue_a-glue_b|/mean, launches>0)
   --ab-metric abs: NAB cfg=.. metric=abs_ms sites=.. ... (|glue_a-glue_b| in ms, ref_p95 same metric)
   NAB ALL cfgs=.. nsum_pass=.. smaller=.. PASS|FAIL                    (PASS = all NSRC ok and all NSUM PASS)
+  n_fit.py --net resnet18 --build-root DIR --ap [--out JSON | --params JSON] CFG=A.log,B.log,C.log [...]
+--ap (M4.1 P2, ap_gemm nets): static sites = aiegraph/costmodel/ap_sites.py (AP_FEATS, one kind, <=7 features);
+  NFLOOR net= cfg= n= feats= floor= PASS|FAIL   (all AP_FEATS NNLS on a, max per-site rel error on b/c, <=0.150)
+  NFIT / NLOO net= cfg= run=a ... loo_maxrel=  (fit on a only; LOO on a with the subset frozen, <=0.200)
+  NCHK net= cfg= run=b|c sites= maxrel= PASS|FAIL  (static prediction, no measured field: NAUDIT, <=0.200)
+  NALL net= cfgs= nchk= maxfloor= maxloo= maxrel= meas_at_predict= PASS|FAIL
+  --params: frozen check of every given log (no fit, no NFLOOR/NLOO).
 --floor: NNLS with all FEATS, no subset cap, fitted on the --fit log, max relative error on the --check log:
   NFLOOR cfg=.. kind=.. n=.. floor=..
   NFLOOR ALL cfgs=.. maxfloor=.. PASS|FAIL                             (maxfloor<=0.150)
@@ -152,34 +159,35 @@ def maxrel(p, rows):
     return max(abs(predict(p, r) - r["N"]) / r["N"] for r in rows)
 
 
-def fit_kind(rows, sub=None, kind="conv"):
+def fit_kind(rows, sub=None, kind="conv", feats=None, maxf=None):
     """{'coef': {feat: v>0}, 'd': v>=0} by NNLS on relative error. sub=None: every subset of <= MAX_FEATS
     non-constant FEATS; the TOP_LOO with the smallest in-sample max relative error are re-ranked by
     max(in-sample, leave-one-out) max relative error on the same rows (ties: fewer features, FEATS order);
     'feats' = the chosen subset (frozen for LOO). sub given: refit on that subset."""
+    FEATS_ = FEATS if feats is None else tuple(feats)   # --ap: AP_FEATS (ap_sites), UNet: FEATS
     y = np.array([r["N"] for r in rows])
-    X = np.array([[float(r[f]) for f in FEATS] + [1.0] for r in rows])
+    X = np.array([[float(r[f]) for f in FEATS_] + [1.0] for r in rows])
     if sub is not None:
-        cols = [FEATS.index(f) for f in sub] + [len(FEATS)]
+        cols = [FEATS_.index(f) for f in sub] + [len(FEATS_)]
         return _params(sub, _nnls(X[:, cols], y))
-    var = [j for j in range(len(FEATS)) if np.ptp(X[:, j]) > 0]
+    var = [j for j in range(len(FEATS_)) if np.ptp(X[:, j]) > 0]
     cand = []
-    for k in range(MAX_FEATS[kind] + 1):
+    for k in range((MAX_FEATS[kind] if maxf is None else maxf) + 1):
         for cmb in itertools.combinations(var, k):
-            cols = list(cmb) + [len(FEATS)]
+            cols = list(cmb) + [len(FEATS_)]
             c = _nnls(X[:, cols], y)
             cand.append((float(np.max(np.abs(X[:, cols] @ c - y) / y)), k, cmb, c))
     cand.sort(key=lambda t: (t[0], t[1], t[2]))
     best = None
     for m, k, cmb, c in cand[:TOP_LOO]:
-        cols = list(cmb) + [len(FEATS)]
+        cols = list(cmb) + [len(FEATS_)]
         lv = 0.0
         for i in range(len(y)):
             keep = np.arange(len(y)) != i
             ci = _nnls(X[keep][:, cols], y[keep])
             lv = max(lv, abs(float(X[i, cols] @ ci) - y[i]) / y[i])
         if best is None or max(lv, m) < best[0] - 1e-12:
-            best = (max(lv, m), [FEATS[j] for j in cmb], c)
+            best = (max(lv, m), [FEATS_[j] for j in cmb], c)
     p = _params(best[1], best[2])
     p["feats"] = [f for f in best[1] if f in p["coef"]]
     return p
@@ -612,6 +620,161 @@ def predict_mode(a, root):
     return 0 if ok else 1
 
 
+# --ap (costmodel M4.1 P2): ap_gemm nets (resnet18). Static sites from ap_sites.sites (graph_driver.c + build log +
+# aiek_cnn.cc + kernel host.cc), all sites one kind 'conv' (ap_gemm runs conv AND dense: op=aie_host_conv).
+AP_MAXF = 7
+AP_RUNS = "abcdefgh"
+_AP_PROF = re.compile(r"^PROF part=(\d+) op=aie_host_conv ms=([\d.]+) .*site_ms=([\d.]+) aie_ms=([\d.]+)", re.M)
+
+
+def ap_measure(srows, log):
+    """measured N per static site of an ap_gemm build: N = PROF part ms (site_ms - aie_ms) + glue + flush + inval
+    (PROF aie_host_split). Alignment: part order and split launches == static launches, else raises."""
+    txt = read(log)
+    prof = _AP_PROF.findall(txt)
+    split = {int(p): (float(g), float(f), float(i), int(n)) for p, _k, g, f, i, n in _SPLIT.findall(txt)}
+    if len(prof) != len(srows):
+        raise ValueError("%s: %d PROF aie_host_conv sites vs %d static sites" % (log, len(prof), len(srows)))
+    out = []
+    for s, (part, ms, site_ms, aie_ms) in zip(srows, prof):
+        part = int(part)
+        if part != s["part"] or part not in split or split[part][3] != s["launches"]:
+            raise ValueError("%s: misaligned part=%s vs static part=%d launches=%d" % (log, part, s["part"],
+                                                                                       s["launches"]))
+        g, f, i, _n = split[part]
+        out.append(dict(part=part, ms=float(ms), site_ms=float(site_ms), aie_ms=float(aie_ms), glue=g, flush=f,
+                        inval=i, N=float(ms) + g + f + i))
+    return out, txt
+
+
+def ap_view(srow, feats):
+    """predict-path view of a static site: only its static feature values (audited: no measured field)"""
+    return {f: srow[f] for f in feats}
+
+
+def ap_predict(p, view):
+    """N_hat (ms) of one site from the frozen kind params p and the static view"""
+    return sum(v * view[f] for f, v in p["coef"].items()) + p["d"]
+
+
+AP_PREDICT_FNS = (ap_view, ap_predict)
+
+
+def ap_audit():
+    """AST audit of the --ap predict path: no measured field name (LOG_FIELDS + site_ms/aie_ms) in it"""
+    import ast
+    import inspect
+    meas = set(LOG_FIELDS) | {"site_ms", "aie_ms", "txt", "log"}
+    bad = 0
+    for fn in AP_PREDICT_FNS:
+        names = set()
+        for n in ast.walk(ast.parse(inspect.getsource(fn))):
+            if isinstance(n, ast.Name):
+                names.add(n.id)
+            elif isinstance(n, ast.Attribute):
+                names.add(n.attr)
+            elif isinstance(n, ast.arg):
+                names.add(n.arg)
+            elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+                names.add(n.value)
+        hit = sorted(names & meas)
+        bad += len(hit)
+        print("NAUDIT fn=%s meas=%s" % (fn.__name__, ",".join(hit) or "-"))
+    return bad
+
+
+def _ap_fit(rows, srows, feats, sub=None):
+    """fit_kind on the joined (static + measured N) rows"""
+    jr = [dict(s, N=r["N"]) for s, r in zip(srows, rows)]
+    return fit_kind(jr, sub, "conv", feats, AP_MAXF)
+
+
+def _ap_maxrel(p, srows, rows, feats):
+    rel = [abs(ap_predict(p, ap_view(s, feats)) - r["N"]) / r["N"] for s, r in zip(srows, rows)]
+    i = int(np.argmax(rel))
+    return float(rel[i]), i, rel
+
+
+def ap_mode(a, root):
+    """--ap CFG=A.log,B.log[,C.log] ...: per cfg NSRC per log, NFLOOR (all AP_FEATS NNLS on a, maxrel on b/c),
+    fit on a only (subset <= AP_MAXF, fit_kind) or --params frozen, NLOO on a (frozen subset), NCHK per non-a run
+    (prediction from static rows only), NAUDIT, NALL; --out writes the params json."""
+    from aiegraph.costmodel import ap_sites
+    import net_sites
+    feats = ap_sites.AP_FEATS
+    prm = json.load(open(a.params)) if a.params else {}
+    out, ok = {}, True
+    floors, loos, chks = [], [], []
+    for cfg, lg in pairs(a.runs):
+        logs = lg.split(",")
+        build = "%s/%s_%s" % (root, NET, cfg)
+        srows = ap_sites.sites(build)
+        runs = []
+        for i, log in enumerate(logs):
+            rows, txt = ap_measure(srows, log)
+            ok &= src_line(cfg, log, txt, sites=len(rows))
+            m = net_sites.run_re(NET).match(log)   # run letter from <net>_<cfg>.<run>.log, else position
+            runs.append((m.group(1) if m else AP_RUNS[i], log, rows))
+        ra = runs[0][2]
+        fl = 0.0
+        if not a.params:
+            pf = _ap_fit(ra, srows, feats, list(feats))
+            fl = max([_ap_maxrel(pf, srows, rr, feats)[0] for _r, _l, rr in runs[1:]] or [float("nan")])
+            good = fl <= FLOOR_GATE
+            ok &= good
+            floors.append(fl)
+            print("NFLOOR net=%s cfg=%s n=%d feats=%d floor=%.4f %s" % (NET, cfg, len(srows), len(feats), fl,
+                                                                         "PASS" if good else "FAIL"))
+            p = _ap_fit(ra, srows, feats)
+            jr = [dict(s, N=r["N"]) for s, r in zip(srows, ra)]
+            lv = 0.0
+            for i in range(len(jr)):
+                pi = fit_kind(jr[:i] + jr[i + 1:], p["feats"], "conv", feats)
+                lv = max(lv, abs(ap_predict(pi, ap_view(srows[i], feats)) - ra[i]["N"]) / ra[i]["N"])
+            good = lv <= GATE
+            ok &= good
+            loos.append(lv)
+            p.update(n=len(jr), loo_a=sig(lv))
+            pc = {"kinds": {"conv": p}, "feats_all": list(feats), "fit": {"run": "a", "log": logs[0]},
+                  "model": "N=sum(coef[f]*f)+d (ms) per site, f = ap_sites static features, nnls on relative "
+                           "error, <=%d features, fit on run a only" % AP_MAXF}
+            out[cfg] = pc
+            print("NFIT net=%s cfg=%s run=a n=%d %s d=%.6g" % (NET, cfg, len(jr), " ".join(
+                "%s=%.6g" % (f, v) for f, v in sorted(p["coef"].items())), p["d"]))
+            print("NLOO net=%s cfg=%s run=a sites=%d feats=%s loo_maxrel=%.4f %s" % (
+                NET, cfg, len(jr), ",".join(p["feats"]) or "-", lv, "PASS" if good else "FAIL"))
+        else:
+            if cfg not in prm:
+                print("NCHK net=%s cfg=%s no params FAIL" % (NET, cfg))
+                ok = False
+                continue
+            pc = prm[cfg]
+        p = pc["kinds"]["conv"]
+        for run, log, rows in (runs[1:] if not a.params else runs):
+            mx, i, _rel = _ap_maxrel(p, srows, rows, feats)
+            pred = np.array([ap_predict(p, ap_view(s, feats)) for s in srows])
+            meas = np.array([r["N"] for r in rows])
+            r2 = 1.0 - float(np.sum((pred - meas) ** 2)) / float(np.sum((meas - meas.mean()) ** 2))
+            good = mx <= GATE
+            ok &= good
+            chks.append(mx)
+            print("NWORST net=%s cfg=%s run=%s part=%d site=%s%d N=%.3f N_hat=%.3f r2=%.4f" % (
+                NET, cfg, run, srows[i]["part"], srows[i]["op"], srows[i]["cid"], rows[i]["N"], pred[i], r2))
+            print("NCHK net=%s cfg=%s run=%s sites=%d maxrel=%.4f %s" % (NET, cfg, run, len(rows), mx,
+                                                                        "PASS" if good else "FAIL"))
+    bad = ap_audit()
+    ok &= bad == 0 and len(chks) > 0
+    if a.out and out:
+        with open(a.out, "w") as f:
+            json.dump(out, f, sort_keys=True, indent=1)
+            f.write("\n")
+        print("NPARAMS path=%s cfgs=%s" % (a.out, ",".join(sorted(out))))
+    fmt = lambda v: "%.4f" % max(v) if v else "n/a"  # noqa: E731
+    print("NALL net=%s cfgs=%d nchk=%d maxfloor=%s maxloo=%s maxrel=%s meas_at_predict=%d %s" % (
+        NET, len(pairs(a.runs)), len(chks), fmt(floors), fmt(loos), fmt(chks), bad, "PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-root", required=True)
@@ -639,12 +802,18 @@ def main(argv=None):
     ap.add_argument("--out-params", help="--fit-ovl: output params json (N part copied unchanged)")
     ap.add_argument("runs", nargs="*", metavar="CFG=A.log,B.log,C.log", help="--predict logs per cfg")
     ap.add_argument("--net", default="unet", choices=("unet", "resnet18", "yolo26n"), help="net: builds BUILD_ROOT/<net>_<cfg>, CMP <net> (default unet)")
+    ap.add_argument("--ap", action="store_true",
+                    help="ap_gemm net (resnet18): NFLOOR + fit on a + NLOO + NCHK on b/c (or --params frozen)")
     a = ap.parse_args(argv)
     sys.path.append(str(Path(__file__).resolve().parent))   # net_sites (run with -I)
     import net_sites
     net_sites.set_net(a.net, sys.modules[__name__], sys.modules.get("n_fit", sys.modules[__name__]))
     root = a.build_root.rstrip("/")
     ok = True
+    if a.ap:
+        if not a.runs:
+            ap.error("--ap needs CFG=A.log,B.log[,C.log] positionals")
+        return ap_mode(a, root)
     if a.fit_ovl:
         if not a.params or not a.out_params or not a.runs:
             ap.error("--fit-ovl needs --params, --out-params and CFG=A.log positionals")
