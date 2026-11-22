@@ -710,6 +710,7 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
     if [ "${SKIP_BSS}" -ne 0 ]; then
         hc_extra_defs="${hc_extra_defs} -DAIEHLC_SKIP_BSS_DEFAULT=${SKIP_BSS}"
     fi
+    aiehlc_ts host_link_begin
     WORKLOCAL_DIR="${WORKLOCAL_DIR}" AIE_VERSION="${aie_version}" PLATFORM="${platform}" \
         SIM_TILES="${SIM_TILES:-}" DEBUG_SYMS="${DEBUG_SYMS}" \
         AIEHLC_PROFILING="${PROFILING}" EXTRA_DEFS="${hc_extra_defs}" \
@@ -720,6 +721,7 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
         echo "Error: tiling mode compilation failed."
         return $TILING_RC
     fi
+    aiehlc_ts host_link_end
 
     # Copy the built ELF to the standard output location
     TILING_BUILD_DIR="${WORKLOCAL_DIR}/build"
@@ -790,6 +792,7 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
             echo "    warning: --prettydebug requested but host_schedule.html missing; skipping server."
         fi
     fi
+    aiehlc_ts aiehlc_end
     return 0
 fi
 
