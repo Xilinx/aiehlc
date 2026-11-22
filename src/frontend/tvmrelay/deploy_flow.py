@@ -629,9 +629,7 @@ def build_c(mod, params, out_dir: Path, *, opt_level: int = 3, fuse: bool = True
     sem = pure_perm.save_relay(cap.module, lib.get_graph_json(), pure_perm.opsem_path(graph_path))
 
     params_path = out_dir / f"{MODULE_STEM}_params.bin"
-    # name-sorted: lib.get_params() is a TVM Map whose iteration order varies run to run, and the
-    # params.bin order becomes the weights.bin layout -> main.elf; sorting makes rebuilds reproducible.
-    params_path.write_bytes(relay.save_param_dict(dict(sorted(lib.get_params().items()))))
+    params_path.write_bytes(relay.save_param_dict(lib.get_params()))
 
     if verbose:
         # Count definitions, not occurrences of the signature: every kernel is
