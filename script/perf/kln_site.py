@@ -44,7 +44,7 @@ Output:
   KLNHAT LOO cfg= run=a k= sites= loo_maxrel= PASS|FAIL                 (--k-tsv: K_loo_ms of the run-a rows,
           nan when the column is missing or all nan; --kswap: the swapped K itself, nothing is fitted)
   KLNHAT121 cfg= k= part= runs=b,c K_hat_ms= K_meas_ms= lock_ms= dw_hat_ms= rel_T=   (conv121 mean over b/c,
-          per launch; rel_T = mean (T_hat - T) / T; dw_hat_ms from the K TSV, nan without the column)
+          per launch; rel_T = |mean (T_hat - T) / T| (magnitude, like maxrel; sign = K_hat_ms vs K_meas_ms); dw_hat_ms from the K TSV, nan without the column)
   KLNHAT ALL k= logs= sites= r2_min= maxrel= loo_max= PASS|FAIL  (b/c only; loo_max = max of the LOO lines, with
           --loo X PASS also needs loo_max <= X, nan = FAIL); rc=1 when ALL FAILs.  Uncomputable metrics print nan.
 --audit: AST check of the predict path (PREDICT_FNS): no measured field name may appear in it (MEAS_FIELDS);
@@ -414,7 +414,7 @@ def khat_eval(rows, src, kmap, label, r2_gate, rel_gate, loo_gate, ls=None):
         m = lambda v: sum(v) / len(v)
         print("KLNHAT121 cfg=%s k=%s part=%d runs=%s K_hat_ms=%s K_meas_ms=%s lock_ms=%s dw_hat_ms=%s rel_T=%s"
               % (cfg, label, rs[0]["part"], ",".join(r["run"] for r in rs), _f(m(kh)), _f(m(kmv)), _f(m(lk)),
-                 _f(m(dw)), _f(m(rt))))
+                 _f(m(dw)), _f(abs(m(rt)))))
     any_nan = lambda v: (not v) or any(math.isnan(x) for x in v)
     loo_max = nan if any_nan(loos) else max(loos)
     r2_min = nan if any_nan(r2s) else min(r2s)
