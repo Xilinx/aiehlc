@@ -27,6 +27,15 @@
 #include <math.h>
 #include <string.h>
 
+#if AIE_GEN == 2
+/* VEK280 (AIE-ML, A72), persistent mode only: no high-throughput control mode and no shim-row control
+ * window on Gen2, so shim BDs are plain MMIO writes (the runtime's AIE-ML BD templates) and the kernel
+ * loads over MMIO once. The window calls below become no-ops; everything between them is MMIO. */
+#define __Runtime_ctrl_shim_bd_begin(f) ((void)(f))
+#define __Runtime_ctrl_shim_bd_commit() ((void)0)
+#define __Runtime_ctrl_shim_bd_sync() 0
+#endif
+
 // Kernel variants (eng/kernel_variants): the full image-major engine for
 // persistent mode, and per-layer-kind ELFs eager mode loads layer by layer.
 extern unsigned char _binary_kernel_eng_start[], _binary_kernel_engstem_start[], _binary_kernel_engconv_start[];
@@ -50,6 +59,10 @@ static const int k_ooo[EF_MESH_ROWS][EF_MESH_COLS] = EF_OOO_BD_TABLE;
 static const int k_pkt[EF_MESH_ROWS][EF_MESH_COLS] = EF_PKT_ID_TABLE;
 static const int k_out_col[EF_MESH_ROWS] = EF_OUT_SHIM_COL_TABLE;
 static const int k_out_ch[EF_MESH_ROWS] = EF_OUT_SHIM_CH_TABLE;
+static const int k_w_col[EF_MESH_COLS] = EF_W_SHIM_COL_TABLE, k_w_ch[EF_MESH_COLS] = EF_W_SHIM_CH_TABLE,
+                 k_w_bd[EF_MESH_COLS] = EF_W_BD_TABLE;
+static const int k_in_col[EF_MESH_ROWS] = EF_IN_SHIM_COL_TABLE, k_in_ch[EF_MESH_ROWS] = EF_IN_SHIM_CH_TABLE;
+static const int k_in_bd[EF_MESH_ROWS][2] = EF_IN_BD_TABLE, k_res_bd[EF_MESH_ROWS][2] = EF_RES_BD_TABLE;
 
 static XAie_LocType shim(int rel_col) { return XAie_TileLoc((uint8_t)rel_col, 0); }
 
@@ -107,14 +120,14 @@ static void arm_output(XAie_DevInst *dev, const eng_layer_t *L, int8_t *out, int
 // Weights: header + P*Q chunks, one contiguous run per mesh column.
 static void arm_weights(XAie_DevInst *dev, const eng_layer_t *L, const int8_t *blob) {
     for (int c = 0; c < EF_MESH_COLS; c++) {
-        XAie_LocType t = shim(EF_FIRST_COL + c);
+        XAie_LocType t = shim(k_w_col[c]);
         // Contiguous, but expressed as 3 dims: a plain BD this long (> 1023
         // words) takes the runtime's fallback path, which leaves the AXI burst
         // at its default and streams ~3x slower than burst 16.
         XAie_DmaDesc d =
-            __Runtime_dma_bd_config_multidim_ooo(dev, t, (void *)(blob + L->blob_off[c]), 0, (int)L->blob_len, -1, 0, 0,
-                                                 0, 0, 0, 0, -1, 3, 4, 64, 256, 512, 256 * 512, 0, 0, 0);
-        __Runtime_startio(dev, __Runtime_dma_createio_4(t, d, 0, 0, DMA_MM2S), 0, 1);
+            __Runtime_dma_bd_config_multidim_ooo(dev, t, (void *)(blob + L->blob_off[c]), k_w_bd[c], (int)L->blob_len,
+                                                 -1, 0, 0, 0, 0, 0, 0, -1, 3, 4, 64, 256, 512, 256 * 512, 0, 0, 0);
+        __Runtime_startio(dev, __Runtime_dma_createio_4(t, d, k_w_ch[c], k_w_bd[c], DMA_MM2S), k_w_bd[c], 1);
     }
 }
 
@@ -123,11 +136,11 @@ static void arm_weights(XAie_DevInst *dev, const eng_layer_t *L, const int8_t *b
 static void arm_input_stem(XAie_DevInst *dev, const int8_t *img) {
     for (int r = 0; r < EF_MESH_ROWS; r++) {
         const int r0 = r == 0 ? 0 : 56 * r - 2, rows_in = r == 0 ? 61 : 63;
-        XAie_LocType t = shim(EF_FIRST_COL + r);
+        XAie_LocType t = shim(k_in_col[r]);
         XAie_DmaDesc d = __Runtime_dma_bd_config_multidim_ooo(
-            dev, t, (void *)(img + (long)r0 * ENG_STEM_IN_ROW), 1, rows_in * ENG_STEM_IN_ROW, -1, 0, 0, 0, 0, 0, 0, -1,
-            2, 4, ENG_STEM_IN_ROW / 4, ENG_STEM_IN_ROW, rows_in, 0, 0, 0, 0);
-        __Runtime_startio(dev, __Runtime_dma_createio_4(t, d, 1, 1, DMA_MM2S), 1, 1);
+            dev, t, (void *)(img + (long)r0 * ENG_STEM_IN_ROW), k_in_bd[r][0], rows_in * ENG_STEM_IN_ROW, -1, 0, 0, 0,
+            0, 0, 0, -1, 2, 4, ENG_STEM_IN_ROW / 4, ENG_STEM_IN_ROW, rows_in, 0, 0, 0, 0);
+        __Runtime_startio(dev, __Runtime_dma_createio_4(t, d, k_in_ch[r], k_in_bd[r][0], DMA_MM2S), k_in_bd[r][0], 1);
     }
 }
 
@@ -138,19 +151,18 @@ static void arm_rows(XAie_DevInst *dev, int r, int bd, const int8_t *t8, int blk
                      int nchunk, int repeat) {
     const long row_bytes = (long)blk * wst * 8;
     const int chunk = ENG_CHUNK_BLK * wst * 8;
-    XAie_LocType t = shim(EF_FIRST_COL + r);
+    XAie_LocType t = shim(k_in_col[r]);
     // (the _ooo variant is the one with an iteration dimension; ooo = -1)
     XAie_DmaDesc d = __Runtime_dma_bd_config_multidim_ooo(dev, t, (void *)(t8 + (long)row0 * row_bytes), bd,
                                                           chunk * rows, -1, 0, 0, 0, 0, 0, 0, -1, 3, 4, wst * 2,
                                                           wst * 8, ENG_CHUNK_BLK, (int)row_bytes, rows, chunk, nchunk);
-    __Runtime_startio(dev, __Runtime_dma_createio_4(t, d, 1, bd, DMA_MM2S), bd, repeat);
+    __Runtime_startio(dev, __Runtime_dma_createio_4(t, d, k_in_ch[r], bd, DMA_MM2S), bd, repeat);
 }
 
 // Input: per mesh row, its rows of one 64-channel chunk; iteration walks the
 // Q chunks, P*Q repeats re-stream them once per pass (resident: once).
 /* Shim BD banks for the input channel (ch1): image b of a layer-major batch
  * uses bank b & 1, so image b+1's input can be queued while b streams. */
-static const int k_in_bd[2] = {1, 13}, k_res_bd[2] = {12, 14};
 
 static void arm_input_rows(XAie_DevInst *dev, const eng_layer_t *L, const int8_t *const *ins, int bank);
 static void arm_input(XAie_DevInst *dev, const eng_layer_t *L, const int8_t *in) {
@@ -164,7 +176,7 @@ static void arm_input_rows(XAie_DevInst *dev, const eng_layer_t *L, const int8_t
     int r0 = 0;
     for (int r = 0; r < EF_MESH_ROWS; r++) {
         const int rows_in = (L->rows[r] - 1) * L->S + 3;
-        arm_rows(dev, r, k_in_bd[bank], ins[r], L->in_blk, L->wst_in, r0 * L->S, rows_in, L->Q,
+        arm_rows(dev, r, k_in_bd[r][bank], ins[r], L->in_blk, L->wst_in, r0 * L->S, rows_in, L->Q,
                  L->ri || L->resident ? L->Q : L->P * L->Q);
         if (!L->ri)
             r0 += L->rows[r];
@@ -180,7 +192,7 @@ static void arm_residual(XAie_DevInst *dev, const eng_layer_t *L, const int8_t *
     int r0 = 0;
     for (int r = 0; r < EF_MESH_ROWS; r++) {
         const int8_t *base = res[r] + (long)(L->res_blk0 + 8 * L->p0) * L->wst_in * 8;
-        arm_rows(dev, r, k_res_bd[bank], base, blk, L->wst_in, r0 + 1, L->rows[r], L->P, L->P);
+        arm_rows(dev, r, k_res_bd[r][bank], base, blk, L->wst_in, r0 + 1, L->rows[r], L->P, L->P);
         if (!L->ri)
             r0 += L->rows[r];
     }
@@ -374,6 +386,15 @@ static void engine_load_kernel(Engine *e, int kv) {
     XTime t0;
     XTime_GetTime(&t0);
     __Runtime_set_kernel_elf(k_kv_elf[kv]);
+#if AIE_GEN == 2
+    const XAie_LocType *tm = e->tiles;
+    struct_kernel_group kgm =
+        __Runtime_load_kernel_group_16t(e->dev, tm[0], tm[1], tm[2], tm[3], tm[4], tm[5], tm[6], tm[7], tm[8], tm[9],
+                                        tm[10], tm[11], tm[12], tm[13], tm[14], tm[15], 16);
+    __Runtime_launch_kernel_group(e->dev, kgm);
+    e->kload_us += us_since(t0);
+    return;
+#endif
     __Runtime_ctrl_kernel_pkt_set(e->kpkt[kv], e->kpkt_bytes[kv]);
     const XAie_LocType *t = e->tiles;
     struct_kernel_group kg =
@@ -427,24 +448,34 @@ static void engine_init(Engine *e) {
     // Shim BDs go over the control-packet plane (~3 ns/word) instead of MMIO
     // (~372 ns/word, doc/performance/register_write_cost.md). AIE2PS needs high
     // throughput mode for that, and it must be set before device init.
-    __Runtime_ctrl_high_throughput_enable(1);
-    __Runtime_ctrl_pmap_enable(0);
+#if AIE_GEN == 2
     e->dev = __Runtime_init_mesh_partition(0, EF_PART_START_COL, EF_PART_NUM_COLS);
-    // Control spine on partition col 0 (abs 2), dedicated: the data plane is cols 1..4.
-    static __Runtime_CtrlRowFabric fab;
-    static const __Runtime_CtrlRowChain fab_rows[] = {{3, 1, 4}, {4, 1, 4}, {5, 1, 4}, {6, 1, 4}};
-    __Runtime_ctrl_plan_init(&fab, e->dev, 0, 0, 1, fab_rows, 4);
-    __Runtime_ctrl_plan_set_exclusive(&fab, 1);
-    e->fab = &fab;
+    e->fab = NULL;
     for (int r = 0; r < EF_MESH_ROWS; r++)
         for (int c = 0; c < EF_MESH_COLS; c++)
             e->tiles[r * 4 + c] = XAie_TileLoc((uint8_t)(EF_FIRST_COL + c), (uint8_t)(EF_FIRST_ROW + r));
-    // encoded once; every (re)load replays it. A NULL image means the ELF does
-    // not fit the core (e.g. > 16 KB of program memory).
-    for (int kv = 0; kv < KV_N; kv++) {
-        e->kpkt[kv] = __Runtime_ctrl_kernel_pkt_build(&fab, k_kv_elf[kv], &e->kpkt_bytes[kv]);
-        printf("ENG kernel %-8s %u B of control packets%s\n", k_kv_name[kv], e->kpkt_bytes[kv],
-               e->kpkt[kv] ? "" : "  -- FAIL: does not encode (program memory overflow?)");
+    if (0)
+#endif
+    {
+        __Runtime_ctrl_high_throughput_enable(1);
+        __Runtime_ctrl_pmap_enable(0);
+        e->dev = __Runtime_init_mesh_partition(0, EF_PART_START_COL, EF_PART_NUM_COLS);
+        // Control spine on partition col 0 (abs 2), dedicated: the data plane is cols 1..4.
+        static __Runtime_CtrlRowFabric fab;
+        static const __Runtime_CtrlRowChain fab_rows[] = {{3, 1, 4}, {4, 1, 4}, {5, 1, 4}, {6, 1, 4}};
+        __Runtime_ctrl_plan_init(&fab, e->dev, 0, 0, 1, fab_rows, 4);
+        __Runtime_ctrl_plan_set_exclusive(&fab, 1);
+        e->fab = &fab;
+        for (int r = 0; r < EF_MESH_ROWS; r++)
+            for (int c = 0; c < EF_MESH_COLS; c++)
+                e->tiles[r * 4 + c] = XAie_TileLoc((uint8_t)(EF_FIRST_COL + c), (uint8_t)(EF_FIRST_ROW + r));
+        // encoded once; every (re)load replays it. A NULL image means the ELF does
+        // not fit the core (e.g. > 16 KB of program memory).
+        for (int kv = 0; kv < KV_N; kv++) {
+            e->kpkt[kv] = __Runtime_ctrl_kernel_pkt_build(&fab, k_kv_elf[kv], &e->kpkt_bytes[kv]);
+            printf("ENG kernel %-8s %u B of control packets%s\n", k_kv_name[kv], e->kpkt_bytes[kv],
+                   e->kpkt[kv] ? "" : "  -- FAIL: does not encode (program memory overflow?)");
+        }
     }
 
     e->blob = (int8_t *)__Runtime_Alloc(ENG_BLOB_BYTES);
@@ -549,7 +580,7 @@ static void timeline(Engine *e, const eng_layer_t *L, struct_ioevent *ev, XTime 
         for (int r = 0; r < EF_MESH_ROWS; r++) {
             u8 n = 1;
             if (!tin[r]) {
-                XAie_DmaGetPendingBdCount(e->dev, XAie_TileLoc((uint8_t)(EF_FIRST_COL + r), 0), 1, DMA_MM2S, &n);
+                XAie_DmaGetPendingBdCount(e->dev, XAie_TileLoc((uint8_t)k_in_col[r], 0), (u8)k_in_ch[r], DMA_MM2S, &n);
                 if (!n) {
                     tin[r] = us_since(t0);
                     left--;
@@ -870,8 +901,15 @@ __attribute__((optimize("O3"))) static void tail_dense(const int8_t *feat, float
     for (int o = o0; o < o1; o++) {
         const int8_t *w = g_dense_nk + o * ENG_FEAT;
         int32x4_t a = vdupq_n_s32(0);
-        for (int k = 0; k < ENG_FEAT; k += 16)
+        for (int k = 0; k < ENG_FEAT; k += 16) {
+#if defined(__ARM_FEATURE_DOTPROD)
             a = vdotq_s32(a, vld1q_s8(feat + k), vld1q_s8(w + k));
+#else /* Cortex-A72 (VEK280): no SDOT -- widening multiplies, pairwise-accumulated */
+            const int8x16_t f = vld1q_s8(feat + k), g = vld1q_s8(w + k);
+            const int16x8_t lo = vmull_s8(vget_low_s8(f), vget_low_s8(g)), hi = vmull_high_s8(f, g);
+            a = vpadalq_s16(vpadalq_s16(a, lo), hi);
+#endif
+        }
         const int32_t acc = vaddvq_s32(a);
         const int64_t sh = (int64_t)eng_dense_shift[o] + 31;
         int32_t v =
@@ -1125,7 +1163,7 @@ int main() {
     printf("=== resnet engine: int8 ResNet-18, every conv on the AIE ===\n");
     static Engine e;
     engine_init(&e);
-    for (int kv = 0; kv < KV_N; kv++)
+    for (int kv = 0; kv < KV_N && AIE_GEN != 2; kv++) /* Gen2 loads over MMIO: no control-packet image */
         if (!e.kpkt[kv]) {
             printf("ENG FAIL\n");
             return 1;
@@ -1150,5 +1188,6 @@ int main() {
     }
     const int ok = !fails;
     printf("ENG %s\n", ok ? "PASS" : "FAIL");
+    printf("%s resnet engine\n", ok ? "PASS:" : "FAIL:"); /* run_vek280.py's end markers */
     return ok ? 0 : 1;
 }

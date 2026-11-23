@@ -28,6 +28,9 @@ comment)::
     export    <symbol>                    keep this global in the archive (the
                                           rest of the user's symbols are made
                                           local so two kernels can share an ELF)
+    target    <board> ...                 boards the AIE body is built for
+                                          (vek280, vek385); aiednn only links a
+                                          kernel on a board it names
     in|param|out <dtype> [d0,d1,...] [name] [key=value ...]
 
 Argument lines are TVM call order: every input as the graph passes it
@@ -219,6 +222,10 @@ class KernelSpec:
     match: tuple = ()
     reference: Path = None
     exports: tuple = ()
+    targets: tuple = ()       # `target` lines: boards the AIE body runs on
+    mesh: tuple = ()          # `mesh` line: (arg name, dim, coef, "rows"|"cols"|"cores") scaled per mesh
+    modes: tuple = ()         # `modes` line: the kernel source's optional modes this entry needs
+                              # (AIEK_MODE_<X> in aie_modes_cfg.h); a per-app build compiles only those
     args: list = field(default_factory=list)
     raw: str = ""
 
@@ -344,6 +351,36 @@ def _parse_arg(index: int, toks: list, where: str) -> ArgSpec:
     return arg
 
 
+def _parse_mesh(tok: str, where: str) -> tuple:
+    """``name[dim]=[coef*]rows|cols|cores``: that dim is coef x the mesh's rows / cols /
+    rows*cols (a kernel whose block grows with the array, gemm_uk.cc); the literal dim in
+    the arg line is its value on the default 4x4 mesh"""
+    m = re.fullmatch(r"(\w+)\[(\d+)\]=(?:(\d+)\*)?(rows|cols|cores)", tok)
+    if not m:
+        raise SpecError(f"mesh {tok!r}; want name[dim]=[coef*]rows|cols|cores", where)
+    return (m.group(1), int(m.group(2)), int(m.group(3) or 1), m.group(4))
+
+
+MESH_DEFAULT = (4, 4)
+
+
+def mesh_dim(coef: int, unit: str, rows: int, cols: int) -> int:
+    return coef * {"rows": rows, "cols": cols, "cores": rows * cols}[unit]
+
+
+def _check_mesh(spec: KernelSpec) -> None:
+    named = {a.name: a for a in spec.args if a.name}
+    for name, dim, coef, unit in spec.mesh:
+        a = named.get(name)
+        if a is None or dim >= len(a.dims):
+            raise SpecError(f"mesh {name}[{dim}]: no such argument dim", spec.where)
+        want = mesh_dim(coef, unit, *MESH_DEFAULT)
+        if a.dims[dim] != want:
+            raise SpecError(f"mesh {name}[{dim}]={coef}*{unit}: the literal dim is {a.dims[dim]}, "
+                            f"but on the default {MESH_DEFAULT[0]}x{MESH_DEFAULT[1]} mesh it is {want}",
+                            spec.where)
+
+
 def _parse_text(spec: KernelSpec, payload: str) -> None:
     """Fill *spec* from the decoded payload. Raises :class:`SpecError`."""
     for lineno, line in enumerate(payload.split("\n"), 1):
@@ -361,6 +398,15 @@ def _parse_text(spec: KernelSpec, payload: str) -> None:
             spec.match += tuple(toks[1:])
         elif key == "export" and len(toks) >= 2:
             spec.exports += tuple(toks[1:])
+        elif key == "target" and len(toks) >= 2:
+            spec.targets += tuple(toks[1:])
+        elif key == "mesh" and len(toks) >= 2:
+            spec.mesh += tuple(_parse_mesh(t, where) for t in toks[1:])
+        elif key == "modes" and len(toks) >= 2:
+            bad = [t for t in toks[1:] if not re.fullmatch(r"[A-Z][A-Z0-9_]*", t)]
+            if bad:
+                raise SpecError(f"modes {' '.join(bad)}: want upper-case names (AIEK_MODE_<NAME>)", where)
+            spec.modes += tuple(toks[1:])
         elif key == "reference" and len(toks) == 2:
             spec.reference = (spec.spec_file.parent / toks[1]).resolve()
         else:
@@ -370,6 +416,7 @@ def _parse_text(spec: KernelSpec, payload: str) -> None:
     if not spec.outputs:
         raise SpecError("no `out` argument -- the kernel must produce something",
                         spec.where)
+    _check_mesh(spec)
     if spec.args[-1].kind != "out" or any(
             a.kind == "out" for a in spec.args[:len(spec.inputs)]):
         raise SpecError("outputs must come last (TVM passes inputs, then outputs)",

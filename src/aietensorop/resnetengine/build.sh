@@ -34,6 +34,8 @@ EXTRA_DEFS  -D flags for the host/runtime compile. For eng:
          -DRT_SB_NO_KEEP_ARMED (rewrite the shim-row BD chain every commit)
 KDEFS       space-separated macros #define'd at the top of kernel.cc
 PROFILING=1 build the runtime with AIEHLC_PROFILING (PMU phase counters)
+AIE_VERSION 5 (default: VEK385, AIE2PS, A78) or 2 (VEK280, AIE-ML, A72: fabric280/, eng's
+            aieml_v2.bcf, persistent mode only, shim BDs over MMIO; run with run_vek280.py)
 
 Examples:
   bash src/aietensorop/resnetengine/build.sh eng /tmp/claude/re_eng                  # persistent
@@ -56,7 +58,11 @@ cp "$HERE"/*.h "$W"/
 if [ -f "$SRC/extra_inputs.txt" ]; then
     while read -r f; do [ -n "$f" ] && cp "$REPO/$f" "$W"/ || exit 1; done < "$SRC/extra_inputs.txt"
 fi
-cp "$HERE/fabric/routing.cc" "$HERE/fabric/aieml.prx" "$W"/
+AIEV="${AIE_VERSION:-5}"
+FAB="$HERE/fabric"; [ "$AIEV" = 2 ] && FAB="$HERE/fabric280"
+cp "$FAB/routing.cc" "$FAB/aieml.prx" "$W"/
+[ "$AIEV" = 2 ] && [ -f "$SRC/aieml_v2.bcf" ] && cp "$SRC/aieml_v2.bcf" "$W/aieml.bcf"
+[ "$AIEV" = 2 ] && sed -i "1i #define ENG_VEK280 1" "$W/engine_fabric.h"
 # Experiment knobs: KDEFS="A B" prepends #define A / #define B to kernel.cc.
 for d in ${KDEFS:-}; do sed -i "1i #define $d" "$W/kernel.cc"; done
 # Kernel variants: each line "<name> [DEFINE ...]" of <app>/kernel_variants becomes
@@ -72,12 +78,13 @@ fi
 source "$REPO/script/setup.sh" >/dev/null 2>&1
 # hostcompile links thirdparty/alib/lib/libxaienginea78.a, which aiehlc.sh
 # (re)stages at the start of every run and wipes per run -- stage it if absent.
-if [ ! -f "$REPO/thirdparty/alib/lib/libxaienginea78.a" ]; then
-    (cd "$REPO" && source script/aiehlc.sh --aie-version 5 --aielib-only) > "$OUT/aielib.log" 2>&1 \
+ALIB=libxaienginea78.a; [ "$AIEV" = 2 ] && ALIB=libxaienginea72.a
+if [ ! -f "$REPO/thirdparty/alib/lib/$ALIB" ]; then
+    (cd "$REPO" && source script/aiehlc.sh --aie-version "$AIEV" --aielib-only) > "$OUT/aielib.log" 2>&1 \
         || { echo "aielib staging failed (log $OUT/aielib.log)"; exit 1; }
 fi
 cd "$OUT"
-WORKLOCAL_DIR="$W" AIE_VERSION=5 PLATFORM=baremetal AIEHLC_PROFILING="${PROFILING:-0}" \
+WORKLOCAL_DIR="$W" AIE_VERSION="$AIEV" PLATFORM=baremetal AIEHLC_PROFILING="${PROFILING:-0}" \
     bash "$REPO/script/hostcompile.sh" > "$OUT/build.log" 2>&1
 rc=$?
 if [ -f "$W/build/host" ]; then echo "built $W/build/host"; else echo "BUILD FAILED rc=$rc (log $OUT/build.log)"; grep -n 'error' "$OUT/build.log" | head; exit 1; fi
