@@ -1,0 +1,66 @@
+name: Open-source check
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, master]
+
+concurrency:
+  group: opensource-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  opensource-check:
+    name: License headers / OSS gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Open-source compliance
+        id: oss
+        run: |
+          set -euo pipefail
+          report="opensource-check-report.txt"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python3 script/ci/check_opensource.py \
+              --base "${{ github.event.pull_request.base.sha }}" \
+              --report "$report"
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            python3 script/ci/check_opensource.py \
+              --base "${{ github.event.before }}" \
+              --report "$report"
+          else
+            python3 script/ci/check_opensource.py --all --report "$report"
+          fi
+
+      - name: Upload missing-license report
+        if: failure() && hashFiles('opensource-check-report.txt') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: opensource-check-report
+          path: opensource-check-report.txt
+          if-no-files-found: ignore
+
+      - name: Comment violations on PR
+        if: failure() && github.event_name == 'pull_request' && hashFiles('opensource-check-report.txt') != ''
+        continue-on-error: true
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: opensource-check
+          path: opensource-check-report.txt
+
+      - name: Remove stale violation comment
+        if: success() && github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: opensource-check
+          delete: true
