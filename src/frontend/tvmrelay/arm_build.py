@@ -3011,6 +3011,119 @@ def _make_jobs(jobs: int = 0) -> int:
     return 0
 
 
+# -fast (F8): content cache for the slow ARM objects. graph_driver.c is ~1.5 MB of generated
+# straight-line glue for UNet (graph_run ~20k lines, graph_init ~12.7k); gcc -O3 spends 89 % of
+# its 45-108 s in "callgraph functions expansion" on those two functions, and with make -j16 that
+# one compile *is* the ARM-make floor (tasks/2026-11-23_fast-build-F8-driver-obj.md). The key is
+# ccache's preprocessor mode: sha256(compiler --version, the exact flags make would use with the
+# build dir masked, `gcc -E -P` of the source) -> every header, -D and make var is covered.
+# AIEHLC_ARM_OBJ_CACHE=<dir> or AIEHLC_FAST=1 (default ${XDG_CACHE_HOME:-~/.cache}/aiehlc/armobj);
+# LRU-pruned to AIEHLC_ARM_OBJ_CACHE_MAX_MB (default 1024) after each store.
+_OBJ_ENV, _OBJ_MAX_ENV = "AIEHLC_ARM_OBJ_CACHE", "AIEHLC_ARM_OBJ_CACHE_MAX_MB"
+_OBJ_CACHED = ("graph_driver.o",)
+
+
+def _obj_cache_dir():
+    d = os.environ.get(_OBJ_ENV, "").strip()
+    if not d and os.environ.get("AIEHLC_FAST", "0").strip() == "1":
+        xdg = os.environ.get("XDG_CACHE_HOME", "").strip() or str(Path.home() / ".cache")
+        d = str(Path(xdg) / "aiehlc" / "armobj")
+    return Path(d).resolve() if d else None
+
+
+def _obj_key(build: Path, obj: str, make_args: list):
+    """sha256 key for *obj* in *build*, or None when it cannot be worked out (-> no caching)."""
+    import hashlib
+    import shlex
+    src = obj[:-2] + ".c"
+    p = subprocess.run(["make", "-n", "-B", "-C", str(build), *make_args, obj],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        return None
+    argv = None
+    for line in p.stdout.splitlines():
+        t = shlex.split(line) if f"-c {src} -o {obj}" in line else None
+        if t and t[-4:] == ["-c", src, "-o", obj]:
+            argv = t[:-4]
+    if not argv:
+        return None
+    try:
+        ver = subprocess.run([argv[0], "--version"], capture_output=True, text=True).stdout
+        pre = subprocess.run([*argv, "-E", "-P", src], cwd=build, capture_output=True)
+    except OSError:
+        return None
+    if pre.returncode != 0:
+        return None
+    h = hashlib.sha256()
+    h.update(ver.encode())
+    h.update(" ".join(argv).replace(str(build), "<B>").encode() + b"\0")
+    h.update(pre.stdout)
+    return h.hexdigest()
+
+
+def _obj_cache_get(build: Path, make_args: list) -> dict:
+    """Restore cached objects into *build* before make. Returns {obj: key} of the misses to store."""
+    c = _obj_cache_dir()
+    if c is None:
+        return {}
+    miss = {}
+    for obj in _OBJ_CACHED:
+        if not (build / (obj[:-2] + ".c")).is_file():
+            continue
+        key = _obj_key(build, obj, make_args)
+        if key is None:
+            continue
+        e = c / key / obj
+        try:
+            shutil.copyfile(e, build / obj)         # fresh mtime -> make sees it up to date
+            os.utime(c / key)                       # LRU hint
+            print(f"  [arm] obj cache hit: {obj} ({key[:12]})")
+        except OSError:
+            miss[obj] = key
+    return miss
+
+
+def _obj_cache_put(build: Path, miss: dict) -> None:
+    c = _obj_cache_dir()
+    if c is None:
+        return
+    for obj, key in miss.items():
+        if not (build / obj).is_file() or (c / key / obj).is_file():
+            continue
+        tmp = c / f".tmp-{key}-{os.getpid()}"
+        try:
+            tmp.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(build / obj, tmp / obj)
+            tmp.rename(c / key)
+        except OSError as ex:                       # never fail a build on the cache
+            print(f"  [arm] obj cache: store failed: {ex}")
+            shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        _obj_cache_prune(c)
+    except Exception as ex:                         # noqa: BLE001
+        print(f"  [arm] obj cache: prune failed: {ex}")
+
+
+def _obj_cache_prune(c: Path) -> list:
+    import time
+    cap = int(os.environ.get(_OBJ_MAX_ENV, "1024")) << 20
+    now, gone = time.time(), []
+    for t in c.glob(".tmp-*"):                      # crashed stores
+        if now - t.stat().st_mtime > 86400:
+            shutil.rmtree(t, ignore_errors=True)
+    ents = sorted((e.stat().st_mtime, e) for e in c.iterdir()
+                  if e.is_dir() and not e.name.startswith("."))
+    sizes = {e: sum(f.stat().st_size for f in e.iterdir() if f.is_file()) for _, e in ents}
+    total = sum(sizes.values())
+    for _, e in ents:                               # oldest first; the newest entry always stays
+        if total <= cap or e == ents[-1][1]:
+            break
+        shutil.rmtree(e, ignore_errors=True)
+        total -= sizes[e]
+        gone.append(e.name)
+    return gone
+
+
 def build_arm_elf(out_dir, repo_root=None, c_name=None,
                   run_make: bool = True, jobs: int = 0, image=None,
                   local: bool = False, local_run: bool = True,
@@ -3144,12 +3257,15 @@ def build_arm_elf(out_dir, repo_root=None, c_name=None,
     cmd = ["make", "-C", str(build)]
     if jobs:
         cmd.append(f"-j{jobs}")
-    cmd += sync_make_vars(build, make_vars)
+    mvars = sync_make_vars(build, make_vars)
+    cmd += mvars
+    miss = _obj_cache_get(build, mvars)             # after sync_make_vars: it may unlink objects
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         summary.update({"ok": False, "reason": "make failed",
                         "stderr": (proc.stderr or proc.stdout)[-3000:]})
         return summary
+    _obj_cache_put(build, miss)
 
     elf = build / "main.elf"
     summary.update({"ok": True, "elf": str(elf), "bytes": elf.stat().st_size})
