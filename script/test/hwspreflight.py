@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """apppaltest preflight: make sure the board's hw_server service (hws) is healthy
 before a netload or full-mode run, under apppaltest's own board lock.
 

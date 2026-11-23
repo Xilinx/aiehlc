@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Correlate the ARM host clock with per-tile AIE core timers into ONE us axis.
 
 The perf example (example/perf/aieml_perf.cc), built with TIMESYNC=1, prints a

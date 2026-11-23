@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """P4t K-accumulation plan for the 37 AIE conv layers of partition.json (analytic, x86 only, no kernel change).
 
 Ported from steve/work/r18_tilecap/ic_split.py (R18 int8, int32 acc) and redone for bf16 GEMM:

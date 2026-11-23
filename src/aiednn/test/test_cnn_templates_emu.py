@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """aiednn CNN templates on x86 (sprint m4 P5k, 2026-11-18): every template runs through the kemu kernel model +
 aie_api_x86emu.h (bf16 mmul / mac into accfloat) on REAL layers of the two models in example/aiednn/emu_models.json -- shape, stride, pad and
 weights from the ONNX file -- and matches a float64 numpy reference on the same bf16-rounded inputs (cos >= 0.99999).

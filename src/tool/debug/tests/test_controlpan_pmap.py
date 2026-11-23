@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import controlpan_pmap as c

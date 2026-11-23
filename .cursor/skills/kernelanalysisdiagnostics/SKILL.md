@@ -1,6 +1,6 @@
 ---
 name: kernelanalysisdiagnostics
-description: Misspelled/missing `#include` reported as `no #define HW_ROWS` instead of `file not found` (source-text passes run before Clang). Kernel-only block-load kernel (`aie::port<..., aie::shape<...>>`) fails with `[KernelAnalysis] ERROR: kernel analysis needs the launch mesh: no device.partition({...}, ROWS, COLS) found` although the source DOES call `device.partition(...)`; mesh ROWS/COLS are macros from `#include <x.h>`; or xchesscc says `no matching function for call to 'aiehlc_load_buffer'` / `aiehlc_release` / `aiehlc_commit` / `candidate function not viable: no known conversion from 'input_window_int8 *' to 'input_window_int8'`. Also how to add a source-level diagnostic so a mistake is reported where aiehlc can see it, not later in xchesscc.
+description: Misspelled/missing `#include` reported as `no #define HW_ROWS` instead of `file not found` (source-text passes run before Clang). Kernel-only block-load kernel (`aie::port<..., aie::shape<...>>`) fails with `[KernelAnalysis] ERROR: kernel analysis needs the launch mesh: no device.partition({...}, ROWS, COLS) found` although the source DOES call `device.partition(...)`; mesh ROWS/COLS are macros from `#include <x.h>`; or xchesscc says `no matching function for call to 'aiehlc_load_buffer'` / `aiehlc_release` / `aiehlc_commit` / `candidate function not viable: no known conversion from 'input_window_int8 *' to 'input_window_int8'`. Per-core `offset has 4 and shape 4 dims, but the tensor has 3` / `block dim 2 covers [16, 32) outside the tensor extent 4` on every mesh column when the port's `aie::shape` (or role) is wrong -- now a `hint:` line naming the declaration. Per-core `offset has 4 and shape 4 dims, but the tensor has 3` / `block dim 2 covers [16, 32) outside the tensor extent 4` on every mesh column when a port's `aie::shape` (or role) is wrong -- now a `hint:` line naming the declaration. Also how to add a source-level diagnostic so a mistake is reported where aiehlc can see it, not later in xchesscc.
 ---
 
 # Kernel analysis: unresolved mesh, by-value windows
@@ -57,6 +57,81 @@ something Clang would diagnose into a different error of its own.
 the x86 trace. It then fails in xchesscc with `no matching function for call to
 'aiehlc_load_buffer'`. `parsePort` (`kernel_trace.cpp`) now rejects it:
 `port a: the window type must be a pointer -- write aie::port<input_window_int8 *, ...> a`.
+
+## 3. A wrong port declaration reported only as per-core symptoms
+
+Seen with `example/other/aiehlcpm_conv2d.cc` (2026-11-16). The weights port
+was declared with the input's shape, `aie::IFM, aie::shape<230,230,4>> b`, and
+the output with 4 channels instead of 64. The harness (`block()` in the
+trace runtime) checks each `load_buffer` / `store_buffer` call against the
+declared shape, so the only output was one line per core and symptom:
+`offset has 4 and shape 4 dims, but the tensor has 3`, and four
+`covers [16, 32) outside the tensor extent 4` lines, one per mesh column.
+Nothing pointed at the declaration.
+
+Fixed: `declaredShapeHints()` (`kernel_trace.cpp`) runs before the per-core
+errors and adds at most one line per port:
+
+    b: hint: the kernel's blocks are 4-D, spanning (64,7,7,4), which no offset fits into the
+       declared `aie::shape<230,230,4>` (line 4) -- check this port's aie::shape
+       (the blocks suggest aie::shape<64,7,7,4>) and its role (IFM)
+    a: hint: its load/store passes an offset of 4 and a block shape of 3 coordinates -- the
+       call has an extra offset coordinate (the port declares `aie::shape<230,230,4>` (line 3), 3-D)
+
+When the hint fires (deliberately narrow):
+- **declaration**: the offset and shape agree in rank, and either that rank
+  differs from the declaration or some block is larger than a declared dim.
+  Then no offset can fit, so the declaration is the likely mistake. The
+  suggestion is the hull `max(off + shape)` over all blocks, omitted when an
+  offset is negative (a conv border; that is the `.pad` hint instead).
+- **call**: the offset and shape differ in rank, so the call itself is
+  inconsistent.
+- **no hint**: the block fits the declaration but an offset runs past the end
+  (e.g. `pid_c * oc_t * 20`). The call is as likely wrong as the declaration,
+  so only the per-block error is printed.
+
+Regression: three `kernel_trace_cases.py` cases whose names contain `hint:`.
+
+## 4. Errors that named the port but not the line to fix (2026-11-17)
+
+Same file, after section 3. The `a` hint said "the call has an extra offset
+coordinate" but pointed only at the port's **declaration** (line 3). The broken
+call was on line 19. The never-released error named no line at all. Cause: the
+trace events (`L`/`S`/`E` lines the harness writes) carried core, port, offset
+and shape, but **no source location**, so no later stage could name a call.
+
+Fixed in `kernel_trace.cpp`:
+- The harness's `aie::load_buffer` / `store_buffer` / `release` / `commit` take
+  a trailing defaulted `std::source_location`. The body is compiled under
+  `#line <bodyLine> "<srcName>"`, so `at.line()` is the user's line. `g_line`
+  is set per call and written into every `E` record. `Port::live_line` keeps
+  the line of each held block, so `finish()` reports a never-released block at
+  the load that **took** it.
+- `Event::line` is parsed as the last field of `L`/`S` and the field after `n`
+  in `E` (vector reports write `0`).
+- `collectHarnessErrors` prints `file:line: port block N on core (..): msg [k
+  occurrences] in `<call text>``. `callText()` extracts the call on that line
+  for that port (multi-line calls collapse to one line; comments are stripped).
+- `declaredShapeHints` now blames per **call line**: a call whose offset and
+  shape ranks differ, or whose rank differs from the declaration while other
+  calls on the port match it, gets `file:<call line>: port: hint: `<call>` ...`.
+  Only when every call agrees, or a block is larger than a declared dim, does it
+  blame the declaration (`file:<decl line>: ...`). It then adds one call and
+  core as evidence (`e.g. line 20 in `...` on core (0,0) takes 16 in dim 2
+  (channels) at offset 0, the declared extent is 4`).
+
+Before:
+    a: hint: its load/store passes an offset of 4 and a block shape of 3 coordinates -- the call
+       has an extra offset coordinate (the port declares `aie::shape<230,230,4>` (line 3), 3-D)
+After:
+    aiehlcpm_conv2d.cc:19: a: hint: `aie::load_buffer(a, {oh0 * S, ow0 * S, 0, 0}, {ih_t, iw_t, C})`
+       passes an offset of 4 and a block shape of 3 coordinates -- the offset has an extra coordinate
+       (the port is 3-D, `aie::shape<230,230,4>` at line 3)
+
+Limit: lines are those of the text the analysis sees. A kernel spliced in by
+`inlineSourceIncludes` (opaque, no `#line`) reports lines of the spliced text.
+Regression: `never released: the error names the load ...`, plus the
+`store on an input port` and `hint:` cases now check `case.cc:<line>:`.
 
 ## Other mistakes in that file (all reported clearly)
 - An undeclared variable (`w`): `the kernel body does not compile for tracing ... 'w' was not declared`.

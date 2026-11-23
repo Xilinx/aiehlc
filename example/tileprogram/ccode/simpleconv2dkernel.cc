@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 #include "simpleconv2dkernel.h"
 
 using Ifm = aie::tensor<int8_t, 224, 224, 3>;  // the REAL input: no manual padding

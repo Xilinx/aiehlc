@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Thin wrapper over the ``aiehlc-convtile`` CLI (the C++ conv2d auto-tiling model).
 
 The C++ model (``src/llvm/convautotile``) is the single source of truth for

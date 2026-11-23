@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # emu_conv2d_tensor.sh <simpleconv2dkernel.cc> <aout/worklocal>: x86-emulate the
 # generated tensor-form kernel end to end (see emu_conv2d_tensor.cc).
 set -euo pipefail

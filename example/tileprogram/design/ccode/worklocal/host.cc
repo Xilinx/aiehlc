@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 #include "aie_runtime.h"
 #include "aie_runtime_debug.h"
 void host_canonicalized(void *v1, void *v2, void *v3) {

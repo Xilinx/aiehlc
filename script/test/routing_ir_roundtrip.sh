@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Routing IR re-entry round trip (doc/design/routing_ir_reentry.md).
 #
 #   script/test/routing_ir_roundtrip.sh [--stage routing|dmaphop] <src.cc> [aiehlc.sh args...]

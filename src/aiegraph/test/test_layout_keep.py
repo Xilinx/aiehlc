@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """GAP-B x86 test: partition.json ``keep_layout`` on the bk-sdm-tiny UNet (aiegraph.fold.keep_layout_plan,
 build_unet.keep_layout_step, aiegraph.partition.plan_keep_layout).
 

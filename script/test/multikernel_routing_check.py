@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """GAP-MKROUTE guard: aiehlc emits ONE routing() (routing.cc, applied at mesh-partition init) for a multi-kernel
 program. A kernel whose port topology differs from the others' (e.g. two row-broadcast inputs next to gemm_kacc's
 row + column broadcast) silently runs on the other kernels' stream routes and hangs (wait_io TIMEOUT on its first

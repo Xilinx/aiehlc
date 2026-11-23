@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """aiegraph.cnn_chunk (x86): the generated conv kernel source -- gemm_kacc instances AND the chunked host glue
 (aiednn/conv2d/kacc_chunk_*.cc) -- compiled with g++ under the kemu kernel model (aiegraph.kemu._PRELUDE,
 aie_api_x86emu.h, ASan) and run on NCHWc tensors; the output must match a numpy conv on the same

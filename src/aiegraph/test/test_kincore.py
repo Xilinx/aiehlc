@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """aiegraph.kincore: one gemm_kacc launch per conv / linear layer (unit tests + a test_<fn>_rejects* counter-example
 per public planner). x86 only, no TVM build: the kernel source is checked as text."""
 import re

@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 #include "aie_runtime_resource.h"
 
 /* Static reservation table describing the control fabric's stream-switch

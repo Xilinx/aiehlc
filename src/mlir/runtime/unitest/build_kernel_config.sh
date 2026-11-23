@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Build and run the KERNELCONFIGOFFLOAD BD/lock/channel MMIO encoder host test.
 #
 # The test validates a standalone C encoder (src/mlir/runtime/aie_kernel_runtime.h)

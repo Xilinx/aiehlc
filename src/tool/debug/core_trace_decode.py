@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Faithful simulator of __Runtime_core_trace_decode (src/mlir/runtime/aie_runtime.c).
 
 Decodes AIE2ps Event-Time trace frames (Architecture Spec, Figure 4-14). The C

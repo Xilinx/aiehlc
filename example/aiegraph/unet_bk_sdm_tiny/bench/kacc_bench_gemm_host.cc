@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 
 void __Runtime_ctrl_high_throughput_enable(int on); /* C++ linkage, as aie_runtime.h:936 */
 

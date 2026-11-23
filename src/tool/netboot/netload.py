@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Host client for the netboot supervisor (doc/design/lwip_elf_bootloader.md).
 
 Standard library only. Two ways to reach the board:

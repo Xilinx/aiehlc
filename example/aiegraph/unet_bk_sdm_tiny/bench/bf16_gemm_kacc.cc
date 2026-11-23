@@ -1,4 +1,8 @@
 /******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
+/******************************************************************************
  * P4bk: bf16 GEMM with K accumulated in the core (fp32), ONE launch per layer.
  * Contract: $U/p4/K_CONTRACT.md (16x16 fp32 acc per core, kc = 64, 4x4 mesh,
  * one write-back per output tile). Layer: UNet c013 conv 3x3 1280<-2560 on 8x8,

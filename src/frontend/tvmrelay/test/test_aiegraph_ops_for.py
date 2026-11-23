@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Unit tests for aiegraph_partition._aiegraph_ops_for (no TVM needed)."""
 import os
 import sys

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """hws: check, clean, recover and keep hw_server running for a board.
 
 Contract v1: aiengineers/xiaojiang/tasks/2026-11-10_hws/contract.md (plan-1109-b1597a s2).

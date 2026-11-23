@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """ResNet18 (ONNX, 1x3x224x224 -> 1000 logits) -> aiegraph -> A78 main.elf, every Conv and the Gemm on the AIE.
 
   $PY build_resnet18.py --onnx resnet18_fp32_op17.onnx --out <dir> [--input in.bin] [--ctrlpkt aot-kco]

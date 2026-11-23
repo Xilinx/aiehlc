@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # emu_conv2d_spatial.sh <aout/worklocal>: x86-emulate the generated
 # simpleconv2d_new_load.cc / simpleconv2dkernel_port.cc kernel (scalar or vector) against
 # the CPU reference (see emu_conv2d_spatial.cc).

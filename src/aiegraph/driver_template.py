@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Driver template (m3 S6): the application's C glue in the generated ``graph_driver.c``.
 
 A model build declares its groups (``emod.offload_group``) and, once, the C text the driver

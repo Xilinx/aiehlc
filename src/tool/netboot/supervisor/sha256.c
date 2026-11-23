@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* Minimal SHA-256 (FIPS 180-4). Integrity check for uploads, not security. */
 #include <string.h>
 

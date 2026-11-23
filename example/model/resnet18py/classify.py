@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Classify an image with the from-scratch ResNet-18 (v2) and ImageNet weights.
 
 The image, the ONNX weights and the ImageNet labels are all downloaded on first

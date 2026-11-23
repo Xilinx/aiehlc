@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 #include "simpleconv2d_new_load.h"
 // simpleconv2dkernel_port_less.cc plus per-port schedule options (DMA side only, same result):
 //   {.resident = true} weights: one block per core, loaded once, held in ONE buffer all launch

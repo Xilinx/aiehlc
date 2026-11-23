@@ -949,6 +949,7 @@ Read the matching skill when the task fits:
 | Embedded LLM context loss on retarget | debugui-llm-reset |
 | Debug UI grid: every tile red border + ⚠ "supply/demand mismatch" on every launch | flowbalancebroadcast |
 | Debug UI grid: big blank column on the left of the AIE array (data plane starts at col 1, e.g. `{2,6}` control-plane partition) | debuguigridleftgap |
+| Add the AMD Apache-2.0 license header (sweep or new file); which files must not get one (text templates, `board_main.c` MARKER, line-number-asserted examples, generated/vendor); tutorial listings without the header | licenseheader |
 | Dump a lab board's AIE registers / core PM+DM / memtile DM (`script/aiedump.py palmyra_local\|vek385-N`); a column reads all `0x00000002`; which registers must never be read (`lock_request` = acquire) | aiedump |
 | Static XAie API verify (routing.cc, host.cc) | xaieapiverify |
 | Routing debug (IR → generated code) | routinghwdebug |
@@ -978,9 +979,10 @@ Read the matching skill when the task fits:
 | Spatial-halo conv hangs (`wait_io TIMEOUT`) though kernel analysis passed: `out_rounds` ≠ kernel rounds (e.g. 98 for a 14x16x16 tile), tiny core output window; or `[TilingLinalg] ERROR: ... the kernel's blocks give ..` | convoutroundsdoublecount |
 | Triton-style block-load kernel (`aie::program_id`, `aie::load_buffer` / `store_buffer` in tensor coordinates, `aie::release` / `commit`): `no member named 'program_id' in namespace 'aie'`, klog `BLKE`, wrong offsets but correct output, emulating the generated kernel on x86; hand-written `aie::GemmSpace` ports + `load_buffer` (`(GemmSpace X) .d1... = A, the kernel's blocks give B`) | blockloadkernel |
 | Kernel-only `{.depth / .resident / .tile}` options; `the core window is N elements x R round(s) ... but the kernel's blocks (#routing.kernel_block) are`; `the port buffers take N B of core memory`; a GEMM with B loaded once / full-K A strips; kernel macro under `#ifndef` undeclared | gemmdataflowoptions |
-| Misspelled `#include` reported as `` `HW_ROWS` ... no #define `` instead of `file not found`; kernel-only kernel: `kernel analysis needs the launch mesh: no device.partition(...)` though the call exists (mesh macros behind `#include <x.h>`); xchesscc `no matching function for call to 'aiehlc_load_buffer'` (window port by value, missing `*`); adding an early source-level diagnostic | kernelanalysisdiagnostics |
+| Misspelled `#include` reported as `` `HW_ROWS` ... no #define `` instead of `file not found`; kernel-only kernel: `kernel analysis needs the launch mesh: no device.partition(...)` though the call exists (mesh macros behind `#include <x.h>`); xchesscc `no matching function for call to 'aiehlc_load_buffer'` (window port by value, missing `*`); per-core `offset has 4 ... but the tensor has 3` / `outside the tensor extent 4` from a wrong port `aie::shape` (now a `hint:` line); a kernel-analysis error that names a port but not the call line to fix; adding an early source-level diagnostic | kernelanalysisdiagnostics |
 | bfloat16 ports: `input_window_bfloat16`, DMA lengths twice/half, `output block bytes per round` mismatch on a 16-bit conv, `bfloat16` does not compile for tracing, a few hundred outputs reading 0 on 1 run in 6 | bf16kernel |
 | AIEDNN template kernel (GEMM/conv, one launch per layer, fp32 K accumulation): window `N x R ... kernel's blocks are 4N` with M and K rounds, input-shim `wait_io TIMEOUT` ch 1, `.tile` on a K chunk refused, `[KernelTemplate]` / template kernel "never launched" or argument-count errors, bigger TK slower | aiednnkernel |
+| Kernel-only kernel: `hand-written GemmSpaces checked ...` + `parameter `aie::port<..., aie::port<..., ...` is not an aie::port<T, <GemmSpace>>` (whole list as one parameter); `the `<` of aie::port is never closed` — a port missing its closing `>` | portunclosedangle |
 | `data used without being loaded` and WHICH constant causes it (`oc_t = 15` vs loops walking 16); `cause (static analysis)` / `out-of-block access (static analysis)` lines; extending `kernel_static.cpp` | blockstaticbounds |
 | Edit the routing / dmaphop IR and feed it back (`AIEHLC_ROUTING_IR_IN`, `AIEHLC_DMAPHOP_IR_IN`, `aiebackend.routing_ir`: view / set_level / lint / check / build), round-trip test, an IR edit that does nothing or is silently accepted although illegal; `flowcheck FAILED` / `FLOWCHECK ERROR ... does not reach / also reaches` after a build | routingirreentry |
 | Kernel-only kernel without options hangs in `wait_io TIMEOUT ... dir=0` (output) but works with `{.depth = 2}`; output `pp_depth=1`, one output MM2S BD with `next_bd=-1` vs ping/pong `window_init`; `{.depth = 1} on aie::store_buffer` error | outputpingponghang |
@@ -1077,3 +1079,21 @@ to reload the MCP server.
   something you did wrong.
 - **Keep the architecture docs current** — update them as part of the change, not after.
 - **After each task, list every file changed or created.**
+- **Copyright check before adding any non-original file to git.** This repo is
+  open source (Apache-2.0); anything committed is published. Images (`*.jpg`,
+  `*.png`, …), datasets, model weights, binaries (`*.bin`, `*.o`, ELFs),
+  vendor/BSP or driver sources (e.g. `thirdparty/aie-rt/`, XAie, Vitis files),
+  PDFs, and code or text copied from elsewhere must **not** be staged or
+  committed until all three are confirmed:
+  1. **Origin** — where it came from (URL / product / author), or that we
+     created it ourselves.
+  2. **License** — the license is known and permits redistribution under
+     Apache-2.0 (e.g. MIT/BSD/Apache/CC0/CC-BY); "unknown" counts as **no**.
+  3. **User approval** — ask the user explicitly, naming the file, its origin
+     and its license, and get a yes for **that file** in this session. Approval
+     for one file does not extend to another, and `git add -A` / `git add .`
+     never counts as approval.
+  If any of the three is missing, leave the file untracked and say so. When a
+  committed file needs attribution, record origin + license next to it (a
+  README line or a header comment). Never commit secrets or tokens (e.g.
+  `claude.sh`), absolute personal paths, or board images (`HashBlock0.bin`).

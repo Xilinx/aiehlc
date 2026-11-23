@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 #include "simpleconv2d_new_load.h"
 // simpleconv2dkernel_port.cc (aie::mmul<8,8,8> compute) + the per-port schedule
 // options of simpleconv2dkernel_port_opts.cc + a golden-checking host.

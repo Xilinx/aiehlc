@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Unit test for timeline_gui.py (src/tool/debug/timeline_gui.py).
 
 Headless (Agg backend): no window, no board, no display. Asserts

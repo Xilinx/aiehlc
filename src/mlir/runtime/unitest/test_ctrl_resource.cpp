@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // Host unit tests for the control-plane reservation table (aie_runtime_resource.c).
 #include <cassert>
 #include <cstdio>

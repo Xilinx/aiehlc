@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """aiednn template lookup (sprint m4 P1, 2026-11-18): every category has templates, names resolve to the files, text is
 verbatim, parameters are listed / filled, bad names fail, and the aiegraph examples take their generic C from here
 (a bench/ sub-directory of an example may hold a stand-alone board bench source; example-only C text, e.g. a

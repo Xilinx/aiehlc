@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* E1: one generic 3x3 stride-1 conv layer (TVM call 04 of int8 ResNet-18:
  * 64 -> 64 channels, 56x56, pad 1), shared by kernel and host. Plain C.
  *

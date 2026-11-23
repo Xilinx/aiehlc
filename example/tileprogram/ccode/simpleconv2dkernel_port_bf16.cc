@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 #include "simpleconv2d_bf16.h"
 // bfloat16 twin of simpleconv2dkernel_port_less.cc: bf16 in / out, fp32 accumulation, scalar MACs.
 // bf16 blocks are twice the bytes, so the output tile is 7x14 (not 7x28) to fit the core buffers.
