@@ -1,0 +1,56 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
+# One command, from a checkout:
+#
+#     pip install -e .            # add [torch] for torchvision models, [test] for pytest
+#
+# installs the `aiegraph` Python API + the `aiegraph` and `aiehlc` commands.
+# EDITABLE on purpose: the flow needs the checkout itself (script/aiehlc.sh,
+# include/, thirdparty/tvm-0.16, example kernels), not just Python files.
+# TVM 0.16 has no wheel; aiegraph attaches the source build in
+# thirdparty/tvm-0.16 at run time, or builds it once via `aiegraph setup`.
+# Vitis (AIE compiler + aarch64 cross toolchain) is licensed and installed
+# separately; only `offload` / `build` need it -- `aiegraph doctor` says what is missing.
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiegraph"
+version = "0.1.0"
+description = "ONNX/PyTorch model -> int8 per-layer C on the Cortex-A78, with layers offloaded to AMD Versal AI Engine kernels (aiehlc)"
+readme = "doc/tutorial_aiegraph.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "numpy",
+    "onnx",
+    "onnxruntime",
+    "pillow",
+    "torch",                       # image preprocessing (example/model/resnet18py/classify.py)
+    # TVM 0.16 runtime deps (frontend/tvmrelay/setup_tvm016.py:CORE_DEPS)
+    "attrs",
+    "cloudpickle",
+    "decorator",
+    "ml_dtypes",
+    "psutil",
+    "scipy",
+    "tornado",
+    "typing_extensions",
+]
+
+[project.optional-dependencies]
+torch = ["torchvision"]
+test = ["pytest"]
+
+[project.scripts]
+aiegraph = "aiegraph.__main__:main"
+aiehlc = "aiegraph._tools:aiehlc_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["aiegraph*", "frontend*"]
+namespaces = true                  # src/frontend has no __init__.py

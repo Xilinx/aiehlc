@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Build one resnetengine app (e0, ...) into a scratch worklocal and link a host ELF
 # with hostcompile.sh. Usage: build.sh <app dir under resnetengine> [out dir]
 set -u
@@ -60,7 +64,7 @@ for d in ${KDEFS:-}; do sed -i "1i #define $d" "$W/kernel.cc"; done
 # then embeds one ELF per variant as _binary_kernel_<name>_start.
 if [ -f "$SRC/kernel_variants" ]; then
     while read -r name defs; do
-        [ -z "$name" ] && continue
+        case "$name" in ''|'#'*) continue ;; esac   # blank / comment (license header)
         { for d in $defs; do echo "#define $d"; done; cat "$W/kernel.cc"; } > "$W/kernel_$name.cc"
     done < "$SRC/kernel_variants"
     rm -f "$W/kernel.cc"
