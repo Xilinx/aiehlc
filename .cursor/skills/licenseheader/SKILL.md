@@ -71,6 +71,19 @@ otherwise the description stays). After adding headers to examples, run
 `python3 tutorial/aieprogram/sync_code.py` then `--check`; the listings must not
 change.
 
+## Doc line references (`file:N`) shift by 4
+
+A header moves every line down 4, so a doc's `` `file.py:N` `` now points 4 lines
+early. Grep all tracked `*.md` for `name.ext:N[-M]` into the touched files, then:
+- **pinned refs -- leave**: `tutorial/aieprogram/07_special_data_flow/*.md` cite
+  `<!-- ref PATH:L TOKEN -->` against a fixed base (`script/check_refs.sh`,
+  `BASE_REV=43fcb8f`); shifting them breaks `check_refs`. Run it on each file.
+- **dated plans -- leave**: `docs/plans/2026-*` are snapshots.
+- **live refs -- shift**, only when the basename resolves to exactly one touched
+  file and the old line N equals the new line N+4 (the 2026-11-23 sweep shifted
+  11 in `doc/design/tvm_custom_model_recipe.md`; `__init__.py:52` there names a
+  `run_resnet` that no longer exists -- stale before, left alone).
+
 ## Verify
 
 - `python3 -m py_compile` on every touched `.py`, `bash -n` on every `.sh`, and
