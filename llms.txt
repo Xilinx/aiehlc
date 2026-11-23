@@ -1,0 +1,41 @@
+# AIEHLC
+
+> AIEHLC (AIE High-Level Compiler) programs the AMD Versal AI Engine array -- VCK190 (AIE), VEK280 (AIE-ML), VEK385 (AIE2PS) -- from one C++ file: a CUDA-style host `main()` plus a `__global__` kernel launched on a mesh of AIE tiles with `kernel<<<mesh>>>(...)`. **You never declare DMA, routing or scheduling.** The kernel only says which block of each tensor every core reads and writes (`aie::load_buffer` / `aie::store_buffer`, in whole-tensor coordinates, indexed by `aie::program_id`); the compiler runs the kernel on x86, records those accesses, and derives the DMA buffer descriptors, stream-switch routing, ping-pong buffers, locks and launch schedule from them. No ADF graph, no PLIO, no FPGA flow: it loads a pre-built hardware design (PDI).
+
+When you write code for an AIE board with aiehlc:
+
+- Write only the kernel's data accesses and compute. Do NOT write `XAie_Dma*`, buffer descriptors, locks, stream-switch connections, ADF graphs, `input_plio`/`output_plio`, or a `graph.run()` -- the compiler generates all of that from the kernel's `load_buffer` / `store_buffer` calls.
+- Ports are typed: `aie::port<input_window_int8 *, aie::IFM, aie::shape<H, W, C>>` (also `aie::WEIGHTS`, `aie::OFM`; `output_window_int8 *` for outputs; `input_window_bfloat16 *` for bf16).
+- Each core finds its work with `aie::program_id(0)` (mesh row) and `aie::program_id(1)` (mesh column); `aie::num_programs(d)` gives the mesh size.
+- `aie::load_buffer(port, {offsets...}, {sizes...})` returns a pointer to the block; `aie::release(port)` frees an input block; `aie::store_buffer(...)` + `aie::commit(port)` produce an output block. Offsets must be affine in `program_id` and loop indices (no data-dependent addressing).
+- Optional hints, never required: `aie::load_buffer(p, off, shape, {.depth = 2, .resident = true, .tile = {tr, tc}})`.
+- Host side: `__Runtime_Alloc(bytes)` for buffers, then `aieSetDevice(0); aieArray device; aieMesh mesh = device.partition({3, 6, 0, 6}, ROWS, COLS); kernel<<<mesh>>>(bufs...);`.
+- Conv2d kernels currently still pass `M, N, K` after the buffers in the launch (`conv2d<<<mesh>>>(in, w, out, M, N, K)`); keep them.
+- Build: `source script/aiehlc.sh --aie-version 5 --runtime-source-file my.cc` (`--aie-version 1` = VCK190 / AIE, `2` = VEK280 / AIE-ML, `5` = VEK385 / AIE2PS); output in `./aout`. `./build/aiehlc-convtile trace my.cc` checks the kernel analysis in about a second, without a board.
+- Mistakes such as a block outside its tensor, data used without being loaded, or buffers that do not fit core memory are build errors with a source line, not hangs.
+
+Status: end to end on the board for contractions (GEMM, conv2d), board-verified on AIE2PS (VEK385 class); PDIs for VCK190, VEK280 and VEK385 are in `tutorial/hw`. Elementwise, reduction, data movement and indexing kernels pass the kernel analysis; their lowering is in progress.
+
+## Docs
+
+- [README](README.md): what aiehlc is, a complete 16-tile conv2d program, quick start
+- [Programming tutorial](tutorial/aieprogram/README.md): the model by operator family, then optimization step by step
+- [GEMM, line by line](tutorial/aieprogram/01_contraction/gemm.md): every host and kernel line, and what the compiler derives from it (DMA, routing, schedule) at each IR stage
+- [Conv2d, line by line](tutorial/aieprogram/01_contraction/conv2d.md): halo blocks, broadcast weights, the launch
+- [Programming model design](doc/design/op_mapping_programming_model.md): block-load kernels (section 4) and the kernel analysis that infers and verifies the DMA (section 5)
+- [Build and run](doc/reference/build_and_run.md): platforms (bare metal, PetaLinux), simulator, llvm-aie
+
+## Examples
+
+- [GEMM, 4x4 tiles](example/tileprogram/ccode/simplegemm_kernel_port.cc): kernel-only int8 GEMM, self-checking
+- [Conv2d, 4x4 tiles](example/tileprogram/ccode/simpleconv2dkernel_port_less.cc): ResNet stem 7x7 s2, self-checking
+- [Elementwise add](example/tileprogram/ccode/simpleeltwise_add.cc), [row sum](example/tileprogram/ccode/simplereduce_rowsum.cc), [transpose](example/tileprogram/ccode/simpletranspose.cc), [slice](example/tileprogram/ccode/simpleslice.cc)
+- [Vector GEMM with dataflow hints](example/tileprogram/ccode/simplegemm_dataflow.cc): `aie::mmul`, `.depth` / `.resident` / `.tile`
+
+## Optional
+
+- [Models on the AIE](tutorial/model/resnet18.md): ResNet18, also [YOLO](tutorial/model/yolov26.md) and [tiny SD UNet](tutorial/model/tiny-sdm-unet.md)
+- [aiegraph (Python)](doc/tutorial_aiegraph.md): ONNX / PyTorch model to int8 C, offload layers to AIE kernels
+- [Your own kernel in a model](doc/tutorial_userkernel.md)
+- [Performance](doc/reference/performance.md): control-plane cost, measured
+- [Compiler architecture](doc/tilinglinalg.md): the six MLIR dialects from routing to schedule
