@@ -29,6 +29,17 @@ Key (sha256 over):
 Entry = the workdir right after conversion (before any offload), plus meta.json with
 the original workdir and image paths. On restore, text files that mention the old
 workdir / image path get the new ones; binary files are copied unchanged.
+
+F10 hardlink restore (``AIEGRAPH_CONVERT_CACHE_LINK``, default 1; 0 = copy everything):
+files of at least ``_LINK_MIN`` bytes are hardlinked instead of copied when the cache and
+the workdir share a filesystem (UNet: 3 x 1.29 GB .onnx/.folded.onnx/_params.bin). Both
+names then share one inode, so the linked files are made read-only (0444) in the cache:
+a later writer that opens the restored path for writing gets PermissionError instead of
+silently corrupting the cache. Writers that replace by rename (boardmain int32 rewrite:
+tmp + replace) are fine. Paths the build mutates in place are always copied
+(``_NO_LINK_DIRS``: ``arm_build/`` holds weights.bin, rewritten with "wb" by
+write_aligned_blob and "r+b" by the F4 layout pass). Cross-device (EXDEV, e.g. the
+default ~/.cache on an overlay root) falls back to copy per file.
 """
 from __future__ import annotations
 
@@ -54,7 +65,10 @@ _MAX_GB_DEFAULT = 20.0
 _ENV_SKIP = {ENV, MAX_ENV, "AIEHLC_KOBJ_CACHE", "AIEHLC_ROOT", "AIEHLC_FAST",
              "EXTRA_DEFS", "AIEHLC_SH_ARGS", "AIEHLC_WL_CACHE", "AIEHLC_ARM_JOBS",
              "AIEHLC_ARM_OBJ_CACHE", "AIEHLC_ARM_OBJ_CACHE_MAX_MB",
-             "AIEHLC_WBIN_REUSE"}
+             "AIEHLC_WBIN_REUSE", "AIEGRAPH_CONVERT_CACHE_LINK"}
+LINK_ENV = "AIEGRAPH_CONVERT_CACHE_LINK"
+_LINK_MIN = 16 << 20            # hardlink files at least this big (F10)
+_NO_LINK_DIRS = ("arm_build",)  # first path parts the build rewrites in place
 _TMP_STALE_S = 86400
 _TEXT_MAX = 64 << 20            # do not try to relocate text files bigger than this
 
@@ -123,9 +137,40 @@ def _relocate(root: Path, subs: list) -> int:
             continue
         for a, b in subs:
             data = data.replace(a, b)
-        p.write_bytes(data)
+        tmp = p.with_name(p.name + ".reloc.tmp")       # rename, never write in place: p may
+        tmp.write_bytes(data)                          # be a hardlink into the cache (F10)
+        shutil.copymode(p, tmp) if p.stat().st_nlink == 1 else None
+        os.replace(tmp, p)
         n += 1
     return n
+
+
+def _link_enabled() -> bool:
+    return os.environ.get(LINK_ENV, "1").strip() != "0"
+
+
+def _copy_tree(src: Path, dst: Path, link: bool) -> dict:
+    """copytree(symlinks=True) that hardlinks big immutable files; returns counts."""
+    st = {"linked": 0, "linked_bytes": 0, "copied": 0}
+
+    def cp(s, d):
+        rel = Path(s).relative_to(src)
+        if link and rel.parts[0] not in _NO_LINK_DIRS:
+            try:
+                sz = os.stat(s).st_size
+                if sz >= _LINK_MIN:
+                    os.chmod(s, 0o444)             # shared inode: writers must fail loudly
+                    os.link(s, d)
+                    st["linked"] += 1
+                    st["linked_bytes"] += sz
+                    return d
+            except OSError:                            # EXDEV / EPERM / ... -> copy
+                pass
+        st["copied"] += 1
+        return shutil.copy2(s, d)
+
+    shutil.copytree(src, dst, symlinks=True, copy_function=cp)
+    return st
 
 
 def restore(k: str, workdir: Path, image) -> dict:
@@ -140,13 +185,13 @@ def restore(k: str, workdir: Path, image) -> dict:
     if workdir.exists():
         shutil.rmtree(workdir)
     try:
-        shutil.copytree(ent / "tree", workdir, symlinks=True)
+        cst = _copy_tree(ent / "tree", workdir, _link_enabled())
     except (OSError, shutil.Error):                    # entry pruned under us -> miss
         shutil.rmtree(workdir, ignore_errors=True)
         return None
     now = time.time()
     for p in workdir.rglob("*"):                       # fresh mtimes, like the KOBJ cache
-        if p.is_file() and not p.is_symlink():
+        if p.is_file() and not p.is_symlink():         # (linked: also bumps the cache inode; harmless)
             os.utime(p, (now, now))
     subs = [(meta["workdir"], str(workdir))]
     if meta.get("image") and image:
@@ -154,6 +199,7 @@ def restore(k: str, workdir: Path, image) -> dict:
     n = _relocate(workdir, subs)
     meta["restore_s"] = round(time.time() - t0, 1)
     meta["relocated_files"] = n
+    meta.update(cst)
     return meta
 
 

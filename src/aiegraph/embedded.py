@@ -939,7 +939,8 @@ def embedded_convert(model, target: str = "a78", quantize: str = "int8", calib=N
         if hit:
             full = json.loads(stamp.read_text())
             print(f"[aiegraph] convert cache HIT {ckey} -> {workdir} ({hit['restore_s']} s, "
-                  f"{hit['relocated_files']} files relocated)")
+                  f"{hit['relocated_files']} files relocated, {hit.get('linked', 0)} linked "
+                  f"{hit.get('linked_bytes', 0) / 1e9:.2f} GB, {hit.get('copied', 0)} copied)")
             emod = EmbeddedModel(workdir, m, target, image, full)
             set_current(emod)
             return emod
