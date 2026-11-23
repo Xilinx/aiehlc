@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // emu_conv2dstem_new.cc -- run the GENERATED kernel of conv2dstem_new.cc on x86
 // for every core of the 4x4 mesh, end to end with the library's REAL host code:
 // stage_ifm() + pack_wts_tiles() (quant params in the pad channel, mmul order)

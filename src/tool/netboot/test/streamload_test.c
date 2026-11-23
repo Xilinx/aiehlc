@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* x86 unit test of the streaming netboot loader (run by streamload_x86.sh).
  *
  * DDR_LOW0 (2 GB) is a malloc'd block on the host: elfload.c built with

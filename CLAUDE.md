@@ -949,6 +949,7 @@ Read the matching skill when the task fits:
 | Embedded LLM context loss on retarget | debugui-llm-reset |
 | Debug UI grid: every tile red border + ⚠ "supply/demand mismatch" on every launch | flowbalancebroadcast |
 | Debug UI grid: big blank column on the left of the AIE array (data plane starts at col 1, e.g. `{2,6}` control-plane partition) | debuguigridleftgap |
+| Add the AMD Apache-2.0 license header (sweep or new file); which files must not get one (text templates, `board_main.c` MARKER, line-number-asserted examples, generated/vendor); tutorial listings without the header | licenseheader |
 | Dump a lab board's AIE registers / core PM+DM / memtile DM (`script/aiedump.py palmyra_local\|vek385-N`); a column reads all `0x00000002`; which registers must never be read (`lock_request` = acquire) | aiedump |
 | Static XAie API verify (routing.cc, host.cc) | xaieapiverify |
 | Routing debug (IR → generated code) | routinghwdebug |
@@ -1077,3 +1078,21 @@ to reload the MCP server.
   something you did wrong.
 - **Keep the architecture docs current** — update them as part of the change, not after.
 - **After each task, list every file changed or created.**
+- **Copyright check before adding any non-original file to git.** This repo is
+  open source (Apache-2.0); anything committed is published. Images (`*.jpg`,
+  `*.png`, …), datasets, model weights, binaries (`*.bin`, `*.o`, ELFs),
+  vendor/BSP or driver sources (e.g. `thirdparty/aie-rt/`, XAie, Vitis files),
+  PDFs, and code or text copied from elsewhere must **not** be staged or
+  committed until all three are confirmed:
+  1. **Origin** — where it came from (URL / product / author), or that we
+     created it ourselves.
+  2. **License** — the license is known and permits redistribution under
+     Apache-2.0 (e.g. MIT/BSD/Apache/CC0/CC-BY); "unknown" counts as **no**.
+  3. **User approval** — ask the user explicitly, naming the file, its origin
+     and its license, and get a yes for **that file** in this session. Approval
+     for one file does not extend to another, and `git add -A` / `git add .`
+     never counts as approval.
+  If any of the three is missing, leave the file untracked and say so. When a
+  committed file needs attribution, record origin + license next to it (a
+  README line or a header comment). Never commit secrets or tokens (e.g.
+  `claude.sh`), absolute personal paths, or board images (`HashBlock0.bin`).

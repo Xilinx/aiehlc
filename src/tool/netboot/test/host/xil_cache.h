@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* Host stub for the x86 unit test (streamload_x86.sh): the cache calls are counted. */
 #ifndef XIL_CACHE_H
 #define XIL_CACHE_H

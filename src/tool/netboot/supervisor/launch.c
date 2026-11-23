@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* The app core's life cycle as the server drives it: free it, start a placed
  * image (staged for RERUN, streamed for LOAD_RUN), kill it, admit requests.
  * Split from main.c so test/streamload_x86.sh can build it on the host. */

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """bk-sdm-tiny UNet (unet_sim.onnx, 3 inputs) -> aiegraph -> A78 main.elf, conv / linear / attention on the AIE.
 
   $PY build_unet.py --onnx unet_sim.onnx --real-io <real_io> --wdtype bf16 --partition partition_p4a.json \

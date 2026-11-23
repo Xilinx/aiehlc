@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """PDK: kacc_bench.sh --gemm -- the K-in-core gemm_kacc kernel (aiednn gemm/gemm_kacc_kernel.cc template, aiegraph.kaccbench.KACC_KERNEL) as a dense GEMM.
 
   kacc_gemm.py <op_golden matmul dir> <out dir>   -> <out>/kacc_gemm.cc + kacc_{w,x,y}.bin + kacc_data.h

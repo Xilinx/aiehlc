@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """GAP-aiehlc-arm_build-cflags: the ``layer_cflags`` knob of arm_build.write_makefile.
 
 * empty knob  -> the generated Makefile is byte-identical to the one the

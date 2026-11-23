@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # P4bk: build the one-launch K-in-core bench (bf16_gemm_kacc.cc) for one conv layer from an op_golden dir.
 #   kacc_bench.sh --golden <op_golden/.../cNNN_conv_...> --out <dir>   ->  <dir>/main.elf
 # The golden dir holds a.npy (1xCxHxW f32), b.npy (OxCx3x3 f32), c.npy (O f32), y.npy (1xOxHxW f32), meta.json.

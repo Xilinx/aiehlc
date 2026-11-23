@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* aie_kacc_pack.h -- host-side RUNTIME operand packing / output un-tiling for the gemm_kacc kernel
  * (example/aiegraph/unet_bk_sdm_tiny/unet_aie.py: kacc_geom / kacc_kernel_text).
  *

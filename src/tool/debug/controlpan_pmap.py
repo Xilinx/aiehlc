@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Parse CONTROLPAN-PMAP applog lines into device-map ports and edges.
 
 A CONTROLPAN-PMAP line (emitted by the aie_ctrl* runtime when

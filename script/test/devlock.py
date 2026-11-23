@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Per-device lock for board runs (apppaltest.py and friends).
 
 One run per device at a time. The lock is a kernel flock on a file under

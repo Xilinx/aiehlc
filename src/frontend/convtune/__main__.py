@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """CLI:  PYTHONPATH=src python -m frontend.convtune {space,derive,tune} <src.cc> ...
 
   space   list the legal tilings (ranked by the analytical model)

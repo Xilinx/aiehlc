@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """aiegraph.boardmain (unet-m4 P4): the generated board main.c / inputs header / driver glue are
 byte-identical (up to the aiednn-tpl P4 kernel-ABI rename, see _old_module) to what the UNet example produced with its own MAIN_C, runtime_io_main(), unet_aie.main_c()
 and unet_aie.driver_template() before P4 (commit 5649d6a, read with `git show` from THIS worktree's repo).

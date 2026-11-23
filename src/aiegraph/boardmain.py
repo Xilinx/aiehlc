@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Board-side ``main.c`` generator + the build glue around it (sprint m4 P4, gaps 3 / 4).
 
 A model example used to carry its own ``MAIN_C`` (C text in Python), the runtime-io rewrite of it,

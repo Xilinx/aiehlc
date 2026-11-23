@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """One-shot: applog --> timeline.json/csv --> timeline.png.
 
 A single driver that chains the two existing tools so you don't run them by

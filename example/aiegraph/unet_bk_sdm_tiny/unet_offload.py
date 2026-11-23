@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """The UNet's AIE offload declarations for build_unet.py (unet-m4 P4: moved out of build_unet.py).
 
 offload(a, emod, out) maps the partition's conv / linear / attention layers to aiegraph groups (match /

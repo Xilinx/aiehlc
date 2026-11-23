@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Build and run the control-packet transaction translator host unit test.
 #
 # aie_runtime.c compiles host-native under -D__AIESIM__ with the cortexa78 BSP

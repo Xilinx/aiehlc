@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Unit test for __Runtime_core_trace_decode (src/mlir/runtime/aie_runtime.c).
 
 The C decoder cannot be linked standalone (aie_runtime.c pulls in xaiengine.h),

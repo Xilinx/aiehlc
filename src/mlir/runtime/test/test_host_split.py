@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """GAP-RT1 x86 tests of the aie_host split (src/mlir/runtime/aie_host_split.h) and its UNet wiring
 (example/aiegraph/unet_bk_sdm_tiny/unet_aie.py):
 1. the header alone: site selection, phase accumulation, window split dma + wait == window, PROF line format;

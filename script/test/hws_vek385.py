@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """VEK385 backend of hws (contract section 2, "VEK385"; plan-1109-b1597a s4).
 
 On VEK385 hw_server runs on the farm host the board is cabled to

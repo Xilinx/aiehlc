@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Unit tests for the VEK385 hws backend with a fake farm host (mocked cluster-ping,
 systest hold session, nc, xsdb, ssh)."""
 import base64

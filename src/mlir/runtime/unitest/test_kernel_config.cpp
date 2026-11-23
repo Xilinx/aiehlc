@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // Host unit test for KERNELCONFIGOFFLOAD core-tile DMA MMIO encoding.
 //
 // Phase 1 (this file): prove we can capture the GOLDEN register writes the

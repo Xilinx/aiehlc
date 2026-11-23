@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // emu_conv2d_spatial.cc -- run the GENERATED conv2d_spatial kernel of
 // simpleconv2d_new_load.cc on x86 for all 16 cores of the 4x4 mesh and compare with
 // the CPU reference (scalar_conv2d). The windows serve blocks exactly as the

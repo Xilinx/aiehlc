@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """BDD-style tests for devlock: one run per device, crash releases the lock."""
 import os, signal, subprocess, sys, time, textwrap
 import pytest

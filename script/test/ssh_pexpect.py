@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Shared pexpect helpers for driving an interactive ssh -> systest session.
 
 Extracted so both apppaltest.py and schedule_debug_server.py build the ssh

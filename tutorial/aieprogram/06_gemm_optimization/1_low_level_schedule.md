@@ -20,8 +20,6 @@ three `{...}` arguments are the only difference from step 0.
 <!-- code: example/tileprogram/ccode/simplegemm_opt1_schedule.cc -->
 ```cpp
 /******************************************************************************
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
- * SPDX-License-Identifier: Apache-2.0
  *
  * GEMM optimization, step 1: the low-level schedule (tutorial/aieprogram/06_gemm_optimization/1_low_level_schedule.md).
  *   C[2048, 256] = A[2048, 256] x B[256, 256]^T, int8, on the 4x4 mesh.

@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* The app core (A78 core 1), driven through the PLM over IPI (xilpm_ng).
  * RequestWakeUp starts it at an address out of a real reset; ForcePowerDown
  * stops it whatever it is doing -- the watchdog's kill switch. */
