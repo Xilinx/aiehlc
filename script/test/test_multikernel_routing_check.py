@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """GAP-MKROUTE: the multi-kernel routing-topology guard on two real aiehlc host.cc plan excerpts (P2 probes:
 fap6b = gemm_kacc + FA with row-broadcast K/V -> hung on palmyra213; fap7 = FA in gemm_kacc topology -> PASS)."""
 import sys

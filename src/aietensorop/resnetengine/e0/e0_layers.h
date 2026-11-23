@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* E0 bring-up layer table, shared by e0 kernel and host (plain C, no includes).
  * Each "layer": every core receives R input blocks of IN bytes (broadcast per
  * mesh row), one weight block of W bytes (broadcast per mesh col) and returns R

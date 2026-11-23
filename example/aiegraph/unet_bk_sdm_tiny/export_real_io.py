@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Sprint unet-board-apu-aie P1a — export the REAL UNet step input + x86 ORT reference outputs for the board CMP.
 
 Data: modelzoo/artifacts/bk-sdm-tiny/pipeline_ref_256/p00_steps.npz (FP32 torch diffusers run, prompt 0, seed 1000).

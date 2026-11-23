@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
 # Control-Packet Register-Write Support in Routing (Load ELF / Config)
 
 Add stream-switch **control packet** support so `routing.cc` can route packets that

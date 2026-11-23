@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """
 conv2d_debug.py — simulate simpleconv2d.cc input/filter DDR layout and replay the
 conv2d_spatial kernel for the FIRST core tile (mesh row 0, col 0, on-core round 0).

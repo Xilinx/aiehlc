@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Self-test for `script/worktree.sh link-deps` (GAP-aiehlc-worktree-linkdeps).
 # Usage: bash script/test/test_worktree_linkdeps.sh [<ref-worktree>]
 #        (default ref: the repo's main worktree, first entry of `git worktree list`)

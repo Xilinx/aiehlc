@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Read the live stream switch of a tile and diff it against the provenance map.
 
 aiegdb's `show switch` / `scan switch` decode one tile over `aiedbg reg read`,

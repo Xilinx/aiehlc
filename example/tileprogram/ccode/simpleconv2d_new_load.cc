@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 #include "simpleconv2d_new_load.h"
 // AIE_KERNEL_CONFIG_TRACE compiles klog() into the kernel and makes the host
 // print ONLY every core's klog after the launch. Add AIE_DEBUG_LOG for the full

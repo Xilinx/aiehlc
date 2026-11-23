@@ -84,10 +84,26 @@ def annotate(src, notes):
     return "\n".join(lines)
 
 
+FIRST_BLOCK = re.compile(r"\A/\*(?:(?!\*/).)*\*/\n", re.S)
+
+
+def drop_license(src):
+    """Listings omit the license: drop the Copyright / SPDX lines of the file's
+    first comment block, and the whole block if nothing but decoration remains."""
+    m = FIRST_BLOCK.match(src)
+    if not m or "SPDX-License-Identifier" not in m.group(0):
+        return src
+    kept = [l for l in m.group(0).splitlines(keepends=True)
+            if not re.search(r"Copyright \(C\)|SPDX-License-Identifier", l)]
+    if all(not re.sub(r"[/*\s]", "", l) for l in kept):
+        return src[m.end():]
+    return "".join(kept) + src[m.end():]
+
+
 def render(md_text):
     def fill(m):
         opts, *notes = m["opts"].split(";")
-        src = shorten((REPO / m["path"]).read_text(), opts.split())
+        src = shorten(drop_license((REPO / m["path"]).read_text()), opts.split())
         src = annotate(src, [n for n in notes if n.strip().startswith(("after ", "replace "))])
         return f"{m.group(1)}```cpp\n{src.rstrip()}\n```\n{m.group(5)}"
     return BLOCK.sub(fill, md_text)

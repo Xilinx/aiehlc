@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """yolo26n (end2end ONNX, trained) -> aiegraph -> A78 main.elf, every Conv (incl. depthwise) on the AIE.
 
   $PY build_yolov26.py --onnx yolo26n_e2e_trained_op17.onnx --out <dir> [--input images.bin]

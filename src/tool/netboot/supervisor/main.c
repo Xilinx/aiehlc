@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* netboot supervisor: stays resident on A78 core 0 (DDR_LOW1), receives ELFs
  * over TCP and runs each on core 1 with a watchdog.
  * Design: doc/design/lwip_elf_bootloader.md (mode D, section 7a). */

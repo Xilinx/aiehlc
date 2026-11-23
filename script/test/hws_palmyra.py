@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """palmyra (213) backend for hws (contract v1 §2, plan-1109-b1597a s3).
 
 Service = tmux session ``hws`` on huaj@<ip>: /bin/systest -> become "palmyra" -> plain

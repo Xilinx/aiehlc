@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* Host stub for the x86 unit test: the supervisor's UART lines go to stdout. */
 #ifndef XIL_PRINTF_H
 #define XIL_PRINTF_H

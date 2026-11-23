@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """aiegraph.flashattn (unet-decl P3: the flash-attention group code moved from the example's fa_attn.py).
 
 * the class table / kernel parts / step emit are byte-identical to the last example copy (git show d5e9f15);

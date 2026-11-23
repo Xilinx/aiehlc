@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Self-watchdog for a board run (apppaltest.py).
 
 The device lock (devlock.py) is a kernel flock, so a CRASHED holder frees the

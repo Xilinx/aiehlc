@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # GAP-125ece regression test (x86, no board): KERNELCONFIGOFFLOAD in a multi-kernel program.
 #
 #   script/test/kco_multikernel/run.sh [out dir]      (AIEHLC_BIN=<aiehlc> to test a side build)

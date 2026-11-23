@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """ResNet-18 (v2 / pre-activation) implemented from scratch in PyTorch.
 
 This matches the ONNX Model Zoo `resnet18-v2-7` model (MXNet Gluon `resnetv22`):

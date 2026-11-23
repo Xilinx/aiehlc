@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """x86 unit tests: aiegraph driver template (unet-m3 S6) -- placement at checked anchors + refusals."""
 import sys
 from pathlib import Path

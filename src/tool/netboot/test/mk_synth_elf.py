@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Build a large synthetic baremetal A78 ELF to exercise netboot streamload.
 
     python3 src/tool/netboot/test/mk_synth_elf.py --mib 300 --out /tmp/synth300.elf

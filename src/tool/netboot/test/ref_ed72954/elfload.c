@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* Validate an ELF64/AArch64 executable and place its PT_LOAD segments into the
  * app's DDR_LOW0. Nothing is written until every header has been checked, so a
  * rejected upload leaves the previous image intact. */

@@ -77,29 +77,29 @@ CASES = [
     # unrecognizable "GemmSpace" port; the error now names the port and line.
     ("aie::port missing its closing >",
      [("aie::shape<230, 230, 4>> win_a", "aie::shape<230, 230, 4> win_a")],
-     "line 3: `aie::port<input_window_int8 *, aie::IFM, aie::shape<230, 230, 4> win_a,` -- the `<` of aie::port is never closed"),
+     "line 7: `aie::port<input_window_int8 *, aie::IFM, aie::shape<230, 230, 4> win_a,` -- the `<` of aie::port is never closed"),
     # A declaration the blocks cannot fit at any offset: the hint names the
     # port's aie::shape (and what the blocks span), not just each core.
     ("weights port declared with the input's shape (hint: check its aie::shape)",
      [("aie::shape<64, 7, 7, 4>> win_b", "aie::shape<230, 230, 4>> win_b")],
-     "case.cc:4: win_b: hint: the kernel's blocks are 4-D, spanning (64,7,7,4), which no offset fits into the "
+     "case.cc:8: win_b: hint: the kernel's blocks are 4-D, spanning (64,7,7,4), which no offset fits into the "
      "declared `aie::shape<230,230,4>` -- check this port's aie::shape (the blocks suggest aie::shape<64,7,7,4>)"),
     ("output port declared with too few channels (hint: check its aie::shape)",
      [("aie::shape<112, 112, 64>> win_c", "aie::shape<112, 112, 4>> win_c")],
-     "(the blocks suggest aie::shape<112,112,64>) and its role (OFM); e.g. line 40 in "
+     "(the blocks suggest aie::shape<112,112,64>) and its role (OFM); e.g. line 44 in "
      "`aie::store_buffer(win_c, {oh0, ow0, pid_c * oc_t}, {oh_t, ow_t, oc_t})` on core (0,0) takes 16 in dim 2"),
     ("load offset with an extra coordinate (hint: the call, not the port)",
      [(LOAD_X, LOAD_X.replace("{oh0 * S, ow0 * S, 0}", "{oh0 * S, ow0 * S, 0, 0}"))],
-     "case.cc:39: win_a: hint: `aie::load_buffer(win_a, {oh0 * S, ow0 * S, 0, 0}, {ih_t, iw_t, C})` "
+     "case.cc:43: win_a: hint: `aie::load_buffer(win_a, {oh0 * S, ow0 * S, 0, 0}, {ih_t, iw_t, C})` "
      "passes an offset of 4 and a block shape of 3 coordinates -- the offset has an extra coordinate"),
     # Harness errors name the failing call's line; a block never handed back
     # names the call that took it.
     ("never released: the error names the load that took the block",
      [("    aie::release(win_b);\n", "")],
-     "case.cc:18: win_b block 1 on core (0,0): 1 block(s) still held at kernel end: never released"),
+     "case.cc:22: win_b block 1 on core (0,0): 1 block(s) still held at kernel end: never released"),
     ("store on an input port",
      [("int8_t *y = aie::store_buffer(win_c,", "int8_t *y = aie::store_buffer(win_a,")],
-     "case.cc:40: win_a block 1 on core (0,0): aie::store_buffer on an input port"),
+     "case.cc:44: win_a block 1 on core (0,0): aie::store_buffer on an input port"),
     # Vector kernel (aie::mmul, emulated by aie_api_x86emu.h in the trace).
     ("vector: last K-block not shifted back (64-byte load runs past the row)",
      [("const int off = kb < 3 ? kb * 8 : 20;", "const int off = kb * 8;")],
@@ -113,23 +113,23 @@ CASES = [
     # OFM store the trace never reached (it stops at the first fault).
     ("weights block narrower than the compute (oc_t = 15): the cause",
      [("oc_t = 16;", "oc_t = 15;")],
-     "cause (static analysis): `oc_t = 15` (case.cc:8) sizes the block of the access at line 29, whose index never "
+     "cause (static analysis): `oc_t = 15` (case.cc:12) sizes the block of the access at line 33, whose index never "
      "reads oc_t -- with oc_t = 16 every analysed block access fits"),
     ("weights block narrower than the compute (oc_t = 15): the store the trace did not reach",
      [("oc_t = 16;", "oc_t = 15;")],
-     "out-of-block access (static analysis) at case.cc:74: `aie::store_v(o + 96, z.second.extract<32>(1))`"),
+     "out-of-block access (static analysis) at case.cc:78: `aie::store_v(o + 96, z.second.extract<32>(1))`"),
     # Cross-check: the trace faults on a line the static analysis cannot explain.
     ("cross-check: the index reads data (static analysis cannot explain it)",
      [("live ? w[(nb * 8 + n) * TAPS + kh * KW * C + byte] : (int8_t)0;",
        "live ? w[(nb * 8 + n) * TAPS + kh * KW * C + byte + Bp[0] * 0 + 3136] : (int8_t)0;")],
-     "static analysis: cannot explain line 29: `w[(nb * 8 + n) * TAPS + kh * KW * C + byte + Bp[0] * 0 + 3136]`: "
+     "static analysis: cannot explain line 33: `w[(nb * 8 + n) * TAPS + kh * KW * C + byte + Bp[0] * 0 + 3136]`: "
      "`Bp[...]` is not a const array with an initializer"),
     # ... and on a line it evaluated as in bounds: `w` moved through an alias
     # the model does not follow -- it must say so, not stay silent.
     ("cross-check: an alias moves the block pointer (static analysis disagrees)",
      [("    alignas(64) int8_t Bp[7 * 4 * 2 * 64];",
        "    const int8_t **pw = &w;\n    *pw += 2940;\n    alignas(64) int8_t Bp[7 * 4 * 2 * 64];")],
-     "static analysis DISAGREES: it evaluated `w[(nb * 8 + n) * TAPS + kh * KW * C + byte]` at line 31"),
+     "static analysis DISAGREES: it evaluated `w[(nb * 8 + n) * TAPS + kh * KW * C + byte]` at line 35"),
     ("block larger than core memory",
      [(LOAD_X, LOAD_X.replace("{oh0 * S, ow0 * S, 0}, {ih_t, iw_t, C}", "{0, 0, 0}, {230, 230, 4}"))],
      "larger than the core data memory"),

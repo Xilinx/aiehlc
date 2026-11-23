@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Zero-pad a GEMM so M/K/N are multiples of the AIE macro tile (64).
 
 GAP (2026-11-15, Steve): the K-accumulation plan (example/.../kplan.plan) only accepts

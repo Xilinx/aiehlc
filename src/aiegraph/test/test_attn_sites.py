@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """GATT x86 regression test of aiegraph.attnsite (moved from example/aiegraph/unet_bk_sdm_tiny/test_attn_sites.py,
 unet-decl P3: the attention site geometry / host / driver patch left the example for src/aiegraph).
 

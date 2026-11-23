@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """GIN: write one UNet call's inputs + reference from a pipeline steps npz, in the real_io layout
 that aiehlc_elfio.py patch takes (--in sample=... --in timestep_i32=... --in ehs=...).
 

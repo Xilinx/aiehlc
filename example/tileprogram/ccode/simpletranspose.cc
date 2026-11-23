@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 #include "simpleops_load.h"
 // STATUS (2026-11-15): passes the kernel analysis (`build/aiehlc-convtile trace` this file);
 // the lowering does not support this op shape yet, so aiehlc.sh stops with

@@ -18,8 +18,6 @@ the source by `tutorial/aieprogram/sync_code.py`).
 <!-- code: example/tileprogram/ccode/simplegemm_kernel_port.cc -->
 ```cpp
 /******************************************************************************
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
- * SPDX-License-Identifier: Apache-2.0
  * Kernel-only GEMM: the DMA is derived from the kernel.
  *   C[64, 64] = A[64, 256] x B[64, 256]^T, int8, on the 4x4 mesh
  ******************************************************************************/

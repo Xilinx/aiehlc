@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Matplotlib GUI for the host<->AIE merged timeline (timeline.json).
 
 Reads the JSON produced by host_aie_timeline.py (schema: meta / anchors /

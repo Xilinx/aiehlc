@@ -67,7 +67,7 @@ concrete blockers below stop the big ImageNet model:
 - **missing ops** — `resnet18py` needs an input-BN, a 7×7 stride-2 conv stem, and
   a 3×3 maxpool. Only `conv_bn_relu / conv_bn / residual_add_relu / avgpool_fc`
   exist (`kernels.py:181`). Also note `resnet18py` is **pre-activation v2**
-  (BN→ReLU→Conv, `resnet18.py:53`) while the frontend model is **post-activation**
+  (BN→ReLU→Conv, `resnet18.py:57`) while the frontend model is **post-activation**
   (`model.py:240`); the op-fusion pattern the walk keys on differs.
 - **real weights** — this path has no PTQ; only the placeholder buffers of
   `make_conv_params` / `make_fc_params`.
@@ -283,13 +283,13 @@ This section covers meaning (1).
 
 `example/model/resnet18py/classify.py` is a pure PyTorch classifier:
 
-- downloads `resnet18-v2-7.onnx` (`classify.py:122-124`);
+- downloads `resnet18-v2-7.onnx` (`classify.py:126-128`);
 - builds a from-scratch torch model and **loads the real ONNX weights into it**
-  (`classify.py:127` → `resnet18(onnx_path=...)` at `resnet18.py:169-173`);
+  (`classify.py:131` → `resnet18(onnx_path=...)` at `resnet18.py:173-177`);
 - preprocesses the image to a float32 NCHW `[1,3,224,224]` tensor
-  (`preprocess()` at `classify.py:90-108`);
+  (`preprocess()` at `classify.py:94-112`);
 - runs `model(x)` → `softmax` → `topk` and prints labels
-  (`classify.py:129-139`).
+  (`classify.py:133-143`).
 
 The ONNX file already exists on disk after `resolve()`, so TVM's native
 `relay.frontend.from_onnx` can consume it **directly** — the from-scratch torch
@@ -297,12 +297,12 @@ model is not needed for the framework port.
 
 ### The framework port, step by step
 
-1. **Reuse the front matter unchanged.** `resolve()` (`classify.py:62`) and
-   `preprocess()` (`classify.py:90`) already give you the numpy input `x`
+1. **Reuse the front matter unchanged.** `resolve()` (`classify.py:66`) and
+   `preprocess()` (`classify.py:94`) already give you the numpy input `x`
    (`x.numpy()`, shape `(1,3,224,224)`, float32). No change.
 2. **Load the ONNX and read its input name dynamically.** The real model's input
    is named **`"data"`**, *not* `"input"` (which is the *scaled* model's ONNX name
-   from `model.py`). Never hardcode it — `verify_onnx.py:25-27` already reads it
+   from `model.py`). Never hardcode it — `verify_onnx.py:29-31` already reads it
    from onnxruntime (`sess.get_inputs()[0].name`); the Relay equivalent is:
 
    ```python
@@ -337,7 +337,7 @@ model is not needed for the framework port.
    logits = gm.get_output(0).numpy()[0]           # shape (1000,)
    ```
 6. **Tail is identical to `classify.py`.** Feed `logits` through the same
-   `softmax` + `topk` + label lookup as `classify.py:132-139`.
+   `softmax` + `topk` + label lookup as `classify.py:136-143`.
 
 ### Notes
 
@@ -345,7 +345,7 @@ model is not needed for the framework port.
   `(mod, params)` for the graph walk (`relay_import.py:46-75`); it never calls
   `relay.build`, so use the snippet in step 5 to actually classify.
 - **Cross-check the result.** Compare TVM's logits against onnxruntime exactly as
-  `verify_onnx.py` compares torch vs onnxruntime (`verify_onnx.py:25-34`); the
+  `verify_onnx.py` compares torch vs onnxruntime (`verify_onnx.py:29-38`); the
   argmax and top-k should agree.
 - **Contrast in one line.** The framework port is a ~15-line swap (the ONNX
   already exists; only the input name — `"data"` vs `"input"` — differs, read
