@@ -264,6 +264,99 @@ def f32_to_bf16_rne(a):
     return r
 
 
+def _blob_order(offsets: dict, order=()) -> list:
+    """Packing order of :func:`write_aligned_blob`: ``order`` first, then the rest sorted."""
+    rank = {}
+    for name in order:
+        if name in offsets and name not in rank:
+            rank[name] = len(rank)
+    return sorted(offsets, key=lambda n: (0, rank[n], "") if n in rank else (1, 0, n))
+
+
+def blob_layout(offsets: dict, align: int = 64, bf16_names=(), order=()) -> tuple:
+    """``({name: (offset, nbytes)}, total_bytes)`` that :func:`write_aligned_blob`
+    would produce, without reading or writing anything (bf16 halves nbytes)."""
+    new, pos = {}, 0
+    for name in _blob_order(offsets, order):
+        nbytes = offsets[name][1]
+        pos += (-pos) % align
+        n = nbytes // 2 if name in bf16_names else nbytes
+        new[name] = (pos, n)
+        pos += n
+    return new, pos
+
+
+# F4 (-fast): weights.bin reuse. A UNet build writes the same 647 MB weights.bin twice
+# (build_arm_elf offload check + link), ~27-30 s each, byte-identical to the copy the
+# convert cache restored (tasks/2026-11-23_fast-build-F8-e2e-and-F4-plan.md). Under
+# AIEHLC_FAST=1 (or AIEHLC_WBIN_REUSE=1; AIEHLC_WBIN_REUSE=0 forces it off) generate_driver
+# writes a ``weights.bin.key`` sidecar after the blob and its group-step patches:
+# key = sha256(params.bin content, layout, bf16 names, every group-step weight file + its
+# placement, this file's source) and the result's sha256 + (size, mtime_ns, ino). The next call skips the
+# write and the patches only if the key matches AND weights.bin is still that file
+# (stat match, else its content hash is checked). Any other writer -> mismatch -> rewrite.
+_WBIN_SIDECAR = "weights.bin.key"
+
+
+def _wbin_reuse_on() -> bool:
+    v = os.environ.get("AIEHLC_WBIN_REUSE", "").strip()
+    if v:
+        return v == "1"
+    return os.environ.get("AIEHLC_FAST", "0").strip() == "1"
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(16 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _wbin_key(params_path: Path, layout: dict, bf16_names, layers_dir: Path) -> str:
+    import hashlib
+    h = hashlib.sha256(b"aiehlc-wbin-v1\0")
+    h.update(hashlib.sha256(Path(__file__).read_bytes()).digest())   # blob/bf16 code
+    h.update(_sha256_file(params_path).encode())
+    h.update(json.dumps(sorted((k, list(v)) for k, v in layout.items())).encode())
+    h.update(json.dumps(sorted(bf16_names)).encode())
+    patches = [("S1", k, st["weights"]) for k, st in group_steps(layers_dir).items()
+               if st.get("weights")]
+    patches += [("S3", k, v[2]["weights"]) for k, v in group_sites(layers_dir).items()
+                if v[0] == "step" and v[2].get("weights")]
+    for tag, k, w in sorted(patches, key=lambda t: (t[0], str(t[1]))):
+        h.update(json.dumps([tag, str(k), w], sort_keys=True, default=str).encode())
+        h.update(_sha256_file(layers_dir.parent / w["file"]).encode())
+    return h.hexdigest()
+
+
+def _wbin_stat(path: Path) -> list:
+    st = path.stat()
+    return [st.st_size, st.st_mtime_ns, st.st_ino]
+
+
+def _wbin_reusable(wbin: Path, key: str, size: int) -> bool:
+    side = wbin.parent / _WBIN_SIDECAR
+    try:
+        rec = json.loads(side.read_text())
+        if rec.get("key") != key or not wbin.is_file() or wbin.stat().st_size != size:
+            return False
+        if rec.get("stat") == _wbin_stat(wbin):
+            return True
+        return rec.get("sha256") == _sha256_file(wbin)
+    except (OSError, ValueError):
+        return False
+
+
+def _wbin_record(wbin: Path, key: str) -> None:
+    side = wbin.parent / _WBIN_SIDECAR
+    tmp = side.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"key": key, "sha256": _sha256_file(wbin),
+                               "stat": _wbin_stat(wbin)}))
+    os.replace(tmp, side)
+
+
 def write_aligned_blob(params_path: Path, offsets: dict, out_path: Path,
                        align: int = 64, bf16_names=(), order=()) -> dict:
     """Raw weights, each at an ``align``-byte offset, into ``out_path``.
@@ -277,12 +370,7 @@ def write_aligned_blob(params_path: Path, offsets: dict, out_path: Path,
     made two builds of the same config lay weights out differently and
     shifted per-call timings by a few ms (arm J vs K0, 11-22)."""
     data = params_path.read_bytes()
-    rank = {}
-    for name in order:
-        if name in offsets and name not in rank:
-            rank[name] = len(rank)
-    keys = sorted(offsets, key=lambda n: (0, rank[n], "") if n in rank
-                  else (1, 0, n))
+    keys = _blob_order(offsets, order)
     new, pos = {}, 0
     with open(out_path, "wb") as f:
         for name in keys:
@@ -784,6 +872,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
 
     offsets = param_offsets(params_path)
     inplace = params_inplace()
+    wbin_key, wbin_reuse = None, False          # F4 (-fast) weights.bin reuse
     param_eids = set()
     bf16_eids = {}          # eid -> (blob offset, elems) of a bf16-stored fp32 weight
     if inplace:
@@ -794,10 +883,19 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                           and dltypes[row_ptr[i]] == "float32"}
         elif params_wdtype() != "fp32":
             raise ValueError(f"AIEGRAPH_WDTYPE={params_wdtype()!r}: fp32|bf16")
-        offsets = write_aligned_blob(params_path, offsets, out_dir / "weights.bin",
-                                     bf16_names=bf16_names,
-                                     order=[n["name"] for n in nodes
-                                            if n.get("op") == "null"])
+        border = [n["name"] for n in nodes if n.get("op") == "null"]
+        if _wbin_reuse_on():
+            lay, lay_end = blob_layout(offsets, bf16_names=bf16_names, order=border)
+            wbin_key = _wbin_key(params_path, lay, bf16_names, graph_path.parent / "layers")
+            wbin_reuse = _wbin_reusable(out_dir / "weights.bin", wbin_key, lay_end)
+        if wbin_reuse:
+            offsets = lay
+            if verbose:
+                print(f"  [arm] -fast: weights.bin reused ({lay_end:,} B, key {wbin_key[:12]})")
+        else:
+            (out_dir / _WBIN_SIDECAR).unlink(missing_ok=True)
+            offsets = write_aligned_blob(params_path, offsets, out_dir / "weights.bin",
+                                         bf16_names=bf16_names, order=border)
         param_eids = {row_ptr[i] for i, node in enumerate(nodes)
                       if node.get("op") == "null" and node["name"] in offsets}
         bf16_eids = {row_ptr[i]: (offsets[node["name"]][0], offsets[node["name"]][1] // 2)
@@ -814,7 +912,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         if wsteps and not bf16_eids:
             raise ValueError("group steps with bf16 weights need AIEGRAPH_PARAMS_INPLACE=1 "
                              "AIEGRAPH_WDTYPE=bf16")
-        with open(out_dir / "weights.bin", "r+b") as wf:
+        with open(out_dir / "weights.bin", "rb" if wbin_reuse else "r+b") as wf:
             for st in wsteps:
                 w = st["weights"]
                 off, nb = offsets[w["param"]]
@@ -823,8 +921,9 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                     raise ValueError(f"group {st['group']}: weight {w['param']} is "
                                      f"{len(data)} B, weights.bin holds {nb} B "
                                      f"(bf16={w['tensor'] in bf16_eids})")
-                wf.seek(off)
-                wf.write(data)
+                if not wbin_reuse:
+                    wf.seek(off)
+                    wf.write(data)
                 inplace_w[st["at"]] = w["tensor"]
         if verbose and wsteps:
             print(f"  [arm] group steps: {len(steps)} calls, {len(wsteps)} bf16 weights "
@@ -836,7 +935,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         if not bf16_eids:
             raise ValueError("group steps with bf16 weights need AIEGRAPH_PARAMS_INPLACE=1 "
                              "AIEGRAPH_WDTYPE=bf16")
-        with open(out_dir / "weights.bin", "r+b") as wf:
+        with open(out_dir / "weights.bin", "rb" if wbin_reuse else "r+b") as wf:
             for k, st in sorted(s3w.items()):
                 w = st["weights"]
                 off, nb = offsets[w["param"]]
@@ -845,11 +944,14 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                     raise ValueError(f"group step {st['name']} at [{k}]: weight {w['param']} is "
                                      f"{len(data)} B, weights.bin holds {nb} B "
                                      f"(bf16={w['tensor'] in bf16_eids})")
-                wf.seek(off)
-                wf.write(data)
+                if not wbin_reuse:
+                    wf.seek(off)
+                    wf.write(data)
                 inplace_w[k] = w["tensor"]
         if verbose:
             print(f"  [arm] group steps (emit): {len(s3w)} bf16 weights in the step layout in weights.bin")
+    if wbin_key and not wbin_reuse:
+        _wbin_record(out_dir / "weights.bin", wbin_key)
     act_sids = {sid for e, sid in enumerate(sids) if e not in param_eids}
 
     # One buffer per storage id, sized by the largest tensor assigned to it.
