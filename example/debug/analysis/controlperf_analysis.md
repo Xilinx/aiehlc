@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
 # Control-Plane Performance Analysis — `aieml_controlperf.cc`
 
 **Date:** 2026-08-26

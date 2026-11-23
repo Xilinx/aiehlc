@@ -354,7 +354,11 @@ compared against their declared mapping (`verifyKernelBlocks`, from
 ### What the verifier rejects
 
 `src/llvm/convautotile/unitest/kernel_trace_cases.py` mutates the example into
-each bug and checks the diagnostic:
+each bug and checks the diagnostic. Every diagnostic about a block call starts
+with `file:line:` of that call and ends with the call's text: the harness's
+`load_buffer` / `store_buffer` / `release` / `commit` take a defaulted
+`std::source_location`, and the body is compiled under `#line <body> "<file>"`,
+so the trace event carries the user's line.
 
 | Bug | Diagnostic |
 |---|---|
@@ -362,8 +366,10 @@ each bug and checks the diagnostic:
 | load smaller than the conv footprint | `accesses memory outside the block ... at case.cc:57 on core (0,0): data used without being loaded` |
 | index past the loaded block | same, at the reading line |
 | use after `aie::release` | `uses a block after aie::release / aie::commit at case.cc:58` |
-| offset outside the tensor (`pid_c * oc_t * 20`) | `win_b block 0 on core (0,1): block dim 0 covers [320, 336) outside the tensor extent 64` |
-| block never committed / released | `16 block(s) still held at kernel end: never committed (the next DMA round would deadlock)` |
+| offset outside the tensor (`pid_c * oc_t * 20`) | `case.cc:18: win_b block 0 on core (0,1): block dim 0 covers [320, 336) outside the tensor extent 64 ... in `aie::load_buffer(win_b, ...)`` |
+| block never committed / released | `case.cc:18: win_b block 1 on core (0,0): 1 block(s) still held at kernel end: never released ...` -- the line of the call that **took** the block |
+| offset and block shape of different rank | `case.cc:39: win_a: hint: `aie::load_buffer(win_a, {oh0 * S, ow0 * S, 0, 0}, ...)` passes an offset of 4 and a block shape of 3 coordinates -- the offset has an extra coordinate` |
+| port declared with the wrong `aie::shape` | `case.cc:4: win_b: hint: the kernel's blocks are 4-D, spanning (64,7,7,4), which no offset fits into the declared `aie::shape<230,230,4>` ... e.g. line 18 in `...` on core (0,0) takes ...` |
 | more than `pp_depth` blocks held | `takes a block while 2 of this port are still held (pp_depth 2)` |
 | loops swapped | `blocks are visited column-outer ...; the DMA streams output rows in the outer loop -- swap the two loops` |
 | data-dependent schedule | `the load/store schedule depends on the data: win_a block 1 on core (0,0) differs between two inputs` |

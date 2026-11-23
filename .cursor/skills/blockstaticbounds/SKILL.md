@@ -9,7 +9,7 @@ description: A block-load kernel fails `[KernelAnalysis] ERROR ... data used wit
 
 ```
 [KernelAnalysis] ERROR: conv2d_spatial: the kernel accesses memory outside the block
-  load_buffer/store_buffer returned at simpleconv2dkernel_port.cc:29 on core (0,0):
+  load_buffer/store_buffer returned at simpleconv2dkernel_port.cc:33 on core (0,0):
   data used without being loaded (index past the block shape)
 ```
 

@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
 # Cross-Track Timeline Analysis — host / core / port / DMA on tile `0,3`
 
 **Date:** 2026-08-26

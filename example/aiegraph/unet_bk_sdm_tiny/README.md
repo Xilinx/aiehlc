@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
 # bk-sdm-tiny UNet on the Palmyra APU + AIE
 
 One UNet step of bk-sdm-tiny (256×256 image, latent 4×32×32, timestep, text

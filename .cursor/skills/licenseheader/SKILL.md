@@ -62,6 +62,28 @@ Group 1 and 2 *can* get a header later, but only with the consumer fixed and its
 test re-run (e.g. strip the header when reading the template; regenerate the
 expected line numbers).
 
+## `example/` is fully headered (2026-11-23)
+
+Every tracked file under `example/` has a header except the 3 JSON files
+(`aiednn/emu_models.json`, `unet_bk_sdm_tiny/partition*.json`): JSON has no
+comment syntax, and `emu_models.json` maps every key to a model, so a `_license`
+key would become a bogus model. The repo LICENSE covers them.
+How the risky ones were done:
+- `simpleconv2dkernel{,_port,_port_bf16,_port_opts,_space}.cc`: header added and
+  `kernel_trace_cases.py`'s expected `case.cc:N` / `line N` moved +4 in exactly
+  the cases that failed (10). Procedure: add the header, run the cases, shift
+  only the FAILing cases' strings, re-run to 74/74.
+- `unet_bk_sdm_tiny/bench/*` templates: `_bench` / `render` fill `@NAME@` and
+  splice the text into a larger source; a comment carries no `@NAME@`, so the
+  header just rides along into the generated file.
+- `a78_layer_cflags.txt`: `aiegraph.boardmain.read_cflags_file` joined EVERY
+  word into CFLAGS; it now skips `#` lines (tests in
+  `test_arm_build_layer_cflags.py`). Any other line-parsed data file needs the
+  same check before it gets a header.
+- Syntax per type: `.md` / `.prx` `<!-- ... -->` (repo convention, see
+  `doc/llvm_mlir_pitfalls.md`), `.bcf` `//` (`src/sim/stub_kernel.bcf`),
+  `.txt` / `.log` `#`.
+
 ## Tutorial listings
 
 `tutorial/aieprogram/sync_code.py` embeds whole example files into the tutorials

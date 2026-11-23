@@ -157,6 +157,22 @@ def test_flags_file_missing_or_empty_is_error(tmp_path):
                     "--arm-layer-cflags-file", str(tmp_path / "empty")]) == 2
 
 
+def test_flags_file_comment_lines_skipped(tmp_path):
+    # a license header (`#` lines) is not flags; a comment-only file is still empty
+    f = tmp_path / "FLAGS"
+    f.write_text("#####\n# Copyright (C) 2026 AMD\n  # SPDX-License-Identifier: Apache-2.0\n" + P5N_FLAGS + "\n")
+    assert _read_flags(f) == P5N_FLAGS
+    (tmp_path / "hdr_only").write_text("# Copyright\n# SPDX-License-Identifier: Apache-2.0\n")
+    with pytest.raises(ValueError):
+        _read_flags(tmp_path / "hdr_only")
+
+
+def test_flags_file_committed_example_reads():
+    # example/aiegraph/unet_bk_sdm_tiny/a78_layer_cflags.txt carries a license header
+    flags = _read_flags(ROOT / "example/aiegraph/unet_bk_sdm_tiny/a78_layer_cflags.txt")
+    assert flags.startswith("-mcpu=cortex-a78") and "#" not in flags
+
+
 def test_build_arm_elf_and_embedded_take_layer_cflags():
     import inspect
     assert "layer_cflags" in inspect.signature(ab.build_arm_elf).parameters
