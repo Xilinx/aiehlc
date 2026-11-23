@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Sourced by aiehlc.sh. Warns when the caller exported AIEHLC_PROFILING but did
 # not pass --profiling: aiehlc.sh resets PROFILING=0 on every run and passes
 # that value to hostcompile.sh, so the env var alone never reaches the build.

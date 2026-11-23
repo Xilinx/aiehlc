@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Self-test for the host entry-point detection in script/hostcompile.sh
 # (user-main vs mlir-main vs library). Uses the regex as written in
 # hostcompile.sh, so the test follows the script.
