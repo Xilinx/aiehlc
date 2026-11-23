@@ -18,13 +18,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 pushd ${SCRIPT_DIR}
-${LLVM_BIN}/mlir-tblgen -gen-dialect-defs ./aielinkops.td -dialect=AieLink -I /usr/local/include/ ${MLIR_INCLUDES} > ./aielinkdialect.cc.inc
-${LLVM_BIN}/mlir-tblgen -gen-dialect-decls ./aielinkops.td -dialect=AieLink -I /usr/local/include/ ${MLIR_INCLUDES} > ./aielinkdialect.h.inc
-${LLVM_BIN}/mlir-tblgen -gen-op-defs ./aielinkops.td -I /usr/local/include/ ${MLIR_INCLUDES} > ./aielinkop.cc.inc
-${LLVM_BIN}/mlir-tblgen -gen-op-decls ./aielinkops.td -I /usr/local/include/ ${MLIR_INCLUDES} > ./aielinkop.h.inc
+${LLVM_BIN}/mlir-tblgen -gen-dialect-defs ./aielinkops.td -dialect=AieLink ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} > ./aielinkdialect.cc.inc
+${LLVM_BIN}/mlir-tblgen -gen-dialect-decls ./aielinkops.td -dialect=AieLink ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} > ./aielinkdialect.h.inc
+${LLVM_BIN}/mlir-tblgen -gen-op-defs ./aielinkops.td ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} > ./aielinkop.cc.inc
+${LLVM_BIN}/mlir-tblgen -gen-op-decls ./aielinkops.td ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} > ./aielinkop.h.inc
 
-${LLVM_BIN}/mlir-tblgen -gen-typedef-defs ./aielinktypes.td --typedefs-dialect=AieLink -I /usr/local/include/ ${MLIR_INCLUDES} -asmformat-error-is-fatal=false > ./aielinktype.cc.inc
-${LLVM_BIN}/mlir-tblgen -gen-typedef-decls ./aielinktypes.td --typedefs-dialect=AieLink -I /usr/local/include/ ${MLIR_INCLUDES} -asmformat-error-is-fatal=false > ./aielinktype.h.inc
+${LLVM_BIN}/mlir-tblgen -gen-typedef-defs ./aielinktypes.td --typedefs-dialect=AieLink ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -asmformat-error-is-fatal=false > ./aielinktype.cc.inc
+${LLVM_BIN}/mlir-tblgen -gen-typedef-decls ./aielinktypes.td --typedefs-dialect=AieLink ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -asmformat-error-is-fatal=false > ./aielinktype.h.inc
 # The generated .inc files are tracked: give each the license header (script/ci/check_opensource.py).
 for f in ./*.inc; do
   if ! grep -q SPDX-License-Identifier "$f"; then

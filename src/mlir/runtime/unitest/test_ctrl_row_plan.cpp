@@ -12,6 +12,8 @@ acr_rc acr_plan_chain(acr_oplist *, acr_portbook *, uint8_t row, uint8_t col_lo,
 acr_rc acr_plan_row_add(acr_state *, acr_oplist *, acr_portbook *, uint8_t shim_col, uint8_t row, uint8_t col_lo,
                         uint8_t col_hi, uint8_t ctrl_id, int is_top);
 acr_rc acr_plan_return_chain(acr_oplist *, acr_portbook *, uint8_t row, uint8_t col_lo, uint8_t col_hi, int is_top);
+uint8_t acr_shim_row_id(uint8_t k);
+acr_rc acr_plan_shim_row(acr_oplist *fwd, acr_oplist *ret, acr_portbook *b, uint8_t col_lo, uint8_t col_hi);
 }
 
 static int count_kind(const acr_oplist *o, acr_op_kind k) {
@@ -418,10 +420,50 @@ static int test_is_ret_tagging() {
     return 0;
 }
 
+static int test_shim_row() {
+    static acr_oplist fwd, ret;
+    static acr_portbook b = {};
+    fwd.n = ret.n = 0;
+    const uint8_t lo = 1, hi = 5;
+    assert(acr_plan_shim_row(&fwd, &ret, &b, lo, hi) == ACR_OK);
+    for (uint8_t k = 0; k <= hi - lo; k++) {
+        uint8_t id = acr_shim_row_id(k);
+        for (uint8_t c = lo; c <= hi; c++) {
+            int own = 0, east = 0;
+            for (int i = 0; i < fwd.n; i++) {
+                const acr_op *op = &fwd.ops[i];
+                if (op->kind != ACR_OP_SLOT || op->col != c || op->row != 0 || ((id ^ op->pkt_id) & op->mask))
+                    continue;
+                own += op->msel == ACR_SHIMROW_MSEL_OWN;
+                east += op->msel == ACR_SHIMROW_MSEL_FWD;
+            }
+            assert(own + east == 1);
+            assert(own == (c == lo + k));
+            if (own)
+                break;
+        }
+    }
+    for (uint8_t c = lo; c <= hi; c++) {
+        assert(count_master(&fwd, c, ACR_CTRL) == 1);
+        assert(count_master(&fwd, c, ACR_EAST) == (c < hi));
+        assert(count_master(&ret, c, ACR_WEST) == 1);
+        assert(count_slots(&ret, c) == 1 + (c < hi));
+    }
+    for (int i = 0; i < fwd.n; i++)
+        assert(!fwd.ops[i].is_ret && fwd.ops[i].row == 0);
+    for (int i = 0; i < ret.n; i++)
+        assert(ret.ops[i].is_ret && ret.ops[i].row == 0);
+    acr_oplist again = {};
+    acr_oplist again_ret = {};
+    assert(acr_plan_shim_row(&again, &again_ret, &b, lo, hi) == ACR_ERR_PORT_CONFLICT);
+    assert(acr_plan_shim_row(&again, &again_ret, &b, 1, 6) == ACR_ERR_BOUNDS);
+    return 0;
+}
+
 int main() {
     if (test_book() || test_slot_classes() || test_east_forward() || test_forward_slot_table() || test_return_chain() ||
         test_spine_reuse() || test_shared_head_fanout() || test_top_head_no_north_climb() || test_relay_head() ||
-        test_is_ret_tagging())
+        test_is_ret_tagging() || test_shim_row())
         return 1;
     printf("PASS\n");
     return 0;

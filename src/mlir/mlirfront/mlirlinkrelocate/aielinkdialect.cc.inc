@@ -12,8 +12,8 @@
 \*===----------------------------------------------------------------------===*/
 
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aiel::AieLinkDialect)
-namespace mlir {
-namespace aiel {
+namespace mlir::aiel {
+
 
 AieLinkDialect::AieLinkDialect(::mlir::MLIRContext *context)
     : ::mlir::Dialect(getDialectNamespace(), context, ::mlir::TypeID::get<AieLinkDialect>())
@@ -25,5 +25,5 @@ AieLinkDialect::AieLinkDialect(::mlir::MLIRContext *context)
 
 AieLinkDialect::~AieLinkDialect() = default;
 
-} // namespace aiel
-} // namespace mlir
+
+} // namespace mlir::aiel

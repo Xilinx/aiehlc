@@ -262,7 +262,7 @@ AieRC __Runtime_device_teardown(XAie_DevInst *dev);
 // Enable each AIE core tile's processor bus so the core can write its own
 // memory-module DMA/lock registers (required for KERNELCONFIGOFFLOAD, where
 // kernel.cc self-programs its DMA via MMIO). Iterates the partition's core
-// tiles calling XAie_CoreProcessorBusEnable. Gen5 baremetal only; no-op
+// tiles calling XAie_CoreProcessorBusEnable. Gen2 + Gen5 baremetal; no-op
 // elsewhere. Safe to call unconditionally (only enables bus access).
 AieRC __Runtime_enable_core_proc_bus(XAie_DevInst *dev);
 
@@ -295,6 +295,13 @@ XAie_DevInst *__Runtime_init_mesh_partition(int meshId, int startCol, int numCol
 // routing -- another aiehlc library in the same ELF -- is torn down and
 // re-initialized, so several user-kernel libraries can coexist in one ELF.
 XAie_DevInst *__Runtime_init_mesh_partition_with(int meshId, int startCol, int numCols, void (*route)(XAie_DevInst *));
+// One-shot hint: the NEXT __Runtime_init_mesh_partition_with call returns the
+// partition registered for its meshId whatever routing set it up (initializing
+// one as usual if none is). Generated aieArray::partition() always passes the
+// first kernel's routing, so a multi-kernel app (aiednn eager) calls this right
+// before it; the exact-routing check in __aie_launch then re-initializes only
+// when the launched kernel's routing is not the one on the partition.
+void __Runtime_partition_reuse_next(void);
 
 // DMA and data movement
 XAie_DmaDesc __Runtime_dma_bd_config(XAie_DevInst *dev, XAie_LocType tile, void *buffer, int32_t bd_id, int32_t len,
@@ -333,6 +340,61 @@ XAie_DmaDesc __Runtime_dma_bd_config_multidim_ooo(XAie_DevInst *dev, XAie_LocTyp
 // field in incoming packet headers, bypassing normal sequential BD chaining.
 // Used on shim S2MM channels for gathering output data from multiple core tiles.
 void __Runtime_dma_channel_enable_ooo(XAie_DevInst *dev, XAie_LocType tile, int32_t channel, XAie_DmaDirection dir);
+// Memtile output join (doc/design/memtile_staging.md stage 1): program the memtile
+// above @shim to collect a core row's @n packet-merged C tiles of @tile_bytes each and
+// re-emit them row-major; then one linear shim S2MM BD. Variadic tail of setup: n pairs
+// (int32_t out-of-order BD id, void *DDR target of that core's tile); of shim_bd: n DDR targets.
+// @c_blocked: the core writes C in mmul<4,8,8> block order; the memtile S2MM lands it row-major.
+void __Runtime_memtile_join_setup(XAie_DevInst *dev, XAie_LocType shim, int32_t shim_ch, int32_t n, int32_t tile_bytes,
+                                  int32_t c_blocked, ...);
+XAie_DmaDesc __Runtime_memtile_join_shim_bd(XAie_DevInst *dev, XAie_LocType shim, int32_t bd, int32_t n,
+                                            int32_t tile_bytes, ...);
+// Diagnosis: print each joined memtile's locks and pending BDs, plus its shim S2MM.
+void __Runtime_memtile_join_report(XAie_DevInst *dev);
+// Memtile input staging (stages 2-3): terminate a shim MM2S input stream in the memtile
+// above it and re-send it packed into the mmul<4,8,8> block layout; @kind 0 = A, 1 = B^T.
+void __Runtime_memtile_stage_input_setup(XAie_DevInst *dev, XAie_LocType shim, int32_t shim_ch, int32_t kind);
+// Memtile-resident weights (#pragma memtile_staging(weights)): call before a launch to name
+// the B block it uses (0 = no caching); tail_rows = rows at the end of every window that
+// change on every call (refreshed from DDR even on a hit).
+void __Runtime_memtile_weights_key(uint64_t key, int32_t tail_rows);
+/* after the key: only the first head_rows rows (+ the tail rows) of each window are read by the cores,
+ * so a miss transfers head + tail rows from DDR instead of the whole window (head == tail only;
+ * 0 = whole window). Reset to 0 by every __Runtime_memtile_weights_key. */
+void __Runtime_memtile_weights_head(int32_t head_rows);
+// 1 if a launch with this key will hit on every weight channel (two blocks per channel, LRU):
+// the app may then skip rewriting the static rows; 0 = copy the whole block.
+int __Runtime_memtile_weights_cached(uint64_t key);
+// Forget every memtile weight slot (their BDs are reprogrammed and the next launch misses): a reloaded
+// kernel ELF's first launch (persist_transform: megakernel switch) reconfigures the memtiles from its
+// own host_first, so the slots' BDs and contents can no longer be trusted.
+void __Runtime_memtile_weights_invalidate(void);
+// One-shot: skip the next deferred device sync of exactly this buffer (caller flushed what it wrote).
+void __Runtime_sync_skip_next(const void *ptr);
+struct_ioevent __Runtime_memtile_weights_start(XAie_DevInst *dev, XAie_LocType shim, void *buffer, int32_t bd_id,
+                                               int32_t len, int32_t next_bd, int32_t enable_packet, int32_t packet_id,
+                                               int32_t acq_id, int32_t acq_val, int32_t rel_id, int32_t rel_val,
+                                               int32_t ooo, int32_t num_dims, int32_t s0, int32_t w0, int32_t s1,
+                                               int32_t w1, int32_t s2, int32_t w2, int32_t iter_step, int32_t iter_wrap,
+                                               int32_t shim_ch, int32_t repeat);
+struct_ioevent __Runtime_memtile_weights_start_n(XAie_DevInst *dev, XAie_LocType shim, void *buffer, int32_t bd_id,
+                                                 int32_t len, int32_t next_bd, int32_t enable_packet, int32_t packet_id,
+                                                 int32_t acq_id, int32_t acq_val, int32_t rel_id, int32_t rel_val,
+                                                 int32_t ooo, int32_t num_dims, int32_t s0, int32_t w0, int32_t s1,
+                                                 int32_t w1, int32_t s2, int32_t w2, int32_t iter_step,
+                                                 int32_t iter_wrap, int32_t shim_ch, int32_t repeat, int32_t n,
+                                                 int64_t b_step, int32_t b_period);
+/* n GEMM tiles per launch (persist_transform host_tile_n_start; aie_runtime.c) */
+XAie_DmaDesc __Runtime_ntile_bd_a(XAie_DevInst *dev, XAie_LocType tile, void *buffer, int32_t bd_id, int32_t len,
+                                  int32_t next_bd, int32_t enable_packet, int32_t packet_id, int32_t acq_id,
+                                  int32_t acq_val, int32_t rel_id, int32_t rel_val, int32_t ooo, int32_t num_dims,
+                                  int32_t s0, int32_t w0, int32_t s1, int32_t w1, int32_t s2, int32_t w2,
+                                  int32_t iter_step, int32_t iter_wrap, int32_t n, int64_t a_step);
+XAie_DmaDesc __Runtime_ntile_bd_c(XAie_DevInst *dev, XAie_LocType tile, void *buffer, int32_t bd_id, int32_t len,
+                                  int32_t next_bd, int32_t enable_packet, int32_t packet_id, int32_t acq_id,
+                                  int32_t acq_val, int32_t rel_id, int32_t rel_val, int32_t ooo, int32_t num_dims,
+                                  int32_t s0, int32_t w0, int32_t s1, int32_t w1, int32_t s2, int32_t w2, int32_t s3,
+                                  int32_t w3, int32_t n, int64_t c_step);
 
 struct_io __Runtime_dma_createio(XAie_LocType tile_loc, XAie_DmaDesc dma_desc, int32_t channel_id, int32_t bd_id,
                                  XAie_DmaDirection direction, XAie_MemInst *mem);
@@ -361,6 +423,25 @@ struct_kernel_group __Runtime_load_kernel_group_16t(XAie_DevInst *dev, XAie_LocT
                                                     XAie_LocType t6, XAie_LocType t7, XAie_LocType t8, XAie_LocType t9,
                                                     XAie_LocType t10, XAie_LocType t11, XAie_LocType t12,
                                                     XAie_LocType t13, XAie_LocType t14, XAie_LocType t15, int n);
+struct_kernel_group __Runtime_load_kernel_group_32t(
+    XAie_DevInst *dev, XAie_LocType t0, XAie_LocType t1, XAie_LocType t2, XAie_LocType t3, XAie_LocType t4,
+    XAie_LocType t5, XAie_LocType t6, XAie_LocType t7, XAie_LocType t8, XAie_LocType t9, XAie_LocType t10,
+    XAie_LocType t11, XAie_LocType t12, XAie_LocType t13, XAie_LocType t14, XAie_LocType t15, XAie_LocType t16,
+    XAie_LocType t17, XAie_LocType t18, XAie_LocType t19, XAie_LocType t20, XAie_LocType t21, XAie_LocType t22,
+    XAie_LocType t23, XAie_LocType t24, XAie_LocType t25, XAie_LocType t26, XAie_LocType t27, XAie_LocType t28,
+    XAie_LocType t29, XAie_LocType t30, XAie_LocType t31, int n);
+struct_kernel_group __Runtime_load_kernel_group_64t(
+    XAie_DevInst *dev, XAie_LocType t0, XAie_LocType t1, XAie_LocType t2, XAie_LocType t3, XAie_LocType t4,
+    XAie_LocType t5, XAie_LocType t6, XAie_LocType t7, XAie_LocType t8, XAie_LocType t9, XAie_LocType t10,
+    XAie_LocType t11, XAie_LocType t12, XAie_LocType t13, XAie_LocType t14, XAie_LocType t15, XAie_LocType t16,
+    XAie_LocType t17, XAie_LocType t18, XAie_LocType t19, XAie_LocType t20, XAie_LocType t21, XAie_LocType t22,
+    XAie_LocType t23, XAie_LocType t24, XAie_LocType t25, XAie_LocType t26, XAie_LocType t27, XAie_LocType t28,
+    XAie_LocType t29, XAie_LocType t30, XAie_LocType t31, XAie_LocType t32, XAie_LocType t33, XAie_LocType t34,
+    XAie_LocType t35, XAie_LocType t36, XAie_LocType t37, XAie_LocType t38, XAie_LocType t39, XAie_LocType t40,
+    XAie_LocType t41, XAie_LocType t42, XAie_LocType t43, XAie_LocType t44, XAie_LocType t45, XAie_LocType t46,
+    XAie_LocType t47, XAie_LocType t48, XAie_LocType t49, XAie_LocType t50, XAie_LocType t51, XAie_LocType t52,
+    XAie_LocType t53, XAie_LocType t54, XAie_LocType t55, XAie_LocType t56, XAie_LocType t57, XAie_LocType t58,
+    XAie_LocType t59, XAie_LocType t60, XAie_LocType t61, XAie_LocType t62, XAie_LocType t63, int n);
 struct_kernel_group __Runtime_load_kernel_group_4t_ctrl(XAie_DevInst *dev, __Runtime_CtrlRowFabric *fab,
                                                         XAie_LocType t0, XAie_LocType t1, XAie_LocType t2,
                                                         XAie_LocType t3, int n, int32_t bd_id, int32_t mm2s_ch);
@@ -1023,6 +1104,15 @@ void __Runtime_sync_for_cpu(XAie_DevInst *dev, void *ptr, size_t size);
 void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size);
 // Complete all deferred maintenance (emitted after host_canonicalized).
 void __Runtime_dsync_drain(void);
+
+// AIE-ML shim BD template counters (aie_runtime.c "AIE-ML shim BD templates"): hits are
+// template + per-BD fields, misses go through the driver; bad = VERIFY-build mismatches.
+void __Runtime_bd_template_stats(unsigned long long *hits, unsigned long long *misses, unsigned long long *bad);
+// Shim BD config calls between begin/end only build their shape's template (no write).
+void __Runtime_bd_template_prepare_begin(void);
+void __Runtime_bd_template_prepare_end(void);
+// Diagnosis: why BD configs bypassed the template path.
+void __Runtime_bd_template_report(void);
 // Contract: the array writes [ptr, ptr+size) and the CPU does not write it
 // between launches (it only reads it after a launch returns). Flushes it once;
 // afterwards its deferred maintenance is invalidate-only and may overlap the

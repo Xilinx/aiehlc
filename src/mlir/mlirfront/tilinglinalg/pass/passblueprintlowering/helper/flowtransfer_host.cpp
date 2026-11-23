@@ -10,6 +10,7 @@
 // byte-identical to the original; all cross-boundary locals are carried in
 // FlowLoweringCtx (`c`).
 
+#include "pass/passmemtilejoin/passmemtilejoin.h"
 #include "flowtransfer_internal.h"
 
 namespace blueprint_sched {
@@ -296,16 +297,33 @@ LogicalResult FlowTransferConversion::computeShimBdParams(FlowLoweringCtx &c) co
 // (resolveKernelBlock): one shim BD per kernel block, block-sized, with the
 // .tile panel-major dims when asked; no K-round iteration.
 // ---------------------------------------------------------------------------
-void FlowTransferConversion::applyKernelBlockShim(FlowLoweringCtx &c) const {
+LogicalResult FlowTransferConversion::applyKernelBlockShim(FlowLoweringCtx &c) const {
     if (!c.shimIsSender || c.isHaloSlab)
-        return;
+        return success();
     int64_t elemBytes = 1;
     if (c.memrefType.getElementType().isIntOrFloat())
         elemBytes = std::max<int64_t>(c.memrefType.getElementTypeBitWidth() / 8, 1);
     c.kb = resolveKernelBlock(passState->tensorInfo, traceFlowConfigToFuncArgIndex(c.shimFlowConfig), true,
                               isFullConnectAuto(c.op->getParentOfType<ModuleOp>()), elemBytes);
+    // A checked block that does not span its rows, where the GEMM model has no
+    // shim dims of its own: the model would stream the partition as one linear
+    // run, so each window would hold whole rows instead of the block. Follow the
+    // block when it is a plain 2-D one; anything else would be silent wrong data.
+    const bool linearRun = !c.shimDimStrides || c.shimDimStrides.empty();
+    if (c.kb.check && !c.kb.follow && !c.kb.rowContiguous && linearRun) {
+        if (!c.kb.block2D) {
+            c.op.emitError() << "input " << traceFlowConfigToFuncArgIndex(c.shimFlowConfig)
+                             << ": the kernel's blocks (#routing.kernel_block) do not span their rows and are not a "
+                                "plain 2-D block, but the shim would send the partition as one linear run -- each "
+                                "core window would hold whole rows, not the block";
+            return failure();
+        }
+        c.kb.follow = true;
+        llvm::errs() << "[KernelBlock] flowIdx=" << c.flowIndex
+                     << " input is a 2-D block the shim would send as a linear run: following it\n";
+    }
     if (!c.kb.follow)
-        return;
+        return success();
     c.perTileShimLen = c.kb.blockElems * elemBytes;
     c.shimIterStepSize = 0;
     c.shimIterWrap = 0;
@@ -313,7 +331,44 @@ void FlowTransferConversion::applyKernelBlockShim(FlowLoweringCtx &c) const {
     c.shimDimWraps = c.kb.tileWraps.empty() ? ArrayAttr() : c.rewriter.getI32ArrayAttr(c.kb.tileWraps);
     llvm::errs() << "[KernelBlock] flowIdx=" << c.flowIndex << " input follows the kernel's blocks: " << c.kb.rounds
                  << " x " << c.perTileShimLen << " B per core, round stride " << c.kb.strideIBytes << "/"
-                 << c.kb.strideJBytes << " B" << (c.kb.tileStrides.empty() ? "" : ", .tile panel-major") << "\n";
+                 << c.kb.strideJBytes << " B" << (c.kb.tileStrides.empty() ? "" : ", 2-D / .tile dims") << "\n";
+    return success();
+}
+
+// ---------------------------------------------------------------------------
+// applyKernelBlockGather — a kernel-only output whose blocks stack straight
+// down dim 0 (resolveKernelBlock): each core's panel keeps the gather's per-core
+// addressing; one round gathers one kernel block, so the core sends `rounds`
+// blocks instead of its whole panel in one window.
+// ---------------------------------------------------------------------------
+LogicalResult FlowTransferConversion::applyKernelBlockGather(FlowLoweringCtx &c) const {
+    if (c.shimIsSender || !c.isManyToOne)
+        return success();
+    c.kb = resolveKernelBlock(passState->tensorInfo, traceFlowConfigToFuncArgIndex(c.shimFlowConfig), false,
+                              isFullConnectAuto(c.op->getParentOfType<ModuleOp>()), c.ooElementSizeBytes);
+    if (!c.kb.follow)
+        return success();
+    // The GEMM model's own per-round gathers (M sub-tiling: one C tile per round,
+    // re-armed in a host loop; a conv width-split halo) already send what the kernel
+    // stores and are board-proven: leave those ports to it and to checkKernelBlock.
+    ModuleOp mod = c.op->getParentOfType<ModuleOp>();
+    const bool gemmMRounds = passState->tileM > 0 && passState->tileM < passState->tileRows && isFullConnectAuto(mod);
+    if (gemmMRounds || detectConvHalo(passState->tensorInfo).valid) {
+        c.kb.follow = false;
+        return success();
+    }
+    if (c.ooPerCoreElements != c.kb.blockElems * c.kb.rounds) {
+        c.op.emitError() << "output: each core's region is " << c.ooPerCoreElements
+                         << " elements, but the kernel's blocks (#routing.kernel_block) cover " << c.kb.blockElems
+                         << " x " << c.kb.rounds << " -- the gather cannot place them";
+        return failure();
+    }
+    c.ooPingPongSize = c.kb.blockElems;
+    c.ooNumIterations = c.kb.rounds;
+    c.perRoundBytes = c.kb.blockElems * c.ooElementSizeBytes;
+    llvm::errs() << "[KernelBlock] flowIdx=" << c.flowIndex << " output follows the kernel's blocks: " << c.kb.rounds
+                 << " x " << c.perRoundBytes << " B per core\n";
+    return success();
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +406,10 @@ void FlowTransferConversion::emitShimBdOoo(FlowLoweringCtx &c) const {
 
     c.oooIterWrap = (int32_t)c.ooNumIterations;
     c.oooIterStepSize = (c.oooIterWrap > 1) ? (int32_t)(rowsPerRound * ddrRowStride) : 0;
+    // A block-following output without row dims is one contiguous panel per core:
+    // round r lands r blocks further on.
+    if (c.kb.follow && c.oooIterWrap > 1 && ddrRowStride == 0)
+        c.oooIterStepSize = (int32_t)c.perRoundBytes;
 
     // Build per-tile addressing from shimDimStrides.
     {
@@ -450,17 +509,44 @@ void FlowTransferConversion::emitShimBdOoo(FlowLoweringCtx &c) const {
                      << " oooMRounds=" << c.oooMRounds << "\n";
     }
 
-    // Allocate N shim BD IDs
+    // Allocate N shim BD IDs.
+    //
+    // With #pragma memtile_staging(output) the channel's out-of-order BDs move to the memtile
+    // above (StartioInterleavePass memtileOutputJoin), whose even channels own BDs 0-23
+    // (20 and 22 are the joins' re-emit BDs). Only the first id stays a real shim BD (the
+    // join's one linear BD), so the block is first .. first+N-1, contiguous as the join
+    // expects, and may run past the shim's 16 BDs -- which is what lets a mesh row of 8
+    // cores fit. Ids of the block that are also shim ids are reserved so another channel's
+    // block cannot start inside it.
     SmallVector<int32_t> shimBdIds;
+    ModuleOp parentModule = c.op->getParentOfType<ModuleOp>();
+    const bool joined = parentModule && (memtileStaging(parentModule) & kMemtileStageOutput) && numCoreTiles > 1;
     for (int64_t t = 0; t < numCoreTiles; t++) {
         int32_t bid = -1;
+        if (joined && t > 0) {
+            bid = shimBdIds[0] + (int32_t)t;
+            if (resourceMgr && bid < resourceMgr->tile(c.shimRow, c.shimCol).numBds() &&
+                !resourceMgr->tile(c.shimRow, c.shimCol).reserveBd(bid, c.flowIndex))
+                bid = -1;
+            if (bid >= 20 || bid < 0) {
+                c.op.emitError() << "memtile output join: shim (" << c.shimCol << ",0) has no contiguous block of "
+                                 << numCoreTiles << " out-of-order BD ids starting at " << shimBdIds[0]
+                                 << " below the memtile re-emit BDs (20)";
+                bid = shimBdIds[0] + (int32_t)t;
+            }
+            shimBdIds.push_back(bid);
+            continue;
+        }
         if (resourceMgr) {
             auto bdOpt = resourceMgr->allocateTileBd(c.shimRow, c.shimCol, /*ownerId=*/c.flowIndex);
             if (bdOpt)
                 bid = *bdOpt;
         }
-        if (bid < 0)
-            bid = c.shimBdIdVal + (int32_t)t; // fallback
+        if (bid < 0) {
+            c.op.emitError() << "shim (" << c.shimCol << ",0) is out of BDs for out-of-order output tile " << t
+                             << " of " << numCoreTiles << "; add #pragma memtile_staging(output)";
+            bid = c.shimBdIdVal + (int32_t)t;
+        }
         shimBdIds.push_back(bid);
     }
     c.shimPerTileBdIds = shimBdIds;
@@ -719,7 +805,7 @@ void FlowTransferConversion::classifyScheduleMode(FlowLoweringCtx &c) const {
     }
     // A kernel-only input that follows its blocks loops once per kernel block
     // (an input the kernel takes once is sent once, outside any round loop).
-    if (c.kb.follow)
+    if (c.kb.follow && c.shimIsSender)
         c.needsOuterLoop = c.kb.rounds > 1;
 }
 
@@ -881,6 +967,10 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
     const int32_t dataId = c.dataId;
     auto moduleOp = op->getParentOfType<ModuleOp>();
     bool nOuterPolicy = isNOuterPolicy(moduleOp);
+    // A kernel-block input loop waits on every round on the host; StartioInterleavePass
+    // arms the output channels in front of it (outputsBeforeRoundLoop).
+    if (c.kb.follow && moduleOp)
+        moduleOp->setAttr("routing.kernel_block_round_loop", rewriter.getUnitAttr());
 
     MultipleInputOffsetParams p;
     computeMultipleInputOffsetParams(c, moduleOp, nOuterPolicy, p);
@@ -933,19 +1023,19 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
         Value offset;
         if (halo2D) {
             auto wRoundsC =
-                rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(haloWRoundsVal), rewriter.getI32Type());
+                rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(), static_cast<int32_t>(haloWRoundsVal));
             auto hc = rewriter.create<arith::DivSIOp>(loc, ivI32, wRoundsC);
             auto wc = rewriter.create<arith::RemSIOp>(loc, ivI32, wRoundsC);
-            auto hStrideC = rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(haloHStrideBytes),
-                                                                  rewriter.getI32Type());
-            auto wStrideC = rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(haloWStrideBytes),
-                                                                  rewriter.getI32Type());
+            auto hStrideC = rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(),
+                                                                  static_cast<int32_t>(haloHStrideBytes));
+            auto wStrideC = rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(),
+                                                                  static_cast<int32_t>(haloWStrideBytes));
             auto hOff = rewriter.create<arith::MulIOp>(loc, hc, hStrideC);
             auto wOff = rewriter.create<arith::MulIOp>(loc, wc, wStrideC);
             offset = rewriter.create<arith::AddIOp>(loc, hOff, wOff);
         } else {
             auto strideConst =
-                rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(subTileStride), rewriter.getI32Type());
+                rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(), static_cast<int32_t>(subTileStride));
             offset = rewriter.create<arith::MulIOp>(loc, ivI32, strideConst);
         }
 
@@ -979,6 +1069,17 @@ LogicalResult FlowTransferConversion::emitScheduleMultipleInput(FlowLoweringCtx 
                 llvm::errs() << "[BlueprintToSchedule] 3D K BD covers all " << kR << " k-rounds: len=" << full
                              << " B, repeat 1, no BD iteration (was len=" << c.perTileShimLen
                              << " iter_wrap=" << c.shimIterWrap << " repeat=" << perIterRepeat << ")\n";
+            } else if (kR > 1 && wr && st && wr.size() == 3 && st.size() == 3 &&
+                       cast<IntegerAttr>(wr[2]).getInt() == kR && cast<IntegerAttr>(st[0]).getInt() == 4 &&
+                       c.perTileShimLen == full && c.shimIterWrap <= 1 && perIterRepeat == kR) {
+                // The BD already IS the whole walk and has no BD iteration to step strips with, so a
+                // repeat of k_rounds (the fallback when there is no M / N sub-tiling) re-sends the same
+                // strip k_rounds times: the cores take one copy and the shim never drains (VEK280,
+                // kernel-only gemm_s8 with M rounds: wait_io TIMEOUT on the A shims, half of C wrong).
+                // simplematmul2 keeps its repeat: there the iteration steps the N strips.
+                loopRepeat = 1;
+                llvm::errs() << "[BlueprintToSchedule] 3D K BD is the whole walk with no BD iteration: repeat "
+                             << perIterRepeat << " -> 1\n";
             }
         }
         auto loopPktConst =
@@ -1108,21 +1209,21 @@ void FlowTransferConversion::emitScheduleOooOutput(FlowLoweringCtx &c) const {
                     innerProd *= rd[j].first;
                 Value comp = ivI32;
                 if (innerProd > 1) {
-                    auto divC = rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(innerProd),
-                                                                      rewriter.getI32Type());
+                    auto divC = rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(),
+                                                                      static_cast<int32_t>(innerProd));
                     comp = rewriter.create<arith::DivSIOp>(loc, comp, divC);
                 }
                 if (i != 0) {
-                    auto wrapC = rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(rd[i].first),
-                                                                       rewriter.getI32Type());
+                    auto wrapC = rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(),
+                                                                       static_cast<int32_t>(rd[i].first));
                     comp = rewriter.create<arith::RemSIOp>(loc, comp, wrapC);
                 }
                 comps[i] = comp;
             }
             SmallVector<Value> offs(nDims);
             for (size_t i = 0; i < nDims; i++) {
-                auto strideC = rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(rd[i].second),
-                                                                     rewriter.getI32Type());
+                auto strideC = rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(),
+                                                                     static_cast<int32_t>(rd[i].second));
                 offs[i] = rewriter.create<arith::MulIOp>(loc, comps[i], strideC);
             }
             mBaseOffset = offs[0];
@@ -1136,9 +1237,9 @@ void FlowTransferConversion::emitScheduleOooOutput(FlowLoweringCtx &c) const {
             int32_t thisBdId = c.shimPerTileBdIds[t];
             int64_t perTileOffset = t * c.perTileStrideFromDims;
 
-            auto bdIdConst = rewriter.create<arith::ConstantIntOp>(loc, thisBdId, rewriter.getI32Type());
+            auto bdIdConst = rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(), thisBdId);
             auto perTileOffsetConst =
-                rewriter.create<arith::ConstantIntOp>(loc, static_cast<int32_t>(perTileOffset), rewriter.getI32Type());
+                rewriter.create<arith::ConstantIntOp>(loc, rewriter.getI32Type(), static_cast<int32_t>(perTileOffset));
             auto totalOffset = rewriter.create<arith::AddIOp>(loc, mBaseOffset, perTileOffsetConst.getResult());
 
             Value linkedBd = (t < numCoreTiles - 1) ? loopBdHandles[t + 1] : Value();

@@ -214,6 +214,11 @@ public:
     virtual std::string name() const = 0;
 };
 
+/* ---------- partition column base ------------------------- */
+/// Absolute column of the partition's first column. The routing model and aie-rt
+/// both address tiles partition-relative, but the layout tables list DDR-capable
+/// (NoC) shim columns absolutely; resources made after this call rebase that list.
+/// Only matters where not every column has a shim DMA (Gen1/Gen2); 0 = no shift.
 void setResourcePartitionStartCol(int absStartCol);
 
 /* ---------- factory (implementation inside .cpp) ---------- */

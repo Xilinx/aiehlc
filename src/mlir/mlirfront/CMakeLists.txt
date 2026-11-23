@@ -152,6 +152,7 @@ list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passdfscheduletoapi/passdfsched
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passdfscheduletokernelapi/passdfscheduletokernelapi.cpp)
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passcoretraceinsert/passcoretraceinsert.cpp)
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passstartiointerleave/passstartiointerleave.cpp)
+list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/passmemtilejoin/passmemtilejoin.cpp)
 # tilinglinalg routing implementation
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/routingimplement/routing/routingpath.cpp)
 list(APPEND SOURCE_LIB_FILES ./tilinglinalg/pass/routingimplement/hw/hwresource.cpp)

@@ -24,12 +24,13 @@ def DirectionAttr : I32EnumAttr<"Direction", "Port direction attribute",
 }
 
 def dmaphopdialect : Dialect {
+    // keep the pre-LLVM-24 textual form (inherent attrs in attr-dict)
+    let useStrictPropertiesInAssemblyFormat = 0;
     let name = "dmaphop";
     let cppNamespace = "dmaphop";
     //let useDefaultAttributePrinterParser = 1;
     let hasOperationAttrVerify = 0;
     let useDefaultAttributePrinterParser = 1;
-    let usePropertiesForAttributes = 0;
     let useDefaultTypePrinterParser = 1;  
     dag discardableAttrs = (ins);
 }

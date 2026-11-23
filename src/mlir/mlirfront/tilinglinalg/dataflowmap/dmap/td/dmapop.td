@@ -6,6 +6,12 @@
 #define dmap_OPS
 include "dmaptype.td"
 include "dmapattr.td"
+
+#ifndef AIEHLC_PUBLIC_SYMBOL_TD
+#define AIEHLC_PUBLIC_SYMBOL_TD
+// every aiehlc symbol is public (tilinglinalg/aiehlcsymbol.h)
+def AiehlcPublicSymbol : NativeOpTrait<"PublicSymbol"> { let cppNamespace = "::aiehlc"; }
+#endif
 /*
       %data = dataflowmap.create_data {type="i32", dim1=10, dim2 20}
       %pegroup = dataflowmap.dmap_create_pe_group {group_idx = 1, pe_count=4, "row"}
@@ -19,11 +25,9 @@ include "dmapattr.td"
       dataflowmap.push %data, %broadcast_stream {cache_policy = "force_memtile" }
 */
 def dmap_FuncOp : dmapop<"func",[
-    SymbolTable,
-    Symbol,
+    SymbolTable, 
     SingleBlock,
-    NoTerminator
-  ]>
+    NoTerminator]>
 {
     let summary = "Defines a function in the Starplat Dialect";
     let description = [{This operation represents a function definiton in the Starplat dialect.
@@ -132,7 +136,7 @@ def dmap_define_io_engine : dmapop<"define_io_engine"> {
   }];
 }
 
-def dmap_define_port_configure : dmapop<"define_port_configure", [Symbol]> {
+def dmap_define_port_configure : dmapop<"define_port_configure", []> {
   let summary = "this is port config.";
   let description = [{
     Binds a physical hardware handle (e.g., a tile from the routinghw dialect)

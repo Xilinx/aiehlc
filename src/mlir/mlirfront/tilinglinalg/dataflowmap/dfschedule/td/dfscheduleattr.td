@@ -14,12 +14,13 @@ include "mlir/IR/EnumAttr.td"
 
 // Dialect: amd_host
 def dfscheduledialect : Dialect {
+    // keep the pre-LLVM-24 textual form (inherent attrs in attr-dict)
+    let useStrictPropertiesInAssemblyFormat = 0;
     let name = "dfschedule";
     let cppNamespace = "dfschedule";
     //let useDefaultAttributePrinterParser = 1;
     let hasOperationAttrVerify = 0;
     let useDefaultAttributePrinterParser = 1;
-	  let usePropertiesForAttributes = 0;
     let useDefaultTypePrinterParser = 1;  
     dag discardableAttrs = (ins);
 }

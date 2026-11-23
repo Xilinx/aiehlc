@@ -2676,12 +2676,16 @@ __attribute__((weak)) int g_runtime_debug_level = 0;
 static inline int __Runtime_is_aie_core_tile(XAie_LocType tile) { return tile.Row >= XAIE_AIE_TILE_ROW_START; }
 
 #define MAX_ALLOC_BUFFERS 64
+/* DMA buffers own whole cache lines: the user pointer is rounded up to RT_DMA_ALIGN and the
+ * allocation padded to the next line, so no heap metadata or neighbouring buffer shares a line
+ * with DMA data. A shared line can be pulled back into the D-cache (or written back dirty) while
+ * the DMA runs, and the post-launch invalidate then returns stale bytes (VEK280: C row 0). */
 #define RT_DMA_ALIGN 64u
 typedef struct {
-    void *vaddr;
+    void *vaddr; /* user-visible, RT_DMA_ALIGN-aligned */
     XAie_MemInst *mem;
     size_t size;
-    uint64_t shift;
+    uint64_t shift; /* vaddr - XAie_MemGetVAddr(mem); added to every DevAddr offset */
 } AllocEntry;
 static AllocEntry s_alloc_map[MAX_ALLOC_BUFFERS];
 static int s_alloc_count = 0;
@@ -2706,7 +2710,7 @@ static XAie_MemInst *__vaddr_to_mem_offset(void *vaddr, uint64_t *offset_out) {
 static XAie_MemInst *__vaddr_to_mem(void *vaddr) { return __vaddr_to_mem_offset(vaddr, NULL); }
 
 /** Static buffer for kernel group tiles so kg.tiles/event.tiles outlive __Runtime_load_kernel_group_*. */
-#define MAX_KERNEL_TILES 32
+#define MAX_KERNEL_TILES 304 /* every VEK280 core (8 rows x 38 cols) */
 static XAie_LocType s_kernel_tiles[MAX_KERNEL_TILES];
 
 /* ---------------------------------------------------------------------------
@@ -3023,6 +3027,7 @@ void *__Runtime_alloc_buffer(XAie_DevInst *dev, size_t size_bytes) {
     return vaddr;
 }
 
+/* Drop vaddr from the map; returns its MemInst (NULL if untracked). */
 static XAie_MemInst *rt_alloc_map_remove(void *vaddr) {
     for (int i = 0; i < s_alloc_count; i++) {
         if (s_alloc_map[i].vaddr == vaddr) {
@@ -3041,6 +3046,7 @@ void __Runtime_free_buffer(XAie_DevInst *dev, void *ptr) {
         printf("[aie_runtime] ERROR: free_buffer called with dev=NULL\n");
         return;
     }
+    /* ptr may sit past the MemInst base (RT_DMA_ALIGN shift): free through the MemInst. */
     XAie_MemInst *mem = rt_alloc_map_remove(ptr);
     AieRC rc = mem ? XAie_MemFree(mem) : XAie_MemFreeVAddr(dev, ptr);
     AIEHLC_LOG(printf("[aie_runtime] free_buffer(%p) rc=%d\n", ptr, rc););
@@ -3539,7 +3545,17 @@ void __Runtime_dsync_drain(void) {
     rt_post_inval_run();
 }
 
+/* One-shot: the next deferred device sync of exactly this buffer is skipped. For an app that
+ * knows a launch argument is unchanged in DDR (e.g. memtile-resident weights on a key hit,
+ * where it flushed the per-call rows itself). */
+static const void *g_sync_skip;
+void __Runtime_sync_skip_next(const void *ptr) { g_sync_skip = ptr; }
+
 void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size) {
+    if (ptr && ptr == g_sync_skip) {
+        g_sync_skip = NULL;
+        return;
+    }
 #ifdef __AIESIM__
     __Runtime_sync_for_dev(dev, ptr, size);
     return;
@@ -3709,6 +3725,11 @@ void __Runtime_init(void) {
     __Runtime_platform_init();
     __Runtime_aie_mmio_posted();
     __rt_pmccntr_enable();
+#if AIE_GEN == 5 && defined(__aarch64__) && !defined(__AIESIM__) && !defined(__AIELINUX__)
+    /* VEK385 baremetal: the system counter behind cntvct_el0 / cntpct_el0 stays stopped until
+     * XilTimer's XTime_GetTime enables it (CNTControl), so apps and aiednn timing cntvct read 0 */
+    (void)__aie_host_now();
+#endif
 
     AIEHLC_LOG(printf("[aie_runtime] _init OK\n"));
 }
@@ -3765,7 +3786,11 @@ static AieRC __Runtime_partition_initialize(XAie_DevInst *dev) {
  * XAie_CoreProcessorBusEnable mask-writes the ProcBusCtrl enable bit at the
  * tile address, letting the core write its own memory-module DMA/lock
  * registers. Iterate the partition's core tiles (AieTileRowStart .. +NumRows)
- * across its columns. Gen5 baremetal only.
+ * across its columns. Baremetal Gen2 (AIE-ML, same register 0x32038) and Gen5.
+ * On VEK280 enabling it once appeared to corrupt C row 0 of the first launch:
+ * that was a host D-cache bug (no post-launch invalidate, buffers sharing lines
+ * with heap metadata), fixed in __Runtime_alloc_buffer + the __aie_launch
+ * sync_for_cpu.
  *
  * Columns are PARTITION-RELATIVE (0 .. NumCols-1), not StartCol-based: the
  * partition's BaseAddr already includes StartCol, and aie-rt rejects any
@@ -3946,11 +3971,13 @@ XAie_DevInst *__Runtime_explicit_init_partition(int startCol, int numCols) {
     }
 
 #if defined(AIEHLC_PHASE_TIMERS) && !defined(__AIESIM__)
+    /* Benchmark hook (-DAIEHLC_PHASE_TIMERS): array config done here, outside the
+     * launch, so cross-tool comparisons can add it to aiehlc's setup time. */
     uint64_t __pt0 = __aie_host_now();
 #endif
     // Enable each core's processor bus so KERNELCONFIGOFFLOAD kernels can
-    // self-program their DMA/lock registers via MMIO. No-op unless gen5
-    // baremetal; harmless when offload is off.
+    // self-program their DMA/lock registers via MMIO. Gen2/Gen5 baremetal;
+    // harmless when offload is off.
     __Runtime_enable_core_proc_bus(dev);
 
     /* Shim DMA loopback self-test: write 0xABCD at DDR offset 10MB,
@@ -4091,16 +4118,23 @@ void __Runtime_register_partition(int meshId, XAie_DevInst *dev) {
                       g_partition_registry_count));
 }
 
+static int g_partition_reuse_next;
+
+void __Runtime_partition_reuse_next(void) { g_partition_reuse_next = 1; }
+
 /* Init-once per meshId FOR ONE ROUTING: a partition is reused only by the
  * library that set it up. Another aiehlc library launching on the same meshId
  * (two user kernels in one ELF, each with its own routing) gets the partition
  * torn down and re-initialized with its routing -- the same teardown + init the
- * per-launch aieDim path does every time. */
+ * per-launch aieDim path does every time. After __Runtime_partition_reuse_next()
+ * the next call returns a registered partition whatever its routing. */
 XAie_DevInst *__Runtime_init_mesh_partition_with(int meshId, int startCol, int numCols, void (*route)(XAie_DevInst *)) {
+    const int reuse = g_partition_reuse_next;
+    g_partition_reuse_next = 0;
     for (int i = 0; i < g_partition_registry_count; i++) {
         if (g_partition_registry[i].meshId != meshId)
             continue;
-        if (g_partition_registry[i].route == route)
+        if (reuse || g_partition_registry[i].route == route)
             return g_partition_registry[i].dev;
         AIEHLC_LOG(
             printf("[aie_runtime] meshId=%d: another library's routing -- re-initializing the partition\n", meshId););
@@ -5264,6 +5298,42 @@ static const char *rt_acr_dir(const acr_op *op) { return op->is_ret ? "ret" : "f
  * CTRL) keep the planner's index unchanged. */
 static uint8_t rt_acr_chan(acr_port p, int is_master, uint8_t idx) { return rt_seq_acr_chan(p, is_master, idx); }
 
+/* Log the port(s) one planner op programs to the provenance map (opt-in) so the
+ * aiedebug device-map can overlay the row-fabric control route. */
+static void rt_pmap_row_op(const acr_op *op) {
+    uint8_t sidx = rt_acr_chan(op->sport, /*master*/ 0, op->sidx);
+    uint8_t midx = rt_acr_chan(op->mport, /*master*/ 1, op->midx);
+    switch (op->kind) {
+    case ACR_OP_SLOT:
+        rt_pmap_port_ex(op->col, op->row, rt_acr_port_name(op->sport), sidx, rt_acr_dir(op), "slave", op->pkt_id, "pkt",
+                        (int)op->slot, (int)op->arbiter, (int)op->msel, (int)op->mask);
+        break;
+    case ACR_OP_SLAVE_EN:
+        rt_pmap_port(op->col, op->row, rt_acr_port_name(op->sport), sidx, rt_acr_dir(op), "slave", op->pkt_id, "pkt",
+                     -1);
+        break;
+    case ACR_OP_MASTER_EN:
+        rt_pmap_port_ex(op->col, op->row, rt_acr_port_name(op->mport), midx, rt_acr_dir(op), "master", op->pkt_id,
+                        "pkt", -1, (int)op->arbiter, (int)op->mselen, -1);
+        break;
+    case ACR_OP_CCT:
+        rt_pmap_port(op->col, op->row, rt_acr_port_name(op->sport), sidx, rt_acr_dir(op), "slave", op->pkt_id,
+                     "circuit", -1);
+        rt_pmap_port(op->col, op->row, rt_acr_port_name(op->mport), midx, rt_acr_dir(op), "master", op->pkt_id,
+                     "circuit", -1);
+        break;
+    default:
+        break;
+    }
+}
+
+static void rt_pmap_row_ops(const acr_oplist *ops) {
+    if (!rt_ctrl_pmap_on())
+        return;
+    for (int i = 0; i < ops->n; i++)
+        rt_pmap_row_op(&ops->ops[i]);
+}
+
 /* Translate one pure-planner op list into XAie stream-switch calls. Slot/slave/
  * master enables realize the packet-switch taps; CCT enables realize circuit
  * pass-through hops. Vertical spine ports are remapped to VFWD/VRET (see
@@ -5271,34 +5341,8 @@ static uint8_t rt_acr_chan(acr_port p, int is_master, uint8_t idx) { return rt_s
 AieRC __Runtime_ctrl_row_emit(XAie_DevInst *dev, const acr_oplist *ops) {
     for (int i = 0; i < ops->n; i++) {
         const acr_op *op = &ops->ops[i];
-        uint8_t sidx = rt_acr_chan(op->sport, /*master*/ 0, op->sidx);
-        uint8_t midx = rt_acr_chan(op->mport, /*master*/ 1, op->midx);
-        /* Translate the op into its XAie stream-switch call, then log the
-         * port(s) it programmed to the provenance map (opt-in) so the aiedebug
-         * device-map can overlay the row-fabric control route. */
         AieRC rc = rt_seq_row_op(dev, op);
-        switch (op->kind) {
-        case ACR_OP_SLOT:
-            rt_pmap_port_ex(op->col, op->row, rt_acr_port_name(op->sport), sidx, rt_acr_dir(op), "slave", op->pkt_id,
-                            "pkt", (int)op->slot, (int)op->arbiter, (int)op->msel, (int)op->mask);
-            break;
-        case ACR_OP_SLAVE_EN:
-            rt_pmap_port(op->col, op->row, rt_acr_port_name(op->sport), sidx, rt_acr_dir(op), "slave", op->pkt_id,
-                         "pkt", -1);
-            break;
-        case ACR_OP_MASTER_EN:
-            rt_pmap_port_ex(op->col, op->row, rt_acr_port_name(op->mport), midx, rt_acr_dir(op), "master", op->pkt_id,
-                            "pkt", -1, (int)op->arbiter, (int)op->mselen, -1);
-            break;
-        case ACR_OP_CCT:
-            rt_pmap_port(op->col, op->row, rt_acr_port_name(op->sport), sidx, rt_acr_dir(op), "slave", op->pkt_id,
-                         "circuit", -1);
-            rt_pmap_port(op->col, op->row, rt_acr_port_name(op->mport), midx, rt_acr_dir(op), "master", op->pkt_id,
-                         "circuit", -1);
-            break;
-        default:
-            break;
-        }
+        rt_pmap_row_op(op);
         if (rc != XAIE_OK) {
             printf("[aie_runtime] ctrl_row: op[%d] kind=%d tile(%u,%u) rc=%d\n", i, (int)op->kind, (unsigned)op->col,
                    (unsigned)op->row, (int)rc);
@@ -5411,6 +5455,7 @@ static AieRC rt_ctrl_ret_capture_row(__Runtime_CtrlRowFabric *f) {
     uint32_t nwr0 = g_ctrl_ret_nwr;
     AieRC rc = XAIE_ERR;
     if (g_ctrl_ret_aot) {
+        rt_pmap_row_ops(&g_ctrl_ret_defer);
         g_ctrl_ret_defer.n = 0;
         return XAIE_OK;
     }
@@ -6908,8 +6953,13 @@ static AieRC rt_sb_route(__Runtime_CtrlRowFabric *f) {
         rc = XAie_StrmConnCctEnable(dev, spine, EAST, RT_RES_SHIMROW_PORT, SOUTH, rport);
     if (rc == XAIE_OK)
         rc = XAie_EnableAieToShimDmaStrmPort(dev, spine, rport);
-    if (rc == XAIE_OK)
+    if (rc == XAIE_OK) {
+        rt_pmap_port(f->shim_col, 0, "SOUTH", fport, "fwd", "slave", f->ctrl_id, "circuit", -1);
+        rt_pmap_port(f->shim_col, 0, "EAST", RT_RES_SHIMROW_PORT, "fwd", "master", f->ctrl_id, "circuit", -1);
+        rt_pmap_port(f->shim_col, 0, "EAST", RT_RES_SHIMROW_PORT, "ret", "slave", f->ctrl_id, "circuit", -1);
+        rt_pmap_port(f->shim_col, 0, "SOUTH", rport, "ret", "master", f->ctrl_id, "circuit", -1);
         rc = __Runtime_ctrl_row_emit(dev, &fwd);
+    }
     if (rc == XAIE_OK)
         rc = XAie_DmaChannelEnable(dev, spine, RT_RES_SHIMROW_CH, DMA_MM2S);
     if (rc == XAIE_OK)
@@ -6929,6 +6979,7 @@ static AieRC rt_sb_route(__Runtime_CtrlRowFabric *f) {
         }
         if (a) {
             g_sb_stats.aot_prefix++;
+            rt_pmap_row_ops(&ret);
             return XAIE_OK;
         }
     }
@@ -7176,6 +7227,203 @@ void __Runtime_ctrl_shim_bd_commit(void) { rt_sb_commit(); }
  * action after the BDs are live. */
 int __Runtime_ctrl_shim_bd_sync(void) { return rt_sb_ack_wait() == XAIE_OK ? 0 : -1; }
 
+/* ---------------------------------------------------------------------------
+ * AIE-ML shim BD templates (MMIO fast path).
+ *
+ * A shim BD config costs ~0.8 us on VEK280 with nothing else running, against
+ * ~0.43 us per BD for mlir-aie's precomputed words + address patch: the extra is
+ * host CPU in XAie_DmaDescInit, the validating setters and our wrappers, not the
+ * 8-word block write. Within one launch the shim BDs come in a few shapes (dims,
+ * length, iteration, AXI); the remaining fields vary per BD. So aie-rt encodes
+ * one template per shape (written normally, the words recorded through a copied
+ * backend), and every other BD of that shape is the template with exactly the
+ * per-BD fields re-packed -- DDR address, packet enable/id, out-of-order BD id,
+ * next BD -- using the same BdProp masks and word positions as
+ * _XAieMl_ShimDmaWriteBdPrep, then one XAie_BlockWrite32.
+ *
+ * AIE-ML shim tiles, baremetal backend only; never inside a transaction or the
+ * shim-row control window. -DAIEHLC_NO_BD_TEMPLATE disables it;
+ * -DAIEHLC_BD_TEMPLATE_VERIFY encodes every BD both ways and reports mismatches.
+ * ------------------------------------------------------------------------- */
+#define RT_BDT_MAX 16
+#define RT_BDT_NW 8 /* XAIEML_SHIMDMA_NUM_BD_WORDS */
+typedef struct {
+    int32_t shape[17]; /* kind, len, num_dims, strides[4], wraps[4], iter step/wrap, locks[4] */
+    uint32_t w[RT_BDT_NW];
+    uint64_t bd_off; /* BD register offset of bd 0 from the tile base */
+} rt_bdt_ent;
+static rt_bdt_ent g_bdt[RT_BDT_MAX];
+static int g_bdt_n;
+static int g_bdt_prepare; /* __Runtime_bd_template_prepare_begin/_end: encode only, write nothing */
+static unsigned long long g_bdt_hits, g_bdt_misses, g_bdt_verify_bad;
+
+static XAie_Backend g_bdt_be;
+static const XAie_Backend *g_bdt_real;
+static uint32_t g_bdt_cap[RT_BDT_NW];
+static uint64_t g_bdt_cap_addr;
+static int g_bdt_cap_n, g_bdt_cap_fwd;
+
+static AieRC rt_bdt_cap_runop(void *io, XAie_DevInst *dev, XAie_BackendOpCode op, void *arg) {
+    if (op == XAIE_BACKEND_OP_CONFIG_SHIMDMABD) {
+        const XAie_ShimDmaBdArgs *a = (const XAie_ShimDmaBdArgs *)arg;
+        if (a->NumBdWords == RT_BDT_NW) {
+            memcpy(g_bdt_cap, a->BdWords, sizeof(g_bdt_cap));
+            g_bdt_cap_addr = a->Addr;
+            g_bdt_cap_n++;
+        }
+        if (!g_bdt_cap_fwd)
+            return XAIE_OK;
+    }
+    return g_bdt_real->Ops.RunOp(io, dev, op, arg);
+}
+
+/* Why calls were sent down the driver path (diagnosis: __Runtime_bd_template_report). */
+static unsigned g_bdt_reject[5]; /* tile type, generation, backend, open transaction, shim-BD window */
+
+static int rt_bdt_usable(XAie_DevInst *dev, uint8_t tt) {
+#if defined(AIEHLC_NO_BD_TEMPLATE) || defined(__AIESIM__)
+    (void)dev, (void)tt;
+    return 0;
+#else
+    const int why = tt != XAIEGBL_TILE_TYPE_SHIMNOC                   ? 0
+                    : dev->DevProp.DevGen != XAIE_DEV_GEN_AIEML       ? 1
+                    : dev->Backend->Type != XAIE_IO_BACKEND_BAREMETAL ? 2
+                    : dev->TxnList.Next != NULL                       ? 3
+                    : g_sb.active                                     ? 4
+                                                                      : -1;
+    if (why >= 0)
+        g_bdt_reject[why]++;
+    return why < 0;
+#endif
+}
+
+void __Runtime_bd_template_report(void) {
+    printf("[bdt] rejects: tile_type=%u gen=%u backend=%u txn=%u shim_bd_window=%u\n", g_bdt_reject[0], g_bdt_reject[1],
+           g_bdt_reject[2], g_bdt_reject[3], g_bdt_reject[4]);
+}
+
+/* Write @desc through the driver (or only encode it when @fwd is 0), recording the
+ * words. Returns the driver's rc; *ok = 1 when exactly one shim BD was captured. */
+static AieRC rt_bdt_encode(XAie_DevInst *dev, XAie_LocType tile, XAie_DmaDesc *desc, uint8_t bd_id, int fwd, int *ok) {
+    g_bdt_real = dev->Backend;
+    g_bdt_be = *g_bdt_real;
+    g_bdt_be.Ops.RunOp = rt_bdt_cap_runop;
+    g_bdt_cap_n = 0;
+    g_bdt_cap_fwd = fwd;
+    dev->Backend = &g_bdt_be;
+    AieRC rc = XAie_DmaWriteBd(dev, desc, tile, bd_id);
+    dev->Backend = g_bdt_real;
+    *ok = rc == XAIE_OK && g_bdt_cap_n == 1;
+    return rc;
+}
+
+/* Re-pack the per-BD fields of a template (positions as _XAieMl_ShimDmaWriteBdPrep). */
+static void rt_bdt_patch(XAie_DevInst *dev, uint32_t *w, uint64_t addr, const rt_seq_bd_args *a) {
+    const XAie_DmaBdProp *p = dev->DevProp.DevMod[XAIEGBL_TILE_TYPE_SHIMNOC].DmaMod->BdProp;
+    const XAie_ShimDmaBuffer *b = &p->Buffer->ShimDmaBuff;
+    w[1] = XAie_SetField(addr >> b->AddrLow.Lsb, b->AddrLow.Lsb, b->AddrLow.Mask);
+    uint32_t clr2 = b->AddrHigh.Mask | p->Pkt->EnPkt.Mask | p->Pkt->PktType.Mask | p->Pkt->PktId.Mask |
+                    p->BdEn->OutofOrderBdId.Mask;
+    w[2] = (w[2] & ~clr2) | XAie_SetField(addr >> 32U, b->AddrHigh.Lsb, b->AddrHigh.Mask) |
+           XAie_SetField(a->enable_packet ? 1U : 0U, p->Pkt->EnPkt.Lsb, p->Pkt->EnPkt.Mask) |
+           XAie_SetField(a->enable_packet ? (uint32_t)a->packet_id : 0U, p->Pkt->PktId.Lsb, p->Pkt->PktId.Mask) |
+           XAie_SetField(a->out_of_order_bd_id >= 0 ? (uint32_t)a->out_of_order_bd_id : 0U, p->BdEn->OutofOrderBdId.Lsb,
+                         p->BdEn->OutofOrderBdId.Mask);
+    uint32_t clr7 = p->BdEn->UseNxtBd.Mask | p->BdEn->NxtBd.Mask;
+    w[7] = (w[7] & ~clr7) | XAie_SetField(a->next_bd >= 0 ? 1U : 0U, p->BdEn->UseNxtBd.Lsb, p->BdEn->UseNxtBd.Mask) |
+           XAie_SetField(a->next_bd >= 0 ? (uint32_t)a->next_bd : 0U, p->BdEn->NxtBd.Lsb, p->BdEn->NxtBd.Mask);
+}
+
+static void rt_bdt_shape(const rt_seq_bd_args *a, int32_t *s) {
+    memset(s, 0, 17 * sizeof(int32_t));
+    s[0] = a->ooo;
+    s[1] = a->len;
+    s[2] = a->num_dims;
+    for (int i = 0; i < 4; i++) {
+        s[3 + i] = a->stride[i];
+        s[7 + i] = a->wrap[i];
+    }
+    s[11] = a->iter_step_size;
+    s[12] = a->iter_wrap;
+    /* Lock fields stay in the template (word 7), so they are part of the shape. */
+    s[13] = a->acquire_lock_id;
+    s[14] = a->acquire_lock_val;
+    s[15] = a->release_lock_id;
+    s[16] = a->release_lock_val;
+}
+
+/* Program a shim BD from a template. Returns 1 when written (*rc set), 0 to fall back. */
+static int rt_bdt_write(XAie_DevInst *dev, XAie_LocType tile, uint8_t tt, uint64_t dma_addr, const rt_seq_bd_args *a,
+                        AieRC *rc) {
+    /* aie-rt's public XAie_GetTileTypefromLoc takes NoC vs PL from Loc.Col % 4 and ignores
+     * StartCol (its per-device op adds it). A partition starting at column 2 (control spine)
+     * then reports every NoC shim as PL; use the absolute column. */
+    if (tile.Row == 0 && dev->DevProp.DevGen == XAIE_DEV_GEN_AIEML)
+        tt = ((dev->StartCol + tile.Col) % 4U) < 2U ? XAIEGBL_TILE_TYPE_SHIMPL : XAIEGBL_TILE_TYPE_SHIMNOC;
+    if (!rt_bdt_usable(dev, tt))
+        return g_bdt_prepare; /* preparing: skip the call rather than write the BD */
+    int32_t shape[17];
+    rt_bdt_shape(a, shape);
+    rt_bdt_ent *e = NULL;
+    for (int i = 0; i < g_bdt_n && !e; i++)
+        if (memcmp(g_bdt[i].shape, shape, sizeof(shape)) == 0)
+            e = &g_bdt[i];
+    XAie_DmaDesc d;
+    int ok = 0;
+    if (!e) {
+        if (g_bdt_n >= RT_BDT_MAX)
+            return 0;
+        rt_seq_bd_desc(dev, tile, dma_addr, a, &d);
+        *rc = rt_bdt_encode(dev, tile, &d, (uint8_t)a->bd_id, !g_bdt_prepare, &ok);
+        g_bdt_misses += !g_bdt_prepare;
+        if (ok) {
+            e = &g_bdt[g_bdt_n++];
+            memcpy(e->shape, shape, sizeof(shape));
+            memcpy(e->w, g_bdt_cap, sizeof(g_bdt_cap));
+            e->bd_off = g_bdt_cap_addr - XAie_GetTileAddr(dev, tile.Row, tile.Col) -
+                        (uint64_t)a->bd_id * dev->DevProp.DevMod[tt].DmaMod->IdxOffset;
+        }
+        return 1;
+    }
+    if (g_bdt_prepare)
+        return 1;
+    uint32_t w[RT_BDT_NW];
+    memcpy(w, e->w, sizeof(w));
+    rt_bdt_patch(dev, w, dma_addr, a);
+#ifdef AIEHLC_BD_TEMPLATE_VERIFY
+    rt_seq_bd_desc(dev, tile, dma_addr, a, &d);
+    (void)rt_bdt_encode(dev, tile, &d, (uint8_t)a->bd_id, 0, &ok);
+    if (!ok || memcmp(w, g_bdt_cap, sizeof(w)) != 0) {
+        g_bdt_verify_bad++;
+        printf("[aie_runtime] BD template MISMATCH tile(%u,%u) bd=%d\n", (unsigned)tile.Col, (unsigned)tile.Row,
+               a->bd_id);
+        for (int i = 0; i < RT_BDT_NW; i++)
+            printf("    w%d template=0x%08x driver=0x%08x\n", i, (unsigned)w[i], (unsigned)g_bdt_cap[i]);
+    }
+#endif
+    *rc = XAie_BlockWrite32(dev,
+                            XAie_GetTileAddr(dev, tile.Row, tile.Col) + e->bd_off +
+                                (uint64_t)a->bd_id * dev->DevProp.DevMod[tt].DmaMod->IdxOffset,
+                            w, RT_BDT_NW);
+    g_bdt_hits++;
+    return 1;
+}
+
+/* Setup-time template build (StartioInterleavePass, before the kernel launch): the shim
+ * BD config calls between begin and end only encode their shape's template (no register
+ * write), so the first run's BDs are template hits like every later run's. */
+void __Runtime_bd_template_prepare_begin(void) { g_bdt_prepare = 1; }
+void __Runtime_bd_template_prepare_end(void) { g_bdt_prepare = 0; }
+
+void __Runtime_bd_template_stats(unsigned long long *hits, unsigned long long *misses, unsigned long long *bad) {
+    if (hits)
+        *hits = g_bdt_hits;
+    if (misses)
+        *misses = g_bdt_misses;
+    if (bad)
+        *bad = g_bdt_verify_bad;
+}
+
 /**
  * Configure DMA buffer descriptor with multi-dimensional addressing.
  * Uses XAie_DmaSetMultiDimAddr with stride/wrap descriptors to enable
@@ -7237,7 +7485,7 @@ XAie_DmaDesc __Runtime_dma_bd_config_multidim(XAie_DevInst *dev, XAie_LocType ti
     unsigned long long __aot_t1 = RT_PROF_TIC();
     int __aot_hit = rt_sb_aot_take(dev, &aot_rec, rt_aot_bd_hash(aot_args, 19U));
     unsigned long long __aot_t2 = RT_PROF_TIC();
-    if (__aot_hit) {
+    if (__aot_hit || rt_bdt_write(dev, tile, tile_type, dma_addr, &bd_args, &bd_rc)) {
         memset(&DmaInst, 0, sizeof(DmaInst));
     } else {
         rt_seq_bd_desc(dev, tile, dma_addr, &bd_args, &DmaInst);
@@ -7342,7 +7590,7 @@ XAie_DmaDesc __Runtime_dma_bd_config_multidim_ooo(XAie_DevInst *dev, XAie_LocTyp
     unsigned long long __aot_t1 = RT_PROF_TIC();
     int __aot_hit = rt_sb_aot_take(dev, &aot_rec, rt_aot_bd_hash(aot_args, 19U));
     unsigned long long __aot_t2 = RT_PROF_TIC();
-    if (__aot_hit) {
+    if (__aot_hit || rt_bdt_write(dev, tile, tile_type, dma_addr, &bd_args, &bd_rc)) {
         memset(&DmaInst, 0, sizeof(DmaInst));
     } else {
         rt_seq_bd_desc(dev, tile, dma_addr, &bd_args, &DmaInst);
@@ -7442,6 +7690,685 @@ void __Runtime_dma_channel_enable_ooo(XAie_DevInst *dev, XAie_LocType tile, int3
     const char *dir_str = (dir == DMA_MM2S) ? "MM2S" : "S2MM";
     AIEHLC_LOG(printf("[aie_runtime] channel_enable_ooo tile(%u,%u) ch=%d dir=%s rc=%d\n", (unsigned)tile.Col,
                       (unsigned)tile.Row, channel, dir_str, (int)rc));
+}
+
+/* ---------------------------------------------------------------------------
+ * Memtile output join (doc/design/memtile_staging.md, stage 1).
+ *
+ * A row of n cores packet-merges its C tiles toward one shim S2MM channel, which
+ * then needs one out-of-order BD per core (n per channel, reprogrammed every
+ * call). With the join, the memtile above that shim (same column, row 1)
+ * terminates the packet stream instead: its S2MM channel 2*shim_ch runs in
+ * out-of-order mode with the SAME BD ids the cores' packet headers already name,
+ * each writing one core's tile tile-major into the memtile; one MM2S BD
+ * (3-D: tile row x n tiles x tile rows) re-emits the row block row-major once all
+ * n tiles are in (lock F: +1 per tile, MM2S acquires n). The shim then needs a
+ * single linear BD per row block (__Runtime_memtile_join_shim_bd). The
+ * memtile side is programmed once before the kernel launch, the way mlir-aie's
+ * static config programs memtile DMAs; routing (MemtileOutputJoin in the routing
+ * path) sends the packets into memtile DMA 2*shim_ch and adds DMA -> SOUTH.
+ * Even memtile channels own BDs 0-23, hence channel 2*shim_ch (0 or 2).
+ * ------------------------------------------------------------------------- */
+#define RT_MTJ_TILE_BYTES 4096U /* 64 x 64 int8 tile: the C-blocked layout and input staging */
+/* AIE-ML memtile DMA BDs address three tiles: lock ids 0-63 / addresses 0x00000-0x7FFFF are
+ * the WEST neighbour's, 64-127 / 0x80000-0xFFFFF this tile's own (mlir-aie emits
+ * XAie_LockInit(64, ..) and 0x80000+ buffers). XAie_LockSetValue takes the own index. */
+#define RT_MTJ_OWN_LOCK 64U
+#define RT_MTJ_OWN_ADDR 0x80000U
+#define RT_MTJ_ROW_BYTES 64U
+/* Up to 16 core tiles per joined channel (lock values are 6-bit; one shim channel serves a
+ * mesh row of at most 16 cores). Each even memtile channel owns a 128 KB output buffer:
+ * channel 0 at +0, channel 2 at +0x20000; input staging sits above, at +0x40000. */
+#define RT_MTJ_MAX_TILES 16
+#define RT_MTJ_OUT_SPAN 0x20000U
+#define RT_MTI_OWN_OFF 0x40000U
+
+static uintptr_t rt_mtj_base(void *const *p, int n) {
+    uintptr_t b = (uintptr_t)p[0];
+    for (int i = 1; i < n; i++)
+        if ((uintptr_t)p[i] < b)
+            b = (uintptr_t)p[i];
+    return b;
+}
+
+/* Width of one core's C tile row: the tiles of a row block sit side by side in DDR, so
+ * adjacent tile bases are one tile row apart (64 B for a 64x64 int8 tile, 128 B for
+ * gemm_uk's 32 x 128 B). */
+static uint32_t rt_mtj_row_bytes(void *const *p, int n, uint32_t tile_bytes) {
+    uintptr_t lo = (uintptr_t)p[0], hi = lo;
+    for (int i = 1; i < n; i++) {
+        lo = (uintptr_t)p[i] < lo ? (uintptr_t)p[i] : lo;
+        hi = (uintptr_t)p[i] > hi ? (uintptr_t)p[i] : hi;
+    }
+    const uintptr_t rb = n > 1 ? (hi - lo) / (uintptr_t)(n - 1) : tile_bytes;
+    return rb && rb <= tile_bytes && tile_bytes % rb == 0 ? (uint32_t)rb : RT_MTJ_ROW_BYTES;
+}
+
+/* Last full join per memtile channel, for the re-arm-only repeat (col is stored +1 so 0
+ * means empty; everything from dev on is the comparison key). */
+#define RT_MTJ_CACHE_COLS 64
+typedef struct {
+    unsigned col;
+    XAie_DevInst *dev;
+    unsigned gen;
+    int32_t n, tb, rb, c_blocked;
+    int32_t bd[RT_MTJ_MAX_TILES];
+    uint8_t tile[RT_MTJ_MAX_TILES];
+} rt_mtj_cfg;
+static rt_mtj_cfg s_mtj_cfg[RT_MTJ_CACHE_COLS * 2];
+
+/* Joins programmed since the last report (AIEHLC_MTJ_DEBUG diagnosis). */
+static struct {
+    uint8_t col, ch;
+} g_mtj[8];
+static int g_mtj_n;
+
+void __Runtime_memtile_join_report(XAie_DevInst *dev) {
+    for (int i = 0; i < g_mtj_n; i++) {
+        const XAie_LocType mt = XAie_TileLoc(g_mtj[i].col, 1), shim = XAie_TileLoc(g_mtj[i].col, 0);
+        const uint8_t ch = g_mtj[i].ch;
+        uint32_t e = 0, f = 0;
+        uint8_t ps = 0, pm = 0, pshim = 0;
+        (void)XAie_LockGetValue(dev, mt, XAie_LockInit(2 * ch, 0), &e);
+        (void)XAie_LockGetValue(dev, mt, XAie_LockInit(2 * ch + 1, 0), &f);
+        (void)XAie_DmaGetPendingBdCount(dev, mt, ch, DMA_S2MM, &ps);
+        (void)XAie_DmaGetPendingBdCount(dev, mt, ch, DMA_MM2S, &pm);
+        (void)XAie_DmaGetPendingBdCount(dev, shim, ch / 2, DMA_S2MM, &pshim);
+        printf("[mtj] memtile(%u,1) ch=%u lock empty=%u full=%u pending s2mm=%u mm2s=%u | shim(%u,0) s2mm ch=%u "
+               "pending=%u\n",
+               (unsigned)mt.Col, (unsigned)ch, (unsigned)e, (unsigned)f, (unsigned)ps, (unsigned)pm, (unsigned)shim.Col,
+               (unsigned)(ch / 2), (unsigned)pshim);
+        /* Raw AIE-ML registers (xaiemlgbl_params.h): shim S2MM_<k>_CTRL / STATUS_<k>,
+         * memtile S2MM/MM2S STATUS_<ch>, and the shim BD the join uses (3 for k=0, 8 for k=1). */
+        const uint64_t sb = XAie_GetTileAddr(dev, 0, shim.Col), mb = XAie_GetTileAddr(dev, 1, mt.Col);
+        const unsigned k = ch / 2u;
+        uint32_t sctl = 0, sst = 0, ms = 0, mm = 0, w[8] = {0};
+        (void)XAie_Read32(dev, sb + 0x1D200 + 8u * k, &sctl);
+        (void)XAie_Read32(dev, sb + 0x1D220 + 4u * k, &sst);
+        (void)XAie_Read32(dev, mb + 0xA0660 + 4u * ch, &ms);
+        (void)XAie_Read32(dev, mb + 0xA0680 + 4u * ch, &mm);
+        for (unsigned i = 0; i < 8; i++)
+            (void)XAie_Read32(dev, sb + 0x1D000 + (k ? 8u : 3u) * 0x20u + 4u * i, &w[i]);
+        printf("[mtj]   shim s2mm%u ctrl=0x%08x status=0x%08x | memtile s2mm%u status=0x%08x mm2s%u status=0x%08x\n", k,
+               (unsigned)sctl, (unsigned)sst, (unsigned)ch, (unsigned)ms, (unsigned)ch, (unsigned)mm);
+        printf("[mtj]   shim bd%u: %08x %08x %08x %08x %08x %08x %08x %08x\n", k ? 8u : 3u, (unsigned)w[0],
+               (unsigned)w[1], (unsigned)w[2], (unsigned)w[3], (unsigned)w[4], (unsigned)w[5], (unsigned)w[6],
+               (unsigned)w[7]);
+    }
+    g_mtj_n = 0;
+}
+
+void __Runtime_memtile_join_setup(XAie_DevInst *dev, XAie_LocType shim, int32_t shim_ch, int32_t n, int32_t tile_bytes,
+                                  int32_t c_blocked, ...) {
+    if (n < 1 || n > RT_MTJ_MAX_TILES || tile_bytes <= 0 || (uint32_t)(n * tile_bytes) > RT_MTJ_OUT_SPAN) {
+        printf("[aie_runtime] memtile_join_setup: unsupported join of %d x %d B tiles\n", (int)n, (int)tile_bytes);
+        return;
+    }
+    if (g_mtj_n < 8) {
+        g_mtj[g_mtj_n].col = shim.Col;
+        g_mtj[g_mtj_n].ch = (uint8_t)(2 * shim_ch);
+        g_mtj_n++;
+    }
+    int32_t bd[RT_MTJ_MAX_TILES];
+    void *p[RT_MTJ_MAX_TILES];
+    va_list ap;
+    va_start(ap, c_blocked);
+    for (int i = 0; i < n; i++) {
+        bd[i] = va_arg(ap, int32_t);
+        p[i] = va_arg(ap, void *);
+    }
+    va_end(ap);
+    const uint32_t tb = (uint32_t)tile_bytes;
+    const uintptr_t base = rt_mtj_base(p, n);
+    const uint32_t rb = rt_mtj_row_bytes(p, n, tb);
+    if (c_blocked && (rb != RT_MTJ_ROW_BYTES || tb != RT_MTJ_TILE_BYTES)) {
+        printf("[aie_runtime] memtile_join_setup: C-blocked unblock needs 64 x 64 B tiles, got %u x %u B; "
+               "landing linear\n",
+               (unsigned)(tb / rb), (unsigned)rb);
+        c_blocked = 0;
+    }
+    const XAie_LocType mt = XAie_TileLoc(shim.Col, 1);
+    const uint8_t ch = (uint8_t)(2 * shim_ch);
+    const uint64_t mbase = RT_MTJ_OWN_ADDR + (uint64_t)shim_ch * RT_MTJ_OUT_SPAN;
+    const uint8_t lk_empty = (uint8_t)(2 * ch), lk_full = (uint8_t)(2 * ch + 1);
+    const uint8_t mm2s_bd = (uint8_t)(20 + ch);
+    int bad = 0; /* AieRC is an enum: collect failures as a flag */
+#define RT_MTJ_DO(x) (bad |= ((x) != XAIE_OK))
+    /* A repeat of the last join on this memtile channel (persistent kernels redo the setup
+     * every launch): BDs are unchanged and a completed run left the locks at their initial
+     * values (empty = n, full = 0), so only the two start queues need re-arming. */
+    rt_mtj_cfg cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.dev = dev, cfg.gen = g_partition_gen, cfg.n = n, cfg.tb = tb, cfg.rb = rb, cfg.c_blocked = c_blocked;
+    for (int i = 0; i < n; i++) {
+        cfg.bd[i] = bd[i];
+        cfg.tile[i] = (uint8_t)(((uintptr_t)p[i] - base) / rb);
+    }
+    rt_mtj_cfg *prev = &s_mtj_cfg[(shim.Col % RT_MTJ_CACHE_COLS) * 2 + shim_ch];
+    if (prev->col == shim.Col + 1U && memcmp(&prev->dev, &cfg.dev, sizeof cfg - offsetof(rt_mtj_cfg, dev)) == 0) {
+        RT_MTJ_DO(XAie_DmaChannelSetStartQueue(dev, mt, ch, DMA_S2MM, (uint8_t)bd[0], (uint32_t)n, XAIE_DISABLE));
+        RT_MTJ_DO(XAie_DmaChannelSetStartQueue(dev, mt, ch, DMA_MM2S, mm2s_bd, 1, XAIE_DISABLE));
+        if (bad)
+            printf("[aie_runtime] memtile_join_setup memtile(%u,1) ch=%u: re-arm failed\n", (unsigned)mt.Col,
+                   (unsigned)ch);
+        return;
+    }
+    cfg.col = shim.Col + 1U;
+    *prev = cfg;
+    RT_MTJ_DO(XAie_LockSetValue(dev, mt, XAie_LockInit(lk_empty, n)));
+    RT_MTJ_DO(XAie_LockSetValue(dev, mt, XAie_LockInit(lk_full, 0)));
+    for (int i = 0; i < n; i++) {
+        const uint64_t tile = ((uintptr_t)p[i] - base) / rb; /* column position in the row block */
+        XAie_DmaDesc d;
+        RT_MTJ_DO(XAie_DmaDescInit(dev, &d, mt));
+        if (c_blocked) {
+            /* The core wrote mmul<4,8,8> blocks (z, j, rr, 8 B); land them row-major:
+             * d0 = 8 B (2 words), d1 = rr (4 rows, 16 words), d2 = j (8 blocks, 2 words),
+             * d3 = z (16 row groups, 64 words). */
+            XAie_DmaDimDesc cd[4];
+            cd[0].AieMlDimDesc.StepSize = 1;
+            cd[0].AieMlDimDesc.Wrap = 2;
+            cd[1].AieMlDimDesc.StepSize = RT_MTJ_ROW_BYTES / 4;
+            cd[1].AieMlDimDesc.Wrap = 4;
+            cd[2].AieMlDimDesc.StepSize = 2;
+            cd[2].AieMlDimDesc.Wrap = 8;
+            cd[3].AieMlDimDesc.StepSize = 4 * RT_MTJ_ROW_BYTES / 4;
+            cd[3].AieMlDimDesc.Wrap = 16;
+            XAie_DmaTensor ct = {4, cd};
+            RT_MTJ_DO(XAie_DmaSetMultiDimAddr(&d, &ct, mbase + tile * tb, tb));
+        } else {
+            RT_MTJ_DO(XAie_DmaSetAddrLen(&d, mbase + tile * tb, tb));
+        }
+        RT_MTJ_DO(XAie_DmaSetLock(&d, XAie_LockInit(RT_MTJ_OWN_LOCK + lk_empty, -1),
+                                  XAie_LockInit(RT_MTJ_OWN_LOCK + lk_full, 1)));
+        RT_MTJ_DO(XAie_DmaEnableBd(&d));
+        RT_MTJ_DO(XAie_DmaWriteBd(dev, &d, mt, (uint8_t)bd[i]));
+    }
+    __Runtime_dma_channel_enable_ooo(dev, mt, ch, DMA_S2MM);
+    RT_MTJ_DO(XAie_DmaChannelSetStartQueue(dev, mt, ch, DMA_S2MM, (uint8_t)bd[0], (uint32_t)n, XAIE_DISABLE));
+    RT_MTJ_DO(XAie_DmaChannelEnable(dev, mt, ch, DMA_S2MM));
+    /* Row-major re-emit: d0 = one tile row (rb/4 words), d1 = the n tiles, d2 = the tile's rows. */
+    XAie_DmaDimDesc dims[3];
+    dims[0].AieMlDimDesc.StepSize = 1;
+    dims[0].AieMlDimDesc.Wrap = rb / 4;
+    dims[1].AieMlDimDesc.StepSize = tb / 4;
+    dims[1].AieMlDimDesc.Wrap = (uint32_t)n;
+    dims[2].AieMlDimDesc.StepSize = rb / 4;
+    dims[2].AieMlDimDesc.Wrap = tb / rb;
+    XAie_DmaTensor tensor = {3, dims};
+    XAie_DmaDesc d;
+    RT_MTJ_DO(XAie_DmaDescInit(dev, &d, mt));
+    RT_MTJ_DO(XAie_DmaSetMultiDimAddr(&d, &tensor, mbase, (uint32_t)n * tb));
+    RT_MTJ_DO(XAie_DmaSetLock(&d, XAie_LockInit(RT_MTJ_OWN_LOCK + lk_full, -n),
+                              XAie_LockInit(RT_MTJ_OWN_LOCK + lk_empty, n)));
+    RT_MTJ_DO(XAie_DmaEnableBd(&d));
+    RT_MTJ_DO(XAie_DmaWriteBd(dev, &d, mt, mm2s_bd));
+    RT_MTJ_DO(XAie_DmaChannelSetStartQueue(dev, mt, ch, DMA_MM2S, mm2s_bd, 1, XAIE_DISABLE));
+    RT_MTJ_DO(XAie_DmaChannelEnable(dev, mt, ch, DMA_MM2S));
+#undef RT_MTJ_DO
+    if (bad)
+        printf("[aie_runtime] memtile_join_setup memtile(%u,1) ch=%u: a driver call failed\n", (unsigned)mt.Col,
+               (unsigned)ch);
+    AIEHLC_LOG(printf("[aie_runtime] memtile_join_setup memtile(%u,1) ch=%u n=%d tile=%u B row=%u B base=%p\n",
+                      (unsigned)mt.Col, (unsigned)ch, (int)n, (unsigned)tb, (unsigned)rb, (void *)base));
+}
+
+XAie_DmaDesc __Runtime_memtile_join_shim_bd(XAie_DevInst *dev, XAie_LocType shim, int32_t bd, int32_t n,
+                                            int32_t tile_bytes, ...) {
+    void *p[RT_MTJ_MAX_TILES];
+    va_list ap;
+    va_start(ap, tile_bytes);
+    for (int i = 0; i < n && i < RT_MTJ_MAX_TILES; i++)
+        p[i] = va_arg(ap, void *);
+    va_end(ap);
+    const int32_t len = n * tile_bytes;
+    /* Contiguous row block as 2-D (1 KB rows x len/1 KB): the AIE-ML shim D0 wrap field cannot
+     * hold len/4 words, and the driver rejects the 1-D form. */
+    return __Runtime_dma_bd_config_multidim(dev, shim, (void *)rt_mtj_base(p, n), bd, len, -1, 0, 0, -1, 0, -1, 0, -1,
+                                            2, 4, 256, 1024, len / 1024, 0, 0, 0, 0);
+}
+
+/* ---------------------------------------------------------------------------
+ * Memtile input staging with DMA-side packing (doc/design/memtile_staging.md
+ * stages 2-3, AIEHLC_MEMTILE_INPUT=1).
+ *
+ * An input stream (one shim MM2S channel: 4 windows of 64 x 64 B, row-major) is
+ * terminated in the memtile above the shim (S2MM channel 2*shim_ch+1; odd
+ * channels own BDs 24-47) and re-sent to the cores by the memtile MM2S in the
+ * mmul<4,8,8> block layout the kernel computes on, so the core drops its
+ * A/B repacks. One S2MM and one MM2S BD each iterate over the stream in packing
+ * units (256 B of A, 512 B of B^T) with a lock per unit, so the memtile forwards
+ * a unit as soon as it has it (whole 4 KB windows cost ~1.5-2.7k cycles of extra
+ * first-window wait per core on VEK280).
+ * Programmed before the kernel launch (setup), like the output join.
+ * ------------------------------------------------------------------------- */
+#define RT_MTI_WINDOWS 4
+
+void __Runtime_memtile_stage_input_setup(XAie_DevInst *dev, XAie_LocType shim, int32_t shim_ch, int32_t kind) {
+    const XAie_LocType mt = XAie_TileLoc(shim.Col, 1);
+    const uint8_t ch = (uint8_t)(2 * shim_ch + 1);
+    const uint64_t mbase = RT_MTJ_OWN_ADDR + RT_MTI_OWN_OFF + (uint64_t)ch * RT_MTI_WINDOWS * RT_MTJ_TILE_BYTES;
+    const uint8_t lk_empty = (uint8_t)(2 * ch), lk_full = (uint8_t)(2 * ch + 1);
+    const uint8_t s2mm_bd = (uint8_t)(24 + (ch / 2) * 8), mm2s_bd = (uint8_t)(s2mm_bd + 1);
+    /* Forwarding unit = what one packed group needs: 4 rows of A (z) = 256 B, 8 rows of
+     * B^T (j) = 512 B. Each BD runs once per unit (iteration over the 16 KB stream) and the
+     * lock moves per unit, so the memtile forwards after 256-512 B instead of 4 KB. */
+    const int b = kind == 1;
+    const uint32_t unit_words = b ? 128U : 64U;
+    const uint32_t units = RT_MTI_WINDOWS * RT_MTJ_TILE_BYTES / 4U / unit_words;
+    int bad = 0;
+#define RT_MTI_DO(x) (bad |= ((x) != XAIE_OK))
+    /* AIE-ML lock values are 6-bit (0-63): 64 units of A would wrap the empty count to 0.
+     * The lock only bounds how far S2MM runs ahead of MM2S -- every unit has its own
+     * address in the 16 KB buffer -- so 32 in flight is plenty. */
+    RT_MTI_DO(XAie_LockSetValue(dev, mt, XAie_LockInit(lk_empty, (int32_t)(units < 32U ? units : 32U))));
+    RT_MTI_DO(XAie_LockSetValue(dev, mt, XAie_LockInit(lk_full, 0)));
+    XAie_DmaDesc d;
+    RT_MTI_DO(XAie_DmaDescInit(dev, &d, mt));
+    RT_MTI_DO(XAie_DmaSetAddrLen(&d, mbase, unit_words * 4U));
+    RT_MTI_DO(XAie_DmaSetBdIteration(&d, unit_words, (uint16_t)units, 0));
+    RT_MTI_DO(XAie_DmaSetLock(&d, XAie_LockInit(RT_MTJ_OWN_LOCK + lk_empty, -1),
+                              XAie_LockInit(RT_MTJ_OWN_LOCK + lk_full, 1)));
+    RT_MTI_DO(XAie_DmaEnableBd(&d));
+    RT_MTI_DO(XAie_DmaWriteBd(dev, &d, mt, s2mm_bd));
+    /* One packed group: A (z, i, rr, 8 B) = 2 x1, 4 x16, 8 x2; B^T (j, i, nn, 8 B) = 2 x1, 8 x16, 8 x2. */
+    XAie_DmaDimDesc dims[3];
+    dims[0].AieMlDimDesc.StepSize = 1;
+    dims[0].AieMlDimDesc.Wrap = 2;
+    dims[1].AieMlDimDesc.StepSize = 16;
+    dims[1].AieMlDimDesc.Wrap = b ? 8 : 4;
+    dims[2].AieMlDimDesc.StepSize = 2;
+    dims[2].AieMlDimDesc.Wrap = 8;
+    XAie_DmaTensor pack = {3, dims};
+    RT_MTI_DO(XAie_DmaDescInit(dev, &d, mt));
+    RT_MTI_DO(XAie_DmaSetMultiDimAddr(&d, &pack, mbase, unit_words * 4U));
+    RT_MTI_DO(XAie_DmaSetBdIteration(&d, unit_words, (uint16_t)units, 0));
+    RT_MTI_DO(XAie_DmaSetLock(&d, XAie_LockInit(RT_MTJ_OWN_LOCK + lk_full, -1),
+                              XAie_LockInit(RT_MTJ_OWN_LOCK + lk_empty, 1)));
+    RT_MTI_DO(XAie_DmaEnableBd(&d));
+    RT_MTI_DO(XAie_DmaWriteBd(dev, &d, mt, mm2s_bd));
+    RT_MTI_DO(XAie_DmaChannelSetStartQueue(dev, mt, ch, DMA_S2MM, s2mm_bd, units, XAIE_DISABLE));
+    RT_MTI_DO(XAie_DmaChannelEnable(dev, mt, ch, DMA_S2MM));
+    RT_MTI_DO(XAie_DmaChannelSetStartQueue(dev, mt, ch, DMA_MM2S, mm2s_bd, units, XAIE_DISABLE));
+    RT_MTI_DO(XAie_DmaChannelEnable(dev, mt, ch, DMA_MM2S));
+#undef RT_MTI_DO
+    if (bad)
+        printf("[aie_runtime] memtile_stage_input_setup memtile(%u,1) ch=%u: a driver call failed\n", (unsigned)mt.Col,
+               (unsigned)ch);
+}
+
+/* ---------------------------------------------------------------------------
+ * Memtile-resident weights (#pragma memtile_staging(weights), doc/design/memtile_staging.md).
+ *
+ * A column-broadcast input (GEMM B) is stored by the memtile above its shim (S2MM 2*ch+1,
+ * linearly, in arrival order = the shim BD's window order) and re-emitted unchanged by MM2S
+ * 2*ch+1 on every call, so the cores see the same stream as without the memtile. The app
+ * names the block before the launch with __Runtime_memtile_weights_key(key, tail_rows): on a
+ * hit (same non-zero key as this channel's last call) only the last tail_rows rows of each
+ * window -- the per-call part -- come from DDR, landing in their slots of the stored chunk.
+ * Key 0 always transfers the whole chunk. Buffers: own + 0x40000 + shim_ch * 128 KB (above
+ * the output join's region; not combinable with input staging, which uses the same window).
+ * ------------------------------------------------------------------------- */
+#define RT_MTW_OFF 0x40000U
+#define RT_MTW_SPAN 0x20000U
+#define RT_MTW_CACHE_COLS 64
+
+static uint64_t g_mtw_key;
+static int32_t g_mtw_tail_rows, g_mtw_head_rows;
+
+void __Runtime_memtile_weights_key(uint64_t key, int32_t tail_rows) {
+    g_mtw_key = key;
+    g_mtw_tail_rows = tail_rows;
+    g_mtw_head_rows = 0;
+}
+
+/* Compact miss: the cores read only the first head_rows and the last tail_rows rows of every window
+ * (a GEMM block's real B rows + its per-launch tail; the rows between are padding the core skips), so
+ * a miss moves 2 x head rows per window from DDR instead of all of them -- the shim BD reads the two
+ * row groups (3-D), the memtile S2MM puts them at their offsets in the slot (2-D) and leaves the
+ * padding rows as they were. head == tail only (one d1 wrap for both groups). */
+void __Runtime_memtile_weights_head(int32_t head_rows) { g_mtw_head_rows = head_rows; }
+
+/* Up to RT_MTW_SLOTS blocks per channel (as many chunks as fit in RT_MTW_SPAN), replaced
+ * least-recently used; each slot owns a full / tail / re-emit BD (3 of the channel's 8). */
+#define RT_MTW_SLOTS 2
+typedef struct {
+    uint64_t key;
+    uint64_t stamp;
+    int32_t tail_prog;
+    int32_t free_prog; /* replay BD (n-tile launches) programmed */
+    int32_t full_head; /* the full BD's current form: 0 whole windows, else head + tail rows (compact miss) */
+} rt_mtw_slot;
+typedef struct {
+    XAie_DevInst *dev;
+    unsigned gen;
+    uint32_t win, windows, rows, slice, nslots;
+    rt_mtw_slot slot[RT_MTW_SLOTS];
+} rt_mtw_chan;
+static rt_mtw_chan s_mtw[RT_MTW_CACHE_COLS * 2];
+static uint64_t g_mtw_stamp;
+
+void __Runtime_memtile_weights_invalidate(void) { memset(s_mtw, 0, sizeof s_mtw); }
+
+/* Will a launch with this key hit on every weight channel? For the app's copy decision: on 1
+ * it may skip rewriting the static rows (DDR is not read); on 0 it must copy the whole block.
+ * Uses the same state the launch will (partition generation, slots). */
+int __Runtime_memtile_weights_cached(uint64_t key) {
+    if (key == 0)
+        return 0;
+    int seen = 0;
+    for (int i = 0; i < RT_MTW_CACHE_COLS * 2; i++) {
+        const rt_mtw_chan *c = &s_mtw[i];
+        if (!c->dev || c->gen != g_partition_gen)
+            continue;
+        int in = 0;
+        for (uint32_t j = 0; j < c->nslots; j++)
+            in |= c->slot[j].key == key;
+        if (!in)
+            return 0;
+        seen = 1;
+    }
+    return seen;
+}
+
+/* First call on a channel (or a new geometry): locks, the full-chunk S2MM BD, the re-emit MM2S
+ * BD and both channels. Both BDs step one window per iteration with a lock per window, so the
+ * re-emit of window w starts as soon as window w has landed (no whole-chunk store and
+ * forward). Returns non-zero on a driver failure. */
+static int rt_mtw_program(XAie_DevInst *dev, XAie_LocType mt, uint8_t mch, uint64_t mbase, uint32_t win,
+                          uint32_t windows, uint8_t bd_full, uint8_t bd_out) {
+    const uint8_t lk_e = (uint8_t)(2 * mch), lk_f = (uint8_t)(2 * mch + 1);
+    int bad = 0;
+#define RT_MTW_DO(x) (bad |= ((x) != XAIE_OK))
+    RT_MTW_DO(XAie_LockSetValue(dev, mt, XAie_LockInit(lk_e, (int32_t)windows)));
+    RT_MTW_DO(XAie_LockSetValue(dev, mt, XAie_LockInit(lk_f, 0)));
+    XAie_DmaDesc d;
+    RT_MTW_DO(XAie_DmaDescInit(dev, &d, mt));
+    RT_MTW_DO(XAie_DmaSetAddrLen(&d, mbase, win));
+    RT_MTW_DO(XAie_DmaSetBdIteration(&d, win / 4, (uint16_t)windows, 0));
+    RT_MTW_DO(XAie_DmaSetLock(&d, XAie_LockInit(RT_MTJ_OWN_LOCK + lk_e, -1), XAie_LockInit(RT_MTJ_OWN_LOCK + lk_f, 1)));
+    RT_MTW_DO(XAie_DmaEnableBd(&d));
+    RT_MTW_DO(XAie_DmaWriteBd(dev, &d, mt, bd_full));
+    RT_MTW_DO(XAie_DmaDescInit(dev, &d, mt));
+    RT_MTW_DO(XAie_DmaSetAddrLen(&d, mbase, win));
+    RT_MTW_DO(XAie_DmaSetBdIteration(&d, win / 4, (uint16_t)windows, 0));
+    RT_MTW_DO(XAie_DmaSetLock(&d, XAie_LockInit(RT_MTJ_OWN_LOCK + lk_f, -1), XAie_LockInit(RT_MTJ_OWN_LOCK + lk_e, 1)));
+    RT_MTW_DO(XAie_DmaEnableBd(&d));
+    RT_MTW_DO(XAie_DmaWriteBd(dev, &d, mt, bd_out));
+    RT_MTW_DO(XAie_DmaChannelEnable(dev, mt, mch, DMA_S2MM));
+    RT_MTW_DO(XAie_DmaChannelEnable(dev, mt, mch, DMA_MM2S));
+    return bad;
+}
+
+/* The per-call tail: the last tb bytes of every window, written in place, one window per
+ * iteration with the same per-window locks. */
+static int rt_mtw_program_tail(XAie_DevInst *dev, XAie_LocType mt, uint8_t mch, uint64_t mbase, uint32_t win,
+                               uint32_t windows, uint32_t tb, uint8_t bd_tail) {
+    const uint8_t lk_e = (uint8_t)(2 * mch), lk_f = (uint8_t)(2 * mch + 1);
+    int bad = 0;
+    XAie_DmaDesc d;
+    RT_MTW_DO(XAie_DmaDescInit(dev, &d, mt));
+    RT_MTW_DO(XAie_DmaSetAddrLen(&d, mbase + win - tb, tb));
+    RT_MTW_DO(XAie_DmaSetBdIteration(&d, win / 4, (uint16_t)windows, 0));
+    RT_MTW_DO(XAie_DmaSetLock(&d, XAie_LockInit(RT_MTJ_OWN_LOCK + lk_e, -1), XAie_LockInit(RT_MTJ_OWN_LOCK + lk_f, 1)));
+    RT_MTW_DO(XAie_DmaEnableBd(&d));
+    RT_MTW_DO(XAie_DmaWriteBd(dev, &d, mt, bd_tail));
+#undef RT_MTW_DO
+    return bad;
+}
+
+/* The slot's miss BD as whole windows (head 0) or as the compact head + tail rows of each window
+ * (head rows at the window start, the tail rows at win - head * slice), same per-window locks. */
+static int rt_mtw_program_full(XAie_DevInst *dev, XAie_LocType mt, uint8_t mch, uint64_t sbase, uint32_t win,
+                               uint32_t windows, uint32_t head, uint32_t slice, uint8_t bd_full) {
+    const uint8_t lk_e = (uint8_t)(2 * mch), lk_f = (uint8_t)(2 * mch + 1);
+    int bad = 0;
+    XAie_DmaDesc d;
+    bad |= XAie_DmaDescInit(dev, &d, mt) != XAIE_OK;
+    if (head) {
+        XAie_DmaDimDesc dims[2];
+        dims[0].AieMlDimDesc.StepSize = 1;
+        dims[0].AieMlDimDesc.Wrap = head * slice / 4U;
+        dims[1].AieMlDimDesc.StepSize = (win - head * slice) / 4U;
+        dims[1].AieMlDimDesc.Wrap = 2;
+        XAie_DmaTensor t = {2, dims};
+        bad |= XAie_DmaSetMultiDimAddr(&d, &t, sbase, 2U * head * slice) != XAIE_OK;
+    } else {
+        bad |= XAie_DmaSetAddrLen(&d, sbase, win) != XAIE_OK;
+    }
+    bad |= XAie_DmaSetBdIteration(&d, win / 4, (uint16_t)windows, 0) != XAIE_OK;
+    bad |= XAie_DmaSetLock(&d, XAie_LockInit(RT_MTJ_OWN_LOCK + lk_e, -1), XAie_LockInit(RT_MTJ_OWN_LOCK + lk_f, 1)) !=
+           XAIE_OK;
+    bad |= XAie_DmaEnableBd(&d) != XAIE_OK;
+    bad |= XAie_DmaWriteBd(dev, &d, mt, bd_full) != XAIE_OK;
+    return bad;
+}
+
+/* Arguments 4..22 are the shim BD's (as __Runtime_dma_bd_config_multidim_ooo: one window of
+ * rows x slice bytes, repeated `repeat` times stepping iter_step); shim_ch / repeat as the
+ * createio / startio it replaces. */
+/* The replay BD of an n-tile launch: the slot's windows again, no locks. Queued after the locked
+ * re-emit task, so every window it reads has landed (that task acquired each one). */
+static int rt_mtw_program_free(XAie_DevInst *dev, XAie_LocType mt, uint64_t sbase, uint32_t win, uint32_t windows,
+                               uint8_t bd_free) {
+    int bad = 0;
+    XAie_DmaDesc d;
+    bad |= XAie_DmaDescInit(dev, &d, mt) != XAIE_OK;
+    bad |= XAie_DmaSetAddrLen(&d, sbase, win) != XAIE_OK;
+    bad |= XAie_DmaSetBdIteration(&d, win / 4, (uint16_t)windows, 0) != XAIE_OK;
+    bad |= XAie_DmaEnableBd(&d) != XAIE_OK;
+    bad |= XAie_DmaWriteBd(dev, &d, mt, bd_free) != XAIE_OK;
+    return bad;
+}
+
+/* An n-tile K-chain launch: tile t's B block is (t % b_period) * b_step bytes past buffer. Each
+ * block's windows go shim -> memtile slot 0 -> cores, the slot a ring of `windows` windows under
+ * the per-window locks (S2MM waits for the re-emit to free a window). The slot's cached block is
+ * overwritten, so every slot forgets its key. */
+static struct_ioevent rt_mtw_stream(XAie_DevInst *dev, rt_mtw_chan *c, XAie_LocType shim, XAie_LocType mt, uint8_t mch,
+                                    uint64_t mbase, void *buffer, int32_t bd_id, int32_t len, int32_t next_bd,
+                                    int32_t enable_packet, int32_t packet_id, int32_t acq_id, int32_t acq_val,
+                                    int32_t rel_id, int32_t rel_val, int32_t ooo, int32_t s0, int32_t w0, int32_t s1,
+                                    int32_t w1, int32_t iter_step, int32_t shim_ch, int32_t n, int64_t b_step,
+                                    int32_t b_period) {
+    const uint32_t windows = c->windows;
+    const uint8_t bd_base = (uint8_t)(24 + (mch / 2) * 8), bd_full = bd_base, bd_out = (uint8_t)(bd_base + 2);
+    for (uint32_t i = 0; i < c->nslots; i++)
+        c->slot[i].key = 0;
+    if (c->slot[0].full_head) { /* a compact miss left slot 0's BD in head + tail form */
+        if (rt_mtw_program_full(dev, mt, mch, mbase, c->win, windows, 0, c->slice, bd_full))
+            printf("[aie_runtime] memtile_weights stream memtile(%u,1) ch=%u: BD failed\n", (unsigned)mt.Col,
+                   (unsigned)mch);
+        c->slot[0].full_head = 0;
+    }
+    XAie_LockSetValue(dev, mt, XAie_LockInit((uint8_t)(2 * mch), (int32_t)windows));
+    XAie_LockSetValue(dev, mt, XAie_LockInit((uint8_t)(2 * mch + 1), 0));
+    XAie_DmaChannelSetStartQueue(dev, mt, mch, DMA_S2MM, bd_full, windows * (uint32_t)n, XAIE_DISABLE);
+    /* one block = every window (the window walk as d2), b_period blocks b_step apart */
+    XAie_DmaDesc desc = __Runtime_dma_bd_config_multidim_ooo(
+        dev, shim, buffer, bd_id, len * (int32_t)windows, next_bd, enable_packet, packet_id, acq_id, acq_val, rel_id,
+        rel_val, ooo, 3, s0, w0, s1, w1, iter_step, (int32_t)windows, (int32_t)b_step, b_period);
+    struct_ioevent evt =
+        __Runtime_startio(dev, __Runtime_dma_createio_4(shim, desc, shim_ch, bd_id, DMA_MM2S), bd_id, n);
+    XAie_DmaChannelSetStartQueue(dev, mt, mch, DMA_MM2S, bd_out, windows * (uint32_t)n, XAIE_DISABLE);
+    return evt;
+}
+
+static struct_ioevent rt_mtw_start(XAie_DevInst *dev, XAie_LocType shim, void *buffer, int32_t bd_id, int32_t len,
+                                   int32_t next_bd, int32_t enable_packet, int32_t packet_id, int32_t acq_id,
+                                   int32_t acq_val, int32_t rel_id, int32_t rel_val, int32_t ooo, int32_t num_dims,
+                                   int32_t s0, int32_t w0, int32_t s1, int32_t w1, int32_t s2, int32_t w2,
+                                   int32_t iter_step, int32_t iter_wrap, int32_t shim_ch, int32_t repeat, int32_t n,
+                                   int64_t b_step, int32_t b_period) {
+    struct_ioevent evt;
+    memset(&evt, 0, sizeof evt);
+    const uint32_t win = (uint32_t)len, windows = (uint32_t)repeat, chunk = win * windows;
+    const uint32_t slice = (uint32_t)(s0 * w0), rows = (uint32_t)w1;
+    const XAie_LocType mt = XAie_TileLoc(shim.Col, 1);
+    const uint8_t mch = (uint8_t)(2 * shim_ch + 1);
+    const uint64_t mbase = RT_MTJ_OWN_ADDR + RT_MTW_OFF + (uint64_t)shim_ch * RT_MTW_SPAN;
+    if (num_dims < 2 || s0 != 4 || slice * rows != win || chunk > RT_MTW_SPAN || windows < 1 || windows > 63 ||
+        shim_ch < 0 || shim_ch > 1) { /* 6-bit lock values bound the windows */
+        printf(
+            "[aie_runtime] memtile_weights_start shim(%u,0) ch=%d: unsupported window (%u B x %u, %u rows of %u B)\n",
+            (unsigned)shim.Col, (int)shim_ch, (unsigned)win, (unsigned)windows, (unsigned)rows, (unsigned)slice);
+        return evt;
+    }
+    const uint8_t bd_base = (uint8_t)(24 + (mch / 2) * 8);
+    rt_mtw_chan *c = &s_mtw[(shim.Col % RT_MTW_CACHE_COLS) * 2 + shim_ch];
+    if (c->dev != dev || c->gen != g_partition_gen || c->win != win || c->windows != windows || c->rows != rows ||
+        c->slice != slice) {
+        memset(c, 0, sizeof *c);
+        c->nslots = RT_MTW_SPAN / chunk < RT_MTW_SLOTS ? RT_MTW_SPAN / chunk : RT_MTW_SLOTS;
+        for (uint32_t i = 0; i < c->nslots; i++) {
+            if (rt_mtw_program(dev, mt, mch, mbase + (uint64_t)i * chunk, win, windows, (uint8_t)(bd_base + 3 * i),
+                               (uint8_t)(bd_base + 3 * i + 2)))
+                printf("[aie_runtime] memtile_weights_start memtile(%u,1) ch=%u: a driver call failed\n",
+                       (unsigned)mt.Col, (unsigned)mch);
+            c->slot[i].tail_prog = -1;
+            c->slot[i].free_prog = 0;
+        }
+        c->dev = dev, c->gen = g_partition_gen, c->win = win, c->windows = windows, c->rows = rows, c->slice = slice;
+    }
+    if (n > 1 && b_step != 0) /* streaming B: one window ring, nothing cached */
+        return rt_mtw_stream(dev, c, shim, mt, mch, mbase, buffer, bd_id, len, next_bd, enable_packet, packet_id,
+                             acq_id, acq_val, rel_id, rel_val, ooo, s0, w0, s1, w1, iter_step, shim_ch, n, b_step,
+                             b_period);
+    /* The slot holding this key, else the least recently used one. */
+    uint32_t si = 0;
+    int hit = 0;
+    for (uint32_t i = 0; i < c->nslots; i++) {
+        if (g_mtw_key != 0 && c->slot[i].key == g_mtw_key) {
+            si = i, hit = 1;
+            break;
+        }
+        if (c->slot[i].stamp < c->slot[si].stamp)
+            si = i;
+    }
+    rt_mtw_slot *sl = &c->slot[si];
+    sl->stamp = ++g_mtw_stamp;
+    const uint64_t sbase = mbase + (uint64_t)si * chunk;
+    const uint8_t bd_full = (uint8_t)(bd_base + 3 * si), bd_tail = (uint8_t)(bd_full + 1),
+                  bd_out = (uint8_t)(bd_full + 2);
+    const uint32_t tail = g_mtw_tail_rows < 0                ? 0U
+                          : (uint32_t)g_mtw_tail_rows > rows ? rows
+                                                             : (uint32_t)g_mtw_tail_rows;
+    /* (the window is d0 x d1 = slice x rows, checked above: a third dim never comes into play) */
+    const uint32_t head = g_mtw_head_rows > 0 && (uint32_t)g_mtw_head_rows == tail && 2U * tail < rows ? tail : 0U;
+    if (!hit) {
+        if ((uint32_t)sl->full_head != head) {
+            if (rt_mtw_program_full(dev, mt, mch, sbase, win, windows, head, slice, bd_full))
+                printf("[aie_runtime] memtile_weights_start memtile(%u,1) ch=%u: full BD failed\n", (unsigned)mt.Col,
+                       (unsigned)mch);
+            sl->full_head = (int32_t)head;
+        }
+        XAie_DmaChannelSetStartQueue(dev, mt, mch, DMA_S2MM, bd_full, windows, XAIE_DISABLE);
+        /* compact: rows [0, head) and [rows - head, rows) of each window, 3-D */
+        XAie_DmaDesc desc =
+            head ? __Runtime_dma_bd_config_multidim_ooo(dev, shim, buffer, bd_id, (int32_t)(2U * head * slice), next_bd,
+                                                        enable_packet, packet_id, acq_id, acq_val, rel_id, rel_val, ooo,
+                                                        3, s0, w0, s1, (int32_t)head, (int32_t)(rows - head) * s1, 2,
+                                                        iter_step, iter_wrap)
+                 : __Runtime_dma_bd_config_multidim_ooo(dev, shim, buffer, bd_id, len, next_bd, enable_packet,
+                                                        packet_id, acq_id, acq_val, rel_id, rel_val, ooo, num_dims, s0,
+                                                        w0, s1, w1, s2, w2, iter_step, iter_wrap);
+        evt = __Runtime_startio(dev, __Runtime_dma_createio_4(shim, desc, shim_ch, bd_id, DMA_MM2S), bd_id, repeat);
+        sl->key = g_mtw_key;
+    } else if (tail > 0) {
+        const uint32_t tb = tail * slice;
+        if (sl->tail_prog != (int32_t)tail) {
+            if (rt_mtw_program_tail(dev, mt, mch, sbase, win, windows, tb, bd_tail))
+                printf("[aie_runtime] memtile_weights_start memtile(%u,1) ch=%u: tail BD failed\n", (unsigned)mt.Col,
+                       (unsigned)mch);
+            sl->tail_prog = (int32_t)tail;
+        }
+        XAie_DmaChannelSetStartQueue(dev, mt, mch, DMA_S2MM, bd_tail, windows, XAIE_DISABLE);
+        void *tbuf = (char *)buffer + (size_t)(rows - tail) * (size_t)s1;
+        XAie_DmaDesc desc = __Runtime_dma_bd_config_multidim_ooo(
+            dev, shim, tbuf, bd_id, (int32_t)tb, next_bd, enable_packet, packet_id, acq_id, acq_val, rel_id, rel_val,
+            ooo, 2, s0, w0, s1, (int32_t)tail, 0, 0, iter_step, iter_wrap);
+        evt = __Runtime_startio(dev, __Runtime_dma_createio_4(shim, desc, shim_ch, bd_id, DMA_MM2S), bd_id, repeat);
+    } else {
+        /* Nothing changes: hand the stored chunk straight to the re-emit. */
+        XAie_LockSetValue(dev, mt, XAie_LockInit((uint8_t)(2 * mch), 0));
+        XAie_LockSetValue(dev, mt, XAie_LockInit((uint8_t)(2 * mch + 1), (int32_t)windows));
+        evt.io.tile_loc = shim;
+        evt.io.channel_id = (uint8_t)shim_ch;
+        evt.io.direction = DMA_MM2S;
+    }
+    XAie_DmaChannelSetStartQueue(dev, mt, mch, DMA_MM2S, bd_out, windows, XAIE_DISABLE);
+    if (n > 1) { /* n-tile launch: the same block n - 1 more times, from the memtile */
+        const uint8_t bd_free = (uint8_t)(bd_base + 3 * RT_MTW_SLOTS + si);
+        if (!sl->free_prog) {
+            if (rt_mtw_program_free(dev, mt, sbase, win, windows, bd_free))
+                printf("[aie_runtime] memtile_weights_start memtile(%u,1) ch=%u: replay BD failed\n", (unsigned)mt.Col,
+                       (unsigned)mch);
+            sl->free_prog = 1;
+        }
+        XAie_DmaChannelSetStartQueue(dev, mt, mch, DMA_MM2S, bd_free, windows * (uint32_t)(n - 1), XAIE_DISABLE);
+    }
+    AIEHLC_LOG(printf("[aie_runtime] memtile_weights_start shim(%u,0) ch=%d %s key=%llx tail=%u chunk=%u\n",
+                      (unsigned)shim.Col, (int)shim_ch,
+                      hit    ? (tail ? "hit+tail" : "hit")
+                      : head ? "miss(compact)"
+                             : "miss",
+                      (unsigned long long)g_mtw_key, (unsigned)tail, (unsigned)chunk));
+    return evt;
+}
+
+struct_ioevent __Runtime_memtile_weights_start(XAie_DevInst *dev, XAie_LocType shim, void *buffer, int32_t bd_id,
+                                               int32_t len, int32_t next_bd, int32_t enable_packet, int32_t packet_id,
+                                               int32_t acq_id, int32_t acq_val, int32_t rel_id, int32_t rel_val,
+                                               int32_t ooo, int32_t num_dims, int32_t s0, int32_t w0, int32_t s1,
+                                               int32_t w1, int32_t s2, int32_t w2, int32_t iter_step, int32_t iter_wrap,
+                                               int32_t shim_ch, int32_t repeat) {
+    return rt_mtw_start(dev, shim, buffer, bd_id, len, next_bd, enable_packet, packet_id, acq_id, acq_val, rel_id,
+                        rel_val, ooo, num_dims, s0, w0, s1, w1, s2, w2, iter_step, iter_wrap, shim_ch, repeat, 1, 0, 1);
+}
+
+/* n-tile launch (persist_transform host_tile_n_start): b_step 0 re-emits the column's B block n
+ * times from the memtile (n * repeat windows; n <= 32: the memtile start queue's repeat count);
+ * else tile t streams the block (t % b_period) * b_step bytes on (rt_mtw_stream) */
+struct_ioevent __Runtime_memtile_weights_start_n(XAie_DevInst *dev, XAie_LocType shim, void *buffer, int32_t bd_id,
+                                                 int32_t len, int32_t next_bd, int32_t enable_packet, int32_t packet_id,
+                                                 int32_t acq_id, int32_t acq_val, int32_t rel_id, int32_t rel_val,
+                                                 int32_t ooo, int32_t num_dims, int32_t s0, int32_t w0, int32_t s1,
+                                                 int32_t w1, int32_t s2, int32_t w2, int32_t iter_step,
+                                                 int32_t iter_wrap, int32_t shim_ch, int32_t repeat, int32_t n,
+                                                 int64_t b_step, int32_t b_period) {
+    return rt_mtw_start(dev, shim, buffer, bd_id, len, next_bd, enable_packet, packet_id, acq_id, acq_val, rel_id,
+                        rel_val, ooo, num_dims, s0, w0, s1, w1, s2, w2, iter_step, iter_wrap, shim_ch, repeat, n,
+                        b_step, b_period);
+}
+
+/* n-tile A: a 2-D window BD iterated over k windows (iter_step, iter_wrap) becomes one 3-D BD
+ * covering every k window (d2 = the old iteration) iterated over n tiles a_step bytes apart, so
+ * one start with repeat n streams the n tiles in the order the per-tile launches did */
+XAie_DmaDesc __Runtime_ntile_bd_a(XAie_DevInst *dev, XAie_LocType tile, void *buffer, int32_t bd_id, int32_t len,
+                                  int32_t next_bd, int32_t enable_packet, int32_t packet_id, int32_t acq_id,
+                                  int32_t acq_val, int32_t rel_id, int32_t rel_val, int32_t ooo, int32_t num_dims,
+                                  int32_t s0, int32_t w0, int32_t s1, int32_t w1, int32_t s2, int32_t w2,
+                                  int32_t iter_step, int32_t iter_wrap, int32_t n, int64_t a_step) {
+    if (num_dims != 2 || s2 || w2)
+        printf("[aie_runtime] ntile_bd_a tile(%u,%u) bd=%d: want a 2-D window BD (dims %d)\n", (unsigned)tile.Col,
+               (unsigned)tile.Row, bd_id, num_dims);
+    return __Runtime_dma_bd_config_multidim_ooo(dev, tile, buffer, bd_id, len * iter_wrap, next_bd, enable_packet,
+                                                packet_id, acq_id, acq_val, rel_id, rel_val, ooo, 3, s0, w0, s1, w1,
+                                                iter_step, iter_wrap, (int32_t)a_step, n);
+}
+
+/* n-tile C: an out-of-order S2MM BD (one core's tile) that steps c_step bytes per use */
+XAie_DmaDesc __Runtime_ntile_bd_c(XAie_DevInst *dev, XAie_LocType tile, void *buffer, int32_t bd_id, int32_t len,
+                                  int32_t next_bd, int32_t enable_packet, int32_t packet_id, int32_t acq_id,
+                                  int32_t acq_val, int32_t rel_id, int32_t rel_val, int32_t ooo, int32_t num_dims,
+                                  int32_t s0, int32_t w0, int32_t s1, int32_t w1, int32_t s2, int32_t w2, int32_t s3,
+                                  int32_t w3, int32_t n, int64_t c_step) {
+    if (num_dims > 3 || s3 || w3)
+        printf("[aie_runtime] ntile_bd_c tile(%u,%u) bd=%d: want <= 3 dims\n", (unsigned)tile.Col, (unsigned)tile.Row,
+               bd_id);
+    return __Runtime_dma_bd_config_multidim_ooo(dev, tile, buffer, bd_id, len, next_bd, enable_packet, packet_id,
+                                                acq_id, acq_val, rel_id, rel_val, ooo, num_dims, s0, w0, s1, w1, s2, w2,
+                                                (int32_t)c_step, n);
 }
 
 /**
@@ -7745,6 +8672,42 @@ static int __Runtime_dm_zero_wide(XAie_DevInst *dev, XAie_LocType loc, u32 paddr
 }
 #endif
 
+#if defined(AIEHLC_WARM_TEXT)
+/* Program memory is not writable by the core and survives core reset and the DM
+ * zeroisation, so a tile that already holds this ELF in this partition instance
+ * keeps its .text: only the data segments are rewritten. */
+#define RT_WARM_TEXT_MAX 64
+static struct {
+    XAie_DevInst *dev;
+    const unsigned char *elf;
+    unsigned gen;
+    u8 col, row;
+} s_text_warm[RT_WARM_TEXT_MAX];
+
+static int rt_text_warm(XAie_DevInst *dev, XAie_LocType loc, const unsigned char *elf) {
+    int fr = -1;
+    for (int i = 0; i < RT_WARM_TEXT_MAX; i++) {
+        if (s_text_warm[i].elf && s_text_warm[i].col == loc.Col && s_text_warm[i].row == loc.Row) {
+            int hit = s_text_warm[i].dev == dev && s_text_warm[i].elf == elf && s_text_warm[i].gen == g_partition_gen;
+            fr = i;
+            if (hit)
+                return 1;
+            break;
+        }
+        if (fr < 0 && !s_text_warm[i].elf)
+            fr = i;
+    }
+    if (fr >= 0) {
+        s_text_warm[fr].dev = dev;
+        s_text_warm[fr].elf = elf;
+        s_text_warm[fr].gen = g_partition_gen;
+        s_text_warm[fr].col = loc.Col;
+        s_text_warm[fr].row = loc.Row;
+    }
+    return 0;
+}
+#endif
+
 #if defined(AIEHLC_PMLOAD_WIDE) && AIEHLC_PMLOAD_WIDE && defined(__aarch64__)
 /* Experimental (-DAIEHLC_PMLOAD_WIDE=1): write a program-memory segment with
  * 128-bit stores instead of aie-rt's one 32-bit write per word (each AXI
@@ -7905,6 +8868,10 @@ static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc
         g_pm_warm_cold_loads++;
     rt_pm_warm_record(dev, loc, elfmem, 0); /* invalid while PM is being (re)written */
 #endif
+#if defined(AIEHLC_WARM_TEXT)
+    const u32 pm_size = dev->DevProp.DevMod[XAIEGBL_TILE_TYPE_AIETILE].CoreMod->ProgMemSize;
+    const int warm = rt_text_warm(dev, loc, elfmem);
+#endif
     for (u32 ph = 0; ph < ehdr->e_phnum; ph++) {
         const Elf32_Phdr *phdr = (const Elf32_Phdr *)(elfmem + ehdr->e_phoff + (u64)ph * sizeof(Elf32_Phdr));
         if (phdr->p_type != (u32)PT_LOAD)
@@ -7920,6 +8887,12 @@ static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc
 #if defined(AIEHLC_PM_WARM_SKIP_VERIFY) && AIEHLC_PM_WARM_SKIP_VERIFY
             rt_pm_warm_verify(dev, loc, elfmem + phdr->p_offset, phdr);
 #endif
+            continue;
+        }
+#endif
+#if defined(AIEHLC_WARM_TEXT)
+        if (warm && phdr->p_paddr < pm_size) {
+            skipped++;
             continue;
         }
 #endif
@@ -7975,6 +8948,55 @@ static int __Runtime_skip_bss_enabled(void) {
 }
 #endif
 
+#if defined(AIEHLC_HW_ZERO_BSS) && !defined(__AIESIM__)
+#ifdef __cplusplus
+extern "C" {
+#endif
+#include "xaiengine/xaie_npi.h"
+#ifdef __cplusplus
+}
+#endif
+/* Zero every kernel tile's data memory with the hardware zeroisation engine (one
+ * protected-register window for the whole group), so ELF loads can skip .bss. */
+static void rt_hw_zero_dm(XAie_DevInst *dev, const XAie_LocType *tiles, int n) {
+    const XAie_MemCtrlMod *mc = dev->DevProp.DevMod[XAIEGBL_TILE_TYPE_AIETILE].MemCtrlMod;
+    XAie_NpiProtRegReq req = {dev->StartCol, dev->NumCols, XAIE_ENABLE};
+    const AieRC prc = _XAie_NpiSetProtectedRegEnable(dev, &req);
+#if AIE_GEN == 5
+    /* --warm-launch skips .bss on load and relies on this: prove once per process that the zeroisation
+     * clears AIE2PS data memory (a canary in the last DM word must read back 0; portobello13: it does) */
+    static int s_zero_checked;
+    XAie_LocType canary = n > 0 ? tiles[0] : XAie_TileLoc(0, 0);
+    if (!s_zero_checked && n > 0)
+        XAie_DataMemWrWord(dev, canary, 0xFFFCU, 0xA5A5A5A5U);
+#endif
+    for (int i = 0; i < n; i++)
+        if (__Runtime_is_aie_core_tile(tiles[i]))
+            XAie_Write32(dev, XAie_GetTileAddr(dev, tiles[i].Row, tiles[i].Col) + mc[0].MemCtrlRegOff,
+                         mc[0].MemZeroisation.Mask);
+    for (int i = 0; i < n; i++)
+        if (__Runtime_is_aie_core_tile(tiles[i]))
+            XAie_MaskPoll(dev, XAie_GetTileAddr(dev, tiles[i].Row, tiles[i].Col) + mc[0].MemCtrlRegOff,
+                          mc[0].MemZeroisation.Mask, 0, 1000);
+#if AIE_GEN == 5
+    if (!s_zero_checked && n > 0) {
+        u32 v = 0xFFFFFFFFU;
+        XAie_DataMemRdWord(dev, canary, 0xFFFCU, &v);
+        if (v)
+            printf("[aie_runtime] hw_zero_dm: DM NOT zeroed (canary 0x%08x, npi prot enable rc=%d): .bss is stale, "
+                   "build without --warm-launch\n",
+                   (unsigned)v, (int)prc);
+        AIEHLC_LOG(printf("[aie_runtime] hw_zero_dm: npi rc=%d canary 0x%08x\n", (int)prc, (unsigned)v));
+        s_zero_checked = 1;
+    }
+#else
+    (void)prc;
+#endif
+    req.Enable = XAIE_DISABLE;
+    _XAie_NpiSetProtectedRegEnable(dev, &req);
+}
+#endif
+
 static void __Runtime_load_kernel_elf(XAie_DevInst *dev, XAie_LocType loc, unsigned char *elfmem) {
     g_elf_load_seq++;
 #if !defined(__AIESIM__)
@@ -8017,12 +9039,29 @@ struct_kernel_group __Runtime_load_kernel_group(XAie_DevInst *dev, XAie_LocType 
     return kg;
 }
 
+#if defined(AIEHLC_PLAIN_WRITE_RESET) && AIE_GEN == 2 && !defined(__AIESIM__)
+/* Whole-register writes instead of read-modify-write (the control-packet path's
+ * rt_cpe_reset_accesses sequence): each avoided read is ~175 ns on the A72. */
+#define RT_PW_CORE_CTRL 0x32000U
+#define RT_PW_DMA_CTRL 0x1DE00U
+static inline u64 rt_pw_tile(XAie_DevInst *dev, XAie_LocType t) { return XAie_GetTileAddr(dev, t.Row, t.Col); }
+#endif
+
 static int s_kernel_group_loaded;
 static int s_kernel_ntiles;
 static void rt_relaunch_dma_reset(XAie_DevInst *dev, const XAie_LocType *tiles, int n) {
     if (!s_kernel_group_loaded)
         return;
     unsigned long long t0 = RT_PROF_TIC();
+#if defined(AIEHLC_PLAIN_WRITE_RESET) && AIE_GEN == 2 && !defined(__AIESIM__)
+    for (u32 v = 0; v < 2; v++)
+        for (int i = 0; i < n; i++)
+            if (__Runtime_is_aie_core_tile(tiles[i]))
+                for (u32 c = 0; c < 4; c++)
+                    XAie_Write32(dev, rt_pw_tile(dev, tiles[i]) + RT_PW_DMA_CTRL + c * 8U, v ? 0U : 0x2U);
+    RT_PROF_ADD(g_kl_rst_cyc, g_kl_rst_n, t0);
+    return;
+#endif
     for (int i = 0; i < n; i++)
         if (__Runtime_is_aie_core_tile(tiles[i]))
             (void)XAie_DmaChannelResetAll(dev, tiles[i], DMA_CHANNEL_RESET);
@@ -8046,6 +9085,9 @@ struct_kernel_group __Runtime_load_kernel_group_nt(XAie_DevInst *dev, XAie_LocTy
         s_kernel_tiles[i] = tiles[i];
         AIEHLC_LOG(printf("[aie_runtime]   tile[%d] = (%u,%u)\n", i, (unsigned)tiles[i].Col, (unsigned)tiles[i].Row););
     }
+#if defined(AIEHLC_HW_ZERO_BSS) && !defined(__AIESIM__)
+    rt_hw_zero_dm(dev, s_kernel_tiles, n);
+#endif
     for (int i = 0; i < n; i++) {
         if (!__Runtime_is_aie_core_tile(s_kernel_tiles[i]))
             continue;
@@ -8059,14 +9101,22 @@ struct_kernel_group __Runtime_load_kernel_group_nt(XAie_DevInst *dev, XAie_LocTy
         //   XAie_CoreUnreset(dev, s_kernel_tiles[i]);
         // #else
         unsigned long long __kr0 = RT_PROF_TIC();
+#if defined(AIEHLC_PLAIN_WRITE_RESET) && AIE_GEN == 2 && !defined(__AIESIM__)
+        XAie_Write32(dev, rt_pw_tile(dev, s_kernel_tiles[i]) + RT_PW_CORE_CTRL, 0x2U);
+#else
         XAie_CoreDisable(dev, s_kernel_tiles[i]);
         XAie_CoreReset(dev, s_kernel_tiles[i]);
+#endif
         RT_PROF_ADD(g_kl_rst_cyc, g_kl_rst_n, __kr0);
         unsigned long long __ke0 = RT_PROF_TIC();
         __Runtime_load_kernel_elf(dev, s_kernel_tiles[i], s_active_kernel_elf);
         RT_PROF_ADD(g_kl_elf_cyc, g_kl_elf_n, __ke0);
         unsigned long long __ku0 = RT_PROF_TIC();
+#if defined(AIEHLC_PLAIN_WRITE_RESET) && AIE_GEN == 2 && !defined(__AIESIM__)
+        XAie_Write32(dev, rt_pw_tile(dev, s_kernel_tiles[i]) + RT_PW_CORE_CTRL, 0U);
+#else
         XAie_CoreUnreset(dev, s_kernel_tiles[i]);
+#endif
         RT_PROF_ADD(g_kl_rst_cyc, g_kl_rst_n, __ku0);
         // #endif
     }
@@ -8102,6 +9152,39 @@ struct_kernel_group __Runtime_load_kernel_group_16t(XAie_DevInst *dev, XAie_LocT
                                                     XAie_LocType t10, XAie_LocType t11, XAie_LocType t12,
                                                     XAie_LocType t13, XAie_LocType t14, XAie_LocType t15, int n) {
     XAie_LocType arr[] = {t0, t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15};
+    return __Runtime_load_kernel_group_nt(dev, arr, n);
+}
+
+/* larger meshes (8x4 = 32, 8x8 = 64 cores): positional like _16t, then the generic loader */
+struct_kernel_group __Runtime_load_kernel_group_32t(
+    XAie_DevInst *dev, XAie_LocType t0, XAie_LocType t1, XAie_LocType t2, XAie_LocType t3, XAie_LocType t4,
+    XAie_LocType t5, XAie_LocType t6, XAie_LocType t7, XAie_LocType t8, XAie_LocType t9, XAie_LocType t10,
+    XAie_LocType t11, XAie_LocType t12, XAie_LocType t13, XAie_LocType t14, XAie_LocType t15, XAie_LocType t16,
+    XAie_LocType t17, XAie_LocType t18, XAie_LocType t19, XAie_LocType t20, XAie_LocType t21, XAie_LocType t22,
+    XAie_LocType t23, XAie_LocType t24, XAie_LocType t25, XAie_LocType t26, XAie_LocType t27, XAie_LocType t28,
+    XAie_LocType t29, XAie_LocType t30, XAie_LocType t31, int n) {
+    XAie_LocType arr[] = {t0,  t1,  t2,  t3,  t4,  t5,  t6,  t7,  t8,  t9,  t10, t11, t12, t13, t14, t15,
+                          t16, t17, t18, t19, t20, t21, t22, t23, t24, t25, t26, t27, t28, t29, t30, t31};
+    return __Runtime_load_kernel_group_nt(dev, arr, n);
+}
+
+/* larger meshes (8x4 = 32, 8x8 = 64 cores): positional like _16t, then the generic loader */
+struct_kernel_group __Runtime_load_kernel_group_64t(
+    XAie_DevInst *dev, XAie_LocType t0, XAie_LocType t1, XAie_LocType t2, XAie_LocType t3, XAie_LocType t4,
+    XAie_LocType t5, XAie_LocType t6, XAie_LocType t7, XAie_LocType t8, XAie_LocType t9, XAie_LocType t10,
+    XAie_LocType t11, XAie_LocType t12, XAie_LocType t13, XAie_LocType t14, XAie_LocType t15, XAie_LocType t16,
+    XAie_LocType t17, XAie_LocType t18, XAie_LocType t19, XAie_LocType t20, XAie_LocType t21, XAie_LocType t22,
+    XAie_LocType t23, XAie_LocType t24, XAie_LocType t25, XAie_LocType t26, XAie_LocType t27, XAie_LocType t28,
+    XAie_LocType t29, XAie_LocType t30, XAie_LocType t31, XAie_LocType t32, XAie_LocType t33, XAie_LocType t34,
+    XAie_LocType t35, XAie_LocType t36, XAie_LocType t37, XAie_LocType t38, XAie_LocType t39, XAie_LocType t40,
+    XAie_LocType t41, XAie_LocType t42, XAie_LocType t43, XAie_LocType t44, XAie_LocType t45, XAie_LocType t46,
+    XAie_LocType t47, XAie_LocType t48, XAie_LocType t49, XAie_LocType t50, XAie_LocType t51, XAie_LocType t52,
+    XAie_LocType t53, XAie_LocType t54, XAie_LocType t55, XAie_LocType t56, XAie_LocType t57, XAie_LocType t58,
+    XAie_LocType t59, XAie_LocType t60, XAie_LocType t61, XAie_LocType t62, XAie_LocType t63, int n) {
+    XAie_LocType arr[] = {t0,  t1,  t2,  t3,  t4,  t5,  t6,  t7,  t8,  t9,  t10, t11, t12, t13, t14, t15,
+                          t16, t17, t18, t19, t20, t21, t22, t23, t24, t25, t26, t27, t28, t29, t30, t31,
+                          t32, t33, t34, t35, t36, t37, t38, t39, t40, t41, t42, t43, t44, t45, t46, t47,
+                          t48, t49, t50, t51, t52, t53, t54, t55, t56, t57, t58, t59, t60, t61, t62, t63};
     return __Runtime_load_kernel_group_nt(dev, arr, n);
 }
 
@@ -8919,7 +10002,11 @@ void __Runtime_core_run(XAie_DevInst *dev, XAie_LocType *tiles, uint32_t num_til
     XAie_StartTransaction(dev, XAIE_TRANSACTION_ENABLE_AUTO_FLUSH);
     for (uint32_t i = 0; i < num_tiles; i++) {
         if (__Runtime_is_aie_core_tile(tiles[i])) {
+#if defined(AIEHLC_PLAIN_WRITE_RESET) && AIE_GEN == 2 && !defined(__AIESIM__)
+            XAie_Write32(dev, rt_pw_tile(dev, tiles[i]) + RT_PW_CORE_CTRL, 0x1U);
+#else
             XAie_CoreEnable(dev, tiles[i]);
+#endif
         } else {
             printf("[aie_runtime] WARNING: core_run skipping non-core tile (%u,%u)\n", (unsigned)tiles[i].Col,
                    (unsigned)tiles[i].Row);

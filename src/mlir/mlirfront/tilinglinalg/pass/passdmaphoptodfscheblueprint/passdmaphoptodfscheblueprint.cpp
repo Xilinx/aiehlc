@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  ******************************************************************************/
 
+#include "aiehlcsymbol.h"
 #include "passdmaphoptodfscheblueprint.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -42,17 +43,17 @@ static int32_t g_dataIdCounter = 0;
 // Otherwise assumes it's a direct port symbol.
 static dmaphop::port resolvePortFromPathSymbol(Operation *contextOp, FlatSymbolRefAttr symRef) {
     // Try direct port lookup first (shim/mem ports)
-    if (auto portOp = SymbolTable::lookupNearestSymbolFrom<dmaphop::port>(contextOp, symRef))
+    if (auto portOp = aiehlc::lookupNamed<dmaphop::port>(contextOp, symRef))
         return portOp;
     // Try consumer indirection
-    if (auto consumerOp = SymbolTable::lookupNearestSymbolFrom<dmaphop::consumer>(contextOp, symRef)) {
+    if (auto consumerOp = aiehlc::lookupNamed<dmaphop::consumer>(contextOp, symRef)) {
         auto fromRef = consumerOp.getFromAttr();
-        return SymbolTable::lookupNearestSymbolFrom<dmaphop::port>(contextOp, fromRef);
+        return aiehlc::lookupNamed<dmaphop::port>(contextOp, fromRef);
     }
     // Try producer indirection
-    if (auto producerOp = SymbolTable::lookupNearestSymbolFrom<dmaphop::producer>(contextOp, symRef)) {
+    if (auto producerOp = aiehlc::lookupNamed<dmaphop::producer>(contextOp, symRef)) {
         auto tpRef = producerOp.getTpAttr();
-        return SymbolTable::lookupNearestSymbolFrom<dmaphop::port>(contextOp, tpRef);
+        return aiehlc::lookupNamed<dmaphop::port>(contextOp, tpRef);
     }
     return nullptr;
 }
@@ -78,7 +79,7 @@ static int32_t resolveFuncArgIndexForRootView(Value rootView) {
             return -1;
         // Step through value-forwarding ops that preserve tensor identity.
         if (auto toTensor = dyn_cast<bufferization::ToTensorOp>(def)) {
-            cur = toTensor.getMemref();
+            cur = toTensor.getBuffer();
             continue;
         }
         if (auto sched = dyn_cast<routing::createscheduletensor>(def)) {
@@ -1459,7 +1460,7 @@ struct PullOpConversion : public OpConversionPattern<dmaphop::pull> {
             else if (auto schedTensor = dyn_cast<routing::createscheduletensor>(defOp))
                 traceVal = schedTensor.getInitTensor();
             else if (auto toTensor = dyn_cast<bufferization::ToTensorOp>(defOp))
-                traceVal = toTensor.getMemref();
+                traceVal = toTensor.getBuffer();
             else
                 break; // unknown op
         }

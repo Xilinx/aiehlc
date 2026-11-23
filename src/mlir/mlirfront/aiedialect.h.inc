@@ -11,8 +11,10 @@
 |*                                                                            *|
 \*===----------------------------------------------------------------------===*/
 
-namespace mlir {
-namespace aie {
+#include "mlir/IR/Dialect.h"
+
+namespace mlir::aie {
+
 
 class AieADialect : public ::mlir::Dialect {
   explicit AieADialect(::mlir::MLIRContext *context);
@@ -32,6 +34,6 @@ public:
   void printType(::mlir::Type type,
                  ::mlir::DialectAsmPrinter &os) const override;
 };
-} // namespace aie
-} // namespace mlir
+
+} // namespace mlir::aie
 MLIR_DECLARE_EXPLICIT_TYPE_ID(::mlir::aie::AieADialect)

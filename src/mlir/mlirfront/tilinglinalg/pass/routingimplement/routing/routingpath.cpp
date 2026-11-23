@@ -133,7 +133,9 @@ bool RoutingPath::bfsSingle(const Point& start,const Point& goal,
             
             //check whether the connection has enough resources
             if(!inGrid(nxt)||!connectAvailable(Point{cur.r, cur.c}, Point{nxt.r,nxt.c})) continue;
-            
+            if (hasNoFirstHop_ && cur == start && nxt == noFirstHop_)
+                continue;
+
             int newDist = dist[cur.r][cur.c] + 1;
             
             // Only update if we found a shorter path

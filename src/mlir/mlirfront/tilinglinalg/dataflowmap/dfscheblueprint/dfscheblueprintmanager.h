@@ -64,6 +64,7 @@ using namespace dfscheblueprint;
 #undef GET_ATTRDEF_CLASSES
 
 #define GET_OP_CLASSES
+#include "aiehlcsymbol.h"
 #include "dfscheblueprintop.h.inc"
 #undef GET_OP_CLASSES
 

@@ -506,11 +506,11 @@ struct AllocDeviceMemInnerPattern : public OpConversionPattern<dfschedule::Alloc
 /// Inner pattern for bufferization.to_memref inside dfschedule.host.
 /// The source tensor constant was converted to a global array (void*) in Phase 2.
 /// Simply forward the converted operand (already void*) as the memref → void* result.
-struct ToMemrefInnerPattern : public OpConversionPattern<bufferization::ToMemrefOp> {
+struct ToMemrefInnerPattern : public OpConversionPattern<bufferization::ToBufferOp> {
     ToMemrefInnerPattern(TypeConverter &typeConverter, MLIRContext *ctx)
-        : OpConversionPattern<bufferization::ToMemrefOp>(typeConverter, ctx, /*benefit=*/90) {}
+        : OpConversionPattern<bufferization::ToBufferOp>(typeConverter, ctx, /*benefit=*/90) {}
 
-    LogicalResult matchAndRewrite(bufferization::ToMemrefOp op, OpAdaptor adaptor,
+    LogicalResult matchAndRewrite(bufferization::ToBufferOp op, OpAdaptor adaptor,
                                   ConversionPatternRewriter &rewriter) const override {
         // Only handle ops inside dfschedule.host (the DDR init chain).
         if (!op->getParentOfType<dfschedule::HostBlockOp>())
@@ -637,9 +637,9 @@ struct MemRefSubviewInnerPattern : public OpConversionPattern<memref::SubViewOp>
         auto resType = cast<MemRefType>(op.getType());
         SmallVector<int64_t> resStrides, srcStrides;
         int64_t resOffset = 0, srcOffset = 0;
-        if (!resType.getLayout().isIdentity() && succeeded(getStridesAndOffset(resType, resStrides, resOffset)) &&
+        if (!resType.getLayout().isIdentity() && succeeded(resType.getStridesAndOffset(resStrides, resOffset)) &&
             !ShapedType::isDynamic(resOffset)) {
-            if (!srcType.getLayout().isIdentity() && succeeded(getStridesAndOffset(srcType, srcStrides, srcOffset)) &&
+            if (!srcType.getLayout().isIdentity() && succeeded(srcType.getStridesAndOffset(srcStrides, srcOffset)) &&
                 !ShapedType::isDynamic(srcOffset)) {
                 // relative to the offset carried by the immediate source
             } else {
@@ -2028,6 +2028,9 @@ struct LoadKernelGroupInnerPattern : public OpConversionPattern<dfschedule::Load
         } else if (numTiles <= 16) {
             padTo = 16;
             funcName = "__Runtime_load_kernel_group_16t";
+        } else if (numTiles <= 64 && !state.controlKernelOps) { // 8x4 / 8x8 meshes (MMIO load only)
+            padTo = numTiles <= 32 ? 32 : 64;
+            funcName = padTo == 32 ? "__Runtime_load_kernel_group_32t" : "__Runtime_load_kernel_group_64t";
         } else {
             llvm::errs() << "  ERROR: too many tiles (" << numTiles << ") for load_kernel_group\n";
             return failure();
@@ -3160,35 +3163,32 @@ static void setupTypeConverter(TypeConverter &typeConverter, MLIRContext *ctx) {
     });
   
     // Materialization callbacks to handle value conversions
-    auto castIfNeeded =
-        [](OpBuilder &builder, Type resultType, ValueRange inputs, Location loc)
-        -> std::optional<Value> {
-          if (inputs.size() != 1) {
-              llvm::errs() << "[Materialization] ERROR: Wrong number of inputs: " << inputs.size() << "\n";
-              return std::nullopt;
-          }
-          
-          // Check if input is null
-          if (!inputs[0]) {
-              llvm::errs() << "[Materialization] ERROR: Input value is NULL!\n";
-              llvm::errs() << "[Materialization] ERROR: Requested result type: " << resultType << "\n";
-              return std::nullopt;
-          }
-          
-          if (inputs[0].getType() == resultType) {
-              llvm::errs() << "[Materialization] Types match, returning input directly\n";
-              return inputs[0];
-          }
-          
-          llvm::errs() << "[Materialization] Creating cast from " << inputs[0].getType() << " to " << resultType << "\n";
-          // Create unrealized cast for type mismatches
-          return builder.create<UnrealizedConversionCastOp>(loc, resultType, inputs[0])
-              .getResult(0);
-        };
-  
+    auto castIfNeeded = [](OpBuilder &builder, Type resultType, ValueRange inputs,
+                           Location loc) -> Value { // LLVM 24: a null Value means failure
+        if (inputs.size() != 1) {
+            llvm::errs() << "[Materialization] ERROR: Wrong number of inputs: " << inputs.size() << "\n";
+            return Value();
+        }
+
+        // Check if input is null
+        if (!inputs[0]) {
+            llvm::errs() << "[Materialization] ERROR: Input value is NULL!\n";
+            llvm::errs() << "[Materialization] ERROR: Requested result type: " << resultType << "\n";
+            return Value();
+        }
+
+        if (inputs[0].getType() == resultType) {
+            llvm::errs() << "[Materialization] Types match, returning input directly\n";
+            return inputs[0];
+        }
+
+        llvm::errs() << "[Materialization] Creating cast from " << inputs[0].getType() << " to " << resultType << "\n";
+        // Create unrealized cast for type mismatches
+        return builder.create<UnrealizedConversionCastOp>(loc, resultType, inputs[0]).getResult(0);
+    };
+
     typeConverter.addSourceMaterialization(castIfNeeded);
     typeConverter.addTargetMaterialization(castIfNeeded);
-    typeConverter.addArgumentMaterialization(castIfNeeded);
 }
 
 //===----------------------------------------------------------------------===//
@@ -3349,7 +3349,7 @@ void DfscheduleToApiPass::runOnOperation() {
         // must be converted to global C arrays so the pass can lower them.
         if (!constOp->getParentOfType<dfschedule::HostBlockOp>()) {
             for (Operation *user : constOp->getUsers()) {
-                if (isa<bufferization::ToMemrefOp>(user))
+                if (isa<bufferization::ToBufferOp>(user))
                     return;
             }
         }
@@ -3524,8 +3524,8 @@ void DfscheduleToApiPass::runOnOperation() {
 
     // DDR init chain ops moved into dfschedule.host by ScheduleCanonicalizePass.
     // Mark them illegal only when inside a HostBlockOp (outside is @main, still legal).
-    innerTarget.addDynamicallyLegalOp<bufferization::ToMemrefOp>(
-        [](bufferization::ToMemrefOp op) { return !op->getParentOfType<dfschedule::HostBlockOp>(); });
+    innerTarget.addDynamicallyLegalOp<bufferization::ToBufferOp>(
+        [](bufferization::ToBufferOp op) { return !op->getParentOfType<dfschedule::HostBlockOp>(); });
     innerTarget.addDynamicallyLegalOp<memref::AllocOp>(
         [](memref::AllocOp op) { return !op->getParentOfType<dfschedule::HostBlockOp>(); });
     innerTarget.addDynamicallyLegalOp<memref::CopyOp>(
@@ -3855,7 +3855,10 @@ void DfscheduleToApiPass::runOnOperation() {
 
         // Step 2: Convert scf.for → emitc.for using upstream SCFToEmitC patterns.
         RewritePatternSet scfPatterns(ctx);
-        mlir::populateSCFToEmitCConversionPatterns(scfPatterns);
+        // LLVM 24 takes a TypeConverter; identity keeps the old (converter-less) behaviour
+        TypeConverter scfTypes;
+        scfTypes.addConversion([](Type t) { return t; });
+        mlir::populateSCFToEmitCConversionPatterns(scfPatterns, scfTypes);
 
         ConversionTarget scfTarget(*ctx);
         scfTarget.addLegalDialect<emitc::EmitCDialect>();
@@ -3973,8 +3976,8 @@ void DfscheduleToApiPass::runOnOperation() {
         for (RegisteredOperationName op : ctx->getRegisteredOperations()) {
             op.getCanonicalizationPatterns(canonPatterns, ctx);
         }
-        
-        if (failed(applyPatternsAndFoldGreedily(moduleOp, std::move(canonPatterns)))) {
+
+        if (failed(applyPatternsGreedily(moduleOp, std::move(canonPatterns)))) {
             llvm::errs() << "[Pass] Warning: Canonicalization had issues\n";
         }
     }

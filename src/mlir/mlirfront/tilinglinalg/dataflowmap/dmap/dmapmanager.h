@@ -63,6 +63,7 @@ using namespace dmap;
 
 #define GET_OP_CLASSES
 #define GET_OP_DECLS
+#include "aiehlcsymbol.h"
 #include "dmapop.h.inc"
 #undef GET_OP_DECLS
 #undef GET_OP_CLASSES

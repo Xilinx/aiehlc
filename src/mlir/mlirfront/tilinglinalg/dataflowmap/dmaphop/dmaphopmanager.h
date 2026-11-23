@@ -61,7 +61,15 @@ using namespace dmaphop;
 
 #define GET_OP_CLASSES
 #define GET_OP_DECLS
+#include "aiehlcsymbol.h"
 #include "dmaphopop.h.inc"
+namespace dmaphop {
+// LLVM 24 ODS emits Op::create(builder, loc, <result>, ...); a result named like its
+// class (`port`, `tile`) shadowed the class inside it, so the classes are PortOp /
+// TileOp and the old names stay as aliases.
+using port = PortOp;
+using tile = TileOp;
+} // namespace dmaphop
 #undef GET_OP_DECLS
 #undef GET_OP_CLASSEST
 

@@ -48,40 +48,31 @@ int64_t tilearrayType::getTileBase() const {
 }
 
 // implement creattilearrayop result assembly
-LogicalResult createtilearrayOp::inferReturnTypes(mlir::MLIRContext* ctx, 
-    std::optional<mlir::Location>, 
-    mlir::ValueRange, 
-    mlir::DictionaryAttr args, 
-    mlir::OpaqueProperties, 
-    mlir::RegionRange, 
-    llvm::SmallVectorImpl<mlir::Type>& infer) {
-        //args is arguments
-        //auto items = args.get("items").dyn_cast_or_null<TileRangeArrayAttr>();
-        //if (!items) return failure();
+LogicalResult createtilearrayOp::inferReturnTypes(mlir::MLIRContext *ctx, std::optional<mlir::Location>,
+                                                  mlir::ValueRange, mlir::DictionaryAttr args, mlir::PropertyRef,
+                                                  mlir::RegionRange, llvm::SmallVectorImpl<mlir::Type> &infer) {
+    // args is arguments
+    // auto items = args.get("items").dyn_cast_or_null<TileRangeArrayAttr>();
+    // if (!items) return failure();
     TileRangeAttr ta = TileRangeAttr::get(ctx, -1,-1);
     llvm::SmallVector<TileRangeAttr,4> slist;
     slist.push_back(ta);
     infer.push_back(tilearrayType::get(ctx,slist));
 
     return success();
-
 }
 
-LogicalResult createdataio::inferReturnTypes(mlir::MLIRContext* ctx, 
-    std::optional<mlir::Location>, 
-    mlir::ValueRange, 
-    mlir::DictionaryAttr args, 
-    mlir::OpaqueProperties, 
-    mlir::RegionRange, 
-    llvm::SmallVectorImpl<mlir::Type>& infer) {
-        //args is arguments
-        auto items = args.get("iotype").dyn_cast_or_null<StringAttr>();
-        auto items2 = args.get("direction").dyn_cast_or_null<StringAttr>();
-        if (!items||!items) return failure();
-        infer.push_back(dataioType::get(ctx,items, items2));
+LogicalResult createdataio::inferReturnTypes(mlir::MLIRContext *ctx, std::optional<mlir::Location>, mlir::ValueRange,
+                                             mlir::DictionaryAttr args, mlir::PropertyRef, mlir::RegionRange,
+                                             llvm::SmallVectorImpl<mlir::Type> &infer) {
+    // args is arguments
+    auto items = llvm::dyn_cast_or_null<StringAttr>(args.get("iotype"));
+    auto items2 = llvm::dyn_cast_or_null<StringAttr>(args.get("direction"));
+    if (!items || !items)
+        return failure();
+    infer.push_back(dataioType::get(ctx, items, items2));
 
     return success();
-
 }
 
 // In RoutingOps.cpp
@@ -487,9 +478,9 @@ void routingmanager::createroutingfuncGEMM(OpBuilder &builder, MLIRContext *ctx,
         int splitdimn = splitAxis == "row" ? 0 : 1;
 
         // Get tensor types
-        auto tensorTypeA = tensorA.getType().cast<RankedTensorType>();
-        auto tensorTypeB = tensorB.getType().cast<RankedTensorType>();
-        auto tensorTypeC = tensorC.getType().cast<RankedTensorType>();
+        auto tensorTypeA = llvm::cast<RankedTensorType>(tensorA.getType());
+        auto tensorTypeB = llvm::cast<RankedTensorType>(tensorB.getType());
+        auto tensorTypeC = llvm::cast<RankedTensorType>(tensorC.getType());
 
         // Partition tensor A (input): split by row, each tile group gets its rows
         auto partTensorA = builder.create<partitiontensor>(
@@ -810,7 +801,7 @@ mlir::func::FuncOp routingmanager::createroutingfunc(MLIRContext* ctx, int total
         auto getconstant = [&](Value value) -> int {
             if (auto definingOp = value.getDefiningOp()) {
                 if (auto constantOp = dyn_cast<arith::ConstantIntOp>(definingOp)) {
-                    if (auto intAttr = constantOp.getValue().dyn_cast<mlir::IntegerAttr>()) {
+                    if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constantOp.getValue())) {
                         return intAttr.getInt();
                     }
                 }
@@ -882,7 +873,7 @@ mlir::func::FuncOp routingmanager::createroutingfunc(MLIRContext* ctx, int total
           
             auto output = builder.getI32Type();
             auto op3 = builder.create<creatbroadcast>(builder.getUnknownLoc(), io.getResult(), tilearray.getResult());
-            auto result = tilearray.getResult().getType().dyn_cast<tilearrayType>();
+            auto result = llvm::dyn_cast<tilearrayType>(tilearray.getResult().getType());
 
             llvm::outs() << "result count is "<< result.getItems().size() <<" \n";
            
@@ -918,7 +909,7 @@ void routingmanager::createroutingfuncByDim(OpBuilder& builder, MLIRContext* ctx
                         assert(splitAxis == "col" && "splitdim 1 must be col");
                     }
                     // Get tensor type from input tensor for partitiontensor result
-                    auto tensorType = tensor.getType().cast<RankedTensorType>();
+                    auto tensorType = llvm::cast<RankedTensorType>(tensor.getType());
                     auto rowtensor = builder.create<partitiontensor>(
                         builder.getUnknownLoc(), tensorType, tensor,
                         routing::PartitionAttr::get(ctx, hwsplitnum, 0, tensorhwaxisowner, "col", ""),
@@ -1136,7 +1127,7 @@ void routingmanager::createroutingfuncBySplitModel(OpBuilder &builder, MLIRConte
 
             for (auto &entry : entries) {
                 const auto &split = splitModel.tensorSplits[entry.index];
-                auto tensorType = tensors[entry.index].getType().cast<RankedTensorType>();
+                auto tensorType = llvm::cast<RankedTensorType>(tensors[entry.index].getType());
 
                 // Determine splitnum within this axis group
                 uint32_t splitnum;

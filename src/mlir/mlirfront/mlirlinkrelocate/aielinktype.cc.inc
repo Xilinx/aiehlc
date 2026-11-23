@@ -18,10 +18,15 @@
 ::mlir::aiel::Aie_SymbolType,
 ::mlir::aiel::Aie_SectionType
 
-#endif  // GET_TYPEDEF_LIST
+#endif // GET_TYPEDEF_LIST
 
 #ifdef GET_TYPEDEF_CLASSES
 #undef GET_TYPEDEF_CLASSES
+
+#include "llvm/ADT/TypeSwitch.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/OpImplementation.h"
 
 static ::mlir::OptionalParseResult generatedTypeParser(::mlir::AsmParser &parser, ::llvm::StringRef *mnemonic, ::mlir::Type &value) {
   return ::mlir::AsmParser::KeywordSwitch<::mlir::OptionalParseResult>(parser)
@@ -47,8 +52,8 @@ static ::mlir::OptionalParseResult generatedTypeParser(::mlir::AsmParser &parser
     });
 }
 
-static ::mlir::LogicalResult generatedTypePrinter(::mlir::Type def, ::mlir::AsmPrinter &printer) {
-  return ::llvm::TypeSwitch<::mlir::Type, ::mlir::LogicalResult>(def)    .Case<::mlir::aiel::Aie_L1MemBankType>([&](auto t) {
+static ::llvm::LogicalResult generatedTypePrinter(::mlir::Type def, ::mlir::AsmPrinter &printer) {
+  return ::llvm::TypeSwitch<::mlir::Type, ::llvm::LogicalResult>(def)    .Case<::mlir::aiel::Aie_L1MemBankType>([&](auto t) {
       printer << ::mlir::aiel::Aie_L1MemBankType::getMnemonic();
 t.print(printer);
       return ::mlir::success();
@@ -71,9 +76,10 @@ t.print(printer);
     .Default([](auto) { return ::mlir::failure(); });
 }
 
-namespace mlir {
-namespace aiel {
+namespace mlir::aiel {
+
 namespace detail {
+
 struct Aie_L1MemBankTypeStorage : public ::mlir::TypeStorage {
   using KeyTy = std::tuple<IntegerAttr, StringAttr, IntegerAttr, IntegerAttr, IntegerAttr>;
   Aie_L1MemBankTypeStorage(IntegerAttr locationdirect, StringAttr locationtext, IntegerAttr baseaddr, IntegerAttr memtotalsize, IntegerAttr islocal) : locationdirect(std::move(locationdirect)), locationtext(std::move(locationtext)), baseaddr(std::move(baseaddr)), memtotalsize(std::move(memtotalsize)), islocal(std::move(islocal)) {}
@@ -105,6 +111,7 @@ struct Aie_L1MemBankTypeStorage : public ::mlir::TypeStorage {
   IntegerAttr memtotalsize;
   IntegerAttr islocal;
 };
+
 } // namespace detail
 Aie_L1MemBankType Aie_L1MemBankType::get(::mlir::MLIRContext *context, IntegerAttr locationdirect, StringAttr locationtext, IntegerAttr baseaddr, IntegerAttr memtotalsize, IntegerAttr islocal) {
   return Base::get(context, std::move(locationdirect), std::move(locationtext), std::move(baseaddr), std::move(memtotalsize), std::move(islocal));
@@ -215,12 +222,13 @@ IntegerAttr Aie_L1MemBankType::getIslocal() const {
   return getImpl()->islocal;
 }
 
-} // namespace aiel
-} // namespace mlir
+
+} // namespace mlir::aiel
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aiel::Aie_L1MemBankType)
-namespace mlir {
-namespace aiel {
+namespace mlir::aiel {
+
 namespace detail {
+
 struct Aie_MemBufferTypeStorage : public ::mlir::TypeStorage {
   using KeyTy = std::tuple<Aie_L1MemBankType, IntegerAttr, IntegerAttr>;
   Aie_MemBufferTypeStorage(Aie_L1MemBankType mbanktype, IntegerAttr addr, IntegerAttr len) : mbanktype(std::move(mbanktype)), addr(std::move(addr)), len(std::move(len)) {}
@@ -248,6 +256,7 @@ struct Aie_MemBufferTypeStorage : public ::mlir::TypeStorage {
   IntegerAttr addr;
   IntegerAttr len;
 };
+
 } // namespace detail
 Aie_MemBufferType Aie_MemBufferType::get(::mlir::MLIRContext *context, Aie_L1MemBankType mbanktype, IntegerAttr addr, IntegerAttr len) {
   return Base::get(context, std::move(mbanktype), std::move(addr), std::move(len));
@@ -323,12 +332,13 @@ IntegerAttr Aie_MemBufferType::getLen() const {
   return getImpl()->len;
 }
 
-} // namespace aiel
-} // namespace mlir
+
+} // namespace mlir::aiel
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aiel::Aie_MemBufferType)
-namespace mlir {
-namespace aiel {
+namespace mlir::aiel {
+
 namespace detail {
+
 struct Aie_SymbolTypeStorage : public ::mlir::TypeStorage {
   using KeyTy = std::tuple<StringAttr, Aie_MemBufferType>;
   Aie_SymbolTypeStorage(StringAttr name, Aie_MemBufferType addr) : name(std::move(name)), addr(std::move(addr)) {}
@@ -354,6 +364,7 @@ struct Aie_SymbolTypeStorage : public ::mlir::TypeStorage {
   StringAttr name;
   Aie_MemBufferType addr;
 };
+
 } // namespace detail
 Aie_SymbolType Aie_SymbolType::get(::mlir::MLIRContext *context, StringAttr name, Aie_MemBufferType addr) {
   return Base::get(context, std::move(name), std::move(addr));
@@ -410,12 +421,13 @@ Aie_MemBufferType Aie_SymbolType::getAddr() const {
   return getImpl()->addr;
 }
 
-} // namespace aiel
-} // namespace mlir
+
+} // namespace mlir::aiel
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aiel::Aie_SymbolType)
-namespace mlir {
-namespace aiel {
+namespace mlir::aiel {
+
 namespace detail {
+
 struct Aie_SectionTypeStorage : public ::mlir::TypeStorage {
   using KeyTy = std::tuple<StringAttr, StringAttr, Aie_MemBufferType, IntegerAttr>;
   Aie_SectionTypeStorage(StringAttr sectiontypename, StringAttr sectionname, Aie_MemBufferType startaddress, IntegerAttr len) : sectiontypename(std::move(sectiontypename)), sectionname(std::move(sectionname)), startaddress(std::move(startaddress)), len(std::move(len)) {}
@@ -445,6 +457,7 @@ struct Aie_SectionTypeStorage : public ::mlir::TypeStorage {
   Aie_MemBufferType startaddress;
   IntegerAttr len;
 };
+
 } // namespace detail
 Aie_SectionType Aie_SectionType::get(::mlir::MLIRContext *context, StringAttr sectiontypename, StringAttr sectionname, Aie_MemBufferType startaddress, IntegerAttr len) {
   return Base::get(context, std::move(sectiontypename), std::move(sectionname), std::move(startaddress), std::move(len));
@@ -539,11 +552,11 @@ IntegerAttr Aie_SectionType::getLen() const {
   return getImpl()->len;
 }
 
-} // namespace aiel
-} // namespace mlir
+
+} // namespace mlir::aiel
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aiel::Aie_SectionType)
-namespace mlir {
-namespace aiel {
+namespace mlir::aiel {
+
 
 /// Parse a type registered to this dialect.
 ::mlir::Type AieLinkDialect::parseType(::mlir::DialectAsmParser &parser) const {
@@ -565,8 +578,8 @@ void AieLinkDialect::printType(::mlir::Type type,
     return;
   
 }
-} // namespace aiel
-} // namespace mlir
 
-#endif  // GET_TYPEDEF_CLASSES
+} // namespace mlir::aiel
+
+#endif // GET_TYPEDEF_CLASSES
 

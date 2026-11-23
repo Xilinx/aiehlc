@@ -25,10 +25,15 @@
 ::mlir::aie::RoutingConstraintType,
 ::mlir::aie::DeviceInstanceType
 
-#endif  // GET_TYPEDEF_LIST
+#endif // GET_TYPEDEF_LIST
 
 #ifdef GET_TYPEDEF_CLASSES
 #undef GET_TYPEDEF_CLASSES
+
+#include "llvm/ADT/TypeSwitch.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/OpImplementation.h"
 
 static ::mlir::OptionalParseResult generatedTypeParser(::mlir::AsmParser &parser, ::llvm::StringRef *mnemonic, ::mlir::Type &value) {
   return ::mlir::AsmParser::KeywordSwitch<::mlir::OptionalParseResult>(parser)
@@ -82,8 +87,8 @@ static ::mlir::OptionalParseResult generatedTypeParser(::mlir::AsmParser &parser
     });
 }
 
-static ::mlir::LogicalResult generatedTypePrinter(::mlir::Type def, ::mlir::AsmPrinter &printer) {
-  return ::llvm::TypeSwitch<::mlir::Type, ::mlir::LogicalResult>(def)    .Case<::mlir::aie::KernelFuncNameType>([&](auto t) {
+static ::llvm::LogicalResult generatedTypePrinter(::mlir::Type def, ::mlir::AsmPrinter &printer) {
+  return ::llvm::TypeSwitch<::mlir::Type, ::llvm::LogicalResult>(def)    .Case<::mlir::aie::KernelFuncNameType>([&](auto t) {
       printer << ::mlir::aie::KernelFuncNameType::getMnemonic();
 t.print(printer);
       return ::mlir::success();
@@ -135,9 +140,10 @@ t.print(printer);
     .Default([](auto) { return ::mlir::failure(); });
 }
 
-namespace mlir {
-namespace aie {
+namespace mlir::aie {
+
 namespace detail {
+
 struct KernelFuncNameTypeStorage : public ::mlir::TypeStorage {
   using KeyTy = std::tuple<StringAttr>;
   KernelFuncNameTypeStorage(StringAttr name) : name(std::move(name)) {}
@@ -161,6 +167,7 @@ struct KernelFuncNameTypeStorage : public ::mlir::TypeStorage {
 
   StringAttr name;
 };
+
 } // namespace detail
 KernelFuncNameType KernelFuncNameType::get(::mlir::MLIRContext *context, StringAttr name) {
   return Base::get(context, std::move(name));
@@ -198,12 +205,13 @@ StringAttr KernelFuncNameType::getName() const {
   return getImpl()->name;
 }
 
-} // namespace aie
-} // namespace mlir
+
+} // namespace mlir::aie
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aie::KernelFuncNameType)
-namespace mlir {
-namespace aie {
+namespace mlir::aie {
+
 namespace detail {
+
 struct KernelFileNameTypeStorage : public ::mlir::TypeStorage {
   using KeyTy = std::tuple<StringAttr>;
   KernelFileNameTypeStorage(StringAttr name) : name(std::move(name)) {}
@@ -227,6 +235,7 @@ struct KernelFileNameTypeStorage : public ::mlir::TypeStorage {
 
   StringAttr name;
 };
+
 } // namespace detail
 KernelFileNameType KernelFileNameType::get(::mlir::MLIRContext *context, StringAttr name) {
   return Base::get(context, std::move(name));
@@ -264,12 +273,13 @@ StringAttr KernelFileNameType::getName() const {
   return getImpl()->name;
 }
 
-} // namespace aie
-} // namespace mlir
+
+} // namespace mlir::aie
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aie::KernelFileNameType)
-namespace mlir {
-namespace aie {
+namespace mlir::aie {
+
 namespace detail {
+
 struct WindowTypeStorage : public ::mlir::TypeStorage {
   using KeyTy = std::tuple<int, int, long, long, int, int, StringAttr>;
   WindowTypeStorage(int direction, int size, long pingaddr, long pongaddr, int pinglockid, int ponglockid, StringAttr name) : direction(std::move(direction)), size(std::move(size)), pingaddr(std::move(pingaddr)), pongaddr(std::move(pongaddr)), pinglockid(std::move(pinglockid)), ponglockid(std::move(ponglockid)), name(std::move(name)) {}
@@ -305,6 +315,7 @@ struct WindowTypeStorage : public ::mlir::TypeStorage {
   int ponglockid;
   StringAttr name;
 };
+
 } // namespace detail
 WindowType WindowType::get(::mlir::MLIRContext *context, int direction, int size, long pingaddr, long pongaddr, int pinglockid, int ponglockid, StringAttr name) {
   return Base::get(context, std::move(direction), std::move(size), std::move(pingaddr), std::move(pongaddr), std::move(pinglockid), std::move(ponglockid), std::move(name));
@@ -456,12 +467,13 @@ StringAttr WindowType::getName() const {
   return getImpl()->name;
 }
 
-} // namespace aie
-} // namespace mlir
+
+} // namespace mlir::aie
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aie::WindowType)
-namespace mlir {
-namespace aie {
+namespace mlir::aie {
+
 namespace detail {
+
 struct KernelTypeStorage : public ::mlir::TypeStorage {
   using KeyTy = std::tuple<int, int, KernelFuncNameType, KernelFileNameType, ::llvm::ArrayRef<WindowType>>;
   KernelTypeStorage(int numInputArgs, int numOutputArgs, KernelFuncNameType kname, KernelFileNameType fname, ::llvm::ArrayRef<WindowType> arguments) : numInputArgs(std::move(numInputArgs)), numOutputArgs(std::move(numOutputArgs)), kname(std::move(kname)), fname(std::move(fname)), arguments(std::move(arguments)) {}
@@ -494,6 +506,7 @@ struct KernelTypeStorage : public ::mlir::TypeStorage {
   KernelFileNameType fname;
   ::llvm::ArrayRef<WindowType> arguments;
 };
+
 } // namespace detail
 KernelType KernelType::get(::mlir::MLIRContext *context, int numInputArgs, int numOutputArgs, KernelFuncNameType kname, KernelFileNameType fname, ::llvm::ArrayRef<WindowType> arguments) {
   return Base::get(context, std::move(numInputArgs), std::move(numOutputArgs), std::move(kname), std::move(fname), std::move(arguments));
@@ -608,12 +621,13 @@ KernelFileNameType KernelType::getFname() const {
   return getImpl()->arguments;
 }
 
-} // namespace aie
-} // namespace mlir
+
+} // namespace mlir::aie
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aie::KernelType)
-namespace mlir {
-namespace aie {
+namespace mlir::aie {
+
 namespace detail {
+
 struct TileKernelTypeStorage : public ::mlir::TypeStorage {
   using KeyTy = std::tuple<int, int, StringAttr>;
   TileKernelTypeStorage(int col, int row, StringAttr kernels) : col(std::move(col)), row(std::move(row)), kernels(std::move(kernels)) {}
@@ -641,6 +655,7 @@ struct TileKernelTypeStorage : public ::mlir::TypeStorage {
   int row;
   StringAttr kernels;
 };
+
 } // namespace detail
 TileKernelType TileKernelType::get(::mlir::MLIRContext *context, int col, int row, StringAttr kernels) {
   return Base::get(context, std::move(col), std::move(row), std::move(kernels));
@@ -716,41 +731,41 @@ StringAttr TileKernelType::getKernels() const {
   return getImpl()->kernels;
 }
 
-} // namespace aie
-} // namespace mlir
+
+} // namespace mlir::aie
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aie::TileKernelType)
-namespace mlir {
-namespace aie {
-} // namespace aie
-} // namespace mlir
+namespace mlir::aie {
+
+
+} // namespace mlir::aie
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aie::LocType)
-namespace mlir {
-namespace aie {
-} // namespace aie
-} // namespace mlir
+namespace mlir::aie {
+
+
+} // namespace mlir::aie
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aie::CoreConstraintType)
-namespace mlir {
-namespace aie {
-} // namespace aie
-} // namespace mlir
+namespace mlir::aie {
+
+
+} // namespace mlir::aie
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aie::RoutingInstanceType)
-namespace mlir {
-namespace aie {
-} // namespace aie
-} // namespace mlir
+namespace mlir::aie {
+
+
+} // namespace mlir::aie
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aie::HostAieConstraintType)
-namespace mlir {
-namespace aie {
-} // namespace aie
-} // namespace mlir
+namespace mlir::aie {
+
+
+} // namespace mlir::aie
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aie::RoutingConstraintType)
-namespace mlir {
-namespace aie {
-} // namespace aie
-} // namespace mlir
+namespace mlir::aie {
+
+
+} // namespace mlir::aie
 MLIR_DEFINE_EXPLICIT_TYPE_ID(::mlir::aie::DeviceInstanceType)
-namespace mlir {
-namespace aie {
+namespace mlir::aie {
+
 
 /// Parse a type registered to this dialect.
 ::mlir::Type AieADialect::parseType(::mlir::DialectAsmParser &parser) const {
@@ -772,8 +787,8 @@ void AieADialect::printType(::mlir::Type type,
     return;
   
 }
-} // namespace aie
-} // namespace mlir
 
-#endif  // GET_TYPEDEF_CLASSES
+} // namespace mlir::aie
+
+#endif // GET_TYPEDEF_CLASSES
 

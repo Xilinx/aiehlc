@@ -49,7 +49,7 @@ fi
 
 echo "=== Step 3b: Generate readable schedule view (schedule_view.json + host_schedule.html) ==="
 if [ -f "$(pwd)/build/worklocal/dfscheduleprovenancemap.json" ]; then
-    python3 ../../../../../../src/tool/debug/schedule_view.py "$(pwd)/build/worklocal" || \
+    python3 ../../../../../../tool/aiegdb/src/aiedbg/debugui/schedule_view.py "$(pwd)/build/worklocal" || \
         echo "warning: schedule_view.py failed (non-fatal)"
 else
     echo "=== Step 3b: Skipped (no dfscheduleprovenancemap.json in build/worklocal) ==="

@@ -438,9 +438,12 @@ void TestParserOperation(std::string file_path){
 		llvm::errs() << "Error when parsing input.mlir\n";
 		return;
 	}
-	module->dump();
-	auto moduleOp = mlir::dyn_cast<mlir::ModuleOp>(module.get());
-	if (!moduleOp) {
+    {
+        module->print(llvm::errs());
+        llvm::errs() << "\n";
+    }
+    auto moduleOp = mlir::dyn_cast<mlir::ModuleOp>(module.get());
+    if (!moduleOp) {
 		llvm::errs() << "Error when casting to ModuleOp\n";
 		std::cout << "TestParserOperation fails " << file_path << ":[Error]\n";
 		return;
@@ -491,7 +494,10 @@ void CreateLoadKernel(int x, int y, std::string name="")
 	ValueRange args(arguments);
 
 	builder.create<LoadKernel>(builder.getUnknownLoc(), nameAttr, _col, _row, arguments);
-	module.dump();
+    {
+        module->print(llvm::errs());
+        llvm::errs() << "\n";
+    }
 }
 
 
@@ -539,8 +545,10 @@ void CreateWindowOperation(int arg_dir, int arg_size, long arg_pingaddr, long ar
 	
 	builder.create<CreateWindowOp>(builder.getUnknownLoc(), typeinfo, attr_direction, attr_size, 
 		attr_pingaddr, attr_pongaddr, attr_pinglockid, attr_ponglockid, nameAttr);
-	module.dump();
-
+    {
+        module->print(llvm::errs());
+        llvm::errs() << "\n";
+    }
 }
 
 
@@ -645,7 +653,10 @@ void CreateTileKernelObjectOperation(int row, int col, std::string kernel_src)
 
         builder.create<CreateTileKernelObjectOp>(builder.getUnknownLoc(), type_val, val_row, val_col, 
 		kernelsrcAttr);
-        module.dump();
+        {
+            module->print(llvm::errs());
+            llvm::errs() << "\n";
+        }
 }
 
 
@@ -667,5 +678,8 @@ void dumpmlir() {
 	mlir::Value value = constantOp.getResult();
 
 	builder.create<LoadKernelOp>(builder.getUnknownLoc(), value, value);
-	module.dump();
+    {
+        module->print(llvm::errs());
+        llvm::errs() << "\n";
+    }
 }
