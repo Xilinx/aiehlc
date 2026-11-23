@@ -256,12 +256,19 @@ def f32_to_bf16_rne(a):
     """fp32 -> bf16 bits (uint16), round-to-nearest-even. Same rounding as
     ``torch.Tensor.to(torch.bfloat16)`` (Shuhua's ``bf()``); NaN stays quiet NaN."""
     import numpy as np
-    u = np.ascontiguousarray(a, dtype="<f4").view("<u4").astype(np.uint64)
-    r = ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16)
-    nan = np.isnan(np.asarray(a, dtype="<f4"))
+    u = np.ascontiguousarray(a, dtype="<f4").view("<u4")
+    # uint32 in place (was uint64 + 4 temporaries: ~40 s per warm UNet build).
+    # u + 0x7FFF + lsb only wraps for NaN bit patterns, which are overwritten below.
+    r = u >> 16
+    r &= 1
+    r += 0x7FFF
+    r += u
+    r >>= 16
+    out = r.astype(np.uint16)
+    nan = (u & 0x7FFFFFFF) > 0x7F800000
     if nan.any():
-        r[nan] = ((u[nan] >> 16) | 0x40).astype(np.uint16)
-    return r
+        out[nan] = ((u[nan] >> 16) | 0x40).astype(np.uint16)
+    return out
 
 
 def _blob_order(offsets: dict, order=()) -> list:
