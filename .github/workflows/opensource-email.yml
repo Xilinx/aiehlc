@@ -1,0 +1,64 @@
+name: Open-source check email
+
+on:
+  workflow_run:
+    workflows: ["Open-source check"]
+    types: [completed]
+
+jobs:
+  email-on-failure:
+    name: Email missing-license report
+    if: >-
+      github.event.workflow_run.conclusion == 'failure'
+      && github.event.workflow_run.event != 'workflow_run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OPENSOURCE_MAIL_TO: ${{ secrets.OPENSOURCE_MAIL_TO }}
+      OPENSOURCE_SMTP_SERVER: ${{ secrets.OPENSOURCE_SMTP_SERVER }}
+      OPENSOURCE_SMTP_USER: ${{ secrets.OPENSOURCE_SMTP_USER }}
+      OPENSOURCE_SMTP_PASSWORD: ${{ secrets.OPENSOURCE_SMTP_PASSWORD }}
+      OPENSOURCE_MAIL_FROM: ${{ secrets.OPENSOURCE_MAIL_FROM }}
+      OPENSOURCE_SMTP_PORT: ${{ secrets.OPENSOURCE_SMTP_PORT }}
+    steps:
+      - name: Require SMTP secrets
+        id: gate
+        run: |
+          set -euo pipefail
+          missing=0
+          for v in OPENSOURCE_MAIL_TO OPENSOURCE_SMTP_SERVER OPENSOURCE_SMTP_USER OPENSOURCE_SMTP_PASSWORD; do
+            if [ -z "${!v}" ]; then
+              echo "missing secret: $v"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "SMTP secrets not configured on ${{ github.repository }}; skipping email."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: Download missing-license report
+        if: steps.gate.outputs.configured == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: opensource-check-report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: report
+
+      - name: Email missing-license report
+        if: steps.gate.outputs.configured == 'true' && hashFiles('report/opensource-check-report.txt') != ''
+        uses: dawidd6/action-send-mail@v4
+        with:
+          server_address: ${{ env.OPENSOURCE_SMTP_SERVER }}
+          server_port: ${{ env.OPENSOURCE_SMTP_PORT != '' && env.OPENSOURCE_SMTP_PORT || 587 }}
+          secure: ${{ (env.OPENSOURCE_SMTP_PORT != '' && env.OPENSOURCE_SMTP_PORT || 587) == '465' }}
+          require_tls: true
+          username: ${{ env.OPENSOURCE_SMTP_USER }}
+          password: ${{ env.OPENSOURCE_SMTP_PASSWORD }}
+          subject: "[aiehlc] open-source check FAILED (${{ github.event.workflow_run.repository.full_name }} / ${{ github.event.workflow_run.head_branch }} @ ${{ github.event.workflow_run.head_sha }})"
+          to: ${{ env.OPENSOURCE_MAIL_TO }}
+          from: ${{ env.OPENSOURCE_MAIL_FROM != '' && env.OPENSOURCE_MAIL_FROM || env.OPENSOURCE_SMTP_USER }}
+          body: file://report/opensource-check-report.txt
