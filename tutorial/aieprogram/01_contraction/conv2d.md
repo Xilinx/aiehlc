@@ -274,8 +274,12 @@ the int8 clamp never hides a wrong sum.
     printf("[BENCH] aie_wall_ms=%.3f\n", 1.0 * (t1 - t0) / COUNTS_PER_SECOND * 1000.0);
 ```
 The launch (1a, section 3). The three buffers bind to the three ports
-in order; `M, N, K` after them are accepted and ignored (kept from the older
-API -- you can drop them).
+in order. **Keep `M, N, K`** (output pixels, filters, taps per filter): the
+conv lowering still reads its GEMM dimensions from these launch arguments
+(build log: `[TilingLinalg] GEMM dims from launch args: M=12544 N=64 K=196`).
+Without them the build succeeds but tiles the filter port wrongly and the
+board result is wrong (measured: 790,221 of 802,816 outputs) -- a known
+compiler issue; the GEMM example of 1a needs no such arguments.
 
 ```cpp
     scalar_conv2d(input, filter, ref);

@@ -8,7 +8,7 @@ description: The palmyra hw_server service (hws, `script/test/hws*.py`, tmux ses
 Evidence lives on 213: `journalctl --since <t> | grep sysconfig.pl` (systest start =
 `clean_tmp` + `ssh_auth add`; a systest JVM shutting down runs `shutdown.cmd` =
 `port_forward kill_rpc_nfsd kill_tftpd ptpv2d ssh_auth`, then `clean_tmp` + `ssh_auth
-remove`), `last -F huaj`, and `/scratch/staff/huaj/tmp/hws/<ip>/hws_*.log` (every
+remove`), `last -F huaj`, and `$HWS_LOG_DIR/<ip>/hws_*.log` (every
 `up` / `down` / `restart` we did). A session end with no matching `hws_down` log was
 not us. The remote login shell is **csh**: wrap checks in `bash -c '...'`, or
 `2>/dev/null &&` silently reads as "gone".
@@ -41,5 +41,5 @@ on xc2ve3858). Board powered off / JTAG lost -> DEGRADED -> one restart, then FA
 the lab pointer. Other unix user's hw_server on 3121 -> FOREIGN, nothing touched. 213
 rebooting -> UNREACHABLE: `ensure_service` fails at once (does not wait; `up` would).
 Another agent on the **same** user looks like ours: only the board lock
-(`/scratch/staff/huaj/tmp/board_locks/<ip>_3121.lock`) keeps a restart from `become`-ing
+(`<board-lock-dir>/<ip>_3121.lock`) keeps a restart from `become`-ing
 the board away from it. Netload is lazy: none of this runs unless JTAG is needed.

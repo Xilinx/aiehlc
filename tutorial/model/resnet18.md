@@ -34,14 +34,14 @@ aiegraph modules used: [`aiegraph/cnn.py`](../../src/aiegraph/cnn.py) (CNN group
 
 ## 1. Prerequisites
 
-Same as sections 1–3 of the [UNet tutorial](tiny-sdm-unet.md): check out the `unet_m4` branch, link the BSP workspace, build aiehlc. The rest uses these variables:
+Same as sections 1–3 of the [UNet tutorial](tiny-sdm-unet.md): check out the `unet_m4` branch, link the BSP workspace, build aiehlc. The rest uses these variables: Replace each `<...>` placeholder (`<repo>`, `<venv>`, `<modelzoo>`, ...) with the path on your machine.
 
 ```bash
-export AIEHLC=/scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj
+export AIEHLC=<repo>
 export T=$AIEHLC/.worktrees/unet_m4                  # worktree of the unet_m4 branch
-export PY=/scratch/staff/huaj/aiehlc/.venv/bin/python3
+export PY=<venv>/bin/python3
 export WORK=$HOME/resnet18_work; mkdir -p $WORK
-export ONNX=/scratch/staff/huaj/modelzoo/artifacts/resnet18/onnx/resnet18_fp32_op17.onnx
+export ONNX=<modelzoo>/artifacts/resnet18/onnx/resnet18_fp32_op17.onnx
 unset AR                                             # make would use $AR as the archiver
 ```
 
@@ -54,7 +54,7 @@ The model is torchvision's ResNet18 exported to fp32 ONNX (opset 17).
 Preprocessing matches torchvision's ImageNet evaluation: resize the short side to 256 (bilinear), center-crop 224, /255, subtract the mean and divide by the std, NCHW fp32. This uses a tench (class 0) from the imagenette validation set:
 
 ```bash
-IMG=/scratch/staff/huaj/modelzoo/data/imagenette_dl/imagenette2-320/val/n01440764/n01440764_10040.JPEG
+IMG=<modelzoo>/data/imagenette_dl/imagenette2-320/val/n01440764/n01440764_10040.JPEG
 $PY - "$IMG" $WORK/img0.bin $ONNX <<'PY'
 import sys, numpy as np, onnxruntime as ort
 from PIL import Image

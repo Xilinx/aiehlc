@@ -30,11 +30,11 @@ void routingdialect::initialize()  {
     #define GET_OP_LIST
     #include "routingop.cc.inc"
         >();
-    // 如果有 Attr / Type：addAttributes<...>(); addTypes<...>();
-     addAttributes<
+    // if there are Attrs / Types: addAttributes<...>(); addTypes<...>();
+    addAttributes<
     #define GET_ATTRDEF_LIST
     #include "routingattr.cc.inc"
-    >();
+        >();
 
         // 3. Types
     addTypes<
@@ -825,10 +825,10 @@ mlir::func::FuncOp routingmanager::createroutingfunc(MLIRContext* ctx, int total
         Value lb = builder.create<arith::ConstantIndexOp>(location, 0);
         Value ub = builder.create<arith::ConstantIndexOp>(location, totalN);
         Value step = builder.create<arith::ConstantIndexOp>(location,1);
-  // ──────────────────────────────
-  // 2. 创建 scf.forall
-  //    OpBuilder 会回调一个 lambda，让你往 region 里塞指令
-  // ──────────────────────────────
+        // ──────────────────────────────
+        // 2. Create the scf.forall
+        //    OpBuilder calls back a lambda that lets you put ops into the region
+        // ──────────────────────────────
         auto scf = builder.create<mlir::scf::ForOp>(location, lb, ub, step);
         {
             //use such format to fix the generic format print issue 

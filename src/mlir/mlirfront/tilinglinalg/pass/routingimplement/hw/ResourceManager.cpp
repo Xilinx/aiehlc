@@ -487,7 +487,7 @@ std::optional<FoundDmaSlot> ResourceMgr::freeShimNoc(std::optional<TypeBasedTile
     }
     return  std::nullopt;
 }
-// ---------- freeShim 例子 ----------
+// ---------- freeShim example ----------
 std::optional<Point> ResourceMgr::freeShimNoc(std::optional<Point> dst) const {
     auto& shimnocs = resource_->getShimNoc();
     auto max_distance = resource_->getColumns();
@@ -560,7 +560,7 @@ bool ResourceMgr::init(std::unique_ptr<IHwResource> resource, TileType defType)
         singleton_ = std::make_shared<ResourceMgr>(std::move(resource), defType);
         created = true;
     });
-    return created;            // true=本次创建，false=之前已创建
+    return created; // true = created by this call, false = already created earlier
 }
 
 std::shared_ptr<ResourceMgr> ResourceMgr::instance()

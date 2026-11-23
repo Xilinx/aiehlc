@@ -228,7 +228,7 @@ After the `routing.control_plan_group_reg_write` setAttr at line 4563
 
 **Step 5: Build**
 
-Run: `make -C /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj/build -j$(nproc)`
+Run: `make -C <repo>/build -j$(nproc)`
 Expected: aiehlc builds clean.
 
 **Step 6: Verify the flag round-trips**
@@ -273,7 +273,7 @@ core tiles only.
 
 **Step 4: Build**
 
-Run: `make -C /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj/build -j$(nproc)`
+Run: `make -C <repo>/build -j$(nproc)`
 Expected: builds clean.
 
 **Step 5: Verify host.cc has no core BD when offload ON; unchanged when OFF**
@@ -314,7 +314,7 @@ In `passdfscheduletokernelapi.cpp`, when offload ON, lower the core S2MM
 
 **Step 3: Build**
 
-Run: `make -C /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj/build -j$(nproc)`
+Run: `make -C <repo>/build -j$(nproc)`
 
 **Step 4: Verify kernel.cc has the S2MM BD + lock MMIO writes when ON**
 
@@ -356,7 +356,7 @@ channel ctrl at `0x1DE10`.
 
 **Step 4: Build + verify**
 
-Run: `make -C /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj/build -j$(nproc)`
+Run: `make -C <repo>/build -j$(nproc)`
 Inspect `kernel.cc` (offload ON): an `if/else` chain over `(col,row)` each
 programming that tile's MM2S BD.
 
@@ -388,7 +388,7 @@ schedule.
 
 **Step 3: Build + verify**
 
-Run: `make -C /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj/build -j$(nproc)`
+Run: `make -C <repo>/build -j$(nproc)`
 Inspect `kernel.cc` (offload ON): start-queue MMIO write present; host.cc has no
 core channel-start.
 

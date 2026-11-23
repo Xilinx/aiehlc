@@ -1024,7 +1024,7 @@ Read the matching skill when the task fits:
 
 **Embedded LLM plugin** (`src/tool/debug/dbg_llm_skills/`): nine skills for the browser LLM tab. Launch locally with `claude --plugin-dir src/tool/debug/dbg_llm_skills`. Listed in **debug-ui-framework** reference.
 
-**External:** aiedbg clone at `/scratch/staff/bkirinci/aiedbg` — see plugin skill `aiedbg-reference`.
+**External:** aiedbg clone at `<aiedbg-checkout>` — see plugin skill `aiedbg-reference`.
 
 **Command:** [data-mismatch-debug](.claude/commands/data-mismatch-debug.md) — systematic DMA data-mismatch triage.
 

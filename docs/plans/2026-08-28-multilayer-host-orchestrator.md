@@ -63,7 +63,7 @@ def test_orchestrate_conv_layer_appends():
 
 **Step 2: Run to verify it fails**
 
-Run: `cd /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj/.worktrees/cnn && python -m pytest src/frontend/tvm/test_tvm_frontend.py::test_orchestrate_conv_layer_appends -v` (sandbox off)
+Run: `cd <repo>/.worktrees/cnn && python -m pytest src/frontend/tvm/test_tvm_frontend.py::test_orchestrate_conv_layer_appends -v` (sandbox off)
 Expected: FAIL — `AttributeError: 'module' has no attribute 'orchestrate_conv_layer'` (or SKIP if pybind unbuilt — in that case build it first, Step 3b).
 
 **Step 3: Add the pybind function**
@@ -487,7 +487,7 @@ git commit -m "feat(tvm): demo Stage 5 orchestrate + dual-build parity test"
 
 **Step 1: HW smoke run** (board `palmyra`)
 
-Run: build A2 `main.elf`, copy to `/home/huaj/aiehlc/main.elf`, `python test/mainelfpaltest.py`.
+Run: build A2 `main.elf`, copy to `~/aiehlc/main.elf`, `python test/mainelfpaltest.py`.
 Expected: `device_teardown done`, no `AIE ERROR`.
 
 **Step 2: Update docs** — mark orchestrator design "implemented"; add a "Multi-layer orchestrator (A2/A1)" subsection to `tvm_frontend.md` and `tvmflow.md`; note in `CLAUDE.md` under the aiegraph section that the TVM frontend now emits a single `main.elf` via the multi-kernel path. Per "Process transparent rule", list all changed/created files.
