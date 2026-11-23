@@ -13,6 +13,7 @@
 #include <deque>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <set>
@@ -228,10 +229,13 @@ const char *kHarnessRuntime = R"HARNESS(
 #include <deque>
 #include <initializer_list>
 #include <sanitizer/asan_interface.h>
+#include <source_location>
 namespace aiehlc_trace {
-struct Port { const char *name; int rank; int dim[4]; int eb; int out; std::deque<void *> live; int n; };
+struct Port { const char *name; int rank; int dim[4]; int eb; int out; std::deque<void *> live; int n;
+              std::deque<int> live_line; };
 static FILE *g_out;
 static int g_p0, g_p1, g_rows, g_cols, g_seed, g_pp;
+static int g_line; // source line of the block call being checked (#line maps it to the user's file)
 struct AnyPtr { void *p; template <class T> operator T *() const { return (T *)p; } };
 } // namespace aiehlc_trace
 namespace aie {
@@ -242,17 +246,18 @@ struct load_opts { int reuse = 0; pad_value pad = pad_value::none; int depth = 0
 using store_opts = load_opts;
 } // namespace aie
 namespace aiehlc_trace {
-#define AIEHLC_E(port, ...) do { fprintf(g_out, "E %d %d %s %d ", g_p0, g_p1, (port).name, (port).n); \
+#define AIEHLC_E(port, ...) do { fprintf(g_out, "E %d %d %s %d %d ", g_p0, g_p1, (port).name, (port).n, g_line); \
     fprintf(g_out, __VA_ARGS__); fputc('\n', g_out); } while (0)
 static AnyPtr block(Port &p, std::initializer_list<int> off, std::initializer_list<int> shape, int st,
-                    aie::load_opts opt = {}) {
+                    aie::load_opts opt, int line) {
+    g_line = line;
     const int pad = opt.pad == aie::pad_value::zero;
     int o[4] = {0, 0, 0, 0}, s[4] = {0, 0, 0, 0}, ro = 0, rs = 0;
     for (int v : off) { if (ro < 4) o[ro] = v; ro++; }
     for (int v : shape) { if (rs < 4) s[rs] = v; rs++; }
-    fprintf(g_out, "%c %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", st ? 'S' : 'L', g_p0, g_p1,
+    fprintf(g_out, "%c %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", st ? 'S' : 'L', g_p0, g_p1,
             p.name, p.n, ro, rs, o[0], o[1], o[2], o[3], s[0], s[1], s[2], s[3], opt.reuse, pad, opt.depth,
-            opt.resident ? 1 : 0, opt.tile[0], opt.tile[1]);
+            opt.resident ? 1 : 0, opt.tile[0], opt.tile[1], line);
     if (st && !p.out) AIEHLC_E(p, "aie::store_buffer on an input port");
     if (!st && p.out) AIEHLC_E(p, "aie::load_buffer on an output port");
     if (st && (opt.reuse || pad || opt.resident || opt.tile[0] || opt.tile[1]))
@@ -286,6 +291,7 @@ static AnyPtr block(Port &p, std::initializer_list<int> off, std::initializer_li
     unsigned char *m = (unsigned char *)raw + 32;
     for (long i = 0; i < bytes; i++) m[i] = (unsigned char)(i * 31 + g_seed * 97 + p.n * 7);
     p.live.push_back(m);
+    p.live_line.push_back(line);
     p.n++;
     return {m};
 }
@@ -294,48 +300,71 @@ static void unblock(void *m) {
     ASAN_UNPOISON_MEMORY_REGION(raw, 32);
     free(raw);
 }
-static void release(Port &p, int st) {
+static void release(Port &p, int st, int line) {
+    g_line = line;
     if (st && !p.out) AIEHLC_E(p, "aie::commit on an input port (use aie::release)");
     if (!st && p.out) AIEHLC_E(p, "aie::release on an output port (use aie::commit)");
     if (p.live.empty()) { AIEHLC_E(p, "%s without a block held", st ? "aie::commit" : "aie::release"); return; }
     unblock(p.live.front());
     p.live.pop_front();
+    p.live_line.pop_front();
     fprintf(g_out, "R %d %d %s %d\n", g_p0, g_p1, p.name, p.n);
 }
 static void finish(Port &p) {
+    if (!p.live.empty()) g_line = p.live_line.front(); // where the block still held was taken
     if (!p.live.empty())
         AIEHLC_E(p, "%d block(s) still held at kernel end: never %s (the next DMA round would deadlock)",
                  (int)p.live.size(), p.out ? "committed" : "released");
     while (!p.live.empty()) { unblock(p.live.front()); p.live.pop_front(); }
+    p.live_line.clear();
 }
 } // namespace aiehlc_trace
 namespace aie {
 using aiehlc_trace::Port;
+// The call site's line rides along as a defaulted std::source_location.
+using srcloc = std::source_location;
 inline aiehlc_trace::AnyPtr load_buffer(Port &p, std::initializer_list<int> o, std::initializer_list<int> s,
-                                        load_opts opt = {}) {
-    return aiehlc_trace::block(p, o, s, 0, opt);
+                                        load_opts opt = {}, srcloc at = srcloc::current()) {
+    return aiehlc_trace::block(p, o, s, 0, opt, (int)at.line());
 }
 inline aiehlc_trace::AnyPtr store_buffer(Port &p, std::initializer_list<int> o, std::initializer_list<int> s,
-                                         store_opts opt = {}) {
-    return aiehlc_trace::block(p, o, s, 1, opt);
+                                         store_opts opt = {}, srcloc at = srcloc::current()) {
+    return aiehlc_trace::block(p, o, s, 1, opt, (int)at.line());
 }
-inline void release(Port &p) { aiehlc_trace::release(p, 0); }
-inline void commit(Port &p) { aiehlc_trace::release(p, 1); }
+inline void release(Port &p, srcloc at = srcloc::current()) { aiehlc_trace::release(p, 0, (int)at.line()); }
+inline void commit(Port &p, srcloc at = srcloc::current()) { aiehlc_trace::release(p, 1, (int)at.line()); }
 inline int program_id(int a) { return a == 0 ? aiehlc_trace::g_p0 : aiehlc_trace::g_p1; }
 inline int num_programs(int a) { return a == 0 ? aiehlc_trace::g_rows : aiehlc_trace::g_cols; }
 } // namespace aie
 static inline unsigned get_coreid() { return ((unsigned)aiehlc_trace::g_p1 << 16) | (unsigned)aiehlc_trace::g_p0; }
 // Vector kernels: the AIE API subset, emulated per element (ASan sees every
 // byte a vector load touches); misaligned vector accesses become diagnostics.
-#define AIEHLC_EMU_REPORT(msg) fprintf(aiehlc_trace::g_out, "E %d %d vector 0 %s\n", aiehlc_trace::g_p0, aiehlc_trace::g_p1, msg)
+#define AIEHLC_EMU_REPORT(msg) fprintf(aiehlc_trace::g_out, "E %d %d vector 0 0 %s\n", aiehlc_trace::g_p0, aiehlc_trace::g_p1, msg)
 #include AIEHLC_EMU_HEADER
 static inline void klog(const char *, int) {}
 )HARNESS";
 
+// The source's AIEHLC_KERNEL_PROLOGUE_BEGIN/END block (file-scope helpers the
+// kernel body calls). aiehlc.cc carries it into the AIE kernel; the trace harness
+// needs it too or the body does not compile. A prologue that uses AIE-only code
+// (intrinsics, chess pragmas) guards it with #if defined(__chess__) and gives
+// x86 stubs in the #else branch: only the load/store_buffer pattern is traced.
+static std::string sourcePrologue(const std::string &src) {
+    std::istringstream is(src);
+    std::string line, out;
+    bool in = false;
+    while (std::getline(is, line)) {
+        if (line.find("AIEHLC_KERNEL_PROLOGUE_BEGIN") != std::string::npos) { in = true; continue; }
+        if (line.find("AIEHLC_KERNEL_PROLOGUE_END") != std::string::npos) { in = false; continue; }
+        if (in) out += line + "\n";
+    }
+    return out;
+}
+
 std::string buildHarness(const std::string &src, const TraceKernel &k, const std::string &prelude,
                          const std::string &srcName) {
     std::ostringstream os;
-    os << kHarnessRuntime << "\n" << prelude << "\n";
+    os << kHarnessRuntime << "\n" << prelude << "\n" << sourcePrologue(src) << "\n";
     os << "static void aiehlc_kernel(";
     for (size_t i = 0; i < k.ports.size(); i++)
         os << (i ? ", " : "") << "aiehlc_trace::Port &" << k.ports[i].var;
@@ -416,6 +445,7 @@ struct Event {
     int off[4] = {0, 0, 0, 0}, shape[4] = {0, 0, 0, 0};
     int reuse = 0, pad = 0; // load_opts of an L event
     BlockOpts opts;         // .depth / .resident / .tile of an L or S event
+    int line = 0;           // source line of the call (L/S), of the failing call (E), 0 if unknown
 };
 
 std::vector<Event> parseTrace(const std::string &text) {
@@ -427,6 +457,7 @@ std::vector<Event> parseTrace(const std::string &text) {
         Event ev;
         ls >> ev.kind >> ev.p0 >> ev.p1 >> ev.port >> ev.n;
         if (ev.kind == 'E') {
+            ls >> ev.line;
             std::getline(ls, ev.msg);
             ev.msg = trim(ev.msg);
         } else if (ev.kind != 'R') {
@@ -437,7 +468,7 @@ std::vector<Event> parseTrace(const std::string &text) {
                 ls >> v;
             ls >> ev.reuse >> ev.pad;
             int resident = 0;
-            ls >> ev.opts.depth >> resident >> ev.opts.tile[0] >> ev.opts.tile[1];
+            ls >> ev.opts.depth >> resident >> ev.opts.tile[0] >> ev.opts.tile[1] >> ev.line;
             ev.opts.resident = resident != 0;
         }
         out.push_back(ev);
@@ -508,7 +539,8 @@ bool runHarness(const std::string &harness, const std::string &srcName, int rows
         bool same = a.kind == b.kind && a.port == b.port && a.p0 == b.p0 && a.p1 == b.p1 &&
                     std::equal(a.off, a.off + 4, b.off) && std::equal(a.shape, a.shape + 4, b.shape);
         if (!same) {
-            r.errors.push_back("the load/store schedule depends on the data: " + a.port + " block " +
+            r.errors.push_back((a.line > 0 ? srcName + ":" + std::to_string(a.line) + ": " : std::string()) +
+                               "the load/store schedule depends on the data: " + a.port + " block " +
                                std::to_string(a.n) + " on core (" + std::to_string(a.p0) + "," + std::to_string(a.p1) +
                                ") differs between two inputs (DMA order is fixed at " + "compile time)");
             break;
@@ -525,14 +557,66 @@ std::string vecStr(const int *v, int n) {
 }
 std::string vecStr(const std::vector<int> &v) { return vecStr(v.data(), (int)v.size()); }
 
-// Harness-reported problems, one line per (port, message), with where/how often.
-void collectHarnessErrors(const std::vector<Event> &events, KernelTraceResult &r) {
+// `file:line: ` for a diagnostic, or "" when the line is unknown.
+std::string atLine(const std::string &srcName, int line) {
+    return line > 0 ? srcName + ":" + std::to_string(line) + ": " : "";
+}
+
+// The aie:: block call on `port` that starts on source line `line`, whitespace
+// collapsed (it may span lines); the line itself when no such call is there.
+std::string callText(const std::string &src, int line, const std::string &port) {
+    size_t b = 0;
+    for (int l = 1; l < line && b != std::string::npos; l++)
+        b = src.find('\n', b) == std::string::npos ? std::string::npos : src.find('\n', b) + 1;
+    if (line <= 0 || b == std::string::npos)
+        return "";
+    const size_t eol = std::min(src.find('\n', b), src.size());
+    const std::string blank = sourceBlankComments(src);
+    for (const char *fn : {"load_buffer", "store_buffer", "release", "commit"}) {
+        for (size_t f = blank.find(fn, b); f != std::string::npos && f < eol; f = blank.find(fn, f + 1)) {
+            size_t open = blank.find_first_not_of(" \t", f + std::strlen(fn));
+            if (open == std::string::npos || blank[open] != '(')
+                continue;
+            size_t close = sourceMatchClose(blank, open, '(', ')');
+            size_t a = blank.find_first_not_of(" \t\r\n", open + 1);
+            if (close == std::string::npos || a == std::string::npos || blank.compare(a, port.size(), port) != 0 ||
+                isIdentChar(blank[a + port.size()]))
+                continue;
+            size_t s = f;
+            if (s >= 5 && blank.compare(s - 5, 5, "aie::") == 0)
+                s -= 5;
+            std::string out;
+            for (size_t i = s; i <= close; i++) {
+                const bool ws = std::isspace((unsigned char)blank[i]);
+                if (ws && (out.empty() || out.back() == ' ' || out.back() == '(' || out.back() == '{'))
+                    continue;
+                if (!ws && (blank[i] == ')' || blank[i] == '}' || blank[i] == ',') && !out.empty() && out.back() == ' ')
+                    out.pop_back();
+                out += ws ? ' ' : blank[i];
+            }
+            return out;
+        }
+    }
+    return trim(src.substr(b, eol - b));
+}
+
+// " in `aie::load_buffer(a, ...)`" -- the call a diagnostic is about, or "".
+std::string inCall(const std::string &src, int line, const std::string &port) {
+    const std::string call = callText(src, line, port);
+    return call.empty() ? "" : " in `" + call + "`";
+}
+
+// Harness-reported problems, one line per (call line, port, message), with
+// where/how often. The location is the call that failed -- for a block never
+// released/committed, the call that took it.
+void collectHarnessErrors(const std::vector<Event> &events, const std::string &src, const std::string &srcName,
+                          KernelTraceResult &r) {
     std::map<std::string, std::pair<const Event *, int>> seen;
     std::vector<std::string> order;
     for (auto &e : events) {
         if (e.kind != 'E')
             continue;
-        std::string key = e.port + ": " + e.msg;
+        std::string key = std::to_string(e.line) + ":" + e.port + ": " + e.msg;
         if (!seen.count(key)) {
             seen[key] = {&e, 0};
             order.push_back(key);
@@ -542,10 +626,126 @@ void collectHarnessErrors(const std::vector<Event> &events, KernelTraceResult &r
     for (auto &key : order) {
         const Event *e = seen[key].first;
         int cnt = seen[key].second;
-        r.errors.push_back(
-            (e->port == "vector" ? std::string("vector access") : e->port + " block " + std::to_string(e->n)) +
-            " on core (" + std::to_string(e->p0) + "," + std::to_string(e->p1) + "): " + e->msg +
-            (cnt > 1 ? " [" + std::to_string(cnt) + " occurrences]" : ""));
+        const bool vec = e->port == "vector";
+        r.errors.push_back(atLine(srcName, e->line) +
+                           (vec ? std::string("vector access") : e->port + " block " + std::to_string(e->n)) +
+                           " on core (" + std::to_string(e->p0) + "," + std::to_string(e->p1) + "): " + e->msg +
+                           (cnt > 1 ? " [" + std::to_string(cnt) + " occurrences]" : "") +
+                           (vec ? "" : inCall(src, e->line, e->port)));
+    }
+}
+
+// `aie::shape<a,b,c>` as a kernel would write it.
+std::string shapeText(const int *v, int n) {
+    std::string s = vecStr(v, n);
+    return "aie::shape<" + s.substr(1, s.size() - 2) + ">";
+}
+
+// Line of `var`'s declaration in the kernel's parameter list, or 0.
+int portDeclLine(const std::string &src, const TraceKernel &k, const std::string &var) {
+    const std::string blank = sourceBlankComments(src);
+    const std::string params = blank.substr(k.paramOpen + 1, k.paramClose - k.paramOpen - 1);
+    size_t at = 0;
+    for (auto &prm : splitTop(params)) {
+        at = params.find(prm, at);
+        size_t v = prm.find_last_not_of(" \t\r\n");
+        size_t b = v;
+        while (b != std::string::npos && b > 0 && isIdentChar(prm[b - 1]))
+            b--;
+        if (v != std::string::npos && prm.substr(b, v - b + 1) == var)
+            return 1 + (int)std::count(src.begin(), src.begin() + k.paramOpen + 1 + at, '\n');
+        at += prm.size();
+    }
+    return 0;
+}
+
+// The per-block errors ("offset has 4 dims, but the tensor has 3", "covers
+// [0, 16) outside the tensor extent 4") name the symptom on every core. Say
+// once which source line is the likelier mistake:
+//  - a CALL whose offset and shape disagree in rank, or whose rank differs from
+//    the declaration while other calls on the port match it: that call's line;
+//  - the DECLARATION, when every block of the port has another rank or one is
+//    larger than a declared dim (no offset can fit): the declaration's line,
+//    what the blocks span, and the call + core that overruns it.
+// An offset that only runs past the end stays the per-block error: there the
+// call is as likely wrong as the declaration.
+void declaredShapeHints(const std::string &src, const std::string &srcName, const TraceKernel &k,
+                        const std::vector<Event> &events, KernelTraceResult &r) {
+    for (auto &p : k.ports) {
+        const int rank = (int)p.shape.size();
+        const int line = portDeclLine(src, k, p.var);
+        const std::string decl = "`" + shapeText(p.shape.data(), rank) + "`";
+        std::map<int, const Event *> badCall; // first event per call line whose rank is wrong
+        bool anyFits = false, anyEvent = false;
+        for (auto &e : events) {
+            if ((e.kind != 'L' && e.kind != 'S') || e.port != p.var)
+                continue;
+            anyEvent = true;
+            if (e.ro != e.rs || e.rs != rank)
+                badCall.emplace(e.line, &e);
+            else
+                anyFits = true;
+        }
+        if (!anyEvent)
+            continue;
+        // Calls the declaration cannot be blamed for.
+        bool callBlamed = false;
+        for (auto &[ln, e] : badCall) {
+            if (e->ro == e->rs && !anyFits)
+                continue; // every call agrees on another rank: the declaration
+            callBlamed = true;
+            const std::string what =
+                e->ro != e->rs
+                    ? "passes an offset of " + std::to_string(e->ro) + " and a block shape of " +
+                          std::to_string(e->rs) + " coordinates -- the " +
+                          (e->ro > e->rs ? "offset has an extra coordinate" : "offset is missing a coordinate")
+                    : "passes " + std::to_string(e->rs) + "-D blocks while the other calls on this port pass " +
+                          std::to_string(rank) + "-D ones";
+            const std::string call = callText(src, ln, p.var);
+            r.errors.push_back(atLine(srcName, ln) + p.var +
+                               ": hint: " + (call.empty() ? "the call" : "`" + call + "`") + " " + what +
+                               " (the port is " + std::to_string(rank) + "-D, " + decl +
+                               (line ? " at line " + std::to_string(line) : "") + ")");
+        }
+        if (callBlamed)
+            continue;
+        // Declaration: every block has another rank, or some block is larger than a declared dim.
+        const Event *over = nullptr; // a block that overruns the declaration, for the evidence
+        int overDim = -1;
+        bool negative = false;
+        std::vector<int> hull(4, 0);
+        int rs = -1;
+        bool mixed = false;
+        for (auto &e : events) {
+            if ((e.kind != 'L' && e.kind != 'S') || e.port != p.var)
+                continue;
+            mixed |= rs >= 0 && e.rs != rs;
+            rs = e.rs;
+            for (int d = 0; d < std::min(rs, 4); d++) {
+                negative |= e.off[d] < 0;
+                hull[d] = std::max(hull[d], e.off[d] + e.shape[d]);
+                if (d < rank && e.shape[d] > p.shape[d] && (!over || d < overDim))
+                    over = &e, overDim = d;
+            }
+        }
+        if (mixed || (rs == rank && !over))
+            continue;
+        const int n = std::min(rs, 4);
+        std::string evidence;
+        if (over)
+            evidence = "; e.g. line " + std::to_string(over->line) + inCall(src, over->line, p.var) + " on core (" +
+                       std::to_string(over->p0) + "," + std::to_string(over->p1) + ") takes " +
+                       std::to_string(over->shape[overDim]) + " in dim " + std::to_string(overDim) + " (" +
+                       traceDimName(p.role, overDim) + ") at offset " + std::to_string(over->off[overDim]) +
+                       ", the declared extent is " + std::to_string(p.shape[overDim]);
+        else
+            evidence = "; e.g. line " + std::to_string(badCall.begin()->first) +
+                       inCall(src, badCall.begin()->first, p.var) + " passes " + std::to_string(rs) + " coordinates";
+        r.errors.push_back(atLine(srcName, line) + p.var + ": hint: the kernel's blocks are " + std::to_string(rs) +
+                           "-D" + (negative ? "" : ", spanning " + vecStr(hull.data(), n)) +
+                           ", which no offset fits into the declared " + decl + " -- check this port's aie::shape" +
+                           (negative ? "" : " (the blocks suggest " + shapeText(hull.data(), n) + ")") +
+                           " and its role (" + p.role + ")" + evidence);
     }
 }
 
@@ -950,7 +1150,8 @@ KernelTraceResult traceKernel(const std::string &src, const TraceKernel &k, int 
         r.ok = false;
         return r;
     }
-    collectHarnessErrors(events, r);
+    declaredShapeHints(src, srcName, k, events, r); // the likely cause first, then the per-core symptoms
+    collectHarnessErrors(events, src, srcName, r);
     for (auto &p : k.ports) {
         PortFit f;
         std::vector<int> origin;
@@ -982,7 +1183,7 @@ KernelTraceResult traceLogical(const std::string &src, const TraceKernel &k, int
         r.ok = false;
         return r;
     }
-    collectHarnessErrors(events, r);
+    collectHarnessErrors(events, src, srcName, r);
     // Blocks held per (core, port), oldest first, with the store count when taken.
     std::map<std::string, std::deque<std::pair<const Event *, long>>> held;
     std::map<std::pair<int, int>, long> stores;
@@ -1293,9 +1494,16 @@ KernelOnlyResult inferKernelOnly(std::string &src, const std::string &srcDir, co
                 res.error = res.errors[0];
             continue;
         }
-        res.tu_decls[k.name] = routedTUDecls(plan, tr.fits);
+        res.tu_decls[k.name] = routedTUDecls(k.name, plan, tr.fits);
         for (auto &p : k.ports)
             res.blocks[k.name][p.var] = {p.shape, tr.fits[p.var], tr.opts.count(p.var) ? tr.opts[p.var] : BlockOpts()};
+        for (auto &rp : plan.ports) {
+            bool slab = false; // halo slabs are sized by the halo path
+            for (auto &d : rp.dims)
+                slab = slab || d.halo() || d.meshHalo();
+            if (!slab && !(plan.halo && !rp.output && rp.dependsOn(0)) && rp.blockBytes() > 0)
+                res.window_bytes[k.name][rp.var] = rp.blockBytes();
+        }
         res.est_ms[k.name] = res.derived.count(k.name) ? res.derived[k.name].est_ms : routingEstMs(plan, hints);
         rep << "  => routed: " << plan.ports.size() << " ports on the " << mesh.first << "x" << mesh.second
             << " mesh, DMA carriers taken from the traced blocks\n";
@@ -1357,13 +1565,45 @@ bool spacePort(const PortSpace &s, TracePort &p, std::string &err) {
     return err.empty();
 }
 
+// Every `aie::port<` of the parameter list whose `<` is never closed. Without
+// its `>` the commas after it are not top-level, so splitTop() returns the
+// whole list as one parameter, parsePort() rejects it silently and the kernel
+// lands here as an unrecognizable "GemmSpace" port -- name the real cause.
+std::vector<std::string> unclosedPorts(const std::string &blank, const std::string &src, const TraceKernel &k) {
+    std::vector<std::string> errs;
+    const std::string params = blank.substr(k.paramOpen + 1, k.paramClose - k.paramOpen - 1);
+    for (size_t a = 0; (a = params.find("aie::port<", a)) != std::string::npos; a += 10) {
+        size_t close = sourceMatchClose(params, a + 9, '<', '>');
+        size_t next = params.find("aie::port<", a + 10);
+        if (close != std::string::npos && (next == std::string::npos || close < next))
+            continue;
+        size_t at = k.paramOpen + 1 + a;
+        size_t eol = params.find('\n', a);
+        int line = 1 + (int)std::count(src.begin(), src.begin() + at, '\n');
+        errs.push_back("line " + std::to_string(line) + ": `" +
+                       trim(params.substr(a, (eol == std::string::npos ? params.size() : eol) - a)) +
+                       "` -- the `<` of aie::port is never closed (a missing `>`: "
+                       "`aie::shape<d0, ...>> var` ends with two)");
+    }
+    return errs;
+}
+
 // One hand-written kernel: trace, compare, and on success its descriptors.
 void verifySpaceKernel(std::string &src, const std::string &srcDir, const std::string &srcName, TraceKernel k,
                        std::pair<int, int> mesh, KernelOnlyResult &res, std::ostringstream &rep) {
-    std::vector<std::string> errs;
+    const std::string blank = sourceBlankComments(src);
+    std::vector<std::string> errs = unclosedPorts(blank, src, k);
+    if (!errs.empty()) {
+        res.ok = false;
+        for (auto &e : errs)
+            res.errors.push_back(k.name + ": " + e);
+        if (res.error.empty())
+            res.error = res.errors[0];
+        return;
+    }
     std::vector<std::string> spaceNames;
     std::vector<PortSpace> hand;
-    std::string params = sourceBlankComments(src).substr(k.paramOpen + 1, k.paramClose - k.paramOpen - 1);
+    std::string params = blank.substr(k.paramOpen + 1, k.paramClose - k.paramOpen - 1);
     int pp = 0;
     for (auto &prm : splitTop(params)) {
         TracePort p;
@@ -1431,7 +1671,7 @@ void verifySpaceKernel(std::string &src, const std::string &srcDir, const std::s
             body.replace(p, from.size(), to);
     }
     src.replace(k.bodyOpen, k.bodyClose - k.bodyOpen + 1, body);
-    res.tu_decls[k.name] = routedTUDecls(plan, tr.fits);
+    res.tu_decls[k.name] = routedTUDecls(k.name, plan, tr.fits);
     res.est_ms[k.name] = d.ok ? d.est_ms : routingEstMs(plan, routingHints(plan));
     rep << "  => verified: " << plan.ports.size() << " ports match their GemmSpace; block descriptors from the "
         << "traced blocks\n";

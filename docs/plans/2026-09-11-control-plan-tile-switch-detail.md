@@ -62,7 +62,7 @@ def test_tile_switch_view_splits_fwd_ret():
 
 **Step 2: Run tests to verify they fail**
 
-Run: `cd /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj && python3 -m pytest src/tool/debug/tests/test_controlpan_pmap.py -q`
+Run: `cd <repo> && python3 -m pytest src/tool/debug/tests/test_controlpan_pmap.py -q`
 Expected: FAIL with `AttributeError: module 'controlpan_pmap' has no attribute 'tile_switch_view'`.
 
 **Step 3: Write minimal implementation**
@@ -109,7 +109,7 @@ def tile_switch_view(text, col, row):
 
 **Step 4: Run tests to verify they pass**
 
-Run: `cd /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj && python3 -m pytest src/tool/debug/tests/test_controlpan_pmap.py -q`
+Run: `cd <repo> && python3 -m pytest src/tool/debug/tests/test_controlpan_pmap.py -q`
 Expected: PASS (10 tests: 6 existing + 4 new).
 
 **Step 5: Commit**
@@ -149,7 +149,7 @@ Insert immediately after the `/ctrlplan/load` `self._send_json(...)` line (~5345
 
 **Step 2: Byte-compile check**
 
-Run: `cd /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj && python3 -m py_compile src/tool/debug/schedule_debug_server.py && echo OK`
+Run: `cd <repo> && python3 -m py_compile src/tool/debug/schedule_debug_server.py && echo OK`
 Expected: `OK`.
 
 **Step 3: Commit**
@@ -289,7 +289,7 @@ In the tile click handler, at the end of the `g.addEventListener('click', ...)` 
 
 **Step 6: Byte-compile check**
 
-Run: `cd /scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj && python3 -m py_compile src/tool/debug/schedule_view.py && echo OK`
+Run: `cd <repo> && python3 -m py_compile src/tool/debug/schedule_view.py && echo OK`
 Expected: `OK`.
 
 **Step 7: Commit**

@@ -6,7 +6,7 @@
 """Split TVM's single generated C file into one folder per layer.
 
 ``relay.build(target="c")`` emits every kernel into one translation unit
-(``resnet18.c``: 4.5k lines, 22 kernels). That is awkward for per-layer work --
+(``<stem>.c``: 4.5k lines, 22 kernels for the zoo default). That is awkward for per-layer work --
 offloading one conv to AIE, diffing a single kernel, compiling layers
 separately -- so this splits it into ``layers/``, **one folder per layer, in
 graph execution order**:
@@ -33,7 +33,7 @@ sources, the generated ``host.cc``/``routing.cc``, a per-layer Makefile
 fragment. Those are per-layer, not per-op-kind, which is why the folder is keyed
 by execution index.
 
-Ordering comes from ``resnet18_graph.json``; without it the source order is
+Ordering comes from ``<stem>_graph.json``; without it the source order is
 used and every file says so. Pass ``group=False`` (CLI ``--flat``) to get one
 flat directory of ``.c`` files with no per-layer folders -- useful only when
 nothing else will ever sit beside them.
@@ -231,8 +231,8 @@ def short_layer_name(func_name: str) -> str:
 
     Keeps the whole fused sequence in order -- so a residual block reads
     ``conv2d_add_add_relu``: conv, bias, residual, activation -- minus the
-    ``expand_dims`` bias artifact. Two kernels can share a stem (ResNet has
-    eight ``conv2d_add_relu``s); the execution-order prefix disambiguates them.
+    ``expand_dims`` bias artifact. Two kernels can share a stem (the zoo
+    default has eight ``conv2d_add_relu``s); the execution-order prefix disambiguates them.
     """
     ops = [op for op in layer_ops(func_name) if op not in _NOISE_OPS]
     stem = "_".join(ops)
@@ -243,7 +243,7 @@ def _graph_schedule(graph_path) -> tuple:
     """``(order, call_counts)`` from a graph JSON, or ``([], {})`` without one.
 
     *order* is each kernel symbol at its first invocation; *call_counts* is how
-    many graph nodes invoke it (ResNet reuses two kernels, so 24 nodes map onto
+    many graph nodes invoke it (the zoo default reuses two kernels, so 24 nodes map onto
     22 functions).
     """
     if not graph_path or not Path(graph_path).is_file():

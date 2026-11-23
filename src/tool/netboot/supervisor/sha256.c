@@ -40,26 +40,57 @@ static void block(uint32_t h[8], const uint8_t *p) {
     h[0] += a, h[1] += b, h[2] += c, h[3] += d, h[4] += e, h[5] += f, h[6] += g, h[7] += hh;
 }
 
-void nb_sha256(const uint8_t *data, uint64_t len, uint8_t out[32]) {
-    uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-    uint64_t i = 0;
-    for (; i + 64 <= len; i += 64)
-        block(h, data + i);
+void nb_sha256_init(struct nb_sha256_ctx *c) {
+    static const uint32_t h0[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                                   0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    memcpy(c->h, h0, sizeof(h0));
+    c->len = 0;
+    c->n = 0;
+}
+
+/* Incremental: the supervisor hashes each TCP segment as it is placed. */
+void nb_sha256_update(struct nb_sha256_ctx *c, const uint8_t *data, uint64_t len) {
+    c->len += len;
+    if (c->n) {
+        uint32_t take = 64 - c->n;
+        if (take > len)
+            take = (uint32_t)len;
+        memcpy(c->buf + c->n, data, take);
+        c->n += take, data += take, len -= take;
+        if (c->n < 64)
+            return;
+        block(c->h, c->buf);
+        c->n = 0;
+    }
+    for (; len >= 64; len -= 64, data += 64)
+        block(c->h, data);
+    memcpy(c->buf, data, len);
+    c->n = (uint32_t)len;
+}
+
+void nb_sha256_final(struct nb_sha256_ctx *c, uint8_t out[32]) {
     uint8_t tail[128] = {0};
-    uint64_t rem = len - i;
-    memcpy(tail, data + i, rem);
+    uint64_t rem = c->n;
+    memcpy(tail, c->buf, rem);
     tail[rem] = 0x80;
     uint64_t tl = (rem < 56) ? 64 : 128;
-    uint64_t bits = len * 8;
+    uint64_t bits = c->len * 8;
     for (int k = 0; k < 8; k++)
         tail[tl - 1 - k] = (uint8_t)(bits >> (8 * k));
-    block(h, tail);
+    block(c->h, tail);
     if (tl == 128)
-        block(h, tail + 64);
+        block(c->h, tail + 64);
     for (int k = 0; k < 8; k++) {
-        out[4 * k] = (uint8_t)(h[k] >> 24);
-        out[4 * k + 1] = (uint8_t)(h[k] >> 16);
-        out[4 * k + 2] = (uint8_t)(h[k] >> 8);
-        out[4 * k + 3] = (uint8_t)h[k];
+        out[4 * k] = (uint8_t)(c->h[k] >> 24);
+        out[4 * k + 1] = (uint8_t)(c->h[k] >> 16);
+        out[4 * k + 2] = (uint8_t)(c->h[k] >> 8);
+        out[4 * k + 3] = (uint8_t)c->h[k];
     }
+}
+
+void nb_sha256(const uint8_t *data, uint64_t len, uint8_t out[32]) {
+    struct nb_sha256_ctx c;
+    nb_sha256_init(&c);
+    nb_sha256_update(&c, data, len);
+    nb_sha256_final(&c, out);
 }

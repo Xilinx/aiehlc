@@ -112,6 +112,10 @@ struct ParsedTensorInfo {
                                      // channel coverage for the filter K). Used by the
                                      // structured-dim coalescing path.
     bool perPort2D = false;          // true when d1/d2 were set on this port
+    // The placeholder shape the launch parse gave this port (defaultDim0 x
+    // defaultDim1, 16x16 when the launch has no dim scalars). A port whose
+    // shape is still this after all overrides never got a real extent.
+    std::vector<int64_t> placeholderShape;
     int layoutTransform = 0;         // 0=None, 1=DmaShuffle, 2=CoreShuffle
     int tileMode = 0;                // 0=Partition, 1=Overlap
     bool requireFullCoverage = true; // validation: tiles must cover the dim
@@ -268,6 +272,9 @@ static KernelBlock kernelBlockFor(const std::string &kernel, const std::string &
     kb.tileC = p->second.opts.tile[1];
     return kb;
 }
+// Trace-routed kernel-only kernels: kernel -> port var -> traced block bytes
+// (the per-port core window cap, TensorSplitDesc::windowBytes).
+static std::map<std::string, std::map<std::string, int64_t>> traceWindowBytesByKernel;
 
 // Spatial-halo conv: the core windows and round count the GEMM-model derivation
 // produced must be the blocks the kernel loads / stores, as the conv auto-tiling
@@ -321,6 +328,22 @@ static bool checkConvTilingAgainstAnalysis(const std::string &kernel, const Deri
 // passthrough the only way to reach TM from an aiehlc kernel is to hardcode the
 // undocumented address_space number the frontend happens to use.
 static std::string userKernelPrologue;
+
+// Text prepended to the user's __global__ body in the tiling / multi-kernel
+// paths: the user's #define lines, then the AIEHLC_KERNEL_PROLOGUE block
+// (file-scope helpers, static scratch arrays, ...). Before 2026-11-12 only the
+// macros were carried here, so a prologue was silently dropped in these paths.
+static std::string userMacroAndPrologueBlock() {
+    std::string out;
+    if (!userMacroDefines.empty()) {
+        out = "// User macro definitions from source file\n";
+        for (const auto &macro : userMacroDefines) out += macro + "\n";
+        out += "\n";
+    }
+    if (!userKernelPrologue.empty())
+        out += "// User kernel prologue from source file (AIEHLC_KERNEL_PROLOGUE_BEGIN/END)\n" + userKernelPrologue + "\n";
+    return out;
+}
 
 using namespace clang;
 using namespace clang::tooling;
@@ -1387,6 +1410,7 @@ public:
                                 } else {
                                     pti.shape = {defaultDim0, defaultDim1};
                                 }
+                                pti.placeholderShape = pti.shape;
                                 pti.elementBitWidth = bitWidth;
                                 pti.isInput = isInput;
                                 pti.spatialTag = spatialTag;
@@ -2341,6 +2365,41 @@ public:
                         llvm::outs() << "[TilingLinalg] GEMM dims from the ports' GemmSpaces: M=" << macroDimM
                                      << " N=" << macroDimN << " K=" << macroDimK << "\n";
 
+                    // Non-GEMM kernel-only ports (eltwise, row reductions: GroupNorm,
+                    // LayerNorm, softmax, SiLU ...). Trace routing writes each port's
+                    // full tensor extent into its GemmSpace d1..d4 fullsize, but only
+                    // GEMM (M/N/K) re-derived the shape from it; every other port kept
+                    // the launch placeholder (16x16), so the windows and the shim BDs
+                    // moved 128 B where the kernel's blocks were KBs and the array
+                    // deadlocked in wait_io with no build error. Take the shape from
+                    // the port's own d1..d4 here; a port that still has the placeholder
+                    // while it declares a GemmSpace is a hard error.
+                    if (macroDimM == 0 && macroDimN == 0 && macroDimK == 0) {
+                        for (auto &t : parsedTensors) {
+                            if (!t.policyResolved || !t.perPort2D || t.shape != t.placeholderShape)
+                                continue;
+                            std::vector<int64_t> sh;
+                            for (const auto *td : {&t.tdD1, &t.tdD2, &t.tdD3, &t.tdD4}) {
+                                if (td->base <= 0)
+                                    break;
+                                sh.push_back(td->base);
+                            }
+                            if (sh.size() < 2) {
+                                llvm::errs() << "[TilingLinalg] ERROR: port " << t.varName
+                                             << " declares a GemmSpace but no d1/d2 fullsize; refusing the "
+                                             << t.placeholderShape[0] << "x" << t.placeholderShape[1]
+                                             << " placeholder shape (its DMA would move the wrong byte count)\n";
+                                std::exit(1);
+                            }
+                            t.shape = sh;
+                            llvm::outs() << "[TilingLinalg] Port shape from GemmSpace d1..d" << sh.size() << ": "
+                                         << t.varName << " [";
+                            for (size_t k = 0; k < sh.size(); ++k)
+                                llvm::outs() << (k ? "x" : "") << sh[k];
+                            llvm::outs() << "] (non-GEMM kernel-only port)\n";
+                        }
+                    }
+
                     // ---- Compute derived tiling parameters from M/K/N + per-port policy ----
                     int effectiveMeshRows = localMeshRows > 0 ? localMeshRows : tilingMeshRows;
                     int effectiveMeshCols = localMeshCols > 0 ? localMeshCols : tilingMeshCols;
@@ -3050,6 +3109,14 @@ public:
                             } else {
                                 mkd.splitModel.tensorSplits.push_back(SplitModel::fromPolicyFields(
                                     pt.isInput ? 0 : 3, 0, pt.isInput ? 0 : 1, 2, pt.isInput, pt.maxBufferBytes));
+                            }
+                            {
+                                auto wk = traceWindowBytesByKernel.find(currentLaunchKernel);
+                                if (wk != traceWindowBytesByKernel.end()) {
+                                    auto wp = wk->second.find(pt.varName);
+                                    if (wp != wk->second.end())
+                                        mkd.splitModel.tensorSplits.back().windowBytes = wp->second;
+                                }
                             }
                             // Spatial-halo: mirror halo descriptor onto the just-pushed split
                             // so createroutingfuncBySplitModel produces overlapping partitions.
@@ -4108,6 +4175,66 @@ public:
                         convDerivedByKernel[kd.first] = kd.second;
                     for (auto &kb : ko.blocks)
                         kernelBlocksByKernel[kb.first] = kb.second;
+                    for (auto &kd : ko.window_bytes)
+                        traceWindowBytesByKernel[kd.first] = kd.second;
+                    // GAP-MKROUTE: aiehlc emits ONE routing() for the whole program. Kernels whose
+                    // port topologies ((role, distribution) per port) differ would silently run on
+                    // one kernel's stream routes and hang on the board -> hard build error.
+                    // Same rule as script/test/multikernel_routing_check.py (1fbf524).
+                    {
+                        std::map<std::string, std::vector<std::string>> topo;
+                        std::vector<std::string> order;
+                        std::string cur;
+                        const std::string kmark = "// ==== aiehlc trace -> routing: ";
+                        std::istringstream ls(src);
+                        for (std::string line; std::getline(ls, line);) {
+                            if (line.rfind(kmark, 0) == 0) {
+                                std::string rest = line.substr(kmark.size());
+                                size_t q = rest.find("'s ports");
+                                cur = q == std::string::npos ? rest : rest.substr(0, q);
+                                if (!topo.count(cur))
+                                    order.push_back(cur);
+                                topo[cur].clear();
+                                continue;
+                            }
+                            if (cur.empty() || line.rfind("//    ", 0) != 0)
+                                continue;
+                            size_t o = line.find(" (");
+                            if (o == std::string::npos)
+                                continue;
+                            std::string r = line.substr(o + 2);
+                            size_t c1 = r.find(", ");
+                            if (c1 == std::string::npos)
+                                continue;
+                            std::string role = r.substr(0, c1);
+                            if (role != "IFM" && role != "WEIGHTS" && role != "OFM")
+                                continue;
+                            size_t c2 = r.find(',', c1 + 2);
+                            if (c2 == std::string::npos)
+                                continue;
+                            topo[cur].push_back(role + "=" + r.substr(c1 + 2, c2 - c1 - 2));
+                        }
+                        std::map<std::vector<std::string>, std::vector<std::string>> groups;
+                        for (auto &k : order)
+                            groups[topo[k]].push_back(k);
+                        if (groups.size() > 1) {
+                            for (auto &g : groups) {
+                                std::string t, ks;
+                                for (auto &x : g.first)
+                                    t += (t.empty() ? "" : " ") + x;
+                                for (auto &k : g.second)
+                                    ks += (ks.empty() ? "" : ",") + k;
+                                llvm::errs() << "[KernelAnalysis] MKROUTE topology " << t << ": " << g.second.size()
+                                             << " kernel(s) " << ks << "\n";
+                            }
+                            llvm::errs() << "[KernelAnalysis] ERROR: MKROUTE kernels=" << order.size()
+                                         << " topologies=" << groups.size()
+                                         << ": aiehlc emits one routing() for all kernels of a program; kernels "
+                                            "with different port topologies would hang on the board. Give every "
+                                            "kernel the same port topology (or build them as separate programs).\n";
+                            std::exit(1);
+                        }
+                    }
                 }
                 // Hand-written GemmSpaces + aie::load_buffer / store_buffer: the
                 // GemmSpaces stay the authority; the kernel's traced blocks must
@@ -5330,14 +5457,8 @@ public:
 
                     // Prepend user macros to kernel body
                     std::string kernelBodyWithMacros = resolvedBody;
-                    if (!userMacroDefines.empty() && !resolvedBody.empty()) {
-                        std::string macroBlock = "// User macro definitions from source file\n";
-                        for (const auto &macro : userMacroDefines) {
-                            macroBlock += macro + "\n";
-                        }
-                        macroBlock += "\n";
-                        kernelBodyWithMacros = macroBlock + resolvedBody;
-                    }
+                    if (!resolvedBody.empty())
+                        kernelBodyWithMacros = userMacroAndPrologueBlock() + resolvedBody;
 
                     // First kernel writes host.cc fresh; subsequent kernels append
                     bool appendMode = (ki > 0);
@@ -5349,12 +5470,43 @@ public:
                         llvm::errs() << "[aiehlc] Aborting: invalid #pragma aie_trace directive(s).\n";
                         std::exit(1);
                     }
+                    // AOT control packets: the pipeline writes one ctrlpkt_sites.txt per run;
+                    // in multi-kernel mode keep a per-kernel copy (ctrlpkt_sites_<kernel>.txt)
+                    // so kc.sh can build one host_ctrlpkt_<kernel>_table per kernel.
+                    const std::string mkSites = outputDir + "/ctrlpkt_sites.txt";
+                    const std::string mkSitesK = outputDir + "/ctrlpkt_sites_" + mkd.kernelName + ".txt";
+                    llvm::sys::fs::remove(mkSites);
+                    llvm::sys::fs::remove(mkSitesK);
+                    // Kernel-ELF load AOT (GAP-aiehlc-multi-kernel-aot-046372): the pipeline leaves the
+                    // fabric ack count in ctrlpkt_kernel_nresp.txt; keep it as the per-kernel manifest
+                    // ctrlpkt_manifest_<kernel>.json, which kc.sh encodes into kernel_<kernel>_ctrlpkt.h.
+                    const std::string mkNresp = outputDir + "/ctrlpkt_kernel_nresp.txt";
+                    const std::string mkManK = outputDir + "/ctrlpkt_manifest_" + mkd.kernelName + ".json";
+                    llvm::sys::fs::remove(mkNresp);
+                    llvm::sys::fs::remove(mkManK);
                     if (!TilingLinalgPipeline::runPipeline(
                             ctx, module, outputDir, kernelBodyWithMacros, mkd.kernelFuncName, parsedDebugLevel,
                             /*userRewrittenSource=*/"", {}, mkd.maxPPBytes, aieGenStr, hostFuncSuffix, appendMode,
                             &hostDdrArgs, mkd.portVarNames, parsedTraceTiles)) {
                         llvm::errs() << "[TilingLinalg] Pipeline FAILED for kernel: " << mkd.kernelName << "\n";
                         std::exit(1);
+                    }
+                    if (llvm::sys::fs::exists(mkSites)) {
+                        if (!llvm::sys::fs::rename(mkSites, mkSitesK))
+                            llvm::outs() << "[TilingLinalg] AOT control-packet sites for kernel " << mkd.kernelName
+                                         << ": " << mkSitesK << "\n";
+                    }
+                    if (auto nb = llvm::MemoryBuffer::getFile(mkNresp)) {
+                        long kn = std::strtol((*nb)->getBuffer().str().c_str(), nullptr, 10);
+                        llvm::sys::fs::remove(mkNresp);
+                        std::error_code kec;
+                        llvm::raw_fd_ostream km(mkManK, kec, llvm::sys::fs::OF_None);
+                        if (kn > 0 && !kec) {
+                            km << "{\"entries\":[{\"func\":\"" << mkd.kernelName << "\",\"nresp\":" << kn
+                               << ",\"stream_id\":16,\"reset\":1}]}\n";
+                            llvm::outs() << "[TilingLinalg] AOT kernel-ELF control-packet manifest for kernel "
+                                         << mkd.kernelName << ": " << mkManK << " (nresp=" << kn << ")\n";
+                        }
                     }
                     mkd.numHostDdrArgs = hostDdrArgs;
                     llvm::outs() << "[TilingLinalg] Pipeline completed for kernel: " << mkd.kernelName
@@ -5651,6 +5803,37 @@ public:
                         stream << "extern unsigned int _binary_kernel_" << mkd.kernelName << "_size;\n";
                     }
 
+                    // AOT control packets (multi-kernel): kc.sh encodes ctrlpkt_sites_<kernel>.txt into
+                    // host_ctrlpkt_<kernel>.h (table host_ctrlpkt_<kernel>_table); each dispatch registers
+                    // its kernel's table right before the launch, so every launch matches its own sites.
+                    std::set<std::string> mkAot;
+                    for (auto &mkd : parsedMeshKernels) {
+                        if (llvm::sys::fs::exists(outputDir + "/ctrlpkt_sites_" + mkd.kernelName + ".txt")) {
+                            mkAot.insert(mkd.kernelName);
+                            stream << "#include \"host_ctrlpkt_" << mkd.kernelName << ".h\"\n";
+                        }
+                    }
+                    // Kernel-ELF load AOT: kc.sh encodes ctrlpkt_manifest_<kernel>.json into
+                    // kernel_<kernel>_ctrlpkt.h; each dispatch selects its kernel's blob (or clears the
+                    // previous kernel's blob so a kernel without one never replays a foreign ELF).
+                    std::set<std::string> mkKpkt;
+                    for (auto &mkd : parsedMeshKernels) {
+                        if (llvm::sys::fs::exists(outputDir + "/ctrlpkt_manifest_" + mkd.kernelName + ".json")) {
+                            mkKpkt.insert(mkd.kernelName);
+                            stream << "#include \"kernel_" << mkd.kernelName << "_ctrlpkt.h\"\n";
+                        }
+                    }
+                    auto emitAotRegister = [&](const MeshKernelDesc &mkd, const char *indent) {
+                        if (mkKpkt.count(mkd.kernelName))
+                            stream << indent << "__Runtime_ctrl_kernel_pkt_set(kernel_" << mkd.kernelName
+                                   << "_ctrlpkt, (unsigned int)sizeof(kernel_" << mkd.kernelName << "_ctrlpkt));\n";
+                        else if (!mkKpkt.empty())
+                            stream << indent << "__Runtime_ctrl_kernel_pkt_set(0, 0u);\n";
+                        if (mkAot.count(mkd.kernelName))
+                            stream << indent << "__Runtime_ctrl_aot_register(&host_ctrlpkt_" << mkd.kernelName
+                                   << "_table);\n";
+                    };
+
                     // Find max DDR args across all kernels for __aie_launch signature
                     unsigned maxDdrArgs = 0;
                     for (auto &mkd : parsedMeshKernels) {
@@ -5685,6 +5868,7 @@ public:
                                    << "_start);\n";
                             // Flush+invalidate ALL buffers (inputs AND outputs) before DMA
                             emitSyncCalls(stream, mkd, "        ", /*beforeLaunch=*/true);
+                            emitAotRegister(mkd, "        ");
                             stream << "        " << hostFunc << "(dev";
                             for (unsigned i = 0; i < mkd.numHostDdrArgs; ++i)
                                 stream << ", _t" << i;
@@ -5715,6 +5899,7 @@ public:
                             stream << "    __Runtime_set_kernel_elf(_binary_kernel_" << mkd0.kernelName << "_start);\n";
                             // Flush+invalidate ALL buffers (inputs AND outputs) before DMA
                             emitSyncCalls(stream, mkd0, "    ", /*beforeLaunch=*/true);
+                            emitAotRegister(mkd0, "    ");
                             stream << "    " << hostFunc << "(dev";
                             for (unsigned i = 0; i < mkd0.numHostDdrArgs; ++i)
                                 stream << ", _t" << i;
@@ -5736,6 +5921,7 @@ public:
                                    << mkd.kernelName << "\") == 0) {\n";
                             stream << "        __Runtime_set_kernel_elf(_binary_kernel_" << mkd.kernelName
                                    << "_start);\n";
+                            emitAotRegister(mkd, "        ");
                             stream << "        " << hostFunc << "(dev);\n";
                         }
                         stream << "    }\n";
@@ -6018,14 +6204,8 @@ public:
 
                 // Prepend user macros to kernel body for multi-tile path
                 std::string kernelBodyWithMacros = singleKernelBody;
-                if (!userMacroDefines.empty() && !singleKernelBody.empty()) {
-                    std::string macroBlock = "// User macro definitions from source file\n";
-                    for (const auto &macro : userMacroDefines) {
-                        macroBlock += macro + "\n";
-                    }
-                    macroBlock += "\n";
-                    kernelBodyWithMacros = macroBlock + singleKernelBody;
-                }
+                if (!singleKernelBody.empty())
+                    kernelBodyWithMacros = userMacroAndPrologueBlock() + singleKernelBody;
 
                 // Port var names (indexed by tensor order) for IR-sourced builtin
                 // resolution (get_arg_per_round_size_in_dim) inside runPipeline.

@@ -1095,6 +1095,9 @@ def netload_start(args, local_elf, collected):
     load_argv = ["load", local_elf, "--host", ip, "--max-run-ms", str(args.netload_max_run_ms),
                  "--wait", "0" if force_now else str(args.netload_wait)] + \
         ([] if args.netload_no_force and not force_now else ["--force"])
+    # A streamed ELF (bf16 weights) is placed as it arrives: the reply can take longer than 60 s.
+    reply_timeout = getattr(args, "netload_reply_timeout", 60.0)
+    load_argv += ["--reply-timeout", str(reply_timeout)]
     if not args.netload_bootstrap:
         # The console attaches while the ELF streams; netload holds back the last
         # 4 KB until it is attached, so the app cannot print before we listen.
@@ -1117,7 +1120,7 @@ def netload_start(args, local_elf, collected):
         print(f"[netload] asking the supervisor at {ip} to run {os.path.basename(local_elf)} " +
               ("(force now: a running app is taken over)" if force_now
                else f"(waits up to {args.netload_wait:g} s if the board is busy)"), flush=True)
-        rc, out = netload_remote(load_argv, gate=console_attached, live=True)
+        rc, out = netload_remote(load_argv, timeout=max(600, reply_timeout + 120), gate=console_attached, live=True)
         opener.join(timeout=60)
         if "c" not in box and rc != 2:
             print(f"\n[ERROR] {CONSOLE_PORT} console did not attach ({box.get('err', 'timeout')})")
@@ -1268,6 +1271,13 @@ Examples:
         default=0,
         help="Max run time of this app on the board (--netload only); 0 = the supervisor default (60 s). "
              "Past it the supervisor marks the run timed out, and a later forced run may take the core over"
+    )
+    parser.add_argument(
+        "--netload-reply-timeout",
+        type=float,
+        default=60.0,
+        help="Seconds netload waits for the supervisor's reply after the ELF is sent (--netload only, default 60); "
+             "raise it for a large streamed ELF (bf16 weights) whose placement outlasts the default"
     )
     parser.add_argument(
         "--netload-wait",
@@ -1550,7 +1560,15 @@ def _main(args):
                 if rc == 0 and ("state=watchdog-timeout" in out or "state=killed" in out):
                     print(f"\n[netload] the supervisor ended the wait: {out.splitlines()[0]}")
                 return rc == 0 and any(f"state={st}" in out for st in ("exited", "watchdog-timeout", "killed"))
-        program_done, output_detected = wait_console(collected_output, finished)
+        max_wait = None
+        if args.netload:
+            max_wait = args.netload_max_run_ms / 1000.0 + 120  # watchdog + margin for the status probe
+        if max_wait:
+            # the supervisor watchdog bounds a silent run; don't let --stall-secs cut it first
+            with devwatch.quiet(max_wait, "netload app run (supervisor watchdog bounds it)"):
+                program_done, output_detected = wait_console(collected_output, finished, max_wait)
+        else:
+            program_done, output_detected = wait_console(collected_output, finished, max_wait)
 
         # Stop console reader
         log.debug("\nmain: signaling console_reader thread to stop...")
@@ -1653,7 +1671,7 @@ def jtag_start(args, remote_elf_path):
     return conn1, conn2, None
 
 
-def wait_console(collected_output, finished=None):
+def wait_console(collected_output, finished=None, max_wait=None):
     """Echo com0 output until the program completes, goes quiet, or MAX_WAIT.
 
     Returns (program_done, output_detected).
@@ -1666,6 +1684,12 @@ def wait_console(collected_output, finished=None):
     """
     MAX_WAIT = 600        # absolute maximum wait (seconds)
     NO_OUTPUT_TIMEOUT = 300  # abort if no output for this long (debug snapshot reads many regs)
+    if max_wait is not None and max_wait > MAX_WAIT:
+        # --netload: the supervisor watchdog (--netload-max-run-ms) bounds the run and
+        # `finished()` reports its end, so a long silent graph_run must not be cut at
+        # 600 s / 300 s quiet.
+        MAX_WAIT = int(max_wait)
+        NO_OUTPUT_TIMEOUT = int(max_wait)
     POLL_INTERVAL = 0.05  # check queue every N seconds
 
     print(f"\n>>> Waiting for console output (max {MAX_WAIT}s, no-output timeout {NO_OUTPUT_TIMEOUT}s)...")

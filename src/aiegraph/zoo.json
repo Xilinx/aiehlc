@@ -1,0 +1,12 @@
+{
+  "_doc": "Model zoo data for aiegraph.model.ZOO and frontend/tvmrelay/deploy_flow (model names live here, not in the generic .py code). 'default' is the model used when none is given; 'module' is the stem of the generated <module>.c / <module>_graph.json / <module>_params.bin. The default is ImageNet v1 on purpose: post-activation, so BN folds into the preceding conv (deploy_flow.prefold_onnx). 'prototype_example' is a filled-in user-kernel backbone shown to the AI prototyper.",
+  "default": "resnet18",
+  "models": {
+    "resnet18": {
+      "url": "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet18-v1-7.onnx",
+      "file": "resnet18-v1-7.onnx",
+      "module": "resnet18"
+    }
+  },
+  "prototype_example": "example/tileprogram/ccode/model/resnet18/layer1/aiek_layer01.cc"
+}

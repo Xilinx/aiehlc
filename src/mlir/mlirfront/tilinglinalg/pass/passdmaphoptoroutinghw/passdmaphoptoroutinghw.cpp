@@ -384,7 +384,31 @@ GetSeqPath(std::optional<std::shared_ptr<const RoutingPath>> rpath, std::shared_
 
                 int portNum;
                 PortDirection slaveDirOnNext, masterDirOnCurrent;
-                if (!router_.occupyLink(currentPoint, nextPoint, dioid, portNum, masterDirOnCurrent, slaveDirOnNext)) {
+                // Packet-gather tail: the last chain tile forwards its merged
+                // packets out of the switch. If the tail leaves on the same
+                // side the chain came in (e.g. chain enters (3,6) on WEST 1,
+                // tail goes WEST to (2,6)), the core-tile stream switch only
+                // has WEST i -> WEST i; WEST 1 -> WEST 2 is not a real path and
+                // the packets are silently dropped (M3 probe14, 2026-11-11:
+                // pkt 13-15 lost). Force the same port index or fail the build.
+                bool sameSideTurn = lastPkttilemap && currentPoint == lastPkttilemap->tile &&
+                                    lastPkttilemap->pktconn.SlaveReceiveForwardDirection != PortDirection::NONE &&
+                                    getDir(currentPoint, nextPoint) ==
+                                        lastPkttilemap->pktconn.SlaveReceiveForwardDirection;
+                if (sameSideTurn) {
+                    portNum = lastPkttilemap->pktconn.SlaveReceiveForwardDirectionPortIdx;
+                    if (!router_.occupyLinkAtPort(currentPoint, nextPoint, dioid, portNum, masterDirOnCurrent,
+                                                  slaveDirOnNext)) {
+                        llvm::report_fatal_error(llvm::Twine("aiehlc routing: packet-gather tail at tile (row ") +
+                                                 llvm::Twine(currentPoint.r) + ", col " + llvm::Twine(currentPoint.c) +
+                                                 ") turns back to its input side " +
+                                                 PortDirectiontoString(slaveDirOnNext) + " and port index " +
+                                                 llvm::Twine(portNum) +
+                                                 " is taken; a same-side turn needs equal port numbers");
+                    }
+                    std::cout << "[GetSeqPath-dmap] same-side turn at (" << currentPoint.r << "," << currentPoint.c
+                              << ") -> forced port " << portNum << std::endl;
+                } else if (!router_.occupyLink(currentPoint, nextPoint, dioid, portNum, masterDirOnCurrent, slaveDirOnNext)) {
                     llvm::report_fatal_error("Failed to occupy link in routing topology.");
                 }
 

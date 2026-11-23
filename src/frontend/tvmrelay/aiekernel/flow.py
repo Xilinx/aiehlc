@@ -173,21 +173,28 @@ def _emulate(net, plans, verbose: bool):
 
 
 def check(out_dir, kernels, layers=None, calibrate: bool = True, emulate: bool = True,
-          verbose: bool = True) -> dict:
-    """Gates 1-4. Writes only under ``<out_dir>/aiek/``. Returns the report dict."""
+          verbose: bool = True, checker=None) -> dict:
+    """Gates 1-4. Writes only under ``<out_dir>/aiek/``. Returns the report dict.
+    ``checker(net, plans, verbose)`` (aiegraph's group-level x86 check) replaces gates
+    3-4: it rejects every layer it cannot prove."""
     net = load_network(out_dir)
     plans = plan(net, kernels, layers, verbose)
     try:
-        if calibrate:
-            _calibrate(net, plans, verbose)
-        emul = _emulate(net, plans, verbose) if emulate else None
+        if checker is not None:
+            checker(net, plans, verbose)
+            emul = None
+        else:
+            if calibrate:
+                _calibrate(net, plans, verbose)
+            emul = _emulate(net, plans, verbose) if emulate else None
     except HostBuildError as exc:
         for kp in plans:
             for layer in list(kp.selected):
                 kp.reject(layer, "host-build", str(exc))
         emul = None
-    report = _report(net, plans, emul, gates=("lint", "detect")
-                     + (("calibrate",) if calibrate else ()) + (("emulate",) if emulate else ()))
+    gates = ("lint", "detect") + (("group-check",) if checker is not None else
+                                  (("calibrate",) if calibrate else ()) + (("emulate",) if emulate else ()))
+    report = _report(net, plans, emul, gates=gates)
     if verbose:
         _print_verdicts(report)
     return report
@@ -285,16 +292,22 @@ def _build(net, plans, aie_version: int, verbose: bool) -> None:
 
 
 def _partition_doc(net) -> dict:
+    """``layers/partition.json``, or a fresh one (every call on the CPU). A file with no layer
+    rows -- aiegraph's ``offload_group`` records ``groups`` before the first offload has written
+    the rows -- gets the fresh rows and keeps its other keys (the groups)."""
     path = net.out_dir / "layers" / "partition.json"
-    if path.is_file():
-        return json.loads(path.read_text())
+    doc = json.loads(path.read_text()) if path.is_file() else {}
+    if doc.get("layers"):
+        return doc
+    # no file, or one that only holds aiegraph groups (offload_group recorded before the
+    # first per-layer offload): the layer rows are made here, the groups are kept
     rows = [{"index": c.layer, "dir": c.dir, "kind": c.dir[3:], "symbol": c.symbol,
              "graph_node": c.node, "aiegraph": [], "target": "cpu",
              "reason": "not offloaded", "aie_dir": None, "backend": None,
              "source": None, "entry": None, "replaces": None, "archive": None,
              "archive_reason": None} for c in net.calls]
     return {"aie_ops": [], "counts_are": "graph invocations; a kernel called twice "
-                                         "counts twice", "layers": rows}
+                                         "counts twice", **doc, "layers": rows}
 
 
 def _rel(net, p) -> str:
@@ -378,14 +391,22 @@ def _link_gate(net, plans, verbose: bool) -> list:
 
 def offload(out_dir, kernels, layers=None, build: bool = True, make: bool = False,
             regenerate: bool = True, force: bool = False, aie_version: int = 5,
-            image=None, verbose: bool = True) -> dict:
+            image=None, verbose: bool = True, checker=None) -> dict:
     """Gates 1-6, then ``partition.json`` + ``arm_build/``. ``force`` skips the
-    calibrate/emulate VERDICTS (they still run and are reported)."""
+    calibrate/emulate VERDICTS (they still run and are reported). ``checker(net, plans,
+    verbose)`` replaces calibrate/emulate (aiegraph's group-level x86 check); its
+    verdicts are binding -- ``force`` is refused with a checker."""
+    if checker is not None and force:
+        raise ValueError("offload: force=True with a checker -- the group check is binding")
     net = load_network(out_dir)
     plans = plan(net, kernels, layers, verbose)
     saved = {id(kp): (list(kp.selected), dict(kp.rejected)) for kp in plans}
-    _calibrate(net, plans, verbose)
-    emul = _emulate(net, plans, verbose)
+    if checker is not None:
+        checker(net, plans, verbose)
+        emul = None
+    else:
+        _calibrate(net, plans, verbose)
+        emul = _emulate(net, plans, verbose)
     if force:
         for kp in plans:
             kp.selected, kp.rejected = saved[id(kp)]
@@ -397,8 +418,9 @@ def offload(out_dir, kernels, layers=None, build: bool = True, make: bool = Fals
             kp.build = {"ok": False, "archive": None, "reason": "not built (--no-build)"}
     part = _write_partition(net, plans, verbose)
     hits = _link_gate(net, plans, verbose) if build else []
-    report = _report(net, plans, emul, gates=("lint", "detect", "calibrate", "emulate",
-                                              "build", "link"))
+    report = _report(net, plans, emul, gates=("lint", "detect")
+                     + (("group-check",) if checker is not None else ("calibrate", "emulate"))
+                     + ("build", "link"))
     report.update(partition=str(part), link_collisions=hits)
     if regenerate and (net.out_dir / "arm_build").is_dir():
         from frontend.tvmrelay.arm_build import build_arm_elf

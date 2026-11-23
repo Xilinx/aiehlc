@@ -66,9 +66,16 @@ def shorten(src, opts):
 
 def annotate(src, notes):
     """`after <anchor>: <text>` inserts `// <text>` after the first line containing
-    <anchor>, with that line's indentation (a comment of the listing only)."""
-    lines = src.split("\n")
+    <anchor>, with that line's indentation (a comment of the listing only);
+    `replace <old> => <new>` rewrites text of the listing (exactly once)."""
     for note in notes:
+        if note.strip().startswith("replace "):
+            old, new = note.strip()[len("replace "):].split("=>", 1)
+            old, new = old.rstrip(), new.strip()  # an empty <new> deletes <old>
+            assert src.count(old) == 1, f"replace: {old!r} must occur exactly once"
+            src = src.replace(old, new)
+    lines = src.split("\n")
+    for note in [n for n in notes if n.strip().startswith("after ")]:
         anchor, text = note.split(":", 1)
         anchor = anchor.strip()[len("after "):].strip()
         at = next(k for k, l in enumerate(lines) if anchor in l)
@@ -81,7 +88,7 @@ def render(md_text):
     def fill(m):
         opts, *notes = m["opts"].split(";")
         src = shorten((REPO / m["path"]).read_text(), opts.split())
-        src = annotate(src, [n for n in notes if n.strip().startswith("after ")])
+        src = annotate(src, [n for n in notes if n.strip().startswith(("after ", "replace "))])
         return f"{m.group(1)}```cpp\n{src.rstrip()}\n```\n{m.group(5)}"
     return BLOCK.sub(fill, md_text)
 

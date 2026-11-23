@@ -208,4 +208,85 @@ static inline int aiek_expect(const aiek_tensor *t, int idx, uint8_t code, uint8
     return ok ? AIEK_OK : AIEK_ERR_ARGS;
 }
 
+/* ══ Group-offload STEPS (aiegraph offload_group; design
+ *    docs/plans/2026-11-16-aiegraph-group-offload-design.md §5.3) ═══════════
+ *
+ * A group of TVM calls is replaced by a few STEP calls, each standing at the
+ * position of one of the group's calls. Every step has the same ABI:
+ *
+ *     AIEK_STEP(fa_step_pack_q, reads(q), writes(0), consts(cid, cls, s:float));
+ *     AIEK_STEP_ENTRY(fa_step_pack_q) { ... in[0] ... AIEK_CI(c, 1) ... }
+ *
+ *   in[]  the boundary tensors the step reads, in reads() order;
+ *   out[] the boundary tensors it writes, in writes() order;
+ *   c     the compile-time constants, in consts() order.
+ *
+ * AIEK_STEP clauses (all three required, in this order):
+ *   reads(N) / writes(N)       N unnamed buffers (N may be 0), or
+ *   reads(a, b:dense, ...)     named buffers; qualifiers after ':' --
+ *                                dense    the step ignores ld: aiegraph refuses
+ *                                         a buffer whose row stride != its last
+ *                                         extent (a strided view)
+ *                                <dtype>  float32 / int8 / ... (spec.py DTYPES)
+ *   consts(n1, n2:float, ...)  named constants; :int (default) or :float.
+ * aiegraph checks every ag.step(name, reads=, writes=, consts=) against this
+ * declaration (src/aiegraph/contract.py check_steps): arity, const names,
+ * dtype, dense. A mismatch is a build error, never a silent miscompile.
+ *
+ * aiek_buf is NOT aiek_tensor: aiek_tensor (above) is the whole-layer ABI the
+ * name-based offload (ResNet) binds from TVM's dense DLTensors and stays as it
+ * is; aiek_buf adds the row stride a group boundary tensor may have (a head's
+ * column block of a [N][H*D] linear output has ld = H*D, not D). */
+
+#define AIEK_STEP_MAX_NDIM 4
+#define AIEK_STEP_MAX_CONSTS 8
+
+typedef struct {
+    void *data;
+    int32_t ndim;
+    uint8_t code; /* AIEK_INT / AIEK_UINT / AIEK_FLOAT */
+    uint8_t bits;
+    uint16_t lanes;
+    int64_t ld; /* elements between rows (consecutive indices of dim ndim-2); == shape[ndim-1] when dense */
+    int64_t shape[AIEK_STEP_MAX_NDIM];
+} aiek_buf;
+
+typedef union {
+    int64_t i;
+    double f;
+} aiek_cval;
+
+typedef struct {
+    int32_t n; /* number of constants, == the consts() count of the AIEK_STEP */
+    aiek_cval v[AIEK_STEP_MAX_CONSTS];
+} aiek_const;
+
+/* Constant k (consts() order) as an integer / a float. */
+#define AIEK_CI(c, k) ((c)->v[(k)].i)
+#define AIEK_CF(c, k) ((float)(c)->v[(k)].f)
+
+/* The fixed step signature. `in` / `out` may be NULL when reads(0) / writes(0). */
+#define AIEK_STEP_ENTRY(name) AIEK_EXTERN_C int name(const aiek_buf *in, aiek_buf *out, const aiek_const *c)
+
+/* The machine-readable step declaration: the clause text itself, kept in the
+ * archive like AIEK_SPEC (`strings` shows "AIEK_STEP name: reads(...)...").
+ * Grammar: frontend/tvmrelay/aiekernel/spec.py parse_steps. */
+#define AIEK_STEP(entry, ...) \
+    static const char aiek_step_##entry[] __attribute__((used)) = "AIEK_STEP " #entry ": " #__VA_ARGS__
+
+static inline int aiek_buf_dense(const aiek_buf *b) { return b->ndim < 2 || b->ld == b->shape[b->ndim - 1]; }
+
+/* Step <-> FA role table (example/aiegraph/unet_bk_sdm_tiny/fa_attn.py FA_STEPS
+ * wraps aiednn_aie_attn_kl; the runtime contract Jane's side relies on):
+ *
+ *   step             reads  writes  consts         aiednn_aie_attn_kl(cid, role, cls, a, lda, b, ldb, s)
+ *   fa_step_pack_q   q      -       cid, cls, s    role 2: a=q.data lda=q.ld, s = log2e-folded Q scale
+ *   fa_step_pack_k   k      -       cid, cls, s    role 3: a=k.data lda=k.ld, s = K scale (counts 1 call)
+ *   fa_step_pack_v   v      -       cid, cls       role 5: a=v.data lda=v.ld, s = 1
+ *   fa_step_run_o    -      o       cid, cls       role 6: b=o.data ldb=o.ld, s = 1 (launch; counts 1 call)
+ *
+ * Order inside a group: pack_q, pack_k before run_o; pack_v before run_o; the
+ * packs fill the class's static staging (g_fa_qk / g_fa_v), so one group of a
+ * class is in flight at a time. */
+
 #endif /* AIE_USER_KERNEL_H */

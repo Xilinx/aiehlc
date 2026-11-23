@@ -2,44 +2,34 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * An AIEDNN kernel as a C++ template (tutorial/aiednn/howto/templatekernel.md):
- *   C[M][N] = epilogue(A[M][K] . W[N][K]^T), bf16 in / out, fp32 accumulation,
- *   ONE launch for the whole GEMM on the 4x4 mesh.
+ * Two instances of ONE template kernel in one source file (aiehlc
+ * regression for multi-instance templates, sprint aiednn-tpl P1).
  *
- * The decisions, one per tutorial section:
- *   tiling      each core owns a TM x TN output tile at a time (16 x 16: 2 x 2
- *               aie::mmul<8,8,8> accumulators -- the register blocking)
- *   scheduling  the tile loop runs IN the core: core (pm, pn) walks M/(4*TM)
- *               tiles of its mesh row; the host launches once
- *   K           K streamed in chunks of TK, accumulated in fp32 on the core,
- *               rounded to bf16 once (output-stationary)
- *   fusion      the epilogue (ReLU when RELU) runs on the accumulator before
- *               the single write-back
- *   layout      the host pre-tiles A / W chunks in mmul order (gemm_kacc_bf16.h)
+ * tpl2_gemm is the gemm_kacc_bf16.cc kernel (C = epilogue(A . B^T), bf16,
+ * fp32 accumulation) with ports a / b / c. It is launched with two different
+ * argument sets, so aiehlc compiles two kernels from it:
+ *   tpl2_gemm<256, 64, 2304, 64, true>   -> tpl2_gemm__256_64_2304_64_1
+ *   tpl2_gemm<128, 64, 2304, 64, false>  -> tpl2_gemm__128_64_2304_64_0
+ * Both instances have the same port names, and port a's shape <M, K> (and c's
+ * <M, N>) depends on the template parameter M. Every kernel TU sees the block
+ * descriptors of all kernels of the program, so aiehlc names them per instance:
+ * aiehlc_desc_<instance>_<port> / aiehlc_cur_<instance>_<port>
+ * (src/llvm/convautotile/block_io_names.h). A template with a single instance
+ * keeps aiehlc_desc_<port> (gemm_kacc_bf16.cc).
  *
- * The template parameters are the shape (M, N, K), the K chunk TK and the
- * epilogue switch RELU. The launch picks the instance: aiehlc instantiates
- * `gemm_kacc<...><<<mesh>>>` before it analyses or compiles the kernel, and
- * each distinct argument set is one compiled kernel. gen_variants.py picks the
- * arguments per layer shape (the GM ... GRELU block below).
+ *   source script/aiehlc.sh --aie-version 5 --runtime-source-file example/aiednn/tpl_two_instances.cc
  ******************************************************************************/
 #include "gemm_kacc_bf16.h"
 
-// ---- this program's instance (gen_variants.py rewrites this block per layer) ----
-#define GM 256
+#define M0 256
+#define M1 128
 #define GN 64
 #define GK 2304
 #define GTK 64
-#define GRELU 1
-// ---- end of instance ----
 
-// M rows of A / C (output pixels), a multiple of 4 * 16; N columns of C (output
-// channels) = 4 mesh cols x 16; K the reduction (Cin * kh * kw), a multiple of
-// TK; TK the K chunk in bf16 elements, a multiple of 8 (the mmul K); RELU the
-// fused epilogue.
 template <int M, int N, int K, int TK = 64, bool RELU = true>
-__global__ void gemm_kacc(aie::port<input_window_bfloat16 *, aie::IFM, aie::shape<M, K>> a,
-                          aie::port<input_window_bfloat16 *, aie::WEIGHTS, aie::shape<N, K>> w,
+__global__ void tpl2_gemm(aie::port<input_window_bfloat16 *, aie::IFM, aie::shape<M, K>> a,
+                          aie::port<input_window_bfloat16 *, aie::WEIGHTS, aie::shape<N, K>> b,
                           aie::port<output_window_bfloat16 *, aie::OFM, aie::shape<M, N>> c) {
     const int TM = 16, TN = 16;     // the output tile: fixed by the 2 x 2 accumulator blocking below
     const int ntile = M / (4 * TM); // output tiles per core, walked on the core
@@ -57,7 +47,7 @@ __global__ void gemm_kacc(aie::port<input_window_bfloat16 *, aie::IFM, aie::shap
 #endif
         for (int j = 0; j < nkc; j++) {
             const bfloat16 *x = aie::load_buffer(a, {m0, j * TK}, {TM, TK});
-            const bfloat16 *v = aie::load_buffer(w, {pn * TN, j * TK}, {TN, TK});
+            const bfloat16 *v = aie::load_buffer(b, {pn * TN, j * TK}, {TN, TK});
 #if defined(__chess__)
             for (int kb = 0; kb < kt; kb++) {
                 const auto a0 = aie::load_v<64>(x + kb * 64), a1 = aie::load_v<64>(x + (kt + kb) * 64);
@@ -75,7 +65,7 @@ __global__ void gemm_kacc(aie::port<input_window_bfloat16 *, aie::IFM, aie::shap
                                            (float)v[((n / 8) * kt + k / 8) * 64 + (k % 8) * 8 + n % 8];
 #endif
             aie::release(a);
-            aie::release(w);
+            aie::release(b);
         }
         // The tile is done: epilogue on the fp32 accumulator, one rounding, one write-back.
         bfloat16 *y = aie::store_buffer(c, {m0, pn * TN}, {TM, TN});
@@ -99,33 +89,39 @@ __global__ void gemm_kacc(aie::port<input_window_bfloat16 *, aie::IFM, aie::shap
     }
 }
 
-// One launch; the mesh must be declared in the function that launches.
-static void gemm_kacc_run(uint16_t *A, uint16_t *W, uint16_t *C) {
+// Both launches in the function that declares the mesh.
+static void tpl2_run(int which, uint16_t *A, uint16_t *W, uint16_t *C) {
     aieSetDevice(0);
     aieArray device;
     aieMesh mesh = device.partition({3, 6, 0, 6}, AD_HW_ROWS, AD_HW_COLS);
-    gemm_kacc<GM, GN, GK, GTK, GRELU><<<mesh>>>(A, W, C);
+    if (which == 0)
+        tpl2_gemm<M0, GN, GK, GTK, true><<<mesh>>>(A, W, C);
+    else
+        tpl2_gemm<M1, GN, GK, GTK, false><<<mesh>>>(A, W, C);
 }
 
-int main() {
-    printf("=== AIEDNN gemm_kacc<%d, %d, %d, %d, %d>: C = A . W^T, bf16, one launch ===\n", GM, GN, GK, GTK, GRELU);
-    const long na = (long)GM * GK, nw = (long)GN * GK, nc = (long)GM * GN;
+static int tpl2_check(int which, int m, int relu) {
+    const long na = (long)m * GK, nw = (long)GN * GK, nc = (long)m * GN;
     uint16_t *A = (uint16_t *)malloc(na * 2), *W = (uint16_t *)malloc(nw * 2), *ref = (uint16_t *)malloc(nc * 2);
     uint16_t *Ad = (uint16_t *)__Runtime_Alloc(na * 2), *Wd = (uint16_t *)__Runtime_Alloc(nw * 2);
     uint16_t *Cd = (uint16_t *)__Runtime_Alloc(nc * 2);
-    ad_init(A, W, GM, GN, GK);
-    ad_pretile(A, Ad, GM, GK, GTK, 0); // mmul A operand order
-    ad_pretile(W, Wd, GN, GK, GTK, 1); // mmul B operand order
+    ad_init(A, W, m, GN, GK);
+    ad_pretile(A, Ad, m, GK, GTK, 0);
+    ad_pretile(W, Wd, GN, GK, GTK, 1);
     memset(Cd, 0, nc * 2);
     XTime t0, t1;
     XTime_GetTime(&t0);
-    gemm_kacc_run(Ad, Wd, Cd);
+    tpl2_run(which, Ad, Wd, Cd);
     XTime_GetTime(&t1);
-    // The launch invalidates C only before the DMA; drop lines refetched while the cores wrote it.
     Xil_DCacheInvalidateRange((UINTPTR)Cd, nc * 2);
-    const double ms = ad_ms(t0, t1);
-    printf("[gemm_kacc] PERF SUMMARY launch %.3f ms, %.2f GOPS\n", ms, 2.0 * GM * GN * GK / (ms * 1e-3) / 1e9);
-    ad_report_phases();
-    ad_reference(A, W, ref, GM, GN, GK, GRELU);
+    printf("[tpl2_gemm<%d, %d, %d, %d, %d>] launch %.3f ms\n", m, GN, GK, GTK, relu, ad_ms(t0, t1));
+    ad_reference(A, W, ref, m, GN, GK, relu);
     return ad_check(Cd, ref, nc);
+}
+
+int main() {
+    printf("=== tpl2_gemm: two instances of one template kernel ===\n");
+    int rc = tpl2_check(0, M0, 1);
+    rc |= tpl2_check(1, M1, 0);
+    return rc;
 }

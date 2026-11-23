@@ -255,11 +255,12 @@ static void testGemmStripsOptions() {
     CHECK_EQ(routingSpaces(bare, hb)[1].pp_depth, 1);
     CHECK_EQ(routingSpaces(bare, hb)[2].pp_depth, 2); // an output stays ping-pong (its kernel window is)
     CHECK_EQ(portBufferBytes(bare, 1), 4096 + 16384 + 2 * 1024);
-    // .depth = 2 on that B as well: nothing fits any more.
+    // .depth = 2 on that B as well: 42 KB no longer fits the 29.7 KB region, but
+    // the allocator grows the buffer area into the core stack (limit 58368 B).
     std::map<std::string, BlockOpts> o2;
     o2["b"].depth = 2;
     RoutingPlan two = planRouting(ports, fits, 4, 4, o2);
-    CHECK(checkPortBuffers(two, routingHints(two)).find("more than the 29696 B") != std::string::npos);
+    CHECK(checkPortBuffers(two, routingHints(two)).empty());
 }
 
 // Eltwise on a 4x1 mesh: rows split, 4 column chunks per core, no halo.

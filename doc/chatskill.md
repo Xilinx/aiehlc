@@ -36,7 +36,7 @@ Use `/chat` slash command (requires Mattermost running + MCP configured):
 
 ### Infrastructure
 
-- **Deploy location**: `/scratch/staff/huaj/mattermost/` (persistent, outside repo)
+- **Deploy location**: `<deploy-dir>/` (persistent, outside repo)
 - **Web UI**: `http://<hostname>:8065`
 - **PostgreSQL**: `localhost:5433` (avoids conflict with standard 5432)
 - **Bot token**: `~/.mattermost-claude-token`

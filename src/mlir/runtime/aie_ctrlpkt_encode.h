@@ -45,6 +45,10 @@ uint32_t rt_cpe_pktize(uint32_t *out, uint32_t cap, uint32_t stream_id, uint32_t
 
 int rt_cpe_target(const rt_cpe_dev *d, int col, int row, uint32_t paddr, uint32_t *tile_addr);
 
+/* .bss handling shared by the AOT (aiehlc_ctrlpkt) and JIT (aie_runtime.c) encoders. */
+int rt_cpe_elf_range_is_port_bufs(const unsigned char *elf, uint32_t lo, uint32_t hi);
+uint32_t rt_cpe_seg_load_len(const unsigned char *elf, const void *phdr); /* phdr: const Elf32_Phdr* */
+
 uint32_t rt_cpe_count_pkts(const rt_cpe_dev *d, const unsigned char *elf, int col, int row);
 
 int rt_cpe_encode_body(const rt_cpe_dev *d, const unsigned char *elf, int col, int row, uint32_t stream_id,

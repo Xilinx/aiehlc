@@ -37,6 +37,7 @@ JTAG download.
 """
 import argparse
 import hashlib
+import os
 import select
 import socket
 import struct
@@ -183,6 +184,10 @@ def request(host, cmd, payload=b"", timeout_ms=0, connect_timeout=5.0, reply_tim
     (`verdict`, `run_ms`, `max_run_ms`, `remaining_ms`, `retry_after_ms`, `core`, `can_stop`) and, when
     admitted, the reply (`rc`, `bytes_rx`, `rx_ms`, `place_ms`, `entry`, `state`, `runs`, `msg`)."""
     digest = hashlib.sha256(payload).digest() if payload else bytes(32)
+    corrupt_at = os.environ.get("NETLOAD_CORRUPT_AT")
+    if corrupt_at and payload:  # test hook: the board must reject the upload (sha256 mismatch, NEED_RELOAD)
+        off = int(corrupt_at, 0) % len(payload)
+        payload = payload[:off] + bytes([payload[off] ^ 0xFF]) + payload[off + 1:]
     flags = F_FORCE if force else 0
     hdr = struct.pack(REQ_FMT, REQ_MAGIC, version, CMDS[cmd], flags, len(payload), timeout_ms, 0, digest)
     t0 = time.monotonic()
@@ -252,6 +257,9 @@ def main(argv=None):
     ap.add_argument("--proto", type=int, default=VERSION, choices=(1, 2),
                     help="protocol version (1: no ack, for a supervisor built before version 2)")
     ap.add_argument("--connect-timeout", type=float, default=5.0)
+    ap.add_argument("--reply-timeout", type=float, default=60.0, metavar="SEC",
+                    help="how long to wait for the board's reply (default 60 s); a large ELF streamed into place "
+                         "can need more")
     ap.add_argument("--via", metavar="USER@HOST", help="reach the board through netboot_proxy.py on this host")
     ap.add_argument("--proxy", default="~/aiehlc/netboot/netboot_proxy.py", help="proxy path on the --via host")
     ap.add_argument("--ssh-opt", action="append", default=[], metavar="OPT",
@@ -268,7 +276,7 @@ def main(argv=None):
         ssh_opts = [x for o in a.ssh_opt for x in ("-o", o)]
         def on_wait(ack, pause):
             print(_ack_line(a.cmd, ack) + f" -- waiting {pause:.1f} s", flush=True)
-        r = request(a.host, a.cmd, payload, a.max_run_ms, a.connect_timeout, via=a.via, proxy=a.proxy,
+        r = request(a.host, a.cmd, payload, a.max_run_ms, a.connect_timeout, a.reply_timeout, via=a.via, proxy=a.proxy,
                     ssh_opts=ssh_opts, force=a.force, wait_s=a.wait, version=a.proto, on_wait=on_wait)
     except (OSError, ConnectionError) as e:
         print(f"[netload] {a.cmd}: no answer from {a.host}:{PORT}: {e}")

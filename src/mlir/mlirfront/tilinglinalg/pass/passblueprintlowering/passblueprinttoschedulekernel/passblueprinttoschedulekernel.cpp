@@ -1079,6 +1079,26 @@ analyzeKernelParams(Operation *rootOp, KernelResourceManager &resourceMgr, Type 
                             pingPongBufSize = maxElements;
                     }
                 }
+                // Per-port window cap (trace-routed kernel-only ports): the core
+                // window is the port's traced block, not the kernel-wide
+                // maxPingPongBytes. Without it a port whose block is smaller than
+                // its per-core slice got one slice-sized window while the kernel
+                // acquires block-sized windows per round -> silent lock deadlock.
+                // Must stay in lockstep with computeCoreIterations (host side).
+                if (!isSpatialHaloPort && !isKSplitHaloPort) {
+                    const int64_t capBytes = routing::lookupWindowBytes(tensorInfo, paramInfo.funcArgIndex);
+                    int64_t elemBytes =
+                        paramInfo.elementType.isIntOrFloat() ? paramInfo.elementType.getIntOrFloatBitWidth() / 8 : 1;
+                    if (capBytes > 0 && elemBytes > 0) {
+                        int64_t capElements = capBytes / elemBytes;
+                        if (capElements > 0 && pingPongBufSize > capElements) {
+                            llvm::errs() << "[BlueprintToScheduleKernel] arg" << paramInfo.funcArgIndex
+                                         << " window " << pingPongBufSize << " -> " << capElements
+                                         << " elems (traced block " << capBytes << " B)\n";
+                            pingPongBufSize = capElements;
+                        }
+                    }
+                }
                 // bufferSize is in units of vectors (BUF_SZ = elements / vectorWidth)
                 paramInfo.bufferSize = pingPongBufSize / defaultVectorWidth;
                 if (paramInfo.bufferSize <= 0)
@@ -1120,6 +1140,14 @@ analyzeKernelParams(Operation *rootOp, KernelResourceManager &resourceMgr, Type 
                         int64_t tileM = tiling.tileM;
                         int64_t tileRows = tiling.tileRows;
                         int64_t mRounds = (tileM > 0 && tileM < tileRows) ? (tileRows / tileM) : 1;
+                        // N rounds too (P4bg): the kernel releases one tile_m x tile_n window per
+                        // (m, n) round, as the host output BD (flowtransfer_kernel.cpp outDivisor =
+                        // mRounds * nRounds) and the window size above already assume.
+                        {
+                            const int64_t tileN = tiling.tileN, tileCols = tiling.tileCols;
+                            if (tileN > 0 && tileN < tileCols)
+                                mRounds *= tileCols / tileN;
+                        }
                         // Spatial-halo conv (fullconnect_auto=0): tile_m/tile_rows dropped
                         // so mRounds collapses to 1; use the authoritative per-slab round
                         // count so the output window arms once per kernel slab (16), matching

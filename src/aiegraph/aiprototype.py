@@ -193,8 +193,9 @@ def _stage_dir(dest: Path) -> None:
 def _prompt(emod, proto, d: Path, verdict: ProtoVerdict, check_cmd: str) -> str:
     repo = _env.repo_root()
     e = proto.entry
-    example = repo / "example/tileprogram/ccode/model/resnet18/layer1/aiek_layer01.cc"
-    ex = f"\n- A filled-in backbone of this form (ResNet-18 layer 1, scalar, bit-exact): {example}" \
+    from .model import _ZOO_DATA
+    example = repo / _ZOO_DATA["prototype_example"]
+    ex = f"\n- A filled-in backbone of this form (a first-layer kernel, scalar, bit-exact): {example}" \
         if example.is_file() and e != "aiek_layer01" else ""
     return f"""You are completing an AIE user kernel for layer {proto.layer} of an int8 network.
 

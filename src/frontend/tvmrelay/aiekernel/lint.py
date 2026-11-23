@@ -239,7 +239,11 @@ def _rule_launch_structure(src, clean, funcs, kernels, rep: LintReport):
 def _rule_kernel_body(src, clean, funcs, kernels, rep: LintReport):
     """L017/L018/L031: what the extracted kernel translation unit can see."""
     defines = set(re.findall(r"^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)", src.text, re.M))
-    host_funcs = {f.name for f in funcs}
+    # GFA: aiehlc copies the AIEHLC_KERNEL_PROLOGUE_BEGIN/END block (file-scope helpers, statics) into every
+    # extracted kernel.cc (aiehlc.cc, 75447eb), so a function defined inside it IS visible to the kernel
+    spans = [(b.end(), e.start()) for b, e in
+             zip(re.finditer(r"AIEHLC_KERNEL_PROLOGUE_BEGIN", src.text), re.finditer(r"AIEHLC_KERNEL_PROLOGUE_END", src.text))]
+    host_funcs = {f.name for f in funcs if not any(a <= f.head < b for a, b in spans)}
     for kname, off in kernels:
         body_fn = next((f for f in funcs if f.name == kname and f.head > off), None)
         if body_fn is None:

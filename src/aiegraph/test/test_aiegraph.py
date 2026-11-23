@@ -96,9 +96,12 @@ def test_download_model_returns_convertible_model(tmp_path, monkeypatch):
     assert os.fspath(m) == str(m.onnx_path) and Path(m) == m.onnx_path   # path-like, as before
 
 
-def test_load_rejects_wrong_input(tmp_path):
-    with pytest.raises(ag.AiegraphError, match=r"supports image classifiers"):
-        ag.from_onnx(_onnx(tmp_path / "x.onnx", "data", (1, 3, 32, 32)))
+def test_load_rejects_wrong_input(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIEGRAPH_CACHE", str(tmp_path / "cache"))
+    # 93bdb0a relaxed model._normalize (any static input shape, used by the UNet parts): a 32x32 input is
+    # accepted now, not rejected as "supports image classifiers" (stale expectation fixed in GAP-B)
+    m = ag.from_onnx(_onnx(tmp_path / "x.onnx", "data", (1, 3, 32, 32)))
+    assert m.input_shape == [1, 3, 32, 32]
     with pytest.raises(ag.AiegraphError, match="unknown model"):
         ag.download_model("resnet9000")
     with pytest.raises(ag.AiegraphError, match="don't know how to load"):
@@ -192,6 +195,169 @@ def test_check_region():
     assert check_region(k, _region("x", (64, 3, 7, 7), layer=1)) == \
         ["quantization is per_channel, contract says per_tensor"]
     assert "no TVM call" in check_region(k, _region("x", (64, 3, 7, 7)))[-1]
+
+
+# ── group-offload steps: ag.step vs AIEK_STEP (design 2026-11-16 §5.3) ──────
+
+INC = REPO / "include"
+
+
+def _fa_steps():
+    from aiegraph import flashattn
+    return flashattn
+
+
+@pytest.fixture
+def fa_src(tmp_path):
+    """The real FA step wrappers (aiegraph.flashattn.FA_STEPS) as a kernel source."""
+    p = tmp_path / "fa_steps.cc"
+    p.write_text(_fa_steps().FA_STEPS)
+    return p
+
+
+def _head(ld=320, n=1024, d=64, dtype="float32"):
+    """One head's column block of a [n][ld] linear output (attn0: tensors[58])."""
+    return ag.buf((n, d), dtype, ld=ld)
+
+
+def _fa_group_steps(q=None, k=None, v=None, o=None, cls=0, s=0.398):
+    return [ag.step("fa_step_pack_q", reads=q or _head(), consts=dict(cid=4, cls=cls, s=s)),
+            ag.step("fa_step_pack_k", reads=k or _head(), consts=dict(cid=4, cls=cls, s=s)),
+            ag.step("fa_step_pack_v", reads=v or _head(), consts=dict(cid=5, cls=cls)),
+            ag.step("fa_step_run_o", writes=o or _head(), consts=dict(cid=5, cls=cls))]
+
+
+def test_step_specs_parse_and_bind_fa(fa_src):
+    specs = ag.load_steps(fa_src)
+    assert sorted(specs) == sorted(_fa_steps().FA_STEP_ROLES)
+    assert specs["fa_step_pack_q"].const_names == ("cid", "cls", "s")
+    bound = ag.check_steps(fa_src, _fa_group_steps())
+    assert [b.name for b in bound] == ["fa_step_pack_q", "fa_step_pack_k", "fa_step_pack_v", "fa_step_run_o"]
+    assert bound[0].const_values == (4, 0, 0.398) and isinstance(bound[0].const_values[2], float)
+    assert bound[3].const_values == (5, 0)
+    # consts may be given in any order; the C order comes from AIEK_STEP
+    (b,) = ag.check_steps(specs, [ag.step("fa_step_pack_q", reads=_head(), consts=dict(s=1.0, cls=2, cid=7))])
+    assert b.const_values == (7, 2, 1.0)
+
+
+def test_step_buf_model():
+    b = ag.buf((1024, 64), ld=320)
+    assert not b.dense and b.ld == 320 and b.dtype == "float32"
+    assert ag.buf((1024, 320)).dense and ag.buf((7,)).dense
+    assert ag.buf((2, 3), "fp32").dtype == "float32"
+    with pytest.raises(ag.AiegraphError, match="rows would overlap"):
+        ag.buf((4, 64), ld=32)
+    with pytest.raises(ag.AiegraphError, match="shape"):
+        ag.buf((0, 4))
+    with pytest.raises(ag.AiegraphError, match="not a number"):
+        ag.step("x", reads=b, consts=dict(a="hi"))
+    with pytest.raises(ag.AiegraphError, match="not a buffer"):
+        ag.step("x", reads=3)
+
+
+def test_step_arity_mismatch_raises(fa_src):
+    # pack_q reads ONE buffer; handing it two (or none) is refused, and so is a write it does not declare
+    with pytest.raises(ag.AiegraphError, match=r"reads 2 buffer\(s\) but AIEK_STEP\(fa_step_pack_q\)"):
+        ag.check_steps(fa_src, [ag.step("fa_step_pack_q", reads=[_head(), _head()],
+                                        consts=dict(cid=4, cls=0, s=0.398))])
+    with pytest.raises(ag.AiegraphError, match=r"reads 0 buffer\(s\)"):
+        ag.check_steps(fa_src, [ag.step("fa_step_pack_q", consts=dict(cid=4, cls=0, s=0.398))])
+    with pytest.raises(ag.AiegraphError, match=r"writes 1 buffer\(s\) but AIEK_STEP\(fa_step_pack_v\)"):
+        ag.check_steps(fa_src, [ag.step("fa_step_pack_v", reads=_head(), writes=_head(),
+                                        consts=dict(cid=5, cls=0))])
+    with pytest.raises(ag.AiegraphError, match=r"no AIEK_STEP\(fa_pack_q\)"):
+        ag.check_steps(fa_src, [ag.step("fa_pack_q", reads=_head(), consts=dict(cls=0))])
+
+
+def test_step_const_name_mismatch_raises(fa_src):
+    with pytest.raises(ag.AiegraphError, match=r"consts\(cid, cls, s\).*missing \['s'\].*unknown \['scale'\]"):
+        ag.check_steps(fa_src, [ag.step("fa_step_pack_q", reads=_head(),
+                                        consts=dict(cid=4, cls=0, scale=0.398))])
+    with pytest.raises(ag.AiegraphError, match=r"missing \['cid'\]"):
+        ag.check_steps(fa_src, [ag.step("fa_step_run_o", writes=_head(), consts=dict(cls=0))])
+    with pytest.raises(ag.AiegraphError, match=r"cls=0.5 but AIEK_STEP declares it :int"):
+        ag.check_steps(fa_src, [ag.step("fa_step_run_o", writes=_head(), consts=dict(cid=5, cls=0.5))])
+
+
+def test_step_strided_buf_into_dense_raises(tmp_path, fa_src):
+    src = tmp_path / "dense.cc"
+    src.write_text('#include "aie_user_kernel.h"\n'
+                   'AIEK_STEP(conv_step, reads(x:dense:float32), writes(y:dense), consts(cid));\n'
+                   'AIEK_STEP_ENTRY(conv_step) { (void)in; (void)out; (void)c; return AIEK_OK; }\n')
+    ok = ag.check_steps(src, [ag.step("conv_step", reads=ag.buf((64, 320)), writes=ag.buf((64, 320)),
+                                      consts=dict(cid=1))])
+    assert ok[0].const_values == (1,)
+    # a head's column block (ld 320, last extent 64) handed to a step that ignores ld
+    with pytest.raises(ag.AiegraphError, match=r"reads\[0\] \(x\) is strided.*marks it dense"):
+        ag.check_steps(src, [ag.step("conv_step", reads=_head(), writes=ag.buf((64, 320)), consts=dict(cid=1))])
+    with pytest.raises(ag.AiegraphError, match=r"writes\[0\] \(y\) is strided"):
+        ag.check_steps(src, [ag.step("conv_step", reads=ag.buf((64, 320)), writes=_head(), consts=dict(cid=1))])
+    with pytest.raises(ag.AiegraphError, match=r"is int8, AIEK_STEP wants float32"):
+        ag.check_steps(src, [ag.step("conv_step", reads=ag.buf((64, 320), "int8"), writes=ag.buf((64, 320)),
+                                     consts=dict(cid=1))])
+    # the FA packs are NOT dense: the same strided head block binds
+    assert ag.check_steps(fa_src, _fa_group_steps())
+
+
+def test_step_source_errors(tmp_path):
+    bad = tmp_path / "bad.cc"
+    bad.write_text("AIEK_STEP(e, reads(1), writes(0));\nAIEK_STEP_ENTRY(e) { return 0; }\n")
+    with pytest.raises(ag.AiegraphError, match="exactly reads"):
+        ag.load_steps(bad)
+    with pytest.raises(ag.AiegraphError, match="does not exist"):
+        ag.load_steps(tmp_path / "nope.cc")
+
+
+_FA_STEP_HARNESS = r"""
+#include <stdio.h>
+#include "aie_user_kernel.h"
+static int g_n; static int g_role[8], g_cid[8], g_cls[8], g_lda[8], g_ldb[8]; static const float *g_a[8];
+static float *g_b[8]; static float g_s[8];
+extern "C" int aiednn_aie_attn_kl(int cid, int role, int cls, const float *a, int lda, float *b, int ldb, float s) {
+    g_cid[g_n] = cid; g_role[g_n] = role; g_cls[g_n] = cls; g_a[g_n] = a; g_lda[g_n] = lda; g_b[g_n] = b;
+    g_ldb[g_n] = ldb; g_s[g_n] = s; g_n++;
+    return 0;
+}
+@STEPS@
+AIEK_EXTERN_C int fa_step_pack_q(const aiek_buf *, aiek_buf *, const aiek_const *);
+int main(void) {
+    static float t58[1024 * 320], t70[1024 * 320];
+    aiek_buf q = {t58, 2, AIEK_FLOAT, 32, 1, 320, {1024, 64}};
+    aiek_buf o = {t70, 2, AIEK_FLOAT, 32, 1, 320, {1024, 64}};
+    aiek_const cq = {3, {{4}, {1}, {0}}}; cq.v[2].f = 0.398;
+    aiek_const cv = {2, {{5}, {1}}};
+    int rc = fa_step_pack_q(&q, 0, &cq) | fa_step_pack_k(&q, 0, &cq) | fa_step_pack_v(&q, 0, &cv) |
+             fa_step_run_o(0, &o, &cv);
+    for (int i = 0; i < g_n; i++)
+        printf("KL cid=%d role=%d cls=%d a=%d lda=%d b=%d ldb=%d s=%.3f\n", g_cid[i], g_role[i], g_cls[i],
+               g_a[i] == t58, g_lda[i], g_b[i] == t70, g_ldb[i], g_s[i]);
+    aiek_buf bad = q; bad.code = AIEK_INT;
+    printf("RC %d BAD %d NCONST %d\n", rc, fa_step_pack_q(&bad, 0, &cq), fa_step_pack_q(&q, 0, &cv));
+    return 0;
+}
+"""
+
+
+def test_fa_steps_are_the_kl_calls(tmp_path):
+    """x86: the four FA steps compile warning-free against the header and make exactly the
+    aiednn_aie_attn_kl calls keep_layout_rt.py writes today (roles 2/3/5/6, a/lda and b/ldb from aiek_buf)."""
+    if shutil.which("g++") is None:
+        pytest.fail("g++ is required for the step ABI test")
+    src = tmp_path / "h.cc"
+    src.write_text(_FA_STEP_HARNESS.replace("@STEPS@", _fa_steps().FA_STEPS))
+    exe = tmp_path / "h"
+    import subprocess
+    proc = subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror", f"-I{INC}", str(src), "-o", str(exe)],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    out = subprocess.run([str(exe)], capture_output=True, text=True, check=True).stdout.splitlines()
+    assert out == ["KL cid=4 role=2 cls=1 a=1 lda=320 b=0 ldb=0 s=0.398",
+                   "KL cid=4 role=3 cls=1 a=1 lda=320 b=0 ldb=0 s=0.398",
+                   "KL cid=5 role=5 cls=1 a=1 lda=320 b=0 ldb=0 s=1.000",
+                   "KL cid=5 role=6 cls=1 a=0 lda=0 b=1 ldb=320 s=1.000",
+                   "RC 0 BAD -1 NCONST -1"]
+    roles = _fa_steps().FA_STEP_ROLES
+    assert [roles[k] for k in ("fa_step_pack_q", "fa_step_pack_k", "fa_step_pack_v", "fa_step_run_o")] == [2, 3, 5, 6]
 
 
 def test_doctor_reports():

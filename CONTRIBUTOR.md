@@ -8,4 +8,3 @@ Contributions are made under the Apache License, Version 2.0 (see [LICENSE](LICE
 
 - [Hua Jiang](https://github.com/huajsj)  Advanced Micro Devices, Inc.
 - [Brandon Kirincich](https://github.com/BrandonKi) Advanced Micro Devices, Inc.
-- [Young Wn Song](https://github.com/ywsongasuedu) Advanced Micro Devices, Inc.

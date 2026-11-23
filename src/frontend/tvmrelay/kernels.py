@@ -25,7 +25,7 @@ ABI (matches the pipeline's auto-generated compute kernel, ``:1378``):
     }
 
 The numeric math is a byte-for-byte C transcription of the four ``@aie_triton.jit``
-kernels in ``example/tileprogram/design/triton/resnet18_triton.py`` and of the
+kernels in ``example/tileprogram/design/triton/`` zoo-default triton design and of the
 numpy CPU references used to verify them. Two int16 wrap details are load-bearing
 for bit-exactness with those references:
 
@@ -42,7 +42,7 @@ this ABI has no room for), so ONE body serves every conv/fc launch:
   * fc params:    [config = {sp_h,sp_w,channels,nclass}][weights][bias]
 Each config field is TWO bytes -- a little-endian uint16 read via the ``CFG16``
 macro below, NOT a single ``uint8``. One byte would cap every dimension at 255,
-which real ResNet-18 exceeds (512 channels, 1000 classes). The header sizes come
+which a real ImageNet CNN exceeds (512 channels, 1000 classes). The header sizes come
 from ``CONFIG_SZ`` / ``FC_CONFIG_SZ`` below.
 
 The residual kernel has no param buffer, so its element count comes from the
@@ -57,7 +57,7 @@ groups, i.e. total scalar elements == ``BUF_SZ_OUT_0 * 4`` (see the debug dump a
 CONFIG_FIELD_BYTES = 2
 CONFIG_SZ = 6 * CONFIG_FIELD_BYTES     # conv: {H, W, Cin, Cout, K, stride}
 FC_CONFIG_SZ = 4 * CONFIG_FIELD_BYTES  # fc: {spatial_h, spatial_w, channels, num_classes}
-#: Bound on avgpool_fc's on-stack ``pooled[MAX_POOL_CH]`` (ResNet-18 ends at 512).
+#: Bound on avgpool_fc's on-stack ``pooled[MAX_POOL_CH]`` (the zoo default ends at 512).
 MAX_POOL_CHANNELS = 512
 
 
@@ -73,7 +73,7 @@ void {func_name}(input_window_int8 *window_in_0, input_window_int8 *window_in_1,
     int8_t *out     = (int8_t *)acquire_output_window(window_out_0);
 
     // Config fields are little-endian uint16 pairs (see model.pack_config):
-    // one byte would cap every dimension at 255, which real ResNet-18 exceeds.
+    // one byte would cap every dimension at 255, which a real ImageNet CNN exceeds.
     int H      = CFG16(params, 0);
     int W      = CFG16(params, 1);
     int Cin    = CFG16(params, 2);
@@ -203,7 +203,7 @@ void {func_name}(input_window_int8 *window_in_0, input_window_int8 *window_in_1,
 # would sign-extend and corrupt the field (e.g. Cout=512 -> lo=0x00 hi=0x02 is
 # fine, but Cin=200 -> lo=0xC8 would read as -56 without the cast).
 #
-# MAX_POOL_CH bounds avgpool_fc's on-stack pooled[] array. Real ResNet-18 ends
+# MAX_POOL_CH bounds avgpool_fc's on-stack pooled[] array. The zoo default ends
 # at 512 channels; the old fixed 256 would overflow the stack silently. Now that
 # the uint16 header makes >255 channels representable, this is the binding
 # limit; params writers must reject anything above MAX_POOL_CHANNELS.

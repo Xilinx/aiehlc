@@ -24,11 +24,11 @@ void RoutingHWDialect::initialize()  {
     #define GET_OP_LIST
     #include "routinghwop.cc.inc"
         >();
-    // 如果有 Attr / Type：addAttributes<...>(); addTypes<...>();
-     addAttributes<
+    // if there are Attrs / Types: addAttributes<...>(); addTypes<...>();
+    addAttributes<
     #define GET_ATTRDEF_LIST
     #include "routinghwattr.cc.inc"
-    >();
+        >();
 
         // 3. Types
     addTypes<

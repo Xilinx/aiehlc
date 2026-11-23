@@ -8,6 +8,7 @@
 //====================================================================
 #include "hw/ResourceManager.h"
 #include <iostream>
+#include <cstdlib>
 #include <algorithm> 
 // ── global DataIO id init ──
 std::atomic<int> DataIO::next_{0};
@@ -16,7 +17,25 @@ std::atomic<int> DataIO::next_{0};
 // CoreMemAllocator impl
 // ──────────────────────────────────────────────────────────────
 CoreMemAllocator::CoreMemAllocator(uint32_t baseAddr, uint32_t totalSize)
-    : baseAddr_(baseAddr), totalSize_(totalSize), nextFree_(baseAddr) {}
+    : baseAddr_(baseAddr), totalSize_(totalSize), nextFree_(baseAddr) {
+    // Experimental: AIEHLC_DM_BUF_BASE=<addr> moves the start of the port-buffer area
+    // (end stays at baseAddr+totalSize; the BCF stack shrinks to [0x70000, addr)).
+    // Used to put A/B/C in different 16 KB DM banks (mm_i8_64_vec11 MEMORY_STALL study).
+    const char *env = std::getenv("AIEHLC_DM_BUF_BASE");
+    if (!env || !*env)
+        return;
+    char *end = nullptr;
+    unsigned long v = std::strtoul(env, &end, 0);
+    const uint32_t limit = baseAddr + totalSize;
+    if (*end != '\0' || v < 0x71000 || v >= limit || (v % 0x1000) != 0) {
+        std::cerr << "CoreMemAllocator: ignoring AIEHLC_DM_BUF_BASE=\"" << env
+                  << "\" (need a 4 KB multiple in [0x71000, end))" << std::endl;
+        return;
+    }
+    baseAddr_ = static_cast<uint32_t>(v);
+    totalSize_ = limit - baseAddr_;
+    nextFree_ = baseAddr_;
+}
 
 std::optional<uint32_t> CoreMemAllocator::allocate(const std::string &name, uint32_t size, uint32_t alignment,
                                                    int ownerId) {
@@ -30,8 +49,31 @@ std::optional<uint32_t> CoreMemAllocator::allocate(const std::string &name, uint
     // Align nextFree_ up to the requested alignment
     uint32_t aligned = (nextFree_ + alignment - 1) & ~(alignment - 1);
     if (aligned + size > baseAddr_ + totalSize_) {
+        // Default layout keeps a 32 KB stack at [0x70000, 0x78000) although most kernels
+        // need far less (GN+SiLU 512 B, vec8 192 B per kernel.calltree). Instead of failing,
+        // take the space from the top of the stack: place the buffer just below the current
+        // area start. The BCF stack becomes [0x70000, baseAddr_) and the kernel build checks
+        // the chess "Maximum stack size" against it (script/hostcompile.sh). Not done when
+        // AIEHLC_DM_BUF_BASE pins the layout, or below kStackBase + minStack.
+        constexpr uint32_t kStackBase = 0x70000;
+        uint32_t minStack = 0x1000;
+        if (const char *ms = std::getenv("AIEHLC_DM_MIN_STACK"); ms && *ms)
+            minStack = static_cast<uint32_t>(std::strtoul(ms, nullptr, 0));
+        const char *pinned = std::getenv("AIEHLC_DM_BUF_BASE");
+        uint32_t below = baseAddr_ >= size ? ((baseAddr_ - size) & ~(alignment - 1)) : 0;
+        if ((!pinned || !*pinned) && below >= kStackBase + minStack) {
+            std::cerr << "CoreMemAllocator: \"" << name << "\" (" << size << " B) placed at 0x" << std::hex
+                      << below << " below the buffer area; core stack shrinks to 0x" << (below - kStackBase)
+                      << std::dec << " B" << std::endl;
+            allocations_.push_back({name, below, size, ownerId});
+            totalSize_ += baseAddr_ - below;
+            baseAddr_ = below;
+            return below;
+        }
         std::cerr << "CoreMemAllocator: out of memory for \"" << name << "\" (need " << size << " bytes, "
-                  << (baseAddr_ + totalSize_ - aligned) << " available)" << std::endl;
+                  << (baseAddr_ + totalSize_ - aligned) << " available above, "
+                  << (baseAddr_ > kStackBase + minStack ? baseAddr_ - kStackBase - minStack : 0)
+                  << " below down to a " << minStack << " B stack)" << std::endl;
         return std::nullopt;
     }
     allocations_.push_back({name, aligned, size, ownerId});
@@ -372,6 +414,20 @@ bool ResourceMgr::occupyLink(Point a, Point b,const int ioId,int& portidx, PortD
     return false;
 }
 
+bool ResourceMgr::occupyLinkAtPort(Point a, Point b, const int ioId, int portidx, PortDirection& directionAtoB,
+                                   PortDirection& directionBtoA) {
+    directionAtoB = getDir(a, b);
+    directionBtoA = opposite(directionAtoB);
+    const auto &va_out = tile(a.r, a.c).bank(directionAtoB).slave;
+    const auto &vb_in = tile(b.r, b.c).bank(directionBtoA).master;
+    if (portidx < 0 || portidx >= (int)va_out.size() || portidx >= (int)vb_in.size())
+        return false;
+    if (va_out[portidx].used || vb_in[portidx].used)
+        return false;
+    return tile(a.r, a.c).allocate(IOType::Output, portidx, directionAtoB, ioId) &&
+           tile(b.r, b.c).allocate(IOType::Input, portidx, directionBtoA, ioId);
+}
+
 bool ResourceMgr::occupyPointDirection(Point a,int& portidx, PortDirection& pd, bool slave) {
     if (!portDirAvailable(a, portidx, pd, !slave))
         return false;
@@ -431,7 +487,7 @@ std::optional<FoundDmaSlot> ResourceMgr::freeShimNoc(std::optional<TypeBasedTile
     }
     return  std::nullopt;
 }
-// ---------- freeShim 例子 ----------
+// ---------- freeShim example ----------
 std::optional<Point> ResourceMgr::freeShimNoc(std::optional<Point> dst) const {
     auto& shimnocs = resource_->getShimNoc();
     auto max_distance = resource_->getColumns();
@@ -504,7 +560,7 @@ bool ResourceMgr::init(std::unique_ptr<IHwResource> resource, TileType defType)
         singleton_ = std::make_shared<ResourceMgr>(std::move(resource), defType);
         created = true;
     });
-    return created;            // true=本次创建，false=之前已创建
+    return created; // true = created by this call, false = already created earlier
 }
 
 std::shared_ptr<ResourceMgr> ResourceMgr::instance()

@@ -17,13 +17,15 @@ import fnmatch
 import json
 import re
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import _env
 from .contract import KernelContract, check_region, make_contract
 from .errors import AiegraphError
-from .model import Model, copy_into, load
+from .model import DEFAULT_MODULE_STEM, Model, copy_into, load
 from .plan import group_by_source, parse_offload
 from .region import Regions, build_regions
 from .report import (AIProtoResult, BuildReport, CheckReport, DetectReport, PartitionPlan,
@@ -35,6 +37,10 @@ TARGETS = ("a78", "cpu", "x86", "aie")
 BUILD_TARGETS = ("a78", "cpu", "aie", "x86")    # x86: main_local.elf; the rest: main.elf
 _STATE = "aiegraph.json"
 _STATE_VERSION = 1
+
+
+#: match() kinds that fold a layout / scale call into the group of an offloaded call
+FOLDS = ("conv+layout", "linear+layout", "dense+silu")
 
 
 @dataclass
@@ -132,7 +138,7 @@ class EmbeddedModel:
             c = calls[0]
             where, src = place.get(c.symbol, ("cpu", ""))
             if where == "cpu":
-                src = f"layers/{c.dir}/{c.dir}.c" if c.dir else "resnet18.c"
+                src = f"layers/{c.dir}/{c.dir}.c" if c.dir else f"{DEFAULT_MODULE_STEM}.c"
             out.append(Layer(idx, c.symbol, c.dir, [x.call for x in calls], _label(c),
                              _sig(c), where, src))
         return out
@@ -264,9 +270,31 @@ class EmbeddedModel:
         part = self.workdir / "layers" / "partition.json"
         if not part.is_file():
             return []
+        from .group import recorded_groups, reset_groups
+        refs = layers if isinstance(layers, (list, tuple, set)) else [layers]
+        gnames = [r for r in refs if isinstance(r, str) and r.startswith("group:")]
+        rest = [r for r in refs if not (isinstance(r, str) and r.startswith("group:"))]
+        if layers is not None and gnames and not rest:          # only groups named
+            dropped = reset_groups(self.workdir, names=gnames)
+            if dropped:
+                print(f"[aiegraph] offload reset: group {', '.join(dropped)} back on the CPU "
+                      f"(whole group)")
+            return [f"group:{n}" for n in dropped]
+        if layers is not None:
+            layers = rest if isinstance(layers, (list, tuple, set)) else rest[0]
         want = None if layers is None else set(self.resolve(layers))
+        if gnames:
+            reset_groups(self.workdir, names=gnames)
+        if want is None:
+            dropped = reset_groups(self.workdir)
+        elif recorded_groups(self.workdir):            # a member layer takes its whole group
+            calls = {c for l in self.layers if l.index in want for c in l.calls}
+            dropped = reset_groups(self.workdir, calls=calls)
+        else:
+            dropped = []
+        dropped = sorted(set(dropped) | {g.removeprefix("group:") for g in gnames})
         doc = json.loads(part.read_text())
-        reset = []
+        reset = [f"group:{n}" for n in dropped]
         for row in doc.get("layers", []):
             if row.get("target") != "aie" or (want is not None and row.get("index") not in want):
                 continue
@@ -275,8 +303,10 @@ class EmbeddedModel:
                        reason="offload reset (aiegraph): back on the APU")
             if f"layer{row.get('index')}" not in reset:
                 reset.append(f"layer{row.get('index')}")
-        if not reset:
-            return []
+        if not any(r.startswith("layer") for r in reset):
+            if reset:
+                print(f"[aiegraph] offload reset: {', '.join(reset)} back on the CPU (whole group)")
+            return reset
         targets = [r for r in doc["layers"] if r.get("target") == "aie"]
         doc["aie_count"], doc["cpu_count"] = len(targets), len(doc["layers"]) - len(targets)
         doc["aie_dirs"] = len({r["dir"] for r in targets})
@@ -290,21 +320,156 @@ class EmbeddedModel:
         print(f"[aiegraph] offload reset: {', '.join(reset)} back on the CPU (driver regenerated)")
         return reset
 
-    def offload_check(self, spec, source=None, verbose: bool = False) -> CheckReport:
+    # ── group offload (design 2026-11-16 §6, S2: graph-level checks + record) ──
+
+    @property
+    def input_names(self) -> list:
+        """The converted graph's runtime inputs in order (``graph.json`` arg nodes that are not parameters):
+        what the board main's ``graph_input_name(k)`` returns (a one-input model is renamed ``data``)."""
+        import json
+        from .callsite import _offsets, params_file
+        g = json.loads(next(Path(self.workdir).glob("*_graph.json")).read_text())
+        params = set(_offsets(params_file(self.workdir)))
+        return [g["nodes"][i]["name"] for i in g["arg_nodes"] if g["nodes"][i]["name"] not in params]
+
+    def call_graph(self):
+        """The network as calls / tensors / storage, from ``<stem>_graph.json``."""
+        from .group import CallGraph
+        return CallGraph.load(self.workdir)
+
+    def group(self, calls, name: str = None):
+        """A group of whole TVM calls (``[31, 32, ...]``) with its boundary tensors."""
+        from .group import make_group
+        return make_group(self.call_graph(), calls, name)
+
+    def match(self, kind: str = "attention", onnx=None, nodes=None, wdtype: str = None, *,
+              partition=None, model=None, base=None, convs=None, groups=1, log=None) -> list:
+        """Groups by pattern. ``"attention"`` (S3): every bmm -> softmax -> bmm core with its
+        Q/K/V layout calls and the O merge (data flow on graph.json), as
+        ``attention.AttentionGroup`` (q/k/v/o, H/N/M/D, cls, scale, ONNX node names).
+        *onnx* defaults to the loaded model; *nodes* is the explicit ONNX node list
+        fallback ``[{"qk", "softmax", "pv"}, ...]`` (design §9 (1)); *wdtype* defaults to
+        ``AIEGRAPH_WDTYPE`` (bf16 rounds the scale as the deployed call reads it).
+        ``"conv"`` / ``"linear"`` (S1): one group of ONE call per partition row
+        (``partition=`` partition.json path or dict, ``onnx=`` / ``model=`` the model it was
+        planned on), with ``g.x`` / ``g.y`` / ``g.w`` / ``g.info`` -- see ``aiegraph.callsite``.
+        ``groups`` (conv): the ONNX ``group`` attribute accepted -- 1, ``"dw"`` (depthwise,
+        group == C == O), ``"any"`` or a tuple of them, e.g. ``(1, "dw")``.
+        Folds (``aiegraph.fold``): ``"conv+layout"`` (``base=`` the conv groups),
+        ``"linear+layout"`` (``base=`` the linear groups, ``convs=`` the conv groups),
+        ``"dense+silu"``; join overlapping ones with ``merge_groups``."""
+        import os
+        if kind in ("conv", "linear"):
+            from .callsite import conv_groups, linear_groups
+            if partition is None or (onnx is None and model is None):
+                raise AiegraphError("group", f"match({kind!r}) needs partition= and onnx=")
+            if kind == "conv":
+                return conv_groups(self.call_graph(), self.workdir, onnx, partition, model=model, groups=groups)
+            return linear_groups(self.call_graph(), self.workdir, onnx, partition, model=model)
+        if kind in FOLDS:
+            from . import fold
+            cg = self.call_graph()
+            if kind == "dense+silu":
+                return fold.dense_silu(cg)
+            if base is None:
+                raise AiegraphError("group", f"match({kind!r}) needs base= (the one-call groups it extends)")
+            if kind == "conv+layout":
+                return fold.conv_layout(cg, base, log=log)
+            if convs is None:
+                raise AiegraphError("group", "match('linear+layout') needs convs= (the conv groups)")
+            return fold.linear_layout(cg, base, convs, log=log)
+        if kind != "attention":
+            raise AiegraphError("group", f"match({kind!r})",
+                                hint="'attention', 'conv', 'linear', " + ", ".join(repr(k) for k in FOLDS))
+        from .attention import match_attention
+        if onnx is None and self.model is not None and getattr(self.model, "onnx_path", None):
+            onnx = self.model.onnx_path
+        if wdtype is None:
+            wdtype = os.environ.get("AIEGRAPH_WDTYPE", "fp32")
+        return match_attention(self.call_graph(), onnx=onnx, nodes=nodes, wdtype=wdtype,
+                               workdir=self.workdir)
+
+    def merge_groups(self, groups) -> list:
+        """One group per connected set of calls over one-call groups and the folds extending them
+        (``aiegraph.fold.merge``); ``fold.step_io(cg, g, call)`` gives each kept call's step io."""
+        from .fold import merge
+        return merge(self.call_graph(), groups)
+
+    @property
+    def groups(self) -> list:
+        """The groups ``layers/partition.json`` records."""
+        from .group import recorded_groups
+        return recorded_groups(self.workdir)
+
+    def driver_template(self, decls: str = "", expand_enter: str = "", expand_exit: str = "",
+                        run_enter: str = ""):
+        """The application's C glue in every driver ``arm_build`` generates for this workdir (S6):
+        ``decls`` before ``kernel_ws`` (step/kernel declarations, profiling macros), ``expand_enter`` /
+        ``expand_exit`` around ``graph_bf16_expand``'s loop, ``run_enter`` at the top of ``graph_run``.
+        Every anchor is checked (exactly once); applying twice is an error. Runs before passes
+        registered after it. Returns the registered pass."""
+        from .driver_template import register
+        return register(self.workdir, decls=decls, expand_enter=expand_enter, expand_exit=expand_exit,
+                        run_enter=run_enter)
+
+    def offload_group(self, group, source=None, steps=(), record: bool = True, emit=None, launch=None):
+        """Place *steps* on *group*'s calls, run the placement / deletion / early-write
+        checks on the graph and record the group in ``layers/partition.json``.
+        Undo with ``offload_reset("group:<name>")`` (the whole group).
+
+        *emit* (S3): ``{step name: {"c": [C statements], "tag": str}}`` or a callable
+        ``(step record) -> that dict`` -- what the generated ``graph_driver.c`` runs at the
+        step's slot (``@K@`` = the call index). With it the driver generator places the
+        steps and drops the removed calls (``arm_build.group_sites``). An emit entry may name an
+        aiednn template instead of C: ``{"template": "aiednn/<cat>/<file>", "params": {...}}``.
+        *launch*: what the main program launches for the group (recorded with the group's
+        ``io``: boundary name / shape / dtype, every output)."""
+        from .group import Group, emit_steps, make_group, plan_group, record_group
+        cg = self.call_graph()
+        if not isinstance(group, Group):
+            group = make_group(cg, group)
+        plan = plan_group(cg, group, steps)
+        plan.launch = dict(launch or {})
+        _emit_steps(self.workdir, cg, plan, steps)
+        if emit is not None:
+            emit_steps(plan, emit)
+        if record:
+            record_group(self.workdir, plan, source)
+        return plan
+
+    def offload_check(self, spec, source=None, verbose: bool = False,
+                      check: str = "network", inputs: dict = None) -> CheckReport:
         """lint + detect + calibrate + whole-network emulate, all on x86.
-        ``offload_check("layer1", "k.cc")`` or any spec ``offload`` takes."""
+        ``offload_check("layer1", "k.cc")`` or any spec ``offload`` takes.
+        ``check="group"``: the group-level x86 check instead of calibrate + emulate
+        (every call of the layer vs ``<entry>_ref``, cos >= 0.999, nonfinite == 0;
+        ``inputs={graph entry id: array}`` real activations, else seeded)."""
         _env.frontend("")
-        from frontend.tvmrelay.aiekernel.flow import check
+        from frontend.tvmrelay.aiekernel.flow import check as flow_check
         groups, args = self._kernel_args(spec, source)
-        print(f"[aiegraph] offload_check {', '.join(Path(a).name for a in args)}: "
-              f"lint, detect, calibrate vs TVM, whole-network emulation (x86)...")
-        raw = check(self.workdir, args, verbose=verbose)
+        checker = self._checker(check, inputs)
+        print(f"[aiegraph] offload_check {', '.join(Path(a).name for a in args)}: lint, detect, "
+              + ("group-level check vs TVM (x86)..." if checker else
+                 "calibrate vs TVM, whole-network emulation (x86)..."))
+        raw = flow_check(self.workdir, args, verbose=verbose, checker=checker)
         return CheckReport("offload_check", raw, groups)
 
+    @staticmethod
+    def _checker(check: str, inputs: dict = None):
+        if check == "network":
+            return None
+        if check == "group":
+            from .groupcheck import layer_checker
+            return layer_checker(inputs=inputs)
+        raise AiegraphError("offload", f"check={check!r}", hint="'network' or 'group'")
+
     def offload(self, spec, source=None, build: bool = True, make: bool = False,
-                force: bool = False, verbose: bool = False) -> CheckReport:
+                force: bool = False, verbose: bool = False, check: str = "network",
+                inputs: dict = None) -> CheckReport:
         """``offload_check`` + aiehlc build + link gate + driver swap.
 
+        ``check="group"``: gates 3-4 are the group-level x86 check (see
+        ``offload_check``), binding -- not combinable with ``force``.
         ``offload("layer1", False)`` undoes it: the layer(s) go back on the CPU
         (= ``offload_reset("layer1")``); returns the layer names reset."""
         if source is False:
@@ -317,8 +482,12 @@ class EmbeddedModel:
         groups, args = self._kernel_args(spec, source)
         print(f"[aiegraph] offload {', '.join(Path(a).name for a in args)}: checks, then "
               f"aiehlc build (~2 min the first time, cached after)...")
+        checker = self._checker(check, inputs)
+        if checker is not None and force:
+            raise AiegraphError("offload", "force=True with check='group'",
+                                hint="the group check is binding; fix the step instead")
         raw = offload(self.workdir, args, build=build, make=make, force=force,
-                      image=self.image, verbose=verbose)
+                      image=self.image, verbose=verbose, checker=checker)
         return CheckReport("offload", raw, groups)
 
     def offload_AI_proto(self, spec, source, *, rounds: int = 3, model: str = None,
@@ -431,26 +600,53 @@ class EmbeddedModel:
     # ── build / run ──────────────────────────────────────────────────────
 
     def build(self, target: str = "a78", output=None, *, local: bool = False,
-              profile: bool = False, verbose: bool = False) -> BuildReport:
+              profile: bool = False, verbose: bool = False,
+              main_c=None, extra_sources=(), extra_cflags: str = "",
+              layer_cflags: str = "", runtime_io=None, dump_out: bool = False,
+              launch: str = None) -> BuildReport:
         """Link ``main.elf`` (A78; needs the Vitis cross toolchain), or with
         ``target="x86"`` ``main_local.elf`` for this host. ``local=True`` builds
         both. ``profile=True`` links ``main.elf`` with ``make PROFILE=1`` (a
         per-call time table after "inference", read by ``profile()``).
         ``output=`` copies the ELF(s), ``partition.json`` and ``network.md``
-        into that directory. Never runs anything on a board."""
+        into that directory. Never runs anything on a board.
+
+        ``runtime_io=[(name, bytes | path), ...]`` (graph-input order): the inputs go into the
+        ``.aiehlc_io`` ELF section (``arm_build.write_runtime_io``; swap them later with
+        ``src/tool/elfio/aiehlc_elfio.py patch``), ``dump_out`` sets the section's output-dump flag;
+        the built ELF is checked to carry a loadable section. ``launch="warm"`` asserts the warm
+        launch options were set before the kernels were built (``aiegraph.boardmain.launch_env``)."""
         if target not in BUILD_TARGETS:
             raise AiegraphError("build", f"target={target!r}", hint=f"one of {', '.join(BUILD_TARGETS)}")
+        from . import boardmain
+        if not boardmain.launch_applied(launch):
+            raise AiegraphError("build", f"launch={launch!r} but the environment has no {launch} launch options",
+                                hint="call aiegraph.boardmain.launch_env(launch) before convert / offload")
+        if dump_out and not runtime_io:
+            raise AiegraphError("build", "dump_out=True needs runtime_io")
         ab = _env.frontend("arm_build")
+        if runtime_io:
+            extra_sources = list(extra_sources) + ab.write_runtime_io(Path(self.workdir) / "runtime_io",
+                                                                      list(runtime_io), dump_out=dump_out)
         x86 = target == "x86"
         res = ab.build_arm_elf(self.workdir, c_name=f"{self._stem()}.c", run_make=not x86,
                                image=self.image, local=local or x86, local_run=False,
-                               verbose=verbose, make_vars={"PROFILE": 1} if profile else None)
+                               verbose=verbose, make_vars={"PROFILE": 1} if profile else None,
+                               main_c=main_c, extra_sources=extra_sources,
+                               extra_cflags=extra_cflags, layer_cflags=layer_cflags)
         if x86:
             loc = res.get("local") or {}
             rep = BuildReport(bool(loc.get("ok")), loc.get("elf"), loc.get("reason", ""), loc)
         else:
             rep = BuildReport(bool(res.get("elf")), res.get("elf"), res.get("reason", ""),
                               res.get("local"))
+            if rep.ok and runtime_io:
+                tool = _env.repo_root() / "src" / "tool" / "elfio" / "aiehlc_elfio.py"
+                r = subprocess.run([sys.executable, str(tool), "info", str(rep.elf)], capture_output=True, text=True)
+                info = (r.stdout + r.stderr).strip()
+                rep = (BuildReport(True, rep.elf, "", rep.local, io_info=info) if r.returncode == 0 else
+                       BuildReport(False, rep.elf, f"main.elf has no loadable {ab.AIO_SECTION} section: {info}",
+                                   rep.local))
         if output and rep.ok:
             rep.output, rep.files = self._export(output, rep)
         self.last_build = rep
@@ -587,7 +783,7 @@ class EmbeddedModel:
 
     def _stem(self) -> str:
         g = next(self.workdir.glob("*_graph.json"), None)
-        return g.name[:-len("_graph.json")] if g else "resnet18"
+        return g.name[:-len("_graph.json")] if g else DEFAULT_MODULE_STEM
 
     @property
     def network_md(self) -> Path:
@@ -619,6 +815,64 @@ class EmbeddedModel:
                                    "print(module.regions)  /  module.register_kernel(name=..., "
                                    "source=..., op=...)"))
         return "\n".join(lines)
+
+
+def _emit_steps(workdir: Path, cg, plan, steps) -> None:
+    """S1: steps with the "args" ABI (``ag.step(..., call=...)``) become driver code --
+    record their call form, and write each bf16 weight (layout applied) beside the
+    group so ``arm_build.generate_driver`` puts it into ``weights.bin`` and drops the
+    ``graph_bf16_expand`` of that weight at that call."""
+    import hashlib
+    from .callsite import WeightSpec, params_file, weight_bytes
+    from .contract import CALL_SPECIALS
+    by_name = {getattr(s, "name", None): s for s in steps}
+    emit = [by_name[p["name"]] for p in plan.steps if getattr(by_name[p["name"]], "call", None)]
+    if emit and len(emit) != len(plan.steps):
+        raise AiegraphError("group", f"group {plan.group.name}: {len(emit)} of {len(plan.steps)} steps "
+                            f"use the args ABI (call=)",
+                            hint="one ABI per group: all steps call= (args), or all emit= (AIEK_STEP, S3)")
+    params = None
+    for rec in plan.steps:
+        st = by_name[rec["name"]]
+        call = cg.calls[rec["at"]]
+        if getattr(st, "call", None):
+            types = {k: ("float" if isinstance(v, float) else "int") for k, v in st.consts.items()}
+            rec["call"] = list(st.call)
+            rec["decl"] = "int %s(%s);" % (st.name, ", ".join(
+                CALL_SPECIALS.get(a) or f"{types[a]} {a}" for a in st.call))
+            rec["nargs"] = len(rec["args"]) if rec.get("args") else len(call.ins) + len(call.outs)
+            rec["wrap"] = list(st.wrap) if st.wrap else None
+            rec["tag"] = st.tag or f"aie {st.name}"
+            packed = ({cg.canon(x["tensor"]) for x in rec["args"]} if rec.get("args")
+                      else set(call.ins) | set(call.outs))
+            lost = [t for t in rec["writes"] if t not in packed]
+            if lost:
+                raise AiegraphError("group", f"group {plan.group.name}: step {st.name} writes tensors[{lost[0]}], "
+                                    f"which its packed arguments do not carry (an args ABI step without "
+                                    f"args= is for one-call groups)",
+                                    hint="args=[ag.arg(...), ...] naming the tensor it writes")
+        w = getattr(st, "weights", None)
+        if w is None:
+            continue
+        if not isinstance(w, WeightSpec):
+            raise AiegraphError("group", f"step {st.name}: weights={w!r}",
+                                hint="g.w.as_bf16(layout=...)")
+        if w.ref.tensor not in call.ins:
+            raise AiegraphError("group", f"step {st.name}: weight {w.ref} is not read by call "
+                                f"[{call.call}] {call.fn}")
+        others = [r for r in cg.readers.get(w.ref.tensor, []) if r != call.call]
+        if others:
+            raise AiegraphError("group", f"step {st.name}: weight {w.ref} is also read by call(s) "
+                                f"{others}; its weights.bin bytes would change under them")
+        params = params or params_file(workdir)
+        data = weight_bytes(w, params)
+        d = workdir / "layers" / "groups"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / f"{plan.group.name}.{w.ref.name}.bf16"
+        f.write_bytes(data)
+        rec["weights"] = {"param": w.ref.name, "tensor": w.ref.tensor, "dtype": "bfloat16",
+                          "file": str(f.relative_to(workdir)), "nbytes": len(data),
+                          "sha1": hashlib.sha1(data).hexdigest()}
 
 
 def _clean(workdir: Path) -> None:

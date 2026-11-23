@@ -70,6 +70,10 @@ std::vector<Point> RoutingTopology::ReserveTiles(int nums,int dioID) {
 bool RoutingTopology::occupyLink(Point a, Point b, const int ioId,int& portNum, PortDirection& pda, PortDirection& pdb){
     return rm_->occupyLink(a,  b, ioId,portNum, pda, pdb);
 }
+bool RoutingTopology::occupyLinkAtPort(Point a, Point b, const int ioId, int portNum, PortDirection& pda,
+                                       PortDirection& pdb) {
+    return rm_->occupyLinkAtPort(a, b, ioId, portNum, pda, pdb);
+}
 bool RoutingTopology::occupyPointDirection(Point a,int& portNum, PortDirection& pd, bool slave){
     return rm_->occupyPointDirection(a, portNum, pd, slave);
 }

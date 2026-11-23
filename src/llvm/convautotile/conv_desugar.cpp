@@ -5,6 +5,7 @@
  * Source-level desugaring of aie::Conv2d / aie::Mapping — see conv_desugar.h.
  ******************************************************************************/
 #include "conv_desugar.h"
+#include "block_io_names.h"
 #include "kernel_trace.h"
 
 #include <algorithm>
@@ -1090,8 +1091,8 @@ std::vector<std::string> kernelTUDecls(const KernelDesugar &k) {
         else // WEIGHTS: B^T [k, kh, kw, c_align], this core's OC slice, sent once
             desc = "{4, " + list({d.oc_mesh, c.kh, c.kw, d.c_align}) + ", " + list({0, 0, 0, 0}) + ", " +
                    list({d.oc_mesh, 0, 0, 0}) + ", " + list({0, 0, 0, 0}) + ", " + list({0, 0, 0, 0}) + ", 1, 1}";
-        out.push_back("static const aiehlc_blk_desc aiehlc_desc_" + p.first + " = " + desc + ";");
-        out.push_back("static aiehlc_blk_cursor aiehlc_cur_" + p.first + ";");
+        out.push_back("static const aiehlc_blk_desc " + blockDescVar(k.kernel, p.first) + " = " + desc + ";");
+        out.push_back("static aiehlc_blk_cursor " + blockCurVar(k.kernel, p.first) + ";");
     }
     return out;
 }

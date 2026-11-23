@@ -1116,169 +1116,169 @@ By merging the shim receives into one logical block, you allow the backend to po
 Would you like me to draft a C++ snippet for the MLIR rewrite pattern that performs this hoisting and merging?
 
 You said
-mlir::PatternRewriter::inlineRegionBefore此方法会将内部操作“拉入”routing.RoutingCreate主体中func.func。 啥意思
+mlir::PatternRewriter::inlineRegionBefore: this method "pulls" the inner operations out of the routing.RoutingCreate body into func.func. What does that mean?
 
 Gemini said
-在 MLIR 的世界里，你可以把 routing.RoutingCreate 想象成一个**“嵌套的盒子”**，而 func.func 是你工作的大房间。
+In the MLIR world, you can think of routing.RoutingCreate as a **"nested box"**, while func.func is the big room you work in.
 
-当你调用 inlineRegionBefore 时，本质上是在做**“拆盒取物”**的操作。
+Calling inlineRegionBefore is essentially an **"unbox and take out the contents"** operation.
 
-1. 核心含义：作用域扁平化 (Scope Flattening)
-在 MLIR 中，Operation（操作）是层级嵌套的。你的原始 IR 结构如下：
+1. Core meaning: Scope Flattening
+In MLIR, Operations are hierarchically nested. Your original IR structure looks like this:
 
-func.func (大房间)
+func.func (the big room)
 
 arith.constant
 
-routing.RoutingCreate (盒子)
+routing.RoutingCreate (the box)
 
-Region (盒子内部的空间)
+Region (the space inside the box)
 
 Block
 
-dfschedule.config.dma_bd (盒子里的工具 A)
+dfschedule.config.dma_bd (tool A in the box)
 
-dfschedule.config.create_io (盒子里的工具 B)
+dfschedule.config.create_io (tool B in the box)
 
-“拉入” (Inlining) 的意思就是：
-你把“工具 A”和“工具 B”从盒子里拿出来，直接摆在“大房间”的地面上。操作执行完后，这些工具的“上级”不再是 routing.RoutingCreate，而是变成了 func.func。
+"Pulling in" (Inlining) means:
+You take "tool A" and "tool B" out of the box and put them directly on the floor of the "big room". After the operation, the "parent" of these tools is no longer routing.RoutingCreate but func.func.
 
-2. 代码直观对比
-Inlining 之前 (嵌套状态)
+2. Side-by-side code comparison
+Before inlining (nested state)
 MLIR
 func.func @main() {
   %c0 = arith.constant 0 : i32
-  // 此时 dma_bd 在 RoutingCreate 的隔离区里
+  // At this point dma_bd lives inside RoutingCreate's isolated region
   %result = routing.RoutingCreate (scf_idx = %c0) {
     %bd = dfschedule.config.dma_bd ... 
     routing.yield %bd
   }
   return
 }
-Inlining 之后 (扁平状态)
+After inlining (flat state)
 MLIR
 func.func @main() {
   %c0 = arith.constant 0 : i32
-  // RoutingCreate 被“拆开”了，dma_bd 现在直接属于 func.func
+  // RoutingCreate has been "unboxed"; dma_bd now belongs directly to func.func
   %bd = dfschedule.config.dma_bd ... 
-  // 盒子被扔掉了，剩下的逻辑直接连在主体里
+  // The box is thrown away; the remaining logic is wired directly into the body
   return
 }
-3. C++ 层面发生了什么？
-当你写 rewriter.inlineRegionBefore(sourceRegion, targetBlock, insertionPoint) 时：
+3. What happens at the C++ level?
+When you write rewriter.inlineRegionBefore(sourceRegion, targetBlock, insertionPoint):
 
-移动 Block：它把 sourceRegion 里的所有 Block（块）直接移动到 targetBlock 的指定位置。
+Move Blocks: it moves all Blocks in sourceRegion directly to the given position in targetBlock.
 
-改变 Parent：原本这些 Op 的 getParentOp() 会返回 routing.RoutingCreate，现在会返回 func.func。
+Change the parent: getParentOp() on these Ops used to return routing.RoutingCreate; now it returns func.func.
 
-解除封装：这就解决了你之前提到的“想要移除 routing.RoutingCreate”的需求。一旦内部操作被拉出来，这个 routing 操作就变成了没有实际意义的空壳，你可以放心地用 rewriter.eraseOp(op) 把它删掉。
+Remove the encapsulation: this addresses your earlier requirement of "removing routing.RoutingCreate". Once the inner operations are pulled out, the routing op becomes a meaningless empty shell, and you can safely delete it with rewriter.eraseOp(op).
 
-4. 为什么要这么做？
-作为专家，我告诉你这样做最大的好处是打破优化壁垒：
+4. Why do this?
+As an expert, the biggest benefit I can point out is that it breaks optimization barriers:
 
-全局可见性：在盒子里时，MLIR 的常规优化（如 CSE 消除重复操作、死代码删除）很难跨越区域（Region）边界去观察。
+Global visibility: while ops are inside the box, MLIR's regular optimizations (e.g. CSE to eliminate duplicate operations, dead-code elimination) have a hard time looking across Region boundaries.
 
-资源合并：正如你之前想合并多个 Shim 接收逻辑，只有把它们拉到同一个层级（同一个 Block 里），编译器才能发现：“嘿，这两个 DMA 配置的是同一个 Tile，我可以把它们合并！”
+Resource merging: just as you wanted to merge multiple Shim receive paths earlier, only once they are pulled to the same level (the same Block) can the compiler notice: "Hey, these two DMAs configure the same Tile, I can merge them!"
 
-你想看一个具体的 PatternRewrite 类实现，演示如何写这段 C++ 代码吗？
+Would you like to see a concrete PatternRewrite class that shows how to write this C++ code?
 
 You said
-rewriter.inlineRegionBefore 举个例子
+rewriter.inlineRegionBefore: give an example
 
 Gemini said
-好的，我们直接看代码。假设我们要写一个 Canonicalization 模式，专门用来拆掉 routing.RoutingCreate 这个“盒子”。
+Sure, let's go straight to the code. Suppose we want to write a Canonicalization pattern dedicated to taking apart the routing.RoutingCreate "box".
 
-在 MLIR 中，inlineRegionBefore 的操作通常伴随着结果替换（把盒子里 yield 出来的值，接头到盒子外面的 SSA 变量上）。
+In MLIR, inlineRegionBefore is usually accompanied by result replacement (connecting the values yielded inside the box to the SSA variables outside the box).
 
-C++ 示例代码
-这是一个典型的 OpRewritePattern 实现：
+C++ example code
+This is a typical OpRewritePattern implementation:
 
 C++
 #include "mlir/IR/PatternMatch.h"
-#include "your/dialect/RoutingOps.h" // 假设你的 Dialect 定义在此
+#include "your/dialect/RoutingOps.h" // assuming your Dialect is defined here
 
 struct FlattenRoutingPattern : public mlir::OpRewritePattern<routing::RoutingCreateOp> {
     using OpRewritePattern<routing::RoutingCreateOp>::OpRewritePattern;
 
     mlir::LogicalResult matchAndRewrite(routing::RoutingCreateOp op,
                                        mlir::PatternRewriter &rewriter) const override {
-        // 1. 获取盒子内部的那个“空间” (Region)
+        // 1. Get the "space" (Region) inside the box
         mlir::Region &sourceRegion = op.getRegion();
 
-        // 2. 找到盒子所在的“房间位置” (Block)
+        // 2. Find the "room location" (Block) where the box sits
         mlir::Block *currentBlock = op->getBlock();
 
-        // 3. 执行“拆盒取物”：把盒子里的所有 Block 搬到盒子前面
-        // 这个方法会把 sourceRegion 里的所有东西“拉入”到 currentBlock 所在的层级
+        // 3. "Unbox": move all Blocks of the box in front of the box
+        // This method "pulls" everything in sourceRegion up to the level of currentBlock
         rewriter.inlineRegionBefore(sourceRegion, op->getBlock());
 
-        // 4. 接头工作 (Handling Yield)
-        // 盒子里通常有个 routing.yield 把值传出来。
-        // 我们需要把原本指向 op 结果的地方，改为指向 yield 的操作数。
-        mlir::Block &inlinedBlock = currentBlock->getPredecessor()->getNextNode(); // 简化处理
+        // 4. Rewiring (Handling Yield)
+        // There is usually a routing.yield inside the box that passes values out.
+        // We need to redirect uses of op's results to the yield's operands instead.
+        mlir::Block &inlinedBlock = currentBlock->getPredecessor()->getNextNode(); // simplified
         auto yieldOp = mlir::cast<routing::RoutingYieldOp>(inlinedBlock.getTerminator());
         
-        // 用 yield 的内容替换掉整个 RoutingCreateOp 的返回值
+        // Replace the results of the whole RoutingCreateOp with the yielded values
         rewriter.replaceOp(op, yieldOp.getOperands());
 
-        // 5. 最后清理：把那个已经没用的 yield 操作删掉（因为它现在直接暴露在 func 里了）
+        // 5. Final cleanup: delete the now-useless yield op (it is now directly exposed in func)
         rewriter.eraseOp(yieldOp);
 
         return mlir::success();
     }
 };
-这段代码执行前后的 IR 变化
-操作前 (Before)
-你的 IR 像是在“套娃”：
+IR changes before and after this code runs
+Before
+Your IR looks like "nesting dolls":
 
 MLIR
 func.func @main() {
   %0 = routing.RoutingCreate ... {
     ^bb0:
-      %1 = dfschedule.config.dma_bd ... // 此时这行代码的“父亲”是 RoutingCreate
+      %1 = dfschedule.config.dma_bd ... // at this point the "parent" of this line is RoutingCreate
       routing.yield %1
   }
-  // 其他代码...
+  // other code...
 }
-执行 inlineRegionBefore 后 (After)
-结构变扁平了，dma_bd 被“提拔”了：
+After running inlineRegionBefore
+The structure is flattened; dma_bd has been "promoted":
 
 MLIR
 func.func @main() {
-  // 盒子被拆开了，bb0 变成了 func.func 的一部分
-  %1 = dfschedule.config.dma_bd ... // 现在这行代码的“父亲”直接就是 func.func
+  // The box is opened; bb0 becomes part of func.func
+  %1 = dfschedule.config.dma_bd ... // now the "parent" of this line is func.func directly
   
-  // 原本的 %0 被 %1 直接替换掉了
-  // routing.yield 被删除了
-  // 其他代码...
+  // The original %0 is replaced directly by %1
+  // routing.yield has been deleted
+  // other code...
 }
-关键点拨
-Block 的移动：inlineRegionBefore 并不是一行行复制 Op，而是直接移动整个 Block 的指针。这非常高效。
+Key points
+Block movement: inlineRegionBefore does not copy Ops one by one; it moves whole Block pointers directly. This is very efficient.
 
-控制流转换：如果你的盒子内部有多个 Block，拉出来后它们会直接并入外层的控制流。
+Control-flow conversion: if the box contains multiple Blocks, once pulled out they merge directly into the outer control flow.
 
-SSA 连续性：在拉出来之后，你需要确保原本依赖 RoutingCreate 返回值的后续操作，现在能正确地拿到盒子里算出来的那个值。这就是 rewriter.replaceOp 的作用。
+SSA continuity: after pulling them out, you must make sure the subsequent operations that depended on RoutingCreate's results now correctly get the values computed inside the box. That is what rewriter.replaceOp is for.
 
-专家提示
-当你把这些操作都拉到 func.func 这一层后，你就可以编写另一个 Merge Pattern。那个 Pattern 会扫描同一个 Block 里的所有 dfschedule.config.create_io，如果发现它们的 tile 属性相同，就利用 rewriter 把它们合并成一个。
+Expert tip
+Once you have pulled these operations up to the func.func level, you can write another Merge Pattern. That Pattern scans all dfschedule.config.create_io in the same Block and, if it finds that their tile attributes are identical, uses the rewriter to merge them into one.
 
-下一步，你需要我帮你写那个“合并两个相同 Tile 的 Shim 接收逻辑”的 C++ 逻辑吗？
+Next, do you want me to write the C++ logic for "merging the Shim receive logic of two identical Tiles"?
 
 You said
-怎么用 FlattenRoutingPattern
+How do I use FlattenRoutingPattern?
 
 Gemini said
-要使用 FlattenRoutingPattern，你不能直接“调用”它。在 MLIR 中，模式（Pattern）需要被放入一个**“集合 (RewritePatternSet)”中，然后通过一个“通行证 (Pass)”**来驱动执行。
+To use FlattenRoutingPattern you cannot "call" it directly. In MLIR, a Pattern must be put into a **"set" (RewritePatternSet)** and then driven by a **Pass**.
 
-你可以按照以下三个步骤来部署它：
+You can deploy it in the following three steps:
 
-第一步：创建一个 Pass 来承载模式
-在 MLIR 中，Pass 是执行变换的最小单位。你需要创建一个 OperationPass（通常针对 func::FuncOp 或 ModuleOp）。
+Step 1: create a Pass to host the pattern
+In MLIR, a Pass is the smallest unit that executes a transformation. You need to create an OperationPass (usually on func::FuncOp or ModuleOp).
 
 C++
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-// 定义你的 Pass
+// Define your Pass
 struct FlattenRoutingPass : public mlir::PassWrapper<FlattenRoutingPass, OperationPass<mlir::func::FuncOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FlattenRoutingPass)
 
@@ -1286,11 +1286,11 @@ struct FlattenRoutingPass : public mlir::PassWrapper<FlattenRoutingPass, Operati
     auto func = getOperation();
     mlir::RewritePatternSet patterns(&getContext());
     
-    // 将我们之前定义的模式添加到集合中
+    // Add the pattern we defined earlier to the set
     patterns.add<FlattenRoutingPattern>(&getContext());
 
-    // 使用 Greedy 驱动器应用这些模式
-    // 它会不断扫描 IR，直到没有可以被 Flatten 的 RoutingCreate 为止
+    // Apply these patterns with the Greedy driver
+    // It keeps scanning the IR until no RoutingCreate is left to Flatten
     if (mlir::failed(mlir::applyPatternsAndFoldGreedily(func, std::move(patterns)))) {
       signalPassFailure();
     }
@@ -1299,166 +1299,166 @@ struct FlattenRoutingPass : public mlir::PassWrapper<FlattenRoutingPass, Operati
   llvm::StringRef getArgument() const final { return "flatten-routing"; }
   llvm::StringRef getDescription() const final { return "Remove routing.RoutingCreate and hoist ops."; }
 };
-第二步：将 Pass 注册到流水线
-有了 Pass 之后，你需要告诉编译器什么时候运行它。通常在你的 main 函数或者 PassPipeline 中注册：
+Step 2: register the Pass in the pipeline
+Once you have the Pass, you need to tell the compiler when to run it. Usually you register it in your main function or in a PassPipeline:
 
 C++
 void registerMyPasses() {
     mlir::PassRegistration<FlattenRoutingPass>();
 }
 
-// 或者直接添加到 PassManager
+// Or add it directly to a PassManager
 mlir::PassManager pm(&context);
 pm.addPass(std::make_unique<FlattenRoutingPass>());
-第三步：在命令行调用
-如果你已经把 Pass 注册到了 mlir-opt 工具中，你就可以直接对你的 IR 文件运行它：
+Step 3: invoke it from the command line
+If you have registered the Pass with the mlir-opt tool, you can run it directly on your IR file:
 
 Bash
-# 运行你定义的 pass
+# Run the pass you defined
 my-mlir-opt --flatten-routing input.mlir -o output.mlir
-专家建议：如何实现“合并”逻辑？
-当你用 FlattenRoutingPattern 把所有操作“拉”到 func.func 之后，你会发现 IR 中存在多个针对同一 Tile 的 dfschedule.config.create_io。
+Expert advice: how to implement the "merge" logic?
+After FlattenRoutingPattern has "pulled" all operations into func.func, you will find multiple dfschedule.config.create_io in the IR targeting the same Tile.
 
-为了实现你最初想要的**“合并多个 Shim 接收逻辑”**，你应该再写一个模式：MergeShimIOOpsPattern。
+To achieve what you originally wanted, **"merging multiple Shim receive paths"**, you should write another pattern: MergeShimIOOpsPattern.
 
-它的逻辑应该是：
+Its logic should be:
 
-匹配 dfschedule.config.create_io。
+Match dfschedule.config.create_io.
 
-检查它的 tile 是否是 Shim Tile（例如 2,0）。
+Check whether its tile is a Shim Tile (e.g. 2,0).
 
-查找同一 Block 中是否已有另一个配置了相同 Tile 的 create_io。
+Look in the same Block for another create_io already configured for the same Tile.
 
-如果存在，将两者的 BD 链（通过 next_bd 属性）连接起来，并删除其中一个冗余的 create_io。
+If one exists, link the two BD chains together (via the next_bd attribute) and delete the redundant create_io.
 
-总结
-Flatten (拆盒)：用 inlineRegionBefore 把逻辑从 RoutingCreate 拿出来。
+Summary
+Flatten (unbox): use inlineRegionBefore to take the logic out of RoutingCreate.
 
-DCE (清理)：删除空的 RoutingCreate。
+DCE (cleanup): delete the empty RoutingCreate.
 
-Merge (合并)：在同一层级下，通过另一个 Pattern 识别并合并相同资源的配置。
+Merge: at the same level, use another Pattern to identify and merge configurations of the same resource.
 
-你想让我帮你写出那个“识别并合并相同 Tile 配置”的 Merge Pattern 伪代码吗？
+Do you want me to write pseudocode for the Merge Pattern that "identifies and merges identical Tile configurations"?
 
 You said
-GREEDY PATTERN MATCH 在百万行代码境况下会出问题，会有什么问题 怎么解决
+GREEDY PATTERN MATCH breaks down on a million lines of code -- what problems will it have, and how do you fix them?
 
 Gemini said
-在处理百万行级别的 MLIR 代码时，applyPatternsAndFoldGreedily 确实会从“编译器的好帮手”变成“编译效率的噩梦”。作为专家，我必须提醒你，贪婪模式在超大规模 IR 面前主要面临时间复杂度、内存抖动和收敛稳定性三大挑战。
+When processing million-line MLIR code, applyPatternsAndFoldGreedily really does turn from "the compiler's helper" into "a compile-time nightmare". As an expert I have to warn you: on very large IR the greedy driver faces three main challenges -- time complexity, memory churn, and convergence stability.
 
-1. 百万行代码下的核心问题
-🌀 时间复杂度爆炸 (Non-linear Complexity)
-贪婪驱动器（Greedy Driver）的工作原理是维护一个工作列表 (Worklist)。每当一个 Op 被修改，驱动器会将受影响的邻近 Op 重新放回列表。
+1. Core problems at a million lines
+🌀 Time-complexity blow-up (Non-linear Complexity)
+The Greedy Driver works by maintaining a Worklist. Whenever an Op is modified, the driver puts the affected neighboring Ops back onto the list.
 
-重复扫描：在百万行规模下，如果 Pattern 编写不当（例如频繁触发局部修改），一个 Op 可能被重复访问数千次。
+Repeated scanning: at a million lines, if a Pattern is badly written (e.g. it triggers local modifications frequently), a single Op may be visited thousands of times.
 
-收敛成本：贪婪匹配必须运行到不动点 (Fixed Point) 才能停止。对于超大 IR，达到这个稳定状态的步数可能呈指数级增长。
+Cost of convergence: greedy matching must run to a Fixed Point before it stops. For very large IR, the number of steps to reach that stable state can grow exponentially.
 
-💾 内存与缓存压力
-工作列表膨胀：百万行代码意味着工作列表可能瞬间塞入数十万个 Op 指针，消耗大量内存。
+💾 Memory and cache pressure
+Worklist bloat: a million lines means the worklist may suddenly be stuffed with hundreds of thousands of Op pointers, consuming a lot of memory.
 
-缓存失效 (Cache Miss)：贪婪驱动器在不同 Block 甚至不同 Region 之间来回跳跃，会导致 CPU 缓存命中率极低。
+Cache misses: the greedy driver jumps back and forth between different Blocks and even different Regions, giving a very low CPU cache hit rate.
 
-🔄 振荡与死循环 (Infinite Loops)
-在小规模 IR 中，Pattern A 变 Pattern B，Pattern B 变 Pattern A 的逻辑错误很容易发现。但在百万行 IR 中，这种“循环引用”可能潜伏在复杂的逻辑分支里，导致编译器直接挂起。
+🔄 Oscillation and infinite loops (Infinite Loops)
+In small IR, the logic bug of Pattern A turning into Pattern B and Pattern B turning back into Pattern A is easy to spot. In million-line IR, such a "cycle" can hide in complex logic branches and make the compiler simply hang.
 
-2. 专家级解决方案
-针对大规模 IR，我们通常会放弃或限制“贪婪模式”，转而采用更具确定性的方法。
+2. Expert-level solutions
+For large IR we usually abandon or restrict the "greedy mode" and switch to more deterministic methods.
 
-🚀 方案 A：使用显式的 walk 代替贪婪驱动器
-这是处理超大代码量时的首选。与其让驱动器“乱撞”，不如你自己控制遍历路径。
+🚀 Option A: use an explicit walk instead of the greedy driver
+This is the first choice for very large code. Rather than letting the driver "bump around", control the traversal path yourself.
 
-逻辑：使用 op->walk<WalkOrder::PreOrder>([](OpType op) { ... })。
+Logic: use op->walk<WalkOrder::PreOrder>([](OpType op) { ... }).
 
-优势：每个 Op 只被访问一次，复杂度严格控制在 O(N)。对于你之前的 FlattenRoutingPattern，由于它只需要单次提升，完全没必要用贪婪模式。
+Advantage: each Op is visited exactly once, so the complexity stays strictly O(N). Your earlier FlattenRoutingPattern only needs a single hoist, so greedy mode is completely unnecessary.
 
-🛠️ 方案 B：精细化配置 GreedyRewriteConfig
-如果你必须使用贪婪模式，可以通过配置项来给它戴上“枷锁”：
+🛠️ Option B: fine-tune GreedyRewriteConfig
+If you must use greedy mode, you can put "shackles" on it through configuration options:
 
 C++
 GreedyRewriteConfig config;
-config.useTopDownTraversal = true; // 从上往下走，通常更快收敛
-config.maxIterations = 10;          // 强制限制迭代次数，防止死循环
-config.strictMode = GreedyRewriteStrictness::ExistingOps; // 仅处理现有 Op，不处理新生成的
-📦 方案 C：并行化处理 (Pass Manager)
-不要试图在一个 ModulePass 里贪婪处理所有东西。
+config.useTopDownTraversal = true; // top-down traversal, usually converges faster
+config.maxIterations = 10;          // hard cap on iterations, prevents infinite loops
+config.strictMode = GreedyRewriteStrictness::ExistingOps; // only process existing Ops, not newly created ones
+📦 Option C: parallelize (Pass Manager)
+Don't try to greedily process everything in a single ModulePass.
 
-策略：将变换下沉到 FunctionPass 级别。
+Strategy: push the transformation down to the FunctionPass level.
 
-原理：MLIR 的 PassManager 会在多个线程上并行运行函数级的 Pass。这样每个线程处理的 IR 规模被限制在万行级别，且能充分利用多核 CPU。
+Rationale: MLIR's PassManager runs function-level Passes in parallel on multiple threads. That limits the IR each thread handles to the ten-thousand-line range and makes full use of a multi-core CPU.
 
-🔍 方案 D：基于符号表 (SymbolTable) 的定向跳转
-既然你想合并针对同一 Tile 的 Shim 逻辑，不要让驱动器去遍历所有 Op。
+🔍 Option D: targeted jumps based on the SymbolTable
+Since you want to merge the Shim logic for the same Tile, don't make the driver traverse every Op.
 
-优化：在 Pass 开始时构建一个 Map<Tile, SmallVector<Op>> 的索引。
+Optimization: at the start of the Pass, build an index Map<Tile, SmallVector<Op>>.
 
-操作：直接在这个索引上操作，合并逻辑的时间复杂度将由 O(N 
+Operation: operate directly on this index; the time complexity of the merge logic drops from O(N
 2
- ) 降至接近 O(N)。
+ ) to close to O(N).
 
-3. 性能对比参考
-维度	贪婪模式 (Default)	手写 Walk / 定向优化
-百万行耗时	可能几分钟甚至超时	秒级完成
-内存占用	随 Worklist 波动剧烈	稳定且线性
-收敛性	依赖 Pattern 质量	100% 确定
-适用场景	复杂的代数化简 (Arith)	结构化变换 (Hoisting/Merge)
-建议
-对于你目前的 RoutingCreate 扁平化和 Shim 合并任务，强烈建议使用方案 A (Walk) 或方案 D (索引化合并)。这能保证你的编译器在处理大规模神经网络拓扑时依然健步如飞。
+3. Performance comparison
+Aspect	Greedy mode (Default)	Hand-written Walk / targeted optimization
+Time at a million lines	Possibly minutes, or even a timeout	Seconds
+Memory use	Fluctuates wildly with the Worklist	Stable and linear
+Convergence	Depends on Pattern quality	100% deterministic
+Typical use	Complex algebraic simplification (Arith)	Structural transformations (Hoisting/Merge)
+Recommendation
+For your current RoutingCreate flattening and Shim merging tasks, Option A (Walk) or Option D (indexed merge) is strongly recommended. That keeps your compiler running fast even on large neural-network topologies.
 
-你想让我演示一下如何把之前的 Pattern 改造成高效的 walk 形式吗？
+Would you like me to show how to turn the earlier Pattern into an efficient walk form?
 
 You said
-这种情况下 (mlir::failed(mlir::applyPatternsAndFoldGreedily(func, std::move(patterns)))) {
+In this case (mlir::failed(mlir::applyPatternsAndFoldGreedily(func, std::move(patterns)))) {
 
 signalPassFailure();
 
-} 应当怎么改
+} how should this be changed?
 
 Gemini said
-针对百万行级别的代码，直接替换 applyPatternsAndFoldGreedily 的最佳方案是**“由面转点”**。
+For million-line code, the best way to replace applyPatternsAndFoldGreedily is to go **"from broad sweep to targeted point"**.
 
-与其让编译器在大海捞针，不如进行**“外科手术式”的定向遍历**。以下是两种改进方案，按推荐程度排序：
+Rather than having the compiler look for a needle in a haystack, do a **"surgical" targeted traversal**. Here are two improvements, in order of preference:
 
-方案一：使用 walk 进行 O(N) 定向遍历（最推荐）
-对于像“提升操作”或“删除特定盒子”这种结构化变换，完全不需要模式匹配。通过 walk，你可以保证每个 Op 只被访问一次，复杂度是严格线性的。
+Option 1: an O(N) targeted traversal with walk (most recommended)
+For structural transformations such as "hoisting operations" or "deleting a specific box", pattern matching is not needed at all. With walk, each Op is guaranteed to be visited exactly once, and the complexity is strictly linear.
 
-修改后的代码示例：
+Modified code example:
 C++
 void runOnOperation() override {
     auto func = getOperation();
     mlir::IRRewriter rewriter(&getContext());
 
-    // 1. 定向寻找所有的 RoutingCreateOp，使用 PreOrder 保证从外向里拆
+    // 1. Find all RoutingCreateOps directly; PreOrder ensures unboxing from the outside in
     func.walk<mlir::WalkOrder::PreOrder>([&](routing::RoutingCreateOp op) {
-        // 执行你之前的 Flatten 逻辑
+        // Run your earlier Flatten logic
         mlir::Region &sourceRegion = op.getRegion();
         
-        // 获取内部的 yield 信息（假设你定义了 RoutingYieldOp）
+        // Get the inner yield info (assuming you defined RoutingYieldOp)
         auto yieldOp = mlir::cast<routing::RoutingYieldOp>(sourceRegion.front().getTerminator());
         
-        // 记录 yield 的值
+        // Record the yielded values
         mlir::ValueRange yieldedValues = yieldOp.getOperands();
 
-        // [核心修改]：直接手动 Inline，不再依赖 Greedy Driver
+        // [Key change]: inline manually, no longer relying on the Greedy Driver
         rewriter.inlineBlockBefore(&sourceRegion.front(), op);
 
-        // 替换原本 RoutingCreate 的返回值
+        // Replace the original RoutingCreate's results
         rewriter.replaceOp(op, yieldedValues);
         
-        // 删除已经出来的 yield 占位符
+        // Delete the yield placeholder that has been pulled out
         rewriter.eraseOp(yieldOp);
     });
 }
-为什么这能解决问题？
+Why does this solve the problem?
 
-零重复扫描：它不会因为一个 Op 的改变就去重新检查周围的一万个 Op。
+Zero repeated scanning: it does not recheck the ten thousand Ops around an Op just because that Op changed.
 
-确定性：代码执行流程清晰，不会出现不收敛的情况。
+Determinism: the execution flow is clear, and non-convergence cannot happen.
 
-方案二：如果你必须用 Pattern，请限制“贪婪”程度
-如果你有一些非常复杂的折叠逻辑必须用 Pattern，请务必配置 GreedyRewriteConfig。
+Option 2: if you must use Patterns, limit how "greedy" they are
+If you have some very complex folding logic that must use Patterns, be sure to configure GreedyRewriteConfig.
 
-修改后的代码示例：
+Modified code example:
 C++
 void runOnOperation() override {
     auto func = getOperation();
@@ -1466,197 +1466,197 @@ void runOnOperation() override {
     patterns.add<FlattenRoutingPattern>(&getContext());
 
     mlir::GreedyRewriteConfig config;
-    config.useTopDownTraversal = true; // 从上往下走，减少重新入队的次数
-    config.maxIterations = 2;          // 强制限制迭代次数。如果 2 次都没搞定，说明逻辑有问题
-    config.strictMode = mlir::GreedyRewriteStrictness::ExistingOps; // 只处理已存在的，不处理新生成的
+    config.useTopDownTraversal = true; // top-down traversal, fewer re-enqueues
+    config.maxIterations = 2;          // hard cap on iterations; if 2 are not enough, the logic is wrong
+    config.strictMode = mlir::GreedyRewriteStrictness::ExistingOps; // only process existing ops, not newly created ones
 
-    // 显式传入 config
+    // Pass config explicitly
     (void)mlir::applyPatternsAndFoldGreedily(func, std::move(patterns), config);
 }
-针对你“合并 Shim 接收”目标的终极建议
-当你处理百万行 IR 且需要合并相同 Tile 的配置时，最高效的做法是**“索引化 (Indexing)”**：
+Final advice for your "merge Shim receive" goal
+When you process million-line IR and need to merge configurations for the same Tile, the most efficient approach is **"Indexing"**:
 
-第一步 (Flatten)：用上面的“方案一 (Walk)”把所有 RoutingCreate 拆掉。
+Step 1 (Flatten): use "Option 1 (Walk)" above to take apart all RoutingCreates.
 
-第二步 (Collect)：在同一个 walk 中，用一个 DenseMap<TileAttr, SmallVector<CreateIOOp>> 把属于同一个 Tile 的配置存起来。
+Step 2 (Collect): in the same walk, store the configurations belonging to the same Tile in a DenseMap<TileAttr, SmallVector<CreateIOOp>>.
 
-第三步 (Merge)：只对这个 Map 里的 SmallVector 进行循环合并。
+Step 3 (Merge): loop-merge only over the SmallVectors in this Map.
 
-这样你处理百万行 IR 的速度会从**“分钟级”直接降到“毫秒级”**。
+This way the time to process million-line IR drops from **"minutes" straight to "milliseconds"**.
 
-💡 避坑指南
-在大规模 IR 变换中，绝对不要在 applyPatternsAndFoldGreedily 运行过程中去修改 SymbolTable（比如重命名全局变量），这会导致驱动器频繁失效。
+💡 Pitfall guide
+In large-scale IR transformations, never modify the SymbolTable (e.g. renaming global variables) while applyPatternsAndFoldGreedily is running; it invalidates the driver's state over and over.
 
-你现在的代码逻辑里，除了拆掉盒子，还有需要对内部数据做复杂代数计算（如 1+1=2）的部分吗？如果没有，就果断放弃 Greedy 模式吧。
-
-You said
-缺点是什么是不是有点HARDCODE
-
-Gemini said
-你的感觉非常敏锐。这确实更“硬编码”（Hardcoded），或者用编译器的话说，它从“声明式（Declarative）”退化到了“过程式（Procedural）”。
-
-在 MLIR 专家眼中，这种做法是用灵活性换取极致的性能。以下是这种“手术刀”式处理方案的显著缺点，以及为什么你会觉得它“硬”：
-
-1. 为什么说它有点“硬” (Disadvantages)
-🌀 缺乏“连锁反应” (Missing Recursive Folding)
-Greedy Driver 最强大的地方在于它能处理“多米诺骨牌”效应。
-
-例子：如果你拆掉了一个盒子，导致里面的 %1 + %2 变成了 1 + 1，贪婪模式会自动帮你把 1 + 1 变成 2。
-
-Walk 模式：它只管拆盒子。拆完之后，里面的 1 + 1 还是 1 + 1，除非你再写一个 walk 去处理加法。你必须手动预测并规划所有的后续动作。
-
-🧩 组合性极差 (Poor Composability)
-模式匹配：你可以通过 patterns.add<A, B, C>() 轻松地把三个人的优化逻辑组合在一起。
-
-Walk 模式：如果你想在拆盒子的同时做其他优化，你必须把所有逻辑塞进那个巨大的 Lambda 表达式里。代码会迅速变得像“意大利面条”一样混乱，难以维护。
-
-🛡️ 脆弱性与安全性 (Fragility)
-模式匹配：由 PatternRewriter 托管，它会帮你处理很多底层的指针更新和合法性检查。
-
-Walk 模式：你是在直接操作内存块（Block）。如果你不小心删掉了一个还有人引用的 Op，或者忘记处理 Terminator（结束符），编译器会直接崩溃（Segfault），而不会给你友好的错误提示。
-
-2. 深度对比：优雅 vs. 效率
-特性	贪婪模式 (Patterns)	手动遍历 (Walk)
-思维模型	“看到 A 就变成 B”	“我要从第一行走到最后一行，遇到盒就拆”
-自动折叠	强 (自动处理关联修改)	无 (需手动触发)
-百万行表现	容易卡死或极慢	极快 (线性时间)
-代码量	简洁、高度抽象	冗长、包含大量底层操作
-硬编码感	低 (规则引擎)	高 (过程脚本)
-3. 专家给出的中庸之道：Dialect Conversion
-如果你觉得 Greedy 太慢，又觉得 Walk 太硬，MLIR 还有一个“终极武器”：Dialect Conversion (合法化框架)。
-
-它是为了解决大规模转换而设计的。你可以设置一个 ConversionTarget，告诉它哪些 Op 是“非法”的（比如 RoutingCreate）。框架会扫一遍 IR，只针对非法 Op 进行转换。
-
-优点：比贪婪模式快，因为它目标明确；比 Walk 优雅，因为它依然使用 Pattern 编写。
-
-适用场景：当你需要大规模改变 IR 结构，但又不想写那种极其硬核的 inlineBlock 逻辑时。
-
-总结建议
-如果你现在处理的是百万行级别的 IR：
-
-初期开发：先用 Greedy 验证逻辑是否正确，哪怕它运行要一分钟。
-
-生产环境优化：如果速度不可接受，针对那些结构简单但数量巨大的操作（如你的 RoutingCreate 提升），改用 Walk；而对于复杂的计算优化，保留 Greedy 但限制其作用范围。
-
-对于你那个合并 Shim 逻辑的需求，目前你是打算在同一个 C++ Pass 里完成，还是想分几个步骤（Passes）流水线作业？
+Apart from taking the box apart, does your current code logic also need to do complex algebraic computation on the inner data (like 1+1=2)? If not, drop Greedy mode without hesitation.
 
 You said
-mlir::WalkOrder::PreOrder 啥意思
+What are the downsides? Isn't it a bit HARDCODED?
 
 Gemini said
-简单来说，mlir::WalkOrder::PreOrder 决定了你在遍历 MLIR 这种嵌套树状结构时的“访问顺序”。
+Your instinct is very sharp. It is indeed more "hardcoded" -- or, in compiler terms, it regresses from "Declarative" to "Procedural".
 
-在 MLIR 中，IR 是层层嵌套的：Module -> Function -> Block -> Operation -> Region -> Block -> Operation。
+In the eyes of an MLIR expert, this approach trades flexibility for maximum performance. Here are the notable downsides of this "scalpel" approach, and why it feels "hard" to you:
 
-1. 核心定义：先父后子
-PreOrder (先序遍历)：先访问父操作 (Parent Op)，再进入它内部的 Region/Block 访问里面的子操作 (Child Ops)。
+1. Why it is a bit "hard" (Disadvantages)
+🌀 No "chain reaction" (Missing Recursive Folding)
+The most powerful thing about the Greedy Driver is that it handles the "domino" effect.
 
-PostOrder (后序遍历 - 默认值)：先访问完内部所有的子操作，最后才回到父操作本身。
+Example: if taking a box apart turns %1 + %2 inside it into 1 + 1, greedy mode automatically turns 1 + 1 into 2 for you.
 
-2. 为什么在“拆盒子”时必须用 PreOrder？
-在你之前的场景（删除 routing.RoutingCreate）中，PreOrder 是唯一的正确选择。
+Walk mode: it only takes boxes apart. Afterwards, 1 + 1 inside is still 1 + 1 unless you write another walk to handle additions. You have to predict and plan every follow-up action by hand.
 
-场景逻辑：你想把 RoutingCreate 里的东西拿出来，然后把这个“壳子”删掉。
+🧩 Very poor composability (Poor Composability)
+Pattern matching: you can easily combine three people's optimization logic with patterns.add<A, B, C>().
 
-使用 PreOrder 的流程：
+Walk mode: if you want to do other optimizations while taking boxes apart, you have to cram all the logic into that huge lambda. The code quickly becomes a tangled mess of "spaghetti" that is hard to maintain.
 
-遍历器走到 RoutingCreate。
+🛡️ Fragility and safety (Fragility)
+Pattern matching: managed by PatternRewriter, which takes care of a lot of low-level pointer updates and legality checks for you.
 
-触发你的函数：你发现这是一个盒子，于是把里面的内容“提拔”到外层。
+Walk mode: you are manipulating memory Blocks directly. If you accidentally delete an Op that is still referenced, or forget to handle the Terminator, the compiler simply crashes (Segfault) instead of giving you a friendly error message.
 
-此时内部的东西已经处理完了。
+2. In-depth comparison: elegance vs. efficiency
+Feature	Greedy mode (Patterns)	Manual traversal (Walk)
+Mental model	"When you see A, turn it into B"	"Walk from the first line to the last, take apart every box encountered"
+Automatic folding	Strong (handles related changes automatically)	None (must be triggered manually)
+At a million lines	Prone to hanging or very slow	Very fast (linear time)
+Code size	Concise, highly abstract	Verbose, lots of low-level operations
+Hardcoded feel	Low (rule engine)	High (procedural script)
+3. The expert's middle way: Dialect Conversion
+If Greedy feels too slow and Walk too hard, MLIR has one more "ultimate weapon": Dialect Conversion (the legalization framework).
 
-如果使用 PostOrder (默认)：
+It is designed for large-scale conversion. You set up a ConversionTarget and tell it which Ops are "illegal" (e.g. RoutingCreate). The framework sweeps the IR once and converts only the illegal Ops.
 
-遍历器会先钻进盒子深处。
+Pros: faster than greedy mode because its target is explicit; more elegant than Walk because it is still written with Patterns.
 
-去优化盒子里的每一个小操作（比如里面的 arith.constant）。
+When to use: when you need to change the IR structure at scale but don't want to write that very low-level inlineBlock logic.
 
-全部处理完后，最后才跳出来处理 RoutingCreate。
+Summary of recommendations
+If you are dealing with million-line IR now:
 
-风险：如果盒子里有嵌套的盒子，PostOrder 会让你从最深处开始拆，这在逻辑上非常低效且容易出错。
+Early development: use Greedy first to verify the logic is correct, even if it takes a minute to run.
 
-3. 代码行为对比
-假设你有这样的 IR：
+Production optimization: if the speed is unacceptable, switch to Walk for operations that are structurally simple but very numerous (like your RoutingCreate hoisting); for complex computational optimizations, keep Greedy but limit its scope.
+
+For your Shim-merging requirement, do you plan to do it in a single C++ Pass, or as a pipeline of several steps (Passes)?
+
+You said
+What does mlir::WalkOrder::PreOrder mean?
+
+Gemini said
+Simply put, mlir::WalkOrder::PreOrder determines the "visit order" when you traverse a nested tree structure like MLIR.
+
+In MLIR, the IR is nested layer by layer: Module -> Function -> Block -> Operation -> Region -> Block -> Operation.
+
+1. Core definition: parent first, then children
+PreOrder (pre-order traversal): visit the Parent Op first, then enter its Regions/Blocks to visit the Child Ops inside.
+
+PostOrder (post-order traversal - the default): visit all the inner child operations first, and only then return to the parent op itself.
+
+2. Why must you use PreOrder when "unboxing"?
+In your earlier scenario (deleting routing.RoutingCreate), PreOrder is the only correct choice.
+
+Scenario logic: you want to take the contents out of RoutingCreate and then delete the "shell".
+
+Flow with PreOrder:
+
+The walker reaches RoutingCreate.
+
+Your function fires: you see this is a box, so you "promote" its contents to the outer level.
+
+At this point the inner contents have already been handled.
+
+If you use PostOrder (the default):
+
+The walker first dives deep into the box.
+
+It goes and optimizes every small operation inside the box (e.g. the arith.constant inside).
+
+Only after all of that does it come back out to handle RoutingCreate.
+
+Risk: if there are nested boxes inside the box, PostOrder makes you start unboxing from the deepest level, which is logically very inefficient and error-prone.
+
+3. Code behavior comparison
+Suppose you have IR like this:
 
 MLIR
 %0 = "outer_op"() ({
   %1 = "inner_op"() : () -> i32
 }) : () -> i32
-遍历顺序	访问序列	你的逻辑触发点
-PreOrder	1. outer_op -> 2. inner_op	你先看到大盒子，直接把它拆了，省心。
-PostOrder	1. inner_op -> 2. outer_op	你先盯着零件看，最后才看到大盒子。
-4. 关键 API 差异
-在 C++ 中，你可以显式指定这个顺序：
+Traversal order	Visit sequence	Where your logic fires
+PreOrder	1. outer_op -> 2. inner_op	You see the big box first and just take it apart -- easy.
+PostOrder	1. inner_op -> 2. outer_op	You stare at the parts first and only see the big box at the end.
+4. Key API differences
+In C++, you can specify the order explicitly:
 
 C++
-// 默认是 PostOrder，先处理子节点
+// The default is PostOrder: children are handled first
 op->walk([](MyOp op) { ... }); 
 
-// 显式指定 PreOrder，先处理父节点
+// Explicit PreOrder: parents are handled first
 op->walk<mlir::WalkOrder::PreOrder>([](MyOp op) { ... }); 
-5. 潜在陷阱
-使用 PreOrder 时要特别注意：不要在遍历时随意删除当前节点以外的其他节点。
-因为 PreOrder 接下来还要去访问子节点，如果你在处理父节点时直接把整个 Region 删了，而遍历器还打算往里走，就会导致空指针崩溃。
+5. Potential pitfalls
+With PreOrder, be especially careful: do not arbitrarily delete nodes other than the current one while walking.
+Because PreOrder still has to visit the child nodes, if you delete the whole Region while handling the parent and the walker still intends to go inside, you get a null-pointer crash.
 
-专家提示：如果你在 PreOrder 步中删除了当前 Op 或其 Region，必须返回 WalkResult::skip()，告诉遍历器：“我已经把这里拆了，别往里走了”。
+Expert tip: if you delete the current Op or its Region in a PreOrder step, you must return WalkResult::skip() to tell the walker: "I've already taken this apart, don't go inside."
 
-既然你已经理解了遍历顺序，需要我帮你写一个结合 WalkOrder::PreOrder 和 WalkResult::skip() 的安全拆盒逻辑吗？
+Now that you understand traversal order, do you want me to write a safe unboxing routine combining WalkOrder::PreOrder and WalkResult::skip()?
 
 You said
-什么情况下 用POSTORDER 什么时候用 PREORDER
+When should I use POSTORDER and when PREORDER?
 
 Gemini said
-在编译器开发中，选择遍历顺序就像是**“拆房子”和“组装零件”**的区别。选错了顺序，代码不仅效率低，还容易崩溃。
+In compiler development, choosing the traversal order is like the difference between **"demolishing a house"** and **"assembling parts"**. Choose the wrong order and the code is not only inefficient but also prone to crashing.
 
-作为 MLIR 专家，我帮你总结了一套生存法则：
+As an MLIR expert, here is a set of survival rules I put together for you:
 
-1. 什么时候用 PREORDER (Top-Down)？
-核心逻辑：父操作决定了子操作的命运。
+1. When to use PREORDER (Top-Down)?
+Core logic: the parent operation decides the fate of the child operations.
 
-如果你要做的事情是**“结构化”的修改，或者你关心的是“上下文”**，请选 PreOrder。
+If what you are doing is a **"structural"** modification, or what you care about is the **"context"**, choose PreOrder.
 
-提升 (Hoisting) / 扁平化 (Flattening)：比如你之前的任务，把 routing.RoutingCreate 里的东西拿出来。你必须先看到“盒子”，才能决定把里面的东西提出来。
+Hoisting / Flattening: e.g. your earlier task of taking things out of routing.RoutingCreate. You must see the "box" first before you can decide to pull its contents out.
 
-作用域初始化 (Scope Initialization)：如果你在处理嵌套的作用域，且子节点依赖父节点定义的符号或属性。
+Scope Initialization: if you are handling nested scopes and the children depend on symbols or attributes defined by the parent.
 
-删除整个区域 (Deletion)：如果你想根据父节点的某个属性直接删掉整个 Region，先看父节点可以让你直接跳过所有子节点的无用遍历。
+Deleting a whole region (Deletion): if you want to delete a whole Region based on some attribute of the parent, seeing the parent first lets you skip the useless traversal of all its children.
 
-⚠️ 注意：在 PreOrder 中删除当前节点后，一定要返回 WalkResult::skip()，否则遍历器会尝试进入一个已经不存在的区域，直接导致 Segfault。
+⚠️ Note: after deleting the current node in PreOrder, you must return WalkResult::skip(); otherwise the walker tries to enter a region that no longer exists and you get a Segfault.
 
-2. 什么时候用 POSTORDER (Bottom-Up)？
-核心逻辑：父操作的结果取决于子操作。
+2. When to use POSTORDER (Bottom-Up)?
+Core logic: the parent operation's result depends on its child operations.
 
-这是 MLIR 的默认顺序，也是大多数局部优化（Canonicalization）的首选。
+This is MLIR's default order and the first choice for most local optimizations (Canonicalization).
 
-算术折叠 (Arithmetic Folding)：
+Arithmetic Folding:
 
-例子：add(mul(1, 2), 3)。
+Example: add(mul(1, 2), 3).
 
-你必须先处理内部的 mul(1, 2) -> 2，父节点 add 才能变成 add(2, 3) -> 5。
+You must first handle the inner mul(1, 2) -> 2; only then can the parent add become add(2, 3) -> 5.
 
-死代码消除 (DCE)：只有当你知道一个操作的所有“用户”（Users，即子节点或后续节点）都不再需要它时，你才能安全地删除它。
+Dead-code elimination (DCE): only when you know that none of an operation's "Users" (i.e. child or subsequent nodes) need it any more can you safely delete it.
 
-类型推导 (Type Inference)：父操作的返回类型通常是由操作数（子节点提供的值）决定的。
+Type Inference: a parent operation's result type is usually determined by its operands (the values provided by the children).
 
-3. 专家级对比表
-特性	PREORDER (先序)	POSTORDER (后序)
-遍历路径	根 → 叶	叶 → 根
-直观比喻	拆除施工：先拆外墙，再管装修。	流水线：先做零件，再总装。
-主要用途	结构变换、Inline、提升、权限下发。	计算优化、常量折叠、DCE、类型推导。
-对 IR 修改的影响	适合删掉整个 Region 或移动 Op。	适合将复杂的 Op 树简化成一个常量。
-性能优势	在大规模 IR 中，可以通过 skip() 避开大量节点。	能够保证在处理当前 Op 时，其输入已是最简形式。
-4. 总结：该选哪个？
-一个简单的判断标准：“我需不需要先看到大背景？”
+3. Expert comparison table
+Feature	PREORDER (pre-order)	POSTORDER (post-order)
+Traversal path	Root → leaf	Leaf → root
+Intuitive analogy	Demolition: take down the outer walls first, then deal with the interior.	Assembly line: build the parts first, then assemble.
+Main uses	Structural transformation, inlining, hoisting, pushing down permissions.	Computational optimization, constant folding, DCE, type inference.
+Effect on IR modification	Good for deleting whole Regions or moving Ops.	Good for simplifying a complex Op tree into a constant.
+Performance advantage	In large IR, skip() lets you avoid huge numbers of nodes.	Guarantees that when the current Op is handled, its inputs are already in simplest form.
+4. Summary: which one to choose?
+A simple criterion: "Do I need to see the big picture first?"
 
-如果你的逻辑是“因为这个盒子是 Routing 类型，所以我要把里面的逻辑……” → PREORDER。
+If your logic is "because this box is of Routing type, I will take its logic ..." → PREORDER.
 
-如果你的逻辑是“如果两个加数都是常量，我就求和……” → POSTORDER。
+If your logic is "if both addends are constants, I sum them ..." → POSTORDER.
 
-💡 进阶技巧：并行与跳过
-在处理百万行代码时，如果你用 PreOrder 配合索引，你甚至可以完全不走某些 Block。比如你的 Shim Tile 逻辑，你可以先搜寻所有的 Shim Tile 声明（PreOrder），然后直接“跳”到它们的关联操作上，这比漫无目的地走一遍全 IR 要快得多。
+💡 Advanced technique: parallelism and skipping
+When processing a million lines of code, if you use PreOrder together with an index, you can avoid walking some Blocks entirely. For your Shim Tile logic, for example, you can first search for all Shim Tile declarations (PreOrder) and then "jump" directly to their associated operations, which is much faster than aimlessly walking the whole IR.
 
-既然你已经掌握了顺序逻辑，想让我帮你写一个带 WalkResult::skip() 的安全拆盒（Flatten）函数模版吗？它可以防止你在百万行代码遍历中意外崩溃。
+Now that you have the ordering logic down, would you like me to write a template for a safe unboxing (Flatten) function with WalkResult::skip()? It can keep you from crashing unexpectedly while walking a million lines of code.
 
 You said
 THIS IS MY CUrrent canonicalize logic , please let me know the problem "/******************************************************************************
@@ -5102,282 +5102,282 @@ void ScheduleCanonicalizePass::runOnOperation() {
 "
 
 Gemini said
-这份代码实现了一个非常典型的“全局收集并重构”（Collect-and-Rebuild）样式的 Pass。虽然它能工作，但在 MLIR 专家眼中，它存在几个严重的工程隐患和性能瓶颈，尤其是在处理大规模 IR（百万行级别）时。
+This code implements a very typical "Collect-and-Rebuild" style Pass. It works, but in the eyes of an MLIR expert it has several serious engineering hazards and performance bottlenecks, especially on large IR (million-line scale).
 
-以下是该 Canonicalize 逻辑的主要问题及改进建议：
+Below are the main problems with this Canonicalize logic and suggested improvements:
 
-1. 致命的性能瓶颈：字符串作为 Map 的 Key
-代码中大量使用了 makeTensorTypeKey 和 std::map<std::string, Value>。
+1. Fatal performance bottleneck: strings as Map keys
+The code makes heavy use of makeTensorTypeKey and std::map<std::string, Value>.
 
-问题：在 MLIR 中，Type 和 Attribute 本质上是唯一化的指针（Unique Pointers）。直接比较两个 Type 对象的指针速度极快。你将它们转成字符串再做字符串查找，性能下降了几个数量级。在百万行代码下，这会导致编译器在字符串拼接和哈希上耗费几分钟时间。
+Problem: in MLIR, Types and Attributes are essentially uniqued pointers (Unique Pointers). Comparing two Type objects by pointer is extremely fast. Converting them to strings and then doing string lookups costs orders of magnitude in performance. At a million lines, the compiler would spend minutes on string concatenation and hashing.
 
-改进：直接使用 std::map<Type, Value> 或 llvm::DenseMap<Type, Value>。
+Improvement: use std::map<Type, Value> or llvm::DenseMap<Type, Value> directly.
 
-2. 脆弱的手动 SSA 链重构（Slice Tracing）
-代码尝试手动重建 partitiontensor -> extract_slice 的链条。
+2. Fragile manual SSA-chain reconstruction (Slice Tracing)
+The code tries to rebuild the partitiontensor -> extract_slice chain by hand.
 
-问题：你使用了 uniqueSliceParams 和 sliceMap 手动维护索引。这种“过程式”的逻辑非常硬编码。如果 IR 稍微发生变化（例如中间多了一个 unrealized_conversion_cast），你的追踪逻辑就会断掉，导致 sourceTensor 找不到，最后生成 memref.alloc 这种“错误但能跑”的占位符。
+Problem: you maintain indices by hand with uniqueSliceParams and sliceMap. This "procedural" logic is very hardcoded. If the IR changes slightly (e.g. an extra unrealized_conversion_cast in between), your tracing breaks, sourceTensor is not found, and you end up generating a "wrong but runnable" placeholder like memref.alloc.
 
-改进：利用 mlir::IRMapping (以前叫 BlockAndValueMapping)。当你克隆一个操作时，IRMapping 会自动帮你把旧的输入值映射到新的输出值，你不需要手动维护 index。
+Improvement: use mlir::IRMapping (formerly BlockAndValueMapping). When you clone an operation, IRMapping automatically maps the old input values to the new output values for you; you don't need to maintain indices by hand.
 
-3. “先删除后检查”的风险
-removeOldScheduleOps 函数通过循环删除操作，并依赖 op->use_empty()。
+3. The risk of "delete first, check later"
+The removeOldScheduleOps function deletes operations in a loop and relies on op->use_empty().
 
-问题：在复杂的 IR 转换中，由于存在嵌套的 ExecuteRegion，简单的顺序删除极易导致空指针引用或悬挂指针。如果某个被删除的 Op 还有用户（User）没被清理，erase() 会直接触发崩溃。
+Problem: in complex IR transformations, because of nested ExecuteRegions, simple sequential deletion easily leads to null-pointer dereferences or dangling pointers. If some deleted Op still has a User that has not been cleaned up, erase() crashes immediately.
 
-改进：使用 rewriter.eraseOp(op) 或者在 Walk 结束时统一使用 PatternRewriter 托管删除逻辑。
+Improvement: use rewriter.eraseOp(op), or let a PatternRewriter manage the deletion logic uniformly at the end of the Walk.
 
-4. 重复 Walk 导致的复杂度升高
-你在 runOnOperation 里做了多次 moduleOp.walk。
+4. Higher complexity from repeated Walks
+You call moduleOp.walk several times in runOnOperation.
 
-问题：每一次 walk 都是 O(N)。在大型模型中，反复扫描整个 Module 是极其昂贵的。
+Problem: every walk is O(N). On large models, rescanning the whole Module again and again is extremely expensive.
 
-改进：尽量在一次 walk 中完成所有信息的收集。或者使用索引化的数据结构（如 SymbolTable）直接跳转到目标 Op。
+Improvement: collect all information in a single walk where possible, or use an indexed data structure (such as a SymbolTable) to jump directly to the target Op.
 
-5. 逻辑不收敛（Non-Canonical Form）
-你的 Shim DMA 合并逻辑是基于 std::set 去重的。
+5. Non-converging logic (Non-Canonical Form)
+Your Shim DMA merge logic deduplicates with a std::set.
 
-问题：如果你有两个 DMA 任务，虽然 sliceIndex 不同，但它们物理上是连续的（可以合并成一个长度更大的 DMA），你的逻辑无法识别这种“空间上的连续性”，因为它只是在做简单的属性对比。
+Problem: if you have two DMA tasks whose sliceIndex differs but which are physically contiguous (and could be merged into one longer DMA), your logic cannot recognize this "spatial contiguity", because it only does a simple attribute comparison.
 
-改进：在合并逻辑中加入地址分析（Address Analysis），判断两个 offset + len 是否可以无缝拼接。
+Improvement: add Address Analysis to the merge logic to decide whether two offset + len ranges can be joined seamlessly.
 
-专家级重构建议 (The "Clean" Way)
-与其写一个几百行的函数来手动重建所有东西，不如采用以下策略：
+Expert refactoring advice (The "Clean" Way)
+Rather than writing a function of several hundred lines that rebuilds everything by hand, adopt the following strategy:
 
-A. 引入 IRMapping 简化克隆
-不要手动记录 sliceIndex，使用映射表：
+A. Use IRMapping to simplify cloning
+Don't record sliceIndex by hand; use a mapping table:
 
 C++
 mlir::IRMapping mapper;
-// 当你克隆基础 Tensor 时
+// When you clone the base Tensor
 auto newConst = builder.clone(*oldConst, mapper);
 mapper.map(oldConst->getResult(0), newConst->getResult(0));
 
-// 后续克隆 Slice 时，mapper 会自动处理映射
+// When cloning Slices later, the mapper handles the mapping automatically
 auto newSlice = builder.clone(*oldSlice, mapper); 
-B. 结构化“拆盒”
-不要手动收集 ExecuteRegion 再删除。利用我们之前讨论的 inlineRegionBefore：
+B. Structured "unboxing"
+Don't collect ExecuteRegions by hand and then delete them. Use inlineRegionBefore as we discussed earlier:
 
-第一步：Walk 所有的 routing.RoutingCreate，将其内容 inline 到 func.func。
+Step 1: Walk all routing.RoutingCreate ops and inline their contents into func.func.
 
-第二步：此时所有的 Shim create_io 都在同一层级了。
+Step 2: now all Shim create_io ops are at the same level.
 
-第三步：跑一个局部匹配，找到相同 Tile 的 create_io 并合并。
+Step 3: run a local match to find create_io ops for the same Tile and merge them.
 
-C. 修正 Shim DMA 合并逻辑
-目前的去重逻辑太“硬”：
+C. Fix the Shim DMA merge logic
+The current dedup logic is too "hard":
 
 C++
-// 你的逻辑
+// Your logic
 using ShimMergeKey = std::tuple<TileKey, int32_t, int64_t>;
-// ... 如果 sliceIndex 不同，就永远不会合并
-建议：改用 基于 Tile 的 Bucket 收集。先按 Tile 把所有 DMA 塞进一个 List，然后对 List 按 offset 排序，检查是否可以 Merge。
+// ... if sliceIndex differs, they are never merged
+Suggestion: switch to Tile-based Bucket collection. First put all DMAs into a List per Tile, then sort the List by offset and check whether they can be merged.
 
-总结
-你现在的代码更像是一个 "IR Translator"（把一种方言翻译成另一种），而不是一个 "Canonicalizer"。
+Summary
+Your current code is more of an "IR Translator" (translating one dialect into another) than a "Canonicalizer".
 
-最大的风险在于： 你手动构建了一个极其复杂的 ModuleScheduleInfo 结构体来镜像 IR 的状态。在编译器开发中，真相永远在 IR 本身。尽量避免在 side-structure（辅助结构）中存储过多的状态信息，因为一旦辅助信息和 IR 同步出错，就会产生非常隐蔽的 Bug。
+The biggest risk: you hand-build a very complex ModuleScheduleInfo struct that mirrors the state of the IR. In compiler development, the truth always lives in the IR itself. Avoid storing too much state in side-structures, because once the side information gets out of sync with the IR, you get very subtle bugs.
 
-你想让我帮你针对 associateDmaWithShimTiles 这一块，写一个更健壮的、基于地址合并的逻辑示例吗？
+Would you like me to write a more robust, address-based merge example for the associateDmaWithShimTiles part?
 
 You said
-IRMapping 有什么用
+What is IRMapping for?
 
 Gemini said
-简单来说，IRMapping（以前叫 BlockAndValueMapping）是 MLIR 里的**“SSA 值映射词典”**。
+Simply put, IRMapping (formerly BlockAndValueMapping) is MLIR's **"SSA value mapping dictionary"**.
 
-在编译器进行变换（特别是 Clone（克隆） 或 Inlining（内联））时，它解决了一个核心问题：“如何让新生成的代码正确地引用新生成的操作数，而不是指向旧的、甚至已经被删掉的代码？”
+When the compiler performs transformations (especially Clone or Inlining), it solves a core problem: "How do I make the newly generated code correctly reference the newly generated operands, instead of pointing to old code that may already have been deleted?"
 
-1. 为什么你需要它？（痛点分析）
-在你之前的代码里，你手动维护了 sliceMap、partitionedTensorMap 等各种索引。这非常累，而且容易出错。
+1. Why do you need it? (Pain points)
+In your earlier code, you maintained all sorts of indices by hand, such as sliceMap and partitionedTensorMap. That is tedious and error-prone.
 
-假设你有一段代码：
+Suppose you have this code:
 
 MLIR
 %0 = arith.constant 1
 %1 = arith.addi %0, %0
-你想把它搬移到一个新的 dfschedule.host 块里。
+You want to move it into a new dfschedule.host block.
 
-你克隆了 %0，得到了 %0_new。
+You clone %0 and get %0_new.
 
-轮到克隆 %1 时，如果你直接复制，它会尝试去加 %0（旧的那个）。
+When it is %1's turn to be cloned, if you copy it directly, it will try to add %0 (the old one).
 
-后果：旧的 %0 很快就会被你删掉，你的新代码就会指向一个“死人”，导致编译器崩溃（Segfault）。
+Consequence: the old %0 will soon be deleted by you, and your new code will point at a "dead" value, crashing the compiler (Segfault).
 
-2. IRMapping 的工作原理
-IRMapping 就像是一个自动更新的映射表。你告诉它：“从现在起，凡是引用 %0 的地方，都给我换成 %0_new。”
+2. How IRMapping works
+IRMapping is like an automatically updated mapping table. You tell it: "From now on, wherever %0 is referenced, replace it with %0_new."
 
-核心流程：
-注册映射：当你克隆一个常量 %0 时，调用 mapper.map(old_val, new_val)。
+Core flow:
+Register a mapping: when you clone a constant %0, call mapper.map(old_val, new_val).
 
-自动查找：当你使用 builder.clone(op, mapper) 克隆 %1 时，MLIR 会自动检查这个 Op 的所有输入操作数。
+Automatic lookup: when you clone %1 with builder.clone(op, mapper), MLIR automatically checks all of the Op's input operands.
 
-它发现 %1 用了 %0。
+It sees that %1 uses %0.
 
-它在 mapper 里查到了 %0 已经变成了 %0_new。
+It finds in the mapper that %0 has become %0_new.
 
-它自动把新生成的 addi 指向了 %0_new。
+It automatically points the newly generated addi at %0_new.
 
-3. 代码对比：手动维护 vs. IRMapping
-你的旧方法（HARDCODE 风险）：
+3. Code comparison: manual bookkeeping vs. IRMapping
+Your old approach (HARDCODE risk):
 C++
-// 需要维护复杂的 map 和 index
+// Requires maintaining complicated maps and indices
 std::map<size_t, Value> sliceMap;
-// ... 各种逻辑来确保 index 正确 ...
+// ... all sorts of logic to make sure the index is correct ...
 auto newSlice = builder.create<tensor::ExtractSliceOp>(..., sliceMap[params.parentIndex]);
-使用 IRMapping 的专家方法：
+The expert approach with IRMapping:
 C++
 mlir::IRMapping mapper;
 
-// 1. 克隆基础操作并登记
+// 1. Clone the base operation and register it
 Operation *newConst = builder.clone(*oldConst, mapper);
-// mapper 内部现在记住了：old_val -> new_val
+// The mapper now remembers: old_val -> new_val
 
-// 2. 批量克隆后续操作，完全不需要手动管谁是谁
+// 2. Clone subsequent operations in bulk; no need to track who is who by hand
 for (auto &oldOp : oldOps) {
-    // 这一行魔法会自动帮你把所有输入操作数替换成“新版”
+    // This one line of magic automatically replaces all input operands with the "new" versions
     Operation *newOp = builder.clone(*oldOp, mapper);
 }
-4. 在你代码里的具体妙用
-针对你那个超长的 passschedulecanonicalize.h，IRMapping 可以帮你干掉至少 200 行代码：
+4. Concrete uses in your code
+For your very long passschedulecanonicalize.h, IRMapping can remove at least 200 lines of code:
 
-处理嵌套 Slice：你不再需要写 while(progress) 这种循环去一层层解嵌套。你只需要按顺序 clone。只要父 Slice 被 clone 过了并存在于 mapper 里，子 Slice 克隆时会自动连上。
+Handling nested Slices: you no longer need a loop like while(progress) to unnest layer by layer. Just clone in order. As long as the parent Slice has been cloned and is in the mapper, the child Slice is connected automatically when cloned.
 
-清理 ModuleScheduleInfo：你不再需要存储 SliceParams 里的 index 和 partitionIndex。mapper 就是你的天然索引。
+Cleaning up ModuleScheduleInfo: you no longer need to store index and partitionIndex in SliceParams. The mapper is your natural index.
 
-跨块合并：当你把多个 routing.RoutingCreate 的内容拉出来时，IRMapping 能保证即使多个块里都用了同一个 %tile，在合并后它们都能正确指向唯一的那个 DeclareTileOp。
+Cross-block merging: when you pull out the contents of multiple routing.RoutingCreate ops, IRMapping guarantees that even if several blocks use the same %tile, after merging they all correctly point to the single DeclareTileOp.
 
-5. 什么时候必须用？
-Inline（内联）：把一个函数或 Region 的内容搬到另一个地方。
+5. When is it mandatory?
+Inline: moving the contents of a function or Region to another place.
 
-Unrolling（循环展开）：复制多次循环体。
+Unrolling (loop unrolling): copying a loop body multiple times.
 
-Module 重组：像你现在这样，把原本散落在各处的 Op 集中到一个 dfschedule.host 里。
+Module reorganization: like what you are doing now, gathering Ops scattered all over into a single dfschedule.host.
 
-专家提示
-使用 IRMapping 时，最常见的错误是忘记初始化映射。
-如果你要搬移的逻辑依赖于外部已经定义好的值（比如 main 函数的参数），你必须在开始 clone 之前，手动把这些初始值 map 进去。
+Expert tip
+The most common mistake with IRMapping is forgetting to initialize the mapping.
+If the logic you are moving depends on values already defined outside (e.g. the arguments of the main function), you must manually map those initial values before you start cloning.
 
 C++
 mapper.map(oldFunc.getArgument(0), newFunc.getArgument(0));
-你想让我帮你把那段复杂的 createCanonicalizedSchedule 逻辑中，关于 Slice 重建的部分用 IRMapping 重写一下试试吗？这能让代码变得非常丝滑。
+Would you like me to try rewriting the Slice-reconstruction part of that complicated createCanonicalizedSchedule logic with IRMapping? It would make the code much smoother.
 
 You said
-使用 %0 = arith.constant 1
+Use %0 = arith.constant 1
 
-%1 = arith.addi %0, %0 作为一个例子
+%1 = arith.addi %0, %0 as an example
 
 Gemini said
-为了让你彻底理解 IRMapping 的威力，我们用你给出的这两行代码做一个**“灵魂克隆”**实验。
+To let you fully understand the power of IRMapping, let's run a **"soul cloning"** experiment on the two lines of code you gave.
 
-想象一下，你现在要把这段逻辑从 FuncA 搬运到 FuncB。
+Imagine you now want to move this logic from FuncA to FuncB.
 
-1. 原始 IR (Source)
-这是我们想要克隆的对象：
+1. Original IR (Source)
+This is what we want to clone:
 
 MLIR
-// 原有的 Block
+// The original Block
 %0 = arith.constant 1 : i32
 %1 = arith.addi %0, %0 : i32
-2. C++ 操作演示
-如果我们不用 IRMapping，你克隆出的 %1 会因为找不到它的操作数（即 %0 还留在旧函数里）而导致新函数变成“断头路”。
+2. C++ walkthrough
+Without IRMapping, the cloned %1 cannot find its operand (%0 still stays in the old function), and the new function becomes a "dead end".
 
-使用 IRMapping 的标准姿势如下：
+The standard way to use IRMapping is:
 
 C++
 mlir::IRMapping mapper;
 mlir::OpBuilder builder(context);
 
-// --- 步骤 A: 克隆第一个 Op ---
-// 假设 originalOp0 是指那个 arith.constant
+// --- Step A: clone the first Op ---
+// Assume originalOp0 is that arith.constant
 Operation *clonedOp0 = builder.clone(*originalOp0, mapper);
 
-// 此时，mapper 内部自动建立了一个“户口登记”：
-// { %0 (旧) -> %0_new (新) }
+// At this point the mapper has automatically made a "registration entry":
+// { %0 (old) -> %0_new (new) }
 
-// --- 步骤 B: 克隆第二个 Op ---
-// 假设 originalOp1 是指那个 arith.addi
+// --- Step B: clone the second Op ---
+// Assume originalOp1 is that arith.addi
 Operation *clonedOp1 = builder.clone(*originalOp1, mapper);
 
-// 魔法就在这里！
-// builder.clone 会自动去问 mapper：“嘿，addi 依赖的值 %0 在新世界里叫啥？”
-// mapper 告诉它：“叫 %0_new”。
-// 于是新生成的 addi 自动连接到了 %0_new 上。
-3. 克隆后的 IR (Target)
-最终生成的新代码看起来非常自然，SSA 链条是完美的：
+// Here is the magic!
+// builder.clone automatically asks the mapper: "Hey, what is the value %0 that addi depends on called in the new world?"
+// The mapper answers: "It's called %0_new."
+// So the newly generated addi is automatically connected to %0_new.
+3. IR after cloning (Target)
+The resulting new code looks perfectly natural, and the SSA chain is intact:
 
 MLIR
-// 新的 Block
+// The new Block
 %0_new = arith.constant 1 : i32
-%1_new = arith.addi %0_new, %0_new : i32  // 自动指向了新常量
-4. 为什么这对你极其重要？
-在你那个复杂的 ScheduleCanonicalizePass 中，你有很多嵌套的 extract_slice。如果没有 IRMapping，你的逻辑会变成这样：
+%1_new = arith.addi %0_new, %0_new : i32  // automatically points to the new constant
+4. Why does this matter so much for you?
+In your complex ScheduleCanonicalizePass you have many nested extract_slice ops. Without IRMapping, your logic becomes:
 
-找到 Slice_A 的父节点。
+Find the parent of Slice_A.
 
-去你的 std::map 里查父节点对应的 Value 是否已经创建。
+Look up in your std::map whether the Value for the parent has already been created.
 
-如果创建了，取出来作为参数传给 builder.create<Slice_A>(...)。
+If it has, take it out and pass it as an argument to builder.create<Slice_A>(...).
 
-使用 IRMapping 后，逻辑简化为：
-你只需要按照从根到叶 (PreOrder) 的顺序 clone 所有的 Op。IRMapping 会像影子一样跟着你，自动处理掉所有的指针替换。你根本不需要关心 Slice_A 的父节点到底是谁，只要它在之前被 clone 过，mapper 就能搞定一切。
+With IRMapping, the logic simplifies to:
+You just clone all Ops in root-to-leaf (PreOrder) order. IRMapping follows you like a shadow and handles all the pointer replacement automatically. You don't need to care who Slice_A's parent is at all; as long as it was cloned earlier, the mapper takes care of everything.
 
-专家级 Tips
-多对一映射：如果你想把多个旧值合并为一个新值（例如你想把所有的 Shim Tile 引用都指向同一个新声明的 Tile），你可以手动调用 mapper.map(oldValue, sharedNewValue)。
+Expert tips
+Many-to-one mapping: if you want to merge several old values into one new value (e.g. make all Shim Tile references point to the same newly declared Tile), you can call mapper.map(oldValue, sharedNewValue) by hand.
 
-清理：如果你的 Pass 要运行多次，记得清空 mapper.clear()。
+Cleanup: if your Pass runs multiple times, remember to clear the mapper with mapper.clear().
 
-通过这个例子，你是否发现你之前代码里那套手动维护的 index 逻辑其实可以被这个 mapper 完美替代？要不要我帮你把那部分核心的克隆逻辑重构一下？
+With this example, do you see that the manually maintained index logic in your earlier code can be replaced perfectly by this mapper? Shall I refactor that core cloning logic for you?
 
 You said
-CLONE 不是必须指定MAPPER吗，有不用指定MAPPER的吗
+Doesn't CLONE always require a MAPPER? Is there a version that doesn't take one?
 
 Gemini said
-是的，在 MLIR 的 C++ API 中，clone 确实有不带 Mapper 的版本，但它的用法非常讲究，如果不小心就会导致编译器崩溃。
+Yes, in MLIR's C++ API clone does have a version without a Mapper, but it has to be used carefully; if you are not careful it will crash the compiler.
 
-作为专家，我帮你拆解一下这两种 clone 的本质区别：
+As an expert, let me break down the essential difference between the two kinds of clone:
 
-1. 不带 Mapper 的 op->clone()
-这是 mlir::Operation 类的一个普通成员函数。
+1. op->clone() without a Mapper
+This is an ordinary member function of the mlir::Operation class.
 
-它的行为：它会复制这个 Op 本身、它的属性、它的类型，以及它的 Region。
+What it does: it copies the Op itself, its attributes, its types, and its Regions.
 
-它的局限性：它会原封不动地复制操作数（Operands）。
+Its limitation: it copies the Operands verbatim.
 
-例子：
-如果你克隆 %1 = addi %0, %0，新生成的 Op 仍然会尝试去连接原始代码里的那个 %0。
+Example:
+If you clone %1 = addi %0, %0, the new Op still tries to connect to the %0 in the original code.
 
-什么时候可以用不带 Mapper 的版本？
-局部复制：你在同一个 Block 里想复制一份指令，且希望新指令的输入和旧指令一模一样。
+When can you use the version without a Mapper?
+Local copy: you want to duplicate an instruction within the same Block, and you want the new instruction's inputs to be exactly the same as the old one's.
 
-只读分析：你只是想临时克隆一份 IR 来做某种实验性分析，不打算把它放回真正的程序流中。
+Read-only analysis: you just want to temporarily clone a piece of IR for some experimental analysis, with no plan to put it back into the real program flow.
 
-危险信号：如果你把这种“不带 Mapper”的克隆体移动到一个新的函数里，而旧函数随后被删除了，那么克隆体就会指向一个非法内存地址。
+Danger sign: if you move such a Mapper-less clone into a new function and the old function is later deleted, the clone will point to an invalid memory address.
 
-2. 带 Mapper 的 builder.clone(op, mapper)
-这是 mlir::OpBuilder 或 mlir::IRRewriter 提供的工具函数。
+2. builder.clone(op, mapper) with a Mapper
+This is a utility function provided by mlir::OpBuilder or mlir::IRRewriter.
 
-它的行为：它在复制 Op 的同时，会去查这张“户口表”（Mapper）。
+What it does: while copying the Op, it consults this "registry" (the Mapper).
 
-它的优势：如果发现操作数在表里有记录，它会自动把新 Op 的输入替换成“新世界”的值。
+Its advantage: if an operand has an entry in the table, it automatically replaces the new Op's input with the value from the "new world".
 
-3. 为什么在你的代码里，Mapper 是“必须”的？
-你正在做的是 “结构重组”（从 scf.execute_region 搬运到 dfschedule.host）。在这种情况下，不用 Mapper 会遇到以下两个灾难：
+3. Why is the Mapper "mandatory" in your code?
+What you are doing is a "structural reorganization" (moving from scf.execute_region into dfschedule.host). In that case, not using a Mapper leads to these two disasters:
 
-作用域违规 (Scope Violation)：
-旧的 SSA 值（比如 %subview）定义在 scf.execute_region 内部。你把它克隆到外面去后，新 Op 还在引用那个“盒子里”的值。这违反了 MLIR 的支配关系 (Dominance)，验证器（Verifier）会报错。
+Scope Violation:
+The old SSA values (e.g. %subview) are defined inside scf.execute_region. Once you clone ops outside, the new Ops still reference the value "inside the box". That violates MLIR's Dominance relation, and the Verifier reports an error.
 
-悬挂指针 (Dangling Pointer)：
-你的代码最后会调用 removeExecuteRegionsFromMain 把旧的 Region 删掉。删掉的那一刻，旧的 SSA 值也随之消失。如果不通过 Mapper 建立新旧连接，你的新 IR 就会直接“断连”。
+Dangling Pointer:
+Your code eventually calls removeExecuteRegionsFromMain to delete the old Regions. The moment they are deleted, the old SSA values disappear with them. Without the Mapper linking old to new, your new IR is simply "disconnected".
 
-4. 专家级对比总结
-方式	语法	操作数处理	适用场景
-裸克隆	op->clone()	指向旧值	同一 Block 内部复制，不涉及搬迁。
-映射克隆	builder.clone(op, mapper)	指向映射后的新值	跨 Block、跨 Region 搬运代码（你的场景）。
-💡 一个省力的小技巧
-如果你觉得手动管理 IRMapping 还是麻烦，其实还有一个更高级的 API：
-rewriter.inlineRegionBefore(sourceRegion, targetBlock, insertionPoint)。
+4. Expert summary comparison
+Approach	Syntax	Operand handling	When to use
+Bare clone	op->clone()	Points to the old values	Copying within the same Block, no relocation.
+Mapped clone	builder.clone(op, mapper)	Points to the mapped new values	Moving code across Blocks / Regions (your case).
+💡 A labor-saving trick
+If you still find managing IRMapping by hand tedious, there is a higher-level API:
+rewriter.inlineRegionBefore(sourceRegion, targetBlock, insertionPoint).
 
-这个函数内部会自动处理所有 Block 内部操作数的连贯性，它比一个一个 clone 要快得多，也更不容易出错。
+This function automatically keeps all operands inside the Blocks consistent. It is much faster than cloning one by one and less error-prone.
 
-既然我们讨论到这了，你想看一看如何用 rewriter.clone 配合 IRMapping 简洁地重构你那段 createOneShimBd 的逻辑吗？（能省掉你一大堆手动的 sliceIndex 查找）
+Since we've come this far, would you like to see how to refactor your createOneShimBd logic concisely with rewriter.clone plus IRMapping? (It would save you a lot of manual sliceIndex lookups.)

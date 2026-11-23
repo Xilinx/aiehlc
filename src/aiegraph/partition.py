@@ -18,16 +18,252 @@ different backends is a conflict, and an unassigned one is reported as dragged.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 from . import _env
 from .contract import check_region
 from .errors import AiegraphError
+from .plan import PLAN_MODES, plan_conv_layers
 from .report import PartitionPlan
 
-__all__ = ["run_partition", "reset_aie_rows"]
+__all__ = ["run_partition", "reset_aie_rows", "plan_partition_launches",
+           "ConvPattern", "match_conv", "conv_epilogue_ref", "AIEGRAPH_OP_KINDS",
+           "AttnPattern", "match_attention",
+           "KEEP_LAYOUTS", "LABEL_OPS", "parse_keep_layout", "plan_keep_layout"]
+
+#: Every op the aiegraph dialect defines (``td/aiegraphop.td``).
+AIEGRAPH_OP_KINDS = ("conv_bn_relu", "conv_bn", "residual_add_relu", "avgpool_fc")
 
 FALLBACKS = ("cpu", None)
 OBJECTIVES = ("latency", None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Conv pattern family: conv (+bias) (+relu) | conv (+bias) (+add ...) no relu
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# A fused conv layer is described by its op list -- real Relay op names
+# (``conv2d``, ``bias_add``, ``add``, ``relu``) or the underscore tokens of the
+# fused TVM function name (``contrib_conv2d_NCHWc_add_add`` -> ``conv2d``,
+# ``NCHWc``, ``add``, ``add``). ``match_conv`` maps it onto aiegraph ops:
+#
+#   conv (+bias)                         -> conv_bn
+#   conv (+bias) + relu                  -> conv_bn_relu
+#   conv (+bias) + add + relu            -> conv_bn + residual_add_relu (residual block tail)
+#   conv (+bias) + add [+ add] (no relu) -> conv_bn with an fp32 epilogue:
+#       time-embedding add (per channel), skip / shortcut / attention residual
+#       (same shape as the output). The adds run on the fp32 accumulator BEFORE
+#       any bf16/int8 cast -- the rule of the board host path (the example
+#       uc_conv epilogue, cos 1.000000); casting first and adding after is a
+#       different number (see ``conv_epilogue_ref``).
+#
+# Anything else (a multiply / sigmoid / divide fused in, a relu after two joins,
+# an add of a shape that is neither per-channel nor the output's) is None:
+# unmapped, never mis-mapped with the extra op dropped.
+
+#: QNN requant tokens: in these graphs a ReLU is folded into the requant clip.
+_QNN_TOKENS = ("fixed", "fixed_point_multiply", "requantize", "qnn", "clip", "cli")
+#: Float element-wise ops that are NOT part of the conv(+bias)(+add)(+relu) family.
+_FOREIGN_TOKENS = ("multiply", "divide", "subtract", "sigmoid", "tanh", "exp", "erf",
+                   "power", "sqrt", "rsqrt", "mean", "variance", "silu", "gelu",
+                   "clip", "maximum", "minimum", "negative")
+#: Bound on fused epilogue adds (the diffusion example has at most one join per conv).
+MAX_EPILOGUE_ADDS = 2
+
+
+@dataclass(frozen=True)
+class ConvPattern:
+    """How one fused conv layer maps onto aiegraph ops.
+
+    ``aiegraph``: the dialect ops, in order. ``adds``: the epilogue joins, each
+    ``"channel"`` (per-output-channel, e.g. a time embedding), ``"tensor"`` (same shape
+    as the output: skip / residual) or ``"join"`` (shape not given; resolved at
+    run time by element count, as the board host path does). ``epilogue_fp32``:
+    the bias and adds are applied to the fp32 accumulator before the output cast.
+    """
+    aiegraph: tuple
+    bias: bool
+    relu: bool
+    adds: tuple = ()
+    qnn: bool = False
+    epilogue_fp32: bool = True
+
+    @property
+    def family(self) -> str:
+        parts = ["conv"] + (["bias"] if self.bias else []) + [f"add:{a}" for a in self.adds]
+        return "+".join(parts + (["relu"] if self.relu else []))
+
+
+def _add_kind(shape, out_shape) -> str | None:
+    """``"channel"`` / ``"tensor"`` for an epilogue operand, None if neither."""
+    if shape is None or out_shape is None:
+        return "join"
+    s, o = [int(x) for x in shape], [int(x) for x in out_shape]
+    if s == o:
+        return "tensor"
+    n = 1
+    for x in s:
+        n *= x
+    if len(o) == 4:                                  # NCHW
+        cout = o[1]
+        if n == cout and (len(s) <= 1 or (len(s) == 4 and s[1] == cout)
+                          or (len(s) == 3 and s[0] == cout)):
+            return "channel"
+    elif len(o) == 5:                                # NCHWc
+        cout = o[1] * o[4]
+        if n == cout and len(s) == 5 and s[1] == o[1] and s[4] == o[4]:
+            return "channel"
+    return None
+
+
+def match_conv(ops, add_shapes=None, out_shape=None) -> ConvPattern | None:
+    """Map a fused conv layer's op list onto aiegraph ops (None: not this family).
+
+    *add_shapes* (optional) are the shapes of the non-bias ``add`` operands in
+    order and *out_shape* the conv output shape; with them each join is typed
+    ``channel`` / ``tensor`` and an add of any other shape is rejected.
+    """
+    ops = [str(o) for o in ops]
+    if "conv2d" not in ops:
+        return None
+    relu = "relu" in ops
+    qnn = any(t in ops for t in _QNN_TOKENS)
+    explicit_bias = "bias_add" in ops or "bias" in ops
+    adds = ops.count("add")
+    if "bias_add" in ops:
+        joins = adds
+    else:
+        # tokens "bias" + "add", or a plain add that is the bias (BN folded /
+        # bias_add legalized to add under NCHWc): exactly one bias is assumed.
+        joins = max(adds - 1, 0)
+    bias = explicit_bias or adds > 0
+    if qnn:
+        # int8 QNN CNN: a ReLU cannot be told apart from int8 saturation, so a
+        # single join is the block tail (unchanged from the 1c7316a mapping).
+        if joins == 0:
+            return ConvPattern(("conv_bn_relu" if relu else "conv_bn",), bias, relu, qnn=True)
+        if joins == 1:
+            return ConvPattern(("conv_bn", "residual_add_relu"), bias, True, ("tensor",), qnn=True)
+        return None
+    if any(t in ops for t in _FOREIGN_TOKENS):
+        return None
+    if add_shapes is not None and len(add_shapes) != joins:
+        return None
+    kinds = tuple(_add_kind(add_shapes[i] if add_shapes is not None else None, out_shape)
+                  for i in range(joins))
+    if any(k is None for k in kinds):
+        return None
+    if joins == 0:
+        return ConvPattern(("conv_bn_relu" if relu else "conv_bn",), bias, relu)
+    if relu:
+        # add + relu: the residual_add_relu op, only for one same-shape join.
+        if joins == 1 and kinds[0] in ("tensor", "join"):
+            return ConvPattern(("conv_bn", "residual_add_relu"), bias, True, kinds)
+        return None
+    if joins > MAX_EPILOGUE_ADDS:
+        return None
+    # No relu: the joins are fp32 epilogue adds of conv_bn (time embedding / skip /
+    # attention residual) -- never a residual_add_relu (that would add a ReLU).
+    return ConvPattern(("conv_bn",), bias, False, kinds)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Attention pattern: bmm(Q, K^T) [-> scale / mask / cast] -> softmax -> bmm(P, V)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The two batched matmuls of an attention block have two ACTIVATION inputs (no
+# initializer weight), so ``match_conv`` / the linear rule never see them and they
+# stayed on the A78 (m2-s6 postmortem root cause 1: attn=0). ``match_attention``
+# walks an ONNX graph and returns one ``AttnPattern`` per softmax whose input comes
+# from an activation x activation MatMul (through at most ``MAX_ATTN_SCALE_OPS``
+# element-wise scale / mask / cast ops) and whose output feeds the P.V MatMul.
+
+#: Element-wise ops allowed between QK^T and the softmax (scale, additive mask, cast).
+_ATTN_SCALE_OPS = ("Mul", "Div", "Add", "Cast", "Where")
+MAX_ATTN_SCALE_OPS = 3
+
+
+@dataclass(frozen=True)
+class AttnPattern:
+    """One attention core: ``qk`` = node name of bmm(Q, K^T), ``softmax``, ``pv`` = bmm(P, V);
+    ``scale`` = the element-wise ops between ``qk`` and ``softmax`` (empty when the
+    1/sqrt(d) scale is folded into Q/K upstream, as in the diffusion example export); ``group`` =
+    index of the softmax in graph order."""
+    qk: str
+    softmax: str
+    pv: str
+    scale: tuple = ()
+    group: int = 0
+
+    @property
+    def nodes(self) -> tuple:
+        return (self.qk, self.pv)
+
+
+def match_attention(model) -> list:
+    """All bmm -> softmax -> bmm attention cores of an ONNX model / graph (graph order).
+
+    *model*: ``onnx.ModelProto``, ``GraphProto`` or a path. A MatMul counts as a bmm only if
+    neither input is an initializer (activation x activation). A softmax that does not sit
+    between two such bmms is not an attention core and is skipped (never half-matched)."""
+    if isinstance(model, str) or hasattr(model, "__fspath__"):
+        import onnx
+        model = onnx.load(str(model), load_external_data=False)
+    g = model.graph if hasattr(model, "graph") else model
+    init = {t.name for t in g.initializer}
+    prod = {o: n for n in g.node for o in n.output}
+    cons = {}
+    for n in g.node:
+        for i in n.input:
+            cons.setdefault(i, []).append(n)
+
+    def bmm(n):
+        return n is not None and n.op_type == "MatMul" and not any(i in init for i in n.input[:2])
+
+    out = []
+    for s in (n for n in g.node if n.op_type == "Softmax"):
+        p, scale = prod.get(s.input[0]), []
+        while p is not None and p.op_type in _ATTN_SCALE_OPS and len(scale) < MAX_ATTN_SCALE_OPS:
+            scale.append(p.name)
+            act = [i for i in p.input if i in prod and i not in init]
+            p = prod.get(act[0]) if len(act) == 1 else None
+        if not bmm(p):
+            continue
+        pv = [c for c in cons.get(s.output[0], []) if bmm(c) and c.input[0] == s.output[0]]
+        if len(pv) != 1:
+            continue
+        out.append(AttnPattern(p.name, s.name, pv[0].name, tuple(reversed(scale)), len(out)))
+    return out
+
+
+def conv_epilogue_ref(acc, bias=None, adds=(), out_dtype="fp32"):
+    """Reference epilogue: fp32 ``acc + bias + adds`` (in order), then ONE cast.
+
+    *acc* is the conv accumulator ``[N, C, ...]`` (fp32), *bias* ``[C]``, each
+    add either per-channel (``C`` elements) or the output's shape. ``out_dtype``
+    ``"bf16"`` rounds the final fp32 sum to bf16 (RNE), returned as float32.
+    """
+    import numpy as np
+    y = np.asarray(acc, dtype=np.float32).copy()
+    c = y.shape[1]
+    bshape = (1, c) + (1,) * (y.ndim - 2)
+    if bias is not None:
+        y += np.asarray(bias, dtype=np.float32).reshape(bshape)
+    for a in adds:
+        a = np.asarray(a, dtype=np.float32)
+        y += a.reshape(bshape) if a.size == c else a.reshape(y.shape)
+    if out_dtype == "bf16":
+        y = _bf16_rne(y)
+    elif out_dtype != "fp32":
+        raise AiegraphError("partition", f"out_dtype={out_dtype!r}", hint="'fp32' or 'bf16'")
+    return y
+
+
+def _bf16_rne(x):
+    import numpy as np
+    u = np.ascontiguousarray(x, dtype=np.float32).view(np.uint32).astype(np.uint64)
+    u = (u + 0x7FFF + ((u >> 16) & 1)) & 0xFFFF0000
+    return u.astype(np.uint32).view(np.float32)
 
 
 def reset_aie_rows(workdir) -> int:
@@ -130,3 +366,226 @@ def run_partition(emod, fallback="cpu", optimize_for="latency", verbose=False) -
         raise AiegraphError("partition", plan.report().splitlines()[0],
                             hint="print the plan: module.partition(fallback='cpu').report()")
     return plan
+
+
+def plan_partition_launches(model, partition, mode: str = "kincore") -> dict:
+    """Launch plan of the AIE conv layers of a partition (``{"layers": [{"node", "mkn"?, ...}]}``
+    or a path to that JSON) on ``model`` (ONNX path / ModelProto).
+
+    ``mode="kincore"``: one launch per layer, K accumulated in the core (plan.kincore_geom);
+    ``mode="tile"``: one launch per 64x64x64 tile. The GEMM geometry comes from the ONNX graph;
+    a partition row that carries ``mkn`` must agree with it (else AiegraphError).
+    Returns ``dict(layers=[...], launches_planned=N, tile_launches=T, fallbacks=[node...])``."""
+    from pathlib import Path
+    if mode not in PLAN_MODES:
+        raise AiegraphError("plan", f"mode={mode!r}", hint=f"one of {PLAN_MODES}")
+    doc = json.loads(Path(partition).read_text()) if isinstance(partition, (str, Path)) else partition
+    rows = doc.get("layers", [])
+    plans = plan_conv_layers(model, [r["node"] for r in rows], mode)
+    for r, p in zip(rows, plans):
+        mkn = r.get("mkn")
+        if mkn and p.get("m") is not None and [list(x) for x in mkn] != [[p["m"], p["k"], p["n"]]]:
+            raise AiegraphError("plan", f"{r['node']}: partition mkn {mkn} != graph "
+                                        f"{[p['m'], p['k'], p['n']]}",
+                                hint="the partition was made for another model / export")
+    ok = [p for p in plans if p["launches"] is not None]
+    return dict(layers=plans, mode=mode,
+                launches_planned=sum(p["launches"] for p in ok),
+                tile_launches=sum(p["tile_launches"] for p in ok),
+                fallbacks=[p["node"] for p in plans if p["mode"] != mode])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  keep_layout (GAP-B): an AIE output stays in the AIE layout for its consumers
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# partition.json schema: a layer row may carry
+#
+#   "keep_layout": true                     -> {"layout": "nchw"} (the kacc Y [N][M] image)
+#   "keep_layout": {"layout": "nchw"|"nhwc"}  ("nhwc" = the transposed kacc walk, Y^T [M][N])
+#   "keep_layout": false / absent           -> today's behaviour: the output goes back to the host layout
+#
+# Meaning: the layer's output tensor is NOT converted back to the host (TVM) layout; every consumer reached
+# through layout-only ops reads the AIE buffer as is. Transpose is a pure LABEL change (it permutes the logical
+# axes, the bytes do not move); Identity / Squeeze / Unsqueeze / Flatten / Reshape are labels too when they only
+# merge or split axes that are adjacent and in order in memory. The chain must end at layers of the same
+# partition (AIE), and the consumer's logical view must be the row-major order of the bytes (else the
+# consumer would need a real transpose = data movement). Anything else is an AiegraphError -- the layer would
+# have to go back to the host layout, so the field is rejected rather than silently ignored.
+
+#: Physical layouts an AIE conv / linear output can be kept in (logical axis order of the bytes, rank 4 NCHW).
+KEEP_LAYOUTS = {"nchw": (0, 1, 2, 3), "nhwc": (0, 2, 3, 1)}
+#: ONNX ops that are only a relabel of a kept AIE buffer (no data movement when the checks below hold).
+LABEL_OPS = ("Transpose", "Reshape", "Flatten", "Squeeze", "Unsqueeze", "Identity")
+
+
+def parse_keep_layout(row) -> dict | None:
+    """The ``keep_layout`` field of one partition layer row -> ``{"layout": name}`` or None (host layout)."""
+    v = row.get("keep_layout", False)
+    if v is False or v is None:
+        return None
+    if v is True:
+        return {"layout": "nchw"}
+    if isinstance(v, str):
+        v = {"layout": v}
+    if not isinstance(v, dict) or v.get("layout", "nchw") not in KEEP_LAYOUTS \
+            or set(v) - {"layout"}:
+        raise AiegraphError("partition", f"{row.get('node')}: keep_layout={v!r}",
+                            hint=f"true, false or {{\"layout\": one of {sorted(KEEP_LAYOUTS)}}}")
+    return {"layout": v.get("layout", "nchw")}
+
+
+def _groups(src: list, dst: list):
+    """Reshape src -> dst as a merge/split of adjacent axes (size-1 axes free): list of (src_axes, dst_axes)
+    groups in order, or None when it is not one (a real reshuffle)."""
+    i = j = 0
+    out = []
+    while i < len(src) or j < len(dst):
+        if i < len(src) and src[i] == 1 and (j >= len(dst) or dst[j] != 1):
+            out.append(([i], []))
+            i += 1
+            continue
+        if j < len(dst) and dst[j] == 1 and (i >= len(src) or src[i] != 1):
+            out.append(([], [j]))
+            j += 1
+            continue
+        if i >= len(src) or j >= len(dst):
+            return None
+        a, b, ps, pd = [i], [j], src[i], dst[j]
+        i += 1
+        j += 1
+        while ps != pd:
+            if ps < pd and i < len(src):
+                ps *= src[i]
+                a.append(i)
+                i += 1
+            elif pd < ps and j < len(dst):
+                pd *= dst[j]
+                b.append(j)
+                j += 1
+            else:
+                return None
+        out.append((a, b))
+    return out
+
+
+def _relabel(perm: tuple, src: list, dst: list):
+    """Physical axis order ``perm`` (memory order of the logical axes of ``src``) after a reshape to ``dst``;
+    None if the reshape is not a label (merged axes not adjacent + in order in memory)."""
+    gs = _groups(list(src), list(dst))
+    if gs is None:
+        return None
+    pos = {ax: k for k, ax in enumerate(perm)}      # logical axis -> memory position
+    keyed = []
+    for a, b in gs:
+        big = [x for x in a if src[x] != 1]
+        if big:
+            mp = [pos[x] for x in big]
+            if mp != list(range(mp[0], mp[0] + len(mp))):
+                return None                          # merged axes not contiguous / not in order in memory
+            key = mp[0]
+        else:
+            key = (pos[a[0]] if a else -1)
+        keyed.append((key, b))
+    # memory order of the new axes: groups sorted by memory position, axes of one group in order
+    order = []
+    for k, (key, b) in sorted(enumerate(keyed), key=lambda t: (t[1][0], t[0])):
+        order += b
+    return tuple(order)
+
+
+def _rowmajor(perm: tuple, shape: list) -> bool:
+    """The bytes (memory order ``perm`` of the logical axes) are the row-major image of ``shape``
+    (size-1 axes may sit anywhere)."""
+    big = [a for a in perm if shape[a] != 1]
+    return big == sorted(big)
+
+
+def plan_keep_layout(model, partition) -> dict:
+    """Check every ``keep_layout`` row of ``partition`` (dict / JSON path) on ``model`` (ONNX path / ModelProto).
+
+    Returns ``dict(edges=[{node, tensor, layout, label_ops, consumers, views}], label_ops=n, kept=n)``;
+    ``views``: per consumer the logical shape it reads. Raises AiegraphError if a kept output reaches a host op,
+    a non-label op, a graph output, or a consumer whose view is not the row-major order of the AIE buffer."""
+    from pathlib import Path
+    import onnx
+    doc = json.loads(Path(partition).read_text()) if isinstance(partition, (str, Path)) else partition
+    rows = [(r, parse_keep_layout(r)) for r in doc.get("layers", [])]
+    if not any(k for _, k in rows):
+        return dict(edges=[], label_ops=0, kept=0)
+    m = onnx.load(str(model)) if isinstance(model, (str, Path)) else model
+    shapes = {}
+
+    def _collect(g):
+        for v in list(g.value_info) + list(g.output) + list(g.input):
+            d = [x.dim_value if x.HasField("dim_value") else None for x in v.type.tensor_type.shape.dim]
+            if d and all(x for x in d):
+                shapes[v.name] = d
+    _collect(m.graph)
+    for n in m.graph.node:
+        if n.output and n.output[0] not in shapes:
+            m = onnx.shape_inference.infer_shapes(m)
+            _collect(m.graph)
+            break
+    nodes = {n.name: n for n in m.graph.node}
+    users = {}
+    for n in m.graph.node:
+        for t in n.input:
+            users.setdefault(t, []).append(n)
+    outs = {o.name for o in m.graph.output}
+    aie = {r["node"] for r in doc.get("layers", [])}
+    edges, nlabel = [], 0
+    for r, k in rows:
+        if not k:
+            continue
+        name = r["node"]
+        if name not in nodes:
+            raise AiegraphError("partition", f"keep_layout: node {name} not in the model")
+        t0 = nodes[name].output[0]
+        if t0 not in shapes or len(shapes[t0]) != 4:
+            raise AiegraphError("partition", f"{name}: keep_layout needs a rank-4 output, got {shapes.get(t0)}")
+
+        def fail(msg):
+            raise AiegraphError("partition", f"{name}: keep_layout {k['layout']}: {msg}",
+                                hint="drop keep_layout on this row (output goes back to the host layout) "
+                                     "or put the consumer on the AIE")
+        label_ops, cons, views = [], [], []
+        stack = [(t0, KEEP_LAYOUTS[k["layout"]])]
+        while stack:
+            t, perm = stack.pop()
+            if t in outs:
+                fail(f"tensor {t} is a graph output (host reads it)")
+            for u in users.get(t, []):
+                if u.name in aie:
+                    if not _rowmajor(perm, shapes[t]):
+                        fail(f"consumer {u.name} reads {t} as {shapes[t]} but the bytes are in axis order "
+                             f"{list(perm)}: that is a real transpose, not a label")
+                    cons.append(u.name)
+                    views.append(list(shapes[t]))
+                    continue
+                if u.op_type not in LABEL_OPS:
+                    fail(f"consumer {u.name} ({u.op_type}) runs on the host and needs the host layout")
+                if u.input[0] != t:
+                    fail(f"{u.name}: kept tensor {t} is not the data input")
+                o = u.output[0]
+                if o not in shapes:
+                    fail(f"{u.name}: output shape of {o} unknown")
+                if u.op_type == "Transpose":
+                    tp = [a.ints for a in u.attribute if a.name == "perm"]
+                    tp = list(tp[0]) if tp else list(range(len(perm)))[::-1]
+                    pos = {ax: q for q, ax in enumerate(perm)}
+                    # new logical axis i = old axis tp[i]; memory order of the new axes
+                    nperm = tuple(sorted(range(len(tp)), key=lambda i: pos[tp[i]]))
+                else:
+                    nperm = _relabel(perm, shapes[t], shapes[o])
+                    if nperm is None:
+                        fail(f"{u.name} ({u.op_type}) {shapes[t]} -> {shapes[o]} moves data in layout "
+                             f"{list(perm)} (merged axes not adjacent in memory)")
+                label_ops.append(u.name)
+                stack.append((o, nperm))
+        if not cons:
+            fail("no AIE consumer")
+        nlabel += len(label_ops)
+        edges.append(dict(node=name, tensor=t0, layout=k["layout"], label_ops=label_ops,
+                          consumers=cons, views=views))
+    return dict(edges=edges, label_ops=nlabel, kept=len(edges))

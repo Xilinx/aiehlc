@@ -18,7 +18,7 @@ for an int32 accumulator it cannot emit, and the only way to honour that was a
 scalar loop on the APU -- an "offload" that never touched the AIE.
 
 Written against the real IR, after ``qnn.transform.CanonicalizeOps`` +
-``FoldConstant`` (dumped from the ResNet-18 PT2E/ONNX int8 graph)::
+``FoldConstant`` (dumped from a PT2E/ONNX int8 CNN classifier graph)::
 
     %5  = nn.pad(%4, 113, pad_width=[..,[3,3],[3,3]])           # outside: zp-padded
     %11 = nn.conv2d(%5, W:int8[64,3,7,7], strides=2, out_dtype=int32)
@@ -103,7 +103,7 @@ def find_conv(expr):
         and getattr(e.op, "name", "") == "nn.conv2d" else None)
     return found[0] if found else None
 
-#: The ONE geometry `libconv2dstem.a` implements: ResNet-18 conv1,
+#: The ONE geometry `libconv2dstem.a` implements: a 7x7/s2 stem conv1,
 #: ifm[224,224,3] (*) wts[64,7,7,3], stride 2, pad 3 -> ofm[112,112,64].
 #:
 #: Baked into conv2dstem.cc three times over (the #defines, the GemmSpace

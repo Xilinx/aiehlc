@@ -19,10 +19,35 @@ AieRC rt_seq_bd_desc(XAie_DevInst *dev, XAie_LocType tile, uint64_t dma_addr, co
         dims[i].AieMlDimDesc.StepSize = (uint32_t)(a->stride[i] / 4);
         dims[i].AieMlDimDesc.Wrap = (uint16_t)a->wrap[i];
     }
-    XAie_DmaTensor tensor;
-    tensor.NumDim = (uint8_t)addr_dims;
-    tensor.Dim = dims;
-    XAie_DmaSetMultiDimAddr(desc, &tensor, dma_addr, (uint32_t)a->len);
+    /* A BD whose addressing dims beyond D0 all have wrap <= 1 and whose D0 is one
+     * contiguous 32-bit-word run (step 4 B, wrap*4 == len) is a plain 1-D transfer.
+     * When D0's wrap is over the 10-bit field (> 1024 words, e.g. a 5120 B output
+     * row of a D=80 flash-attention block), XAie_DmaSetMultiDimAddr rejects it --
+     * after it has already stored Address/Length, so the BD silently degrades to a
+     * linear one (right only by luck) and aie-rt prints an XAIE_ERROR per BD over
+     * UART (~6 ms each: fa14 bdcfg 0.09M -> 149M pmu cycles). Write such BDs as a
+     * plain addr/len BD instead; every BD aie-rt accepts keeps its old encoding. */
+    int eff_dims = addr_dims;
+    if (!a->ooo && num_dims <= 3)
+        while (eff_dims > 1 && a->wrap[eff_dims - 1] <= 1)
+            eff_dims--;
+    const int contig_1d = eff_dims == 1 && a->stride[0] == 4 && a->wrap[0] > 1024 && (int64_t)a->wrap[0] * 4 == a->len;
+    AieRC mrc;
+    if (contig_1d) {
+        mrc = XAie_DmaSetAddrLen(desc, dma_addr, (uint32_t)a->len);
+    } else {
+        XAie_DmaTensor tensor;
+        tensor.NumDim = (uint8_t)addr_dims;
+        tensor.Dim = dims;
+        mrc = XAie_DmaSetMultiDimAddr(desc, &tensor, dma_addr, (uint32_t)a->len);
+    }
+    if (mrc != XAIE_OK) {
+        printf("[aie_runtime] ERROR: shim/tile (%u,%u) BD %d multi-dim address rejected (rc=%d), len=%d dims=%d "
+               "d0=%d/%d d1=%d/%d d2=%d/%d (stride B/wrap) -- BD would move len bytes LINEARLY\n",
+               (unsigned)tile.Col, (unsigned)tile.Row, a->bd_id, (int)mrc, a->len, addr_dims, a->stride[0], a->wrap[0],
+               a->stride[1], a->wrap[1], a->stride[2], a->wrap[2]);
+        rc = mrc;
+    }
     if (a->ooo) {
         if (a->iter_wrap > 1)
             XAie_DmaSetBdIteration(desc, a->iter_step_size / 4, a->iter_wrap, 0);
@@ -51,7 +76,7 @@ AieRC rt_seq_bd_desc(XAie_DevInst *dev, XAie_LocType tile, uint64_t dma_addr, co
             (void)XAie_DmaSetAxi(desc, 0U, RT_SEQ_SHIM_AXI_BURST, RT_SEQ_SHIM_AXI_QOS, RT_SEQ_SHIM_AXI_CACHE, 0U);
     }
     XAie_DmaEnableBd(desc);
-    return XAIE_OK;
+    return rc;
 }
 
 AieRC rt_seq_channel_ooo_desc(XAie_DevInst *dev, XAie_LocType tile, XAie_DmaChannelDesc *desc) {

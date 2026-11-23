@@ -6,7 +6,7 @@
 
 After ``PartitionGraph``, TVM calls ``relay.ext.aie`` for every function with
 ``Compiler="aie"``; this module is that callback. It returns a C source module
-(``CSourceModuleCreate``), so the wrapper lands in ``resnet18.c`` next to TVM's
+(``CSourceModuleCreate``), so the wrapper lands in ``<model>.c`` next to TVM's
 own kernels and is compiled and linked by ``arm_build.py`` like everything else.
 
 Dispatch is on the COMPOSITE NAME
@@ -77,10 +77,10 @@ _C_PRELUDE = """\
 extern "C" {
 #endif
 /* libconv2dstem.a (src/aietensorop/conv2dstem/conv2dstem.h). Declared rather
- * than #included so resnet18.c needs no -I. `qp` is the header's
+ * than #included so <model>.c needs no -I. `qp` is the header's
  * conv2dstem_qparam[OC] -- four int32 {bias, zero_point, multiplier, shift}
  * per channel -- passed as a flat int32 array of the same layout: a typedef
- * here would land mid-file in resnet18.c, where split_layers cannot carry it. */
+ * here would land mid-file in <model>.c, where split_layers cannot carry it. */
 int conv2d_stem_prepadded(const int8_t *ifm_pad, const int8_t *wts,
                           const void *qp, uint8_t *ofm);
 #ifdef __cplusplus

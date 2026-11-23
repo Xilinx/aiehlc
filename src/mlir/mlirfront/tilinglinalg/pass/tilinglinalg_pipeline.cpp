@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  ******************************************************************************/
 #include "tilinglinalg_pipeline.h"
+#include "../../../../llvm/convautotile/block_io_names.h"
 
 #include "dmaptodmaphop.h"
 #include "hw/ResourceManager.h"
@@ -239,6 +240,7 @@ static std::string setupPipelineIRDir(const std::string &subdir) {
 
 // Block-load convention (aie_block_io.h) in a __global__(op, map) kernel body:
 //   aie::load_buffer(P, off, shape)  -> aiehlc_load_buffer(P, aiehlc_desc_P, aiehlc_cur_P, pid0, pid1, off, shape)
+//                                       (desc / cur names: convautotile/block_io_names.h)
 //   aie::store_buffer(P, off, shape) -> aiehlc_store_buffer(...)  (same extra arguments)
 //   aie::release(P) / aie::commit(P) -> aiehlc_release(P) / aiehlc_commit(P)
 //   aie::program_id(0|1)             -> this core's mesh row / col, from get_coreid()
@@ -272,7 +274,8 @@ static std::string dropBlockOptions(const std::string &body, const std::string &
     return out;
 }
 
-static std::string resolveBlockIoBuiltins(const std::string &body, int coreRowBase, int coreColBase) {
+static std::string resolveBlockIoBuiltins(const std::string &body, const std::string &kernel, int coreRowBase,
+                                          int coreColBase) {
     std::string out = dropBlockOptions(dropBlockOptions(body, "aie::load_buffer("), "aie::store_buffer(");
     auto replaceAll = [&out](const std::string &from, const std::string &to) {
         for (size_t pos = 0; (pos = out.find(from, pos)) != std::string::npos; pos += to.size())
@@ -290,8 +293,8 @@ static std::string resolveBlockIoBuiltins(const std::string &body, int coreRowBa
                 port.erase(0, 1);
             while (!port.empty() && std::isspace((unsigned char)port.back()))
                 port.pop_back();
-            std::string to = std::string("aiehlc_") + fn + "(" + port + ", aiehlc_desc_" + port + ", aiehlc_cur_" +
-                             port + ", aie::program_id(0), aie::program_id(1)";
+            std::string to = std::string("aiehlc_") + fn + "(" + port + ", " + convautotile::blockDescVar(kernel, port) +
+                             ", " + convautotile::blockCurVar(kernel, port) + ", aie::program_id(0), aie::program_id(1)";
             out.replace(pos, comma - pos, to);
             pos += to.size();
         }
@@ -554,6 +557,10 @@ static void attachTensorRoutingInfo(OpBuilder &builder, ArrayRef<routing::create
         const auto &split = splitModel.tensorSplits[i];
         routing::createscheduletensor decl = decls[i];
         decl.setPpDepthAttr(builder.getI64IntegerAttr(split.pingPong));
+        if (split.windowBytes > 0) {
+            decl->setAttr(routing::kScheduleWindowBytesAttr, builder.getI64IntegerAttr(split.windowBytes));
+            llvm::outs() << "[TilingLinalg] tensor_" << i << " window_bytes=" << split.windowBytes << "\n";
+        }
         if (!split.layoutTransform.empty()) {
             decl.setLayoutTransformAttr(builder.getStringAttr(split.layoutTransform));
             llvm::outs() << "[TilingLinalg] tensor_" << i << " layout_transform=" << split.layoutTransform << "\n";
@@ -824,8 +831,17 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
     // (it runs later inside a pass), so instance() throws — the allocator is empty
     // then, so the catch is a safe no-op. Subsequent runs reuse the persisted
     // singleton and reset it before the host allocation pass repopulates it.
+    //
+    // GAP-125ece (KCO-BISECT): the KERNELCONFIGOFFLOAD per-tile plan rides the same
+    // singleton and needs the same reset. addCoreOffloadTile upserts on (col, row,
+    // direction, flow) and the kernel-side emitter takes the FIRST plan entry per
+    // tile, so without this every later kernel of a multi-kernel program armed its
+    // core MM2S with kernel #0's BD length (UNet KCO: gemm_kacc_960x320x512 sent 5120 B
+    // windows while its host shim S2MM waited for 8192 B -> wait_io TIMEOUT hang at the
+    // first switch to a kernel with a different output window).
     try {
         ResourceMgr::instance()->coreMemAllocator().reset();
+        ResourceMgr::instance()->coreOffloadPlan().clear();
     } catch (...) {
         // Singleton not yet initialized on the first pipeline run; nothing to reset.
     }
@@ -1021,6 +1037,11 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
                     blockBytes *= v;
                 bufSize = static_cast<uint32_t>(std::min<int64_t>(blockBytes, bufSize));
             }
+            // A trace-routed port's core window is capped at its traced block
+            // (routing.window_bytes, see computeCoreIterations / window_init),
+            // so charge that instead of the kernel-wide maximum.
+            if (info && info->windowBytes > 0 && static_cast<uint64_t>(info->windowBytes) < bufSize)
+                bufSize = static_cast<uint32_t>(info->windowBytes);
             totalBufferBytes += ppDepth * bufSize;
         }
 
@@ -1322,6 +1343,26 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
             return false;
         }
 
+        // Multi-kernel (aiehlc.cc dispatch: append runs, and the first run with no user source):
+        // the kernel-ELF load also goes AOT. Leave the
+        // fabric's ack count in ctrlpkt_kernel_nresp.txt; aiehlc.cc turns it into the per-kernel
+        // manifest ctrlpkt_manifest_<kernel>.json that kc.sh encodes into kernel_<kernel>_ctrlpkt.h
+        // (GAP-aiehlc-multi-kernel-aot-046372).
+        if (appendMode || userRewrittenSource.empty()) {
+            const std::string knPath = outputDir + "/ctrlpkt_kernel_nresp.txt";
+            llvm::sys::fs::remove(knPath);
+            auto aotA = hostModule->getAttrOfType<mlir::IntegerAttr>("routing.control_packet_aot");
+            auto nrespA = hostModule->getAttrOfType<mlir::IntegerAttr>("routing.control_packet_nresp");
+            if (aotA && aotA.getInt() != 0 && nrespA) {
+                std::error_code kec;
+                llvm::raw_fd_ostream kn(knPath, kec, llvm::sys::fs::OF_None);
+                if (!kec)
+                    kn << nrespA.getInt() << "\n";
+                else
+                    llvm::errs() << "[TilingLinalg] WARNING: cannot write " << knPath
+                                 << "; kernel-ELF load stays JIT.\n";
+            }
+        }
         // In append mode, skip user source and __aie_launch emission — caller handles it
         if (appendMode) {
             stream.close();
@@ -1925,7 +1966,7 @@ after_host_emit:
                                                                   portVarNames, perTensorTiling);
             resolvedKernelBody = resolveArgDimBuiltin(resolvedKernelBody, "aie::get_arg_total_rounds_in_dim",
                                                       portVarNames, perTensorRounds);
-            resolvedKernelBody = resolveBlockIoBuiltins(resolvedKernelBody, coreRowBase, coreColBase);
+            resolvedKernelBody = resolveBlockIoBuiltins(resolvedKernelBody, computeKernelName, coreRowBase, coreColBase);
             stream << "// User-provided compute kernel (extracted from __global__ function)\n";
             stream << resolvedKernelBody << "\n";
             std::cout << "Compute kernel (user-provided) written to " << computePath << std::endl;

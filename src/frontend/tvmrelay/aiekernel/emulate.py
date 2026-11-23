@@ -10,7 +10,7 @@ synthetic activations. This proves the INTEGRATION on real ones:
 
 * the driver swap -- the same ``<symbol>`` -> ``aie_<symbol>`` substitution
   ``graph_driver.c`` makes under ``-DGRAPH_AIE_OFFLOAD``, for every call of
-  every selected layer (ResNet-18 calls layer 04 twice);
+  every selected layer (the zoo default calls layer 04 twice);
 * the generated adapter -- the same text ``build`` appends to ``host.cc``,
   differing only in the callee (``<entry>_ref`` instead of ``<entry>``): arg
   binding, the per-arg dtype/shape checks, the return-code path;

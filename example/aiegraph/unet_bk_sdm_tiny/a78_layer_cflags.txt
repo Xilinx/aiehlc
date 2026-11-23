@@ -1,0 +1,1 @@
+-mcpu=cortex-a78 -ffp-contract=fast -fassociative-math -fno-signed-zeros -fno-trapping-math -ftree-vectorize

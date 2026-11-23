@@ -18,6 +18,12 @@
 //   aie::load_v / load_unaligned_v / store_v / store_unaligned_v, aie::zeros, aie::concat,
 //   aie::shuffle_down_fill, aie::interleave_zip, aie::bit_and, aie::add
 //   aie::set_rounding / set_saturation (the SRS modes of to_vector)
+//   Floating point (AIE2p bf16 path): aie::accum<accfloat, N> (fp32 lanes),
+//   aie::mmul<M, K, N, bfloat16, bfloat16, accfloat> (fp32 accumulation of exact
+//   bf16 products), aie::mul / mac on bfloat16 / float vectors into accfloat,
+//   aie::max / sub / mul(vector, scalar), aie::reduce_max / reduce_add,
+//   aie::exp2<T> (fp32 exp2, result converted to T), aie::inv (fp32 1/x) -- enough for an fp32-score
+//   online-softmax (flash) attention kernel.
 //   bfloat16 (global scalar type: fp32 upper half, round-to-nearest-even from float)
 // Anything else is a compile error in the harness -- extend this file.
 //
@@ -50,6 +56,7 @@
 // Accumulator tags are global in the AIE API (acc32, not aie::acc32).
 struct acc32 {};
 struct acc64 {};
+struct accfloat {};
 
 // bfloat16 (global, as chess's native type): the upper 16 bits of an IEEE fp32;
 // float -> bfloat16 rounds to nearest even (NaN stays NaN), bfloat16 -> float
@@ -170,18 +177,34 @@ template <class T, unsigned N> struct vector {
 };
 
 template <class Tag, unsigned N> struct accum {
-    int64_t v[N];
+    static constexpr bool is_float = std::is_same<Tag, accfloat>::value;
+    using storage = std::conditional_t<is_float, float, int64_t>;
+    storage v[N];
     static constexpr int bits = std::is_same<Tag, acc32>::value ? 32 : 64;
-    static int64_t wrap(int64_t x) { return bits == 32 ? (int64_t)(int32_t)(uint32_t)x : x; }
+    static storage wrap(storage x) {
+        if constexpr (is_float)
+            return x;
+        else
+            return bits == 32 ? (int64_t)(int32_t)(uint32_t)x : x;
+    }
+    // accfloat: fp32 lanes, shift ignored; to_vector<bfloat16> rounds to nearest even.
     template <class T> accum &from_vector(const vector<T, N> &x, int shift = 0) {
-        for (unsigned i = 0; i < N; i++)
-            v[i] = wrap((int64_t)x.v[i] << shift);
+        for (unsigned i = 0; i < N; i++) {
+            if constexpr (is_float)
+                v[i] = (float)x.v[i];
+            else
+                v[i] = wrap((int64_t)x.v[i] << shift);
+        }
         return *this;
     }
     template <class T> vector<T, N> to_vector(int shift = 0) const {
         vector<T, N> r;
-        for (unsigned i = 0; i < N; i++)
-            r.v[i] = emu::narrow<T>(emu::srs(v[i], shift));
+        for (unsigned i = 0; i < N; i++) {
+            if constexpr (is_float)
+                r.v[i] = T(v[i]);
+            else
+                r.v[i] = emu::narrow<T>(emu::srs(v[i], shift));
+        }
         return r;
     }
     template <unsigned M> accum<Tag, M> extract(unsigned idx) const {
@@ -201,6 +224,8 @@ namespace emu {
 template <class T> struct is_acc : std::false_type {};
 template <> struct is_acc<acc32> : std::true_type {};
 template <> struct is_acc<acc64> : std::true_type {};
+template <> struct is_acc<accfloat> : std::true_type {};
+template <class T> struct is_fp : std::bool_constant<std::is_floating_point<T>::value || std::is_same<T, bfloat16>::value> {};
 } // namespace emu
 
 template <class T, unsigned N> auto zeros() {
@@ -212,7 +237,7 @@ template <class T, unsigned N> auto zeros() {
     } else {
         vector<T, N> r;
         for (unsigned i = 0; i < N; i++)
-            r.v[i] = T(0);
+            r.v[i] = T(0.0f);
         return r;
     }
 }
@@ -302,22 +327,87 @@ template <class T, unsigned N> vector<T, N> add(const vector<T, N> &a, const vec
     return r;
 }
 
+// Floating-point element-wise helpers (computed in fp32, result converted to T).
+template <class T, unsigned N> vector<T, N> sub(const vector<T, N> &a, const vector<T, N> &b) {
+    vector<T, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = T((float)a.v[i] - (float)b.v[i]);
+    return r;
+}
+template <class T, unsigned N> vector<T, N> sub(const vector<T, N> &a, T b) {
+    vector<T, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = T((float)a.v[i] - (float)b);
+    return r;
+}
+template <class T, unsigned N> vector<T, N> max(const vector<T, N> &a, const vector<T, N> &b) {
+    vector<T, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = (float)a.v[i] >= (float)b.v[i] ? a.v[i] : b.v[i];
+    return r;
+}
+template <class T, unsigned N> T reduce_max(const vector<T, N> &a) {
+    T m = a.v[0];
+    for (unsigned i = 1; i < N; i++)
+        if ((float)a.v[i] > (float)m)
+            m = a.v[i];
+    return m;
+}
+template <class T, unsigned N> T reduce_add(const vector<T, N> &a) {
+    float s = 0.0f;
+    for (unsigned i = 0; i < N; i++)
+        s += (float)a.v[i];
+    return T(s);
+}
+// 2^x per lane in fp32 (the AIE2p exp2 unit takes bf16/fp32 in, gives fp32 out).
+template <class TR = float, class T, unsigned N> vector<TR, N> exp2(const vector<T, N> &a) {
+    vector<TR, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = TR(__builtin_exp2f((float)a.v[i]));
+    return r;
+}
+
+// 1/x per lane in fp32 (aie::inv; the SiLU / sigmoid epilogues of the aiednn conv templates).
+template <class T, unsigned N> vector<T, N> inv(const vector<T, N> &a) {
+    vector<T, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = T(1.0f / (float)a.v[i]);
+    return r;
+}
+
 // Element-wise multiply into an accumulator (the AIE API's default precision:
 // 64-bit when either operand is 32-bit, else 32-bit), and multiply-accumulate.
 namespace emu {
-template <class A, class B> using mul_tag = std::conditional_t<(sizeof(A) > 2 || sizeof(B) > 2), acc64, acc32>;
+template <class A, class B>
+using mul_tag = std::conditional_t<(is_fp<A>::value || is_fp<B>::value), accfloat,
+                                   std::conditional_t<(sizeof(A) > 2 || sizeof(B) > 2), acc64, acc32>>;
+template <class Tag, class A, class B> typename accum<Tag, 1>::storage prod(A a, B b) {
+    if constexpr (std::is_same<Tag, accfloat>::value)
+        return (float)a * (float)b;
+    else
+        return (int64_t)a * (int64_t)b;
 }
+} // namespace emu
 template <class A, class B, unsigned N> accum<emu::mul_tag<A, B>, N> mul(const vector<A, N> &a, const vector<B, N> &b) {
-    accum<emu::mul_tag<A, B>, N> r;
+    using Tag = emu::mul_tag<A, B>;
+    accum<Tag, N> r;
     for (unsigned i = 0; i < N; i++)
-        r.v[i] = accum<emu::mul_tag<A, B>, N>::wrap((int64_t)a.v[i] * (int64_t)b.v[i]);
+        r.v[i] = accum<Tag, N>::wrap(emu::prod<Tag>(a.v[i], b.v[i]));
+    return r;
+}
+// vector x scalar (floating point only: the scalar broadcast form used by softmax rescaling).
+template <class A, class B, unsigned N, class = std::enable_if_t<emu::is_fp<B>::value>>
+accum<accfloat, N> mul(const vector<A, N> &a, B b) {
+    accum<accfloat, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = (float)a.v[i] * (float)b;
     return r;
 }
 template <class Tag, class A, class B, unsigned N>
 accum<Tag, N> mac(const accum<Tag, N> &acc, const vector<A, N> &a, const vector<B, N> &b) {
     accum<Tag, N> r;
     for (unsigned i = 0; i < N; i++)
-        r.v[i] = accum<Tag, N>::wrap(acc.v[i] + (int64_t)a.v[i] * (int64_t)b.v[i]);
+        r.v[i] = accum<Tag, N>::wrap(acc.v[i] + emu::prod<Tag>(a.v[i], b.v[i]));
     return r;
 }
 
@@ -328,7 +418,8 @@ struct tile {
 };
 
 // C (M x N) += A (M x K) * B (K x N), row-major, 32-bit accumulation for
-// 8/16-bit operands (acc32 wraps like the hardware accumulator).
+// 8/16-bit operands (acc32 wraps like the hardware accumulator); accfloat:
+// bf16 x bf16 products are exact in fp32 and are summed in fp32.
 template <unsigned M, unsigned K, unsigned N, class TA, class TB, class Tag = acc32> struct mmul {
     using accum_type = accum<Tag, M * N>;
     accum_type c;
@@ -337,9 +428,9 @@ template <unsigned M, unsigned K, unsigned N, class TA, class TB, class Tag = ac
     void mac(const vector<TA, M * K> &a, const vector<TB, K * N> &b) {
         for (unsigned m = 0; m < M; m++)
             for (unsigned n = 0; n < N; n++) {
-                int64_t s = c.v[m * N + n];
+                typename accum_type::storage s = c.v[m * N + n];
                 for (unsigned k = 0; k < K; k++)
-                    s += (int64_t)a.v[m * K + k] * (int64_t)b.v[k * N + n];
+                    s += emu::prod<Tag>(a.v[m * K + k], b.v[k * N + n]);
                 c.v[m * N + n] = accum_type::wrap(s);
             }
     }

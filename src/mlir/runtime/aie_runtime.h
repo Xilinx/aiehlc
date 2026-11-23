@@ -380,6 +380,8 @@ struct_event __Runtime_launch_kernel_group_ctrl(XAie_DevInst *dev, __Runtime_Ctr
 
 void __Runtime_phase_cycles(unsigned long long *cyc, unsigned int *calls);
 void __Runtime_wait_io_cycles(unsigned long long *cycles, unsigned int *calls);
+// GAP-RT1: always-on wait_io time in generic-timer ticks (the XTime counter; aie_host_split.h ahs_now)
+void __Runtime_host_split_wait_ticks(unsigned long long *ticks, unsigned int *calls);
 void __Runtime_ctrl_kernel_pkt_set(const void *blob, unsigned int bytes);
 // Encode a kernel ELF once into the blob __Runtime_ctrl_kernel_pkt_set takes
 // (malloc'd; NULL on failure) -- for callers that reload one kernel often.
@@ -402,6 +404,14 @@ void __Runtime_core_run(XAie_DevInst *dev, XAie_LocType *tiles, uint32_t num_til
 // Synchronization
 void __Runtime_wait_event(XAie_DevInst *dev, struct_event ev);
 void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_ev);
+// Wait-idle hook (GHL): host work that is independent of the running launch (e.g. the
+// post-processing of a PREVIOUS launch's output) stepped from __Runtime_wait_io's
+// DMA poll, one fn(arg) call per poll iteration while the array computes. fn does a
+// bounded chunk and returns nonzero when it has nothing left; the slot is then
+// cleared. The caller owns fn/arg: it clears the slot (fn = NULL) after the launch
+// and finishes any remainder itself. fn must not touch the launch's own buffers.
+typedef int (*Runtime_wait_hook_fn)(void *arg);
+void __Runtime_set_wait_hook(Runtime_wait_hook_fn fn, void *arg);
 /* C only: single name for emitted host. */
 #ifndef __cplusplus
 #define __Runtime_wait(dev, x)                                                                                         \
@@ -473,6 +483,7 @@ AieRC __Runtime_core_perf_setup(XAie_DevInst *dev, XAie_LocType tile);
 AieRC __Runtime_core_perf_read(XAie_DevInst *dev, XAie_LocType tile, uint32_t *active, uint32_t *vec_instr,
                                uint32_t *stream_stall, uint32_t *lock_stall);
 int __Runtime_core_perf_probe_valid(void);
+void __Runtime_core_perf_report(int tag);
 void __Runtime_core_perf_read_probe(uint32_t *active, uint32_t *vec_instr, uint32_t *stream_stall,
                                     uint32_t *lock_stall);
 void __Runtime_perfcnt_read_mm2s_probe(uint32_t *ch0, uint32_t *ch1);
@@ -938,6 +949,8 @@ void __Runtime_ctrl_shim_bd_begin(__Runtime_CtrlRowFabric *f);
 void __Runtime_ctrl_shim_bd_commit(void);
 int __Runtime_ctrl_shim_bd_sync(void);
 void __Runtime_ctrl_shim_bd_ctrl_stats_print(void);
+/* AOT shim-BD calls that fell back to JIT since boot (= [SHIM_BD_CTRL] aot_fallbacks) */
+unsigned long long __Runtime_ctrl_aot_fallbacks(void);
 
 // Poll the shim S2MM drain until the response lands, sync it for the CPU, and
 // return the first response word. Uses @inst->token armed by

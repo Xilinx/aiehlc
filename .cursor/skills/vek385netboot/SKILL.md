@@ -13,7 +13,7 @@ python3 script/test/apppaltest.py -board vek385 -host gomphus3 -y aout/main.elf 
 `-board vek385` accepts any `vek385-N` on that host (`-board vek385-3` only that
 one); `-board-rev b` programs the boot + PLD PDI pair. Run board tests under the
 farm lock: `BOARD_OWNER=huaj board.py lock vek385-3 -- <cmd>`
-(`/scratch/staff/huaj/aiengineers/skills/board-mgmt/board.py`). Do **not** nest
+(`<aiengineers>/skills/board-mgmt/board.py`). Do **not** nest
 `board.py power-cycle` inside `board.py lock` -- both take the same flock and it
 deadlocks.
 
@@ -27,12 +27,12 @@ Logs: `aiengineers/jane/tasks/2026-11-06_vek385-3_main_netload/s2/`. With `-boar
 need `BOARDNAME/PALIP` or `--netload-bootstrap`: `--netload` bootstraps by itself if the board is off.
 
 **Prerequisites**
-- The board must be held by huaj's job: `/proj/systest/bin/cluster-ping | grep vek385-11`
+- The board must be held by huaj's job: `<systest>/bin/cluster-ping | grep vek385-11`
   shows `huaj`. Pairs: vek385-11 = crimini1 (hw_server `crimini1:3121`), vek385-3 = gomphus3.
   Both hosts have eth1 = 10.10.70.101/24, and the supervisor is at 10.10.70.50.
 - `BOARD_OWNER=huaj board.py probe vek385-11` must show `[vek385-11] Systest#`. Never use `become`
   (palmyra only). apppaltest uses the host's systest-client by itself.
-- `source /scratch/staff/huaj/aiengineers/skills/vitis-2026.2/vitis_env.sh` (xsdb, A78 gcc).
+- `source <aiengineers>/skills/vitis-2026.2/vitis_env.sh` (xsdb, A78 gcc).
   The supervisor was verified on the board with gcc 13.4 (2026.1). gcc 15.3 is not verified on the board.
 
 **PMC system reset before programming.** With `-board vek385*` the bootstrap runs
@@ -124,6 +124,6 @@ output, so a plain `grep GOLDEN` sees a stale PASS (seen in 3 of 5 runs on vek38
   timeout; netload ends on the supervisor's `exited`.
 
 Details: `src/tool/netboot/README.md` "VEK385", `doc/design/lwip_elf_bootloader.md` §14.
-Logs for every number above: `/scratch/staff/huaj/aiengineers/jane/tasks/` `2026-11-05_vek385-11_netload/`
+Logs for every number above: `<aiengineers>/jane/tasks/` `2026-11-05_vek385-11_netload/`
 (README, try3/full.out, full_bootstrap.log, exp2_steps.log), `2026-11-04_vek385_netload/dma_ch1/`,
 `2026-11-05_vek385_netboot_bin/`, `2026-11-05_netboot_exit_rc/`.

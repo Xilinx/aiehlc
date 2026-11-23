@@ -20,12 +20,13 @@ run_cmd() {
 }
 
 usage() {
-    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss]"
+    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss]"
     echo "  --platform    baremetal (default) | sim | linux | baremetal_debug"
     echo "                'baremetal_debug' builds a baremetal ELF and writes sim_config.sh so the debug"
     echo "                UI can run either a hardware test or a simulator run from one build."
     echo "  --profiling   build the host with the PMU profiling layer (-DAIEHLC_PROFILING=1)"
-    echo "  --skip-bss    skip .bss zero-init on kernel load (-DAIEHLC_SKIP_BSS_DEFAULT=1)"
+    echo "  --skip-bss    skip ALL .bss zero-init on kernel load (-DAIEHLC_SKIP_BSS_DEFAULT=1; unsafe if the kernel reads zeroed statics)"
+    echo "  --skip-port-bss  skip zero-init only for DMA port-buffer .bss (buf_in_*/buf_out_*), keep it for the rest (-DAIEHLC_SKIP_BSS_DEFAULT=2)"
     return 1
 }
 
@@ -256,6 +257,10 @@ while [[ $# -gt 0 ]]; do
             PROFILING=1
             shift
             ;;
+        --skip-port-bss)
+            SKIP_BSS=2
+            shift
+            ;;
         --skip-bss)
             SKIP_BSS=1
             shift
@@ -382,14 +387,34 @@ else
 fi
 AIENGINE_LIB_DIR=$ARCH_APU_ALIB/../libsrc/build_configs/gen_bsp/libsrc/aienginev2/src
 
-AIEHLC="${AIEHLC_DIR}/build/aiehlc"
-if [[ ! -f "${AIEHLC_DIR}/build/aiehlc" ]]; then
-    AIEHLC="${AIEHLC_DIR}/release/prebuild/aiehlc"
+# AIEHLC_BIN=<path>: run that aiehlc binary (e.g. a side build dir) instead of build/aiehlc
+if [[ -n "${AIEHLC_BIN:-}" ]]; then
+    if [[ ! -x "${AIEHLC_BIN}" ]]; then
+        echo "aiehlc.sh: AIEHLC_BIN=${AIEHLC_BIN} is not an executable" >&2
+        return 1 2>/dev/null || exit 1
+    fi
+    AIEHLC="${AIEHLC_BIN}"
+else
+    AIEHLC="${AIEHLC_DIR}/build/aiehlc"
+    if [[ ! -f "${AIEHLC_DIR}/build/aiehlc" ]]; then
+        AIEHLC="${AIEHLC_DIR}/release/prebuild/aiehlc"
+    fi
 fi
+echo "aiehlc.sh: AIEHLC_BIN=${AIEHLC}"
 
 # compile aie-rt, if the local aie-rt exist
 if [ -d "${AIE_DRIVER_PARENT_DIR}/aie-rt/driver/" ] && [[ "$platform" != "sim" ]]; then
     USE_LOCAL_AIERT_BSP=1
+    # GAP-ALIB-RACE: build_hw_lib wipes and rebuilds the tree-shared thirdparty/alib (include/, lib/*.a,
+    # aie-rt objects); two aiehlc.sh runs on one tree (e.g. a full and a VERIFY UNet build in parallel)
+    # deleted each other's objects ("xaie_feature_config.h: No such file", rc=2). Hold an exclusive lock
+    # on the alib dir from here until this script exits, since the later host link reads alib/lib + include.
+    if command -v flock >/dev/null 2>&1; then
+        exec {AIEHLC_ALIB_LOCK_FD}>"${AIE_DRIVER_PARENT_DIR}/.aiehlc_alib.lock"
+        echo "aiehlc.sh: waiting for alib lock ${AIE_DRIVER_PARENT_DIR}.aiehlc_alib.lock"
+        flock "${AIEHLC_ALIB_LOCK_FD}"
+        echo "aiehlc.sh: alib lock held"
+    fi
     build_hw_lib \
         "${ARCH_APU_AINC}" \
         ${TOOL_PREFIX}gcc \
@@ -562,8 +587,8 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
 
     # Run hostcompile.sh with WORKLOCAL_DIR pointing at aout/worklocal.
     hc_extra_defs="${EXTRA_DEFS:-}"
-    if [ "${SKIP_BSS}" -eq 1 ]; then
-        hc_extra_defs="${hc_extra_defs} -DAIEHLC_SKIP_BSS_DEFAULT=1"
+    if [ "${SKIP_BSS}" -ne 0 ]; then
+        hc_extra_defs="${hc_extra_defs} -DAIEHLC_SKIP_BSS_DEFAULT=${SKIP_BSS}"
     fi
     WORKLOCAL_DIR="${WORKLOCAL_DIR}" AIE_VERSION="${aie_version}" PLATFORM="${platform}" \
         SIM_TILES="${SIM_TILES:-}" DEBUG_SYMS="${DEBUG_SYMS}" \

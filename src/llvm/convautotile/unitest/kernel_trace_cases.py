@@ -10,7 +10,7 @@ the tensor form (simpleconv2dkernel.cc: aie::in / aie::out, .pad, .reuse,
 block views, aie::autotune), DATAFLOW_CASES the {.depth / .resident / .tile}
 options (simplegemm_dataflow.cc), SPACE_CASES hand-written GemmSpaces + block
 loads (simpleconv2dkernel_space.cc: a GemmSpace and the kernel's blocks must agree),
-TEMPLATE_CASES a `template <...> __global__` kernel (example/aiednn/gemm_kacc_bf16.cc:
+TEMPLATE_CASES a `template <...> __global__` kernel (src/aiednn/gemm/gemm_kacc_kernel.cc + a host launch:
 instantiated at its launch by kernel_template.cpp before the analysis).
 
     python3 src/llvm/convautotile/unitest/kernel_trace_cases.py [build/aiehlc-convtile]
@@ -73,9 +73,33 @@ CASES = [
        "    static int8_t w[16 * 196];"),
       ("    aie::release(win_b);\n", "")],
      "is never loaded"),
+    # A port's `>` missing: the whole parameter list used to read as one
+    # unrecognizable "GemmSpace" port; the error now names the port and line.
+    ("aie::port missing its closing >",
+     [("aie::shape<230, 230, 4>> win_a", "aie::shape<230, 230, 4> win_a")],
+     "line 3: `aie::port<input_window_int8 *, aie::IFM, aie::shape<230, 230, 4> win_a,` -- the `<` of aie::port is never closed"),
+    # A declaration the blocks cannot fit at any offset: the hint names the
+    # port's aie::shape (and what the blocks span), not just each core.
+    ("weights port declared with the input's shape (hint: check its aie::shape)",
+     [("aie::shape<64, 7, 7, 4>> win_b", "aie::shape<230, 230, 4>> win_b")],
+     "case.cc:4: win_b: hint: the kernel's blocks are 4-D, spanning (64,7,7,4), which no offset fits into the "
+     "declared `aie::shape<230,230,4>` -- check this port's aie::shape (the blocks suggest aie::shape<64,7,7,4>)"),
+    ("output port declared with too few channels (hint: check its aie::shape)",
+     [("aie::shape<112, 112, 64>> win_c", "aie::shape<112, 112, 4>> win_c")],
+     "(the blocks suggest aie::shape<112,112,64>) and its role (OFM); e.g. line 40 in "
+     "`aie::store_buffer(win_c, {oh0, ow0, pid_c * oc_t}, {oh_t, ow_t, oc_t})` on core (0,0) takes 16 in dim 2"),
+    ("load offset with an extra coordinate (hint: the call, not the port)",
+     [(LOAD_X, LOAD_X.replace("{oh0 * S, ow0 * S, 0}", "{oh0 * S, ow0 * S, 0, 0}"))],
+     "case.cc:39: win_a: hint: `aie::load_buffer(win_a, {oh0 * S, ow0 * S, 0, 0}, {ih_t, iw_t, C})` "
+     "passes an offset of 4 and a block shape of 3 coordinates -- the offset has an extra coordinate"),
+    # Harness errors name the failing call's line; a block never handed back
+    # names the call that took it.
+    ("never released: the error names the load that took the block",
+     [("    aie::release(win_b);\n", "")],
+     "case.cc:18: win_b block 1 on core (0,0): 1 block(s) still held at kernel end: never released"),
     ("store on an input port",
      [("int8_t *y = aie::store_buffer(win_c,", "int8_t *y = aie::store_buffer(win_a,")],
-     "aie::store_buffer on an input port"),
+     "case.cc:40: win_a block 1 on core (0,0): aie::store_buffer on an input port"),
     # Vector kernel (aie::mmul, emulated by aie_api_x86emu.h in the trace).
     ("vector: last K-block not shifted back (64-byte load runs past the row)",
      [("const int off = kb < 3 ? kb * 8 : 20;", "const int off = kb * 8;")],
@@ -269,38 +293,74 @@ SPACE_CASES = [
 ]
 
 
-# C++ templates on a __global__ (example/aiednn/gemm_kacc_bf16.cc): the launch
-# `gemm_kacc<GM, GN, GK, GTK, GRELU><<<mesh>>>` picks the instance.
-TEMPLATE_BASE = REPO / "example" / "aiednn" / "gemm_kacc_bf16.cc"
-TLAUNCH = "gemm_kacc<GM, GN, GK, GTK, GRELU><<<mesh>>>"
+# C++ templates on a __global__: the aiednn library kernel src/aiednn/gemm/gemm_kacc_kernel.cc (the one
+# gemm_kacc every network build instantiates), wrapped in TEMPLATE_HEAD / TEMPLATE_HOST (one launch); the launch
+# `gemm_kacc<...><<<mesh>>>` picks the instance. The arguments are aiednn.gemm_kacc_targs(64, 576, 256, kacc_geom).
+TEMPLATE_BASE = REPO / "src" / "aiednn" / "gemm" / "gemm_kacc_kernel.cc"
+TEMPLATE_HEAD = """#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#define GCH 64
+#define GPX 256
+
+"""
+TARGS = "64, 576, 256, 288, 64, 256, 16, 32, 18, 1, 4, 0"
+TARGS2 = "128, 576, 256, 288, 128, 256, 16, 32, 18, 2, 4, 0"   # (ch, K, px) = (128, 576, 256)
+TLAUNCH = "gemm_kacc<" + TARGS + "><<<mesh>>>"
+TEMPLATE_HOST = """
+
+static void gemm_kacc_run(int32_t *w, int32_t *x, int32_t *y) {
+    aieSetDevice(0);
+    aieArray device;
+    aieMesh mesh = device.partition({2, 6, 0, 6}, 4, 4);
+    """ + TLAUNCH + """(w, x, y);
+}
+
+int main() {
+    int32_t *Wd = (int32_t *)__Runtime_Alloc(128 * 576 * 2);
+    int32_t *Xd = (int32_t *)__Runtime_Alloc(256 * 576 * 2);
+    int32_t *Yd = (int32_t *)__Runtime_Alloc(128 * 256 * 4);
+    gemm_kacc_run(Wd, Xd, Yd);
+    printf("gemm_kacc done\\n");
+    return 0;
+}
+"""
+TPARAMS = "int NT, int S, bool TR>"
 TEMPLATE_CASES = [
-    ("template: baseline (one instance, keeps its name)", [], "PASS:instance gemm_kacc<256, 64, 2304, 64, 1> -> gemm_kacc"),
-    ("template: trailing arguments from the defaults (TK = 64, RELU = true)",
-     [(TLAUNCH, "gemm_kacc<GM, GN, GK><<<mesh>>>")],
-     "PASS:instance gemm_kacc<256, 64, 2304, 64, 1> -> gemm_kacc"),
+    ("template: baseline (one instance, keeps its name)", [],
+     "PASS:instance gemm_kacc<" + TARGS + "> -> gemm_kacc"),
+    ("template: trailing arguments from the defaults (TR = false)",
+     [(TPARAMS, "int NT, int S, bool TR = false>"), (TLAUNCH, "gemm_kacc<" + TARGS[:-3] + "><<<mesh>>>")],
+     "PASS:instance gemm_kacc<" + TARGS + "> -> gemm_kacc"),
     ("template: arguments are expressions over #defines",
-     [(TLAUNCH, "gemm_kacc<2 * 128, GN, GK, GTK * 2, false><<<mesh>>>")],
-     "PASS:instance gemm_kacc<256, 64, 2304, 128, 0> -> gemm_kacc"),
-    ("template: an instance the kernel cannot cover (M = 200, not a multiple of 4 * 16)",
-     [(TLAUNCH, "gemm_kacc<200, GN, GK, GTK, GRELU><<<mesh>>>")],
+     [(TLAUNCH, "gemm_kacc<GCH, 576, GPX, 576 / 2, GCH, GPX, 4 * 4, 32, 18, 1, GPX / GCH, false><<<mesh>>>")],
+     "PASS:instance gemm_kacc<" + TARGS + "> -> gemm_kacc"),
+    ("template: two instances in one file (same ports, a's shape <AROWS, KW>) -> per-instance block descriptors",
+     [(TLAUNCH + "(w, x, y);", "gemm_kacc<" + TARGS2 + "><<<mesh>>>(w, x, y);\n    " + TLAUNCH + "(w, x, y);")],
+     "PASS:static const aiehlc_blk_desc aiehlc_desc_gemm_kacc__128_576_256_288_128_256_16_32_18_2_4_0_a_port"),
+    ("template: an instance the kernel cannot cover (NT = 2 tiles of 16 rows per core on a 64-row a port)",
+     [(TLAUNCH, "gemm_kacc<64, 576, 256, 288, 64, 256, 16, 32, 18, 2, 4, 0><<<mesh>>>")],
      "ERROR"),
     ("template: never launched",
-     [(TLAUNCH, "gemm_kacc_typo<GM, GN, GK, GTK, GRELU><<<mesh>>>")],
+     [(TLAUNCH, "gemm_kacc_typo<" + TARGS + "><<<mesh>>>")],
      "is never launched as gemm_kacc<...><<<mesh>>>(...): nothing to instantiate"),
     ("template: launched without template arguments",
      [(TLAUNCH, "gemm_kacc<<<mesh>>>")],
      "launched without template arguments"),
     ("template: too many arguments",
-     [(TLAUNCH, "gemm_kacc<GM, GN, GK, GTK, GRELU, 1><<<mesh>>>")],
-     "6 template arguments, the kernel has 5"),
+     [(TLAUNCH, "gemm_kacc<" + TARGS + ", 1><<<mesh>>>")],
+     "13 template arguments, the kernel has 12"),
     ("template: no argument and no default",
-     [(TLAUNCH, "gemm_kacc<GM, GN><<<mesh>>>")],
-     "no argument and no default for template parameter K"),
+     [(TLAUNCH, "gemm_kacc<64, 576><<<mesh>>>")],
+     "no argument and no default for template parameter PX"),
 ]
 
 
 def run_case(cli, name, edits, expect, base=BASE):
     src = base.read_text()
+    if base == TEMPLATE_BASE:  # the library kernel alone: add the includes and a host launch
+        src = TEMPLATE_HEAD + src + TEMPLATE_HOST
     for old, new in edits:
         if old not in src:
             return False, f"mutation anchor not found: {old[:60]!r}"

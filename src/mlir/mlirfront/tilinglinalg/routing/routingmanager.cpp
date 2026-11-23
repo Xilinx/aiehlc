@@ -30,11 +30,11 @@ void routingdialect::initialize()  {
     #define GET_OP_LIST
     #include "routingop.cc.inc"
         >();
-    // 如果有 Attr / Type：addAttributes<...>(); addTypes<...>();
-     addAttributes<
+    // if there are Attrs / Types: addAttributes<...>(); addTypes<...>();
+    addAttributes<
     #define GET_ATTRDEF_LIST
     #include "routingattr.cc.inc"
-    >();
+        >();
 
         // 3. Types
     addTypes<
@@ -676,6 +676,8 @@ routing::TensorRoutingInfoMap routing::collectTensorRoutingInfo(mlir::ModuleOp m
             if (auto pp = decl.getPpDepthAttr())
                 info.ppDepth = pp.getInt();
             info.kernelBlock = decl.getKernelBlockAttr();
+            if (auto wb = op->getAttrOfType<IntegerAttr>(kScheduleWindowBytesAttr))
+                info.windowBytes = wb.getInt();
         } else if (op->getName().getStringRef() == "dfscheblueprint.declare_data" && op->getNumOperands() == 1) {
             // Matched by name: the routing library does not link the
             // dfscheblueprint dialect.
@@ -687,6 +689,8 @@ routing::TensorRoutingInfoMap routing::collectTensorRoutingInfo(mlir::ModuleOp m
             if (auto pp = op->getAttrOfType<IntegerAttr>(kDeclPpDepthAttr))
                 info.ppDepth = pp.getInt();
             info.kernelBlock = op->getAttrOfType<KernelBlockAttr>(kDeclKernelBlockAttr);
+            if (auto wb = op->getAttrOfType<IntegerAttr>(kDeclWindowBytesAttr))
+                info.windowBytes = wb.getInt();
         } else {
             return;
         }
@@ -700,6 +704,11 @@ routing::TensorRoutingInfoMap routing::collectTensorRoutingInfo(mlir::ModuleOp m
 const routing::TensorRoutingInfo *routing::lookupTensorRoutingInfo(const TensorRoutingInfoMap &map, int argIdx) {
     auto it = map.find(argIdx);
     return it == map.end() ? nullptr : &it->second;
+}
+
+int64_t routing::lookupWindowBytes(const TensorRoutingInfoMap &map, int argIdx) {
+    const TensorRoutingInfo *info = lookupTensorRoutingInfo(map, argIdx);
+    return info ? info->windowBytes : 0;
 }
 
 routing::HaloAttr routing::lookupHalo(const TensorRoutingInfoMap &map, int argIdx) {
@@ -750,6 +759,8 @@ void routing::copyTensorRoutingInfo(routing::createscheduletensor from, mlir::Op
         to->setAttr(kDeclPpDepthAttr, a);
     if (auto a = from.getKernelBlockAttr())
         to->setAttr(kDeclKernelBlockAttr, a);
+    if (auto a = from->getAttrOfType<IntegerAttr>(kScheduleWindowBytesAttr))
+        to->setAttr(kDeclWindowBytesAttr, a);
 }
 
 // The routing func is the module's func.func (@main, or @routing on the
@@ -814,10 +825,10 @@ mlir::func::FuncOp routingmanager::createroutingfunc(MLIRContext* ctx, int total
         Value lb = builder.create<arith::ConstantIndexOp>(location, 0);
         Value ub = builder.create<arith::ConstantIndexOp>(location, totalN);
         Value step = builder.create<arith::ConstantIndexOp>(location,1);
-  // ──────────────────────────────
-  // 2. 创建 scf.forall
-  //    OpBuilder 会回调一个 lambda，让你往 region 里塞指令
-  // ──────────────────────────────
+        // ──────────────────────────────
+        // 2. Create the scf.forall
+        //    OpBuilder calls back a lambda that lets you put ops into the region
+        // ──────────────────────────────
         auto scf = builder.create<mlir::scf::ForOp>(location, lb, ub, step);
         {
             //use such format to fix the generic format print issue 

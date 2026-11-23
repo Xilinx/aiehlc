@@ -121,7 +121,27 @@ include_directories("./src/mlir/mlirfront/tilinglinalg/routing/inc/")
 find_package(Boost REQUIRED CONFIG)
 #find_package(Boost 1.89.0 REQUIRED)
 # MLIR
+# zstd fallback (GAP-aiehlc-build-0a0b74/14b6ad): LLVM built with LLVM_ENABLE_ZSTD
+# exports zstd::libzstd_shared in its link interface, but Findzstd needs zstd.h and
+# libzstd.so (the -dev package). Hosts with only the runtime libzstd.so.1 then fail at
+# generate time with "zstd::libzstd_shared not found". aiehlc only links zstd, so if
+# the regular lookup fails create the IMPORTED target from the runtime library.
 set(CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}/lib/cmake/mlir" ${CMAKE_PREFIX_PATH})
+list(APPEND CMAKE_MODULE_PATH "${LLVM_INSTALL_DIR}/lib/cmake/llvm")
+find_package(zstd QUIET)
+if(NOT TARGET zstd::libzstd_shared)
+  find_library(AIEHLC_ZSTD_RUNTIME_LIB NAMES zstd libzstd.so.1)
+  if(AIEHLC_ZSTD_RUNTIME_LIB)
+    add_library(zstd::libzstd_shared SHARED IMPORTED GLOBAL)
+    set_target_properties(zstd::libzstd_shared PROPERTIES
+        IMPORTED_LOCATION "${AIEHLC_ZSTD_RUNTIME_LIB}")
+    message(STATUS "zstd fallback: ${AIEHLC_ZSTD_RUNTIME_LIB}")
+  else()
+    message(WARNING "zstd fallback: no libzstd found; LLVM link interface may fail")
+  endif()
+else()
+  message(STATUS "zstd: using zstd::libzstd_shared from Findzstd (${zstd_LIBRARY})")
+endif()
 find_package(MLIR REQUIRED CONFIG PATHS ${MLIR_DIR})
 
 include_directories(${MLIR_INCLUDE_DIRS})
