@@ -174,19 +174,29 @@ def read_param_names(blob_path: Path) -> list:
     Raises if the magic does not match, which catches a truncated or
     wrong-format file here instead of as silent garbage on target.
     """
-    data = blob_path.read_bytes()
-    magic, _reserved = struct.unpack_from("<QQ", data, 0)
+    with open(blob_path, "rb") as f:
+        return _read_names(f, blob_path)
+
+
+def _read_exact(f, n: int, blob_path: Path, what: str) -> bytes:
+    b = f.read(n)
+    if len(b) != n:
+        raise ValueError(f"{blob_path.name}: truncated at {what} "
+                         f"(offset {f.tell()}, wanted {n} B, got {len(b)})")
+    return b
+
+
+def _read_names(f, blob_path: Path) -> list:
+    """Header + name table from an open blob positioned at 0 (F14: header-only read)."""
+    magic, _reserved, n_names = struct.unpack("<QQQ", _read_exact(f, 24, blob_path, "header"))
     if magic != PARAM_MAGIC:
         raise ValueError(
             f"{blob_path.name}: bad magic 0x{magic:X}, expected "
             f"0x{PARAM_MAGIC:X} (not a relay.save_param_dict blob?)")
-    n_names = struct.unpack_from("<Q", data, 16)[0]
-    names, off = [], 24
+    names = []
     for _ in range(n_names):
-        ln = struct.unpack_from("<Q", data, off)[0]
-        off += 8
-        names.append(data[off:off + ln].decode())
-        off += ln
+        ln = struct.unpack("<Q", _read_exact(f, 8, blob_path, "name length"))[0]
+        names.append(_read_exact(f, ln, blob_path, "name").decode())
     return names
 
 
@@ -206,33 +216,32 @@ def param_offsets(blob_path: Path) -> dict:
     and silently computes garbage. Regenerate both together, which
     ``build_arm_elf`` does; never hand-copy one over the other.
     """
-    data = blob_path.read_bytes()
-    names = read_param_names(blob_path)
-    # Skip the header + name table to reach the array payloads.
-    off = 24
-    for name in names:
-        off += 8 + len(name.encode())
-    n_arrays = struct.unpack_from("<Q", data, off)[0]
-    off += 8
-    if n_arrays != len(names):
-        raise ValueError(f"{blob_path.name}: {n_arrays} arrays vs "
-                         f"{len(names)} names")
-
+    # F14: walk the record headers and seek over the payloads. The old version
+    # read the whole blob twice per call (2 x 1.29 GB for the UNet, 9 calls per
+    # build: 12-25 s of read() in a warm --fast build); the result is identical.
+    size = os.path.getsize(blob_path)
     out = {}
-    for name in names:
-        magic = struct.unpack_from("<Q", data, off)[0]
-        if magic != NDARRAY_MAGIC:
-            raise ValueError(f"{blob_path.name}: bad NDArray magic at {off}")
-        off += 8 + 8                      # magic + reserved
-        off += 4 + 4                      # device_type + device_id
-        ndim = struct.unpack_from("<i", data, off)[0]
-        off += 4
-        off += 1 + 1 + 2                  # DLDataType: code, bits, lanes
-        off += 8 * ndim                   # int64 shape
-        nbytes = struct.unpack_from("<q", data, off)[0]
-        off += 8
-        out[name] = (off, nbytes)
-        off += nbytes
+    with open(blob_path, "rb") as f:
+        names = _read_names(f, blob_path)
+        n_arrays = struct.unpack("<Q", _read_exact(f, 8, blob_path, "array count"))[0]
+        if n_arrays != len(names):
+            raise ValueError(f"{blob_path.name}: {n_arrays} arrays vs "
+                             f"{len(names)} names")
+        for name in names:
+            off = f.tell()
+            # magic, reserved, device_type, device_id, ndim, DLDataType(code, bits, lanes)
+            magic, _r, _dt, _di, ndim, _c, _b, _l = struct.unpack(
+                "<QQiiiBBH", _read_exact(f, 32, blob_path, "NDArray header"))
+            if magic != NDARRAY_MAGIC:
+                raise ValueError(f"{blob_path.name}: bad NDArray magic at {off}")
+            _read_exact(f, 8 * ndim, blob_path, "shape")           # int64 shape
+            nbytes = struct.unpack("<q", _read_exact(f, 8, blob_path, "nbytes"))[0]
+            off = f.tell()
+            if nbytes < 0 or off + nbytes > size:
+                raise ValueError(f"{blob_path.name}: {name} payload {nbytes} B at "
+                                 f"{off} runs past end of file ({size} B)")
+            out[name] = (off, nbytes)
+            f.seek(nbytes, os.SEEK_CUR)
     return out
 
 
