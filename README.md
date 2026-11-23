@@ -11,7 +11,7 @@ Engine array: VCK190 (AIE), VEK280 (AIE-ML), VEK385 (AIE2PS); bare metal or Linu
   on x86, records those data accesses, and derives from them the DMA buffer
   descriptors, stream-switch routing, ping-pong buffers, locks and launch
   schedule. No ADF graph, no PLIO, no hand-written buffer descriptors.
-- **CUDA-style host code.** Allocate, launch with `kernel<<<mesh>>>(...)`, check
+- **CUDA/RCOM-style host code.** Allocate, launch with `kernel<<<mesh>>>(...)`, check
   the result -- the runtime wraps the AIE driver and loads a pre-built hardware
   design (PDI), so no FPGA flow is involved.
 - **Checked before the board.** Blocks outside a tensor, data used without
