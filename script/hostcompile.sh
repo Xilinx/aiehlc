@@ -709,6 +709,49 @@ void host_canonicalized();\
 fi
 HOST_SRC="${HOST_FIXED}"
 
+# HOSTCOMPILE_HOST_JOBS: compile host.cc, the 8 aie_runtime*.c files and routing.cc at once
+# (default 10; 1 = the old serial blocks below). Same commands and flags as the serial blocks,
+# so the objects are identical; on the UNet carrier layer this cuts ~7.9 s of serial g++ to the
+# longest single compile (host.cc, ~3.6 s). On success REBUILD=0 makes the serial blocks skip.
+_HC_JOBS="${HOSTCOMPILE_HOST_JOBS:-10}"
+if [ "${REBUILD}" -eq 1 ] && [ "${_HC_JOBS}" -gt 1 ] 2>/dev/null; then
+    # Same unquoted expansions as the serial blocks (no re-parsing through bash -c, so EXTRA_DEFS
+    # word-splits exactly as before).
+    _hc_one() {
+        case "$1" in
+            host)    ${TOOL_PREFIX}g++ ${HOST_OPT_FLAGS} -std=c++20 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -c "${HOST_SRC}" -o host.o ;;
+            routing) ${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++17 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -c "${WORKLOCAL_DIR}/routing.cc" -o routing.o ;;
+            *)       ${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++17 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -c "${AIEHLC_ROOT}/src/mlir/runtime/$1.c" -o "$1.o" ;;
+        esac
+    }
+    _hc_names=(host aie_runtime aie_runtime_debug aie_runtime_stream_debug aie_runtime_common
+               aie_runtime_control_plan aie_runtime_resource aie_ctrlpkt_encode aie_runtime_xaie_seq)
+    [ "${HAS_ROUTING}" -eq 1 ] && _hc_names+=(routing)
+    echo "Compiling host.cc + runtime (${#_hc_names[@]} objects, ${_HC_JOBS} at a time; HOSTCOMPILE_HOST_JOBS=1 for serial)..."
+    _hc_pids=(); _hc_fail=""
+    for _i in "${!_hc_names[@]}"; do
+        rm -f "${_hc_names[$_i]}.o"
+        ( set +e; _hc_one "${_hc_names[$_i]}" ) > "hc_${_hc_names[$_i]}.log" 2>&1 &
+        _hc_pids+=($!)
+        if [ "${#_hc_pids[@]}" -ge "${_HC_JOBS}" ]; then
+            wait "${_hc_pids[0]}" || true          # failures are caught by the .o check below
+            _hc_pids=("${_hc_pids[@]:1}")
+        fi
+    done
+    for _p in "${_hc_pids[@]}"; do wait "${_p}" || true; done
+    for _n in "${_hc_names[@]}"; do
+        [ -s "hc_${_n}.log" ] && { echo "--- ${_n}:"; cat "hc_${_n}.log"; }
+        [ -f "${_n}.o" ] || _hc_fail="${_hc_fail} ${_n}"
+        rm -f "hc_${_n}.log"
+    done
+    if [ -n "${_hc_fail}" ]; then
+        echo "Error: failed to compile:${_hc_fail}"
+        exit 1
+    fi
+    REBUILD=0
+    echo "(compiled in parallel; the 'Skipping ...' lines below are expected)"
+fi
+
 # Compile host
 if [ "${REBUILD}" -eq 1 ] || [ ! -f host.o ]; then
     set -x
@@ -853,7 +896,8 @@ if [ "${HOST_ENTRY_KIND}" = "library" ]; then
         echo "Error: failed to archive ${HOST_LIB_NAME}"
         exit 1
     fi
-    ${TOOL_PREFIX}ranlib "${HOST_LIB_NAME}" 2>/dev/null || true
+    # No ranlib: `ar rcs` already writes the symbol index (ranlib left the 430 MB UNet carrier
+    # archive byte-identical and cost 3.0 s).
 
     echo ""
     echo "============================================"
