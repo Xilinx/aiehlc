@@ -287,8 +287,8 @@ def blob_layout(offsets: dict, align: int = 64, bf16_names=(), order=()) -> tupl
 
 
 # F4 (-fast): weights.bin reuse. A UNet build writes the same 647 MB weights.bin twice
-# (build_arm_elf offload check + link), ~27-30 s each, byte-identical to the copy the
-# convert cache restored (tasks/2026-11-23_fast-build-F8-e2e-and-F4-plan.md). Under
+# (build_arm_elf offload check + link), ~27-30 s each, with the same bytes both times
+# (tasks/2026-11-23_fast-build-F8-e2e-and-F4-plan.md); the second one is skipped. Under
 # AIEHLC_FAST=1 (or AIEHLC_WBIN_REUSE=1; AIEHLC_WBIN_REUSE=0 forces it off) generate_driver
 # writes a ``weights.bin.key`` sidecar after the blob and its group-step patches:
 # key = sha256 over (sha1 of params.bin content, layout, bf16 names, every group-step weight file + its
