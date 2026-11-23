@@ -248,9 +248,128 @@ def _nm(paths, *flags) -> list:
     return rows
 
 
+# F13 -fast: content cache for isolate_archive. The UNet carrier archive is ~430 MB; ar x + ld -r +
+# objcopy + ar rcs take 8-13 s per build although hostcompile.sh rebuilds it byte-identically (F11).
+# AIEHLC_ISO_CACHE=<dir>, or under AIEHLC_FAST=1 ${XDG_CACHE_HOME:-~/.cache}/aiehlc/iso;
+# AIEHLC_ISO_CACHE=0 disables. Key = sha1(version, keep, binutils identity, archive bytes); entries are
+# 0444 and hardlinked into the build (copy on EXDEV); the newest AIEHLC_ISO_CACHE_KEEP (default 3) stay.
+_ISO_VERSION = 1            # bump when isolate_archive's output changes
+_ISO_ENV, _ISO_KEEP_ENV = "AIEHLC_ISO_CACHE", "AIEHLC_ISO_CACHE_KEEP"
+
+
+def _iso_cache_dir():
+    d = os.environ.get(_ISO_ENV, "").strip()
+    if d == "0":
+        return None
+    if not d and os.environ.get("AIEHLC_FAST", "0").strip() == "1":
+        xdg = os.environ.get("XDG_CACHE_HOME", "").strip() or str(Path.home() / ".cache")
+        d = str(Path(xdg) / "aiehlc" / "iso")
+    return Path(d).resolve() if d else None
+
+
+def _iso_key(archive: Path, keep) -> str:
+    h = hashlib.sha1(f"v{_ISO_VERSION}\0{CROSS}\0{chr(1).join(sorted(set(keep)))}\0".encode())
+    for tool in ("ar", "ld", "objcopy", "nm"):     # a toolchain change must miss
+        exe = shutil.which(f"{CROSS}{tool}")
+        if exe:
+            st = Path(exe).resolve().stat()
+            h.update(f"{Path(exe).resolve()}:{st.st_size}:{st.st_mtime_ns}\0".encode())
+    with open(archive, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _iso_backup(archive: Path) -> Path:
+    # The original stays next to the layer for debugging; rename, not copy (430 MB for UNet).
+    backup = archive.parent.parent / f"isolate_backup_{archive.name}.bak"   # not *.a: Makefile wildcard
+    os.replace(archive, backup)
+    return backup
+
+
+def _iso_place(ent: Path, archive: Path) -> None:
+    tmp = archive.with_name(archive.name + f".iso{os.getpid()}")
+    tmp.unlink(missing_ok=True)
+    try:
+        os.link(ent, tmp)
+    except OSError:
+        shutil.copyfile(ent, tmp)
+        os.chmod(tmp, 0o644)
+    tmp.replace(archive)
+
+
+def _iso_cache_get(c: Path, key: str, archive: Path):
+    import json
+    e = c / key
+    try:
+        res = json.loads((e / "result.json").read_text())
+        if not (e / "lib.a").is_file():
+            return None
+        _iso_backup(archive)
+        _iso_place(e / "lib.a", archive)
+    except (OSError, ValueError):
+        return None
+    try:
+        os.utime(e)                                  # LRU hint
+    except OSError:
+        pass
+    return res
+
+
+def _iso_cache_put(c: Path, key: str, archive: Path, res: dict) -> None:
+    import json
+    e = c / key
+    tmp = c / f".tmp-{key}-{os.getpid()}"
+    try:
+        if e.is_dir():
+            return
+        tmp.mkdir(parents=True)
+        try:
+            os.link(archive, tmp / "lib.a")
+        except OSError:
+            shutil.copyfile(archive, tmp / "lib.a")
+        os.chmod(tmp / "lib.a", 0o444)               # an in-place writer must fail loudly
+        (tmp / "result.json").write_text(json.dumps(res))
+        tmp.rename(e)
+    except OSError as ex:                            # never fail a build on the cache
+        print(f"  [build] isolate cache: store failed: {ex}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return
+    try:
+        n = max(1, int(os.environ.get(_ISO_KEEP_ENV, "3")))
+        ents = sorted((x.stat().st_mtime, x) for x in c.iterdir()
+                      if not x.name.startswith(".") and (x / "result.json").is_file())
+        for _, x in ents[:-n]:
+            if x.name != key:
+                shutil.rmtree(x, ignore_errors=True)
+        for t in c.glob(".tmp-*"):
+            if time.time() - t.stat().st_mtime > 86400:
+                shutil.rmtree(t, ignore_errors=True)
+    except (OSError, ValueError) as ex:
+        print(f"  [build] isolate cache: prune failed: {ex}")
+
+
 def isolate_archive(archive: Path, keep, verbose: bool = True) -> dict:
     """Localize every own global of *archive* except *keep* (see module doc)."""
     archive = Path(archive).resolve()
+    keep = list(keep)
+    c = _iso_cache_dir()
+    key = _iso_key(archive, keep) if c else None
+    if key:
+        res = _iso_cache_get(c, key, archive)
+        if res is not None:
+            if verbose:
+                print(f"  [build] isolate {archive.name}: cached ({len(res['kept']) - len(res['missing'])} "
+                      f"entry symbol(s) + {len(res['runtime_hooks'])} runtime hook(s), "
+                      f"{res['localized']} made local)")
+            return res
+    res = _isolate_archive(archive, keep, verbose)
+    if key and res["ok"]:
+        _iso_cache_put(c, key, archive, res)
+    return res
+
+
+def _isolate_archive(archive: Path, keep, verbose: bool) -> dict:
     tmp = Path(tempfile.mkdtemp(prefix="aiek_iso_", dir=archive.parent))
     try:
         subprocess.run([f"{CROSS}ar", "x", str(archive)], cwd=tmp, check=True)
@@ -281,9 +400,7 @@ def isolate_archive(archive: Path, keep, verbose: bool = True) -> dict:
                         str(merged)], check=True)
 
         missing = sorted(k for k in keep if k not in {n for n, t in _nm([merged], "-g", "--defined-only")})
-        backup = archive.parent.parent / f"isolate_backup_{archive.name}.bak"
-        shutil.copy2(archive, backup)       # not *.a: the Makefile wildcard must not see it
-        archive.unlink()
+        _iso_backup(archive)
         subprocess.run([f"{CROSS}ar", "rcs", str(archive), str(merged),
                         *[str(tmp / m) for m in runtime]], check=True)
     finally:
