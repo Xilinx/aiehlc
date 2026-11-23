@@ -291,10 +291,9 @@ def blob_layout(offsets: dict, align: int = 64, bf16_names=(), order=()) -> tupl
 # convert cache restored (tasks/2026-11-23_fast-build-F8-e2e-and-F4-plan.md). Under
 # AIEHLC_FAST=1 (or AIEHLC_WBIN_REUSE=1; AIEHLC_WBIN_REUSE=0 forces it off) generate_driver
 # writes a ``weights.bin.key`` sidecar after the blob and its group-step patches:
-# key = sha256(params.bin content, layout, bf16 names, every group-step weight file + its
-# placement, this file's source) and the result's sha256 + (size, mtime_ns, ino). The next call skips the
-# write and the patches only if the key matches AND weights.bin is still that file
-# (stat match, else its content hash is checked). Any other writer -> mismatch -> rewrite.
+# key = sha256 over (sha1 of params.bin content, layout, bf16 names, every group-step weight file + its
+# placement, this file's source) and the result's sha1. The next call skips the
+# write and the patches only if the key matches AND weights.bin still has that sha1. Any other writer -> mismatch -> rewrite.
 _WBIN_SIDECAR = "weights.bin.key"
 
 
@@ -305,9 +304,12 @@ def _wbin_reuse_on() -> bool:
     return os.environ.get("AIEHLC_FAST", "0").strip() == "1"
 
 
-def _sha256_file(path: Path) -> str:
+def _digest_file(path: Path) -> str:
+    """Content digest for the reuse key: sha1 (~1.0 s per 1.3 GB here vs sha256 5.9 s at
+    load 50 -- v1 with sha256 hashed ~2 GB per call and gave back ~20 of the ~29 s saved).
+    Not a security use. Content, not stat: two writes in one kernel tick keep mtime_ns."""
     import hashlib
-    h = hashlib.sha256()
+    h = hashlib.sha1()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(16 << 20), b""):
             h.update(chunk)
@@ -316,9 +318,9 @@ def _sha256_file(path: Path) -> str:
 
 def _wbin_key(params_path: Path, layout: dict, bf16_names, layers_dir: Path) -> str:
     import hashlib
-    h = hashlib.sha256(b"aiehlc-wbin-v1\0")
+    h = hashlib.sha256(b"aiehlc-wbin-v2\0")
     h.update(hashlib.sha256(Path(__file__).read_bytes()).digest())   # blob/bf16 code
-    h.update(_sha256_file(params_path).encode())
+    h.update(_digest_file(params_path).encode())
     h.update(json.dumps(sorted((k, list(v)) for k, v in layout.items())).encode())
     h.update(json.dumps(sorted(bf16_names)).encode())
     patches = [("S1", k, st["weights"]) for k, st in group_steps(layers_dir).items()
@@ -327,7 +329,7 @@ def _wbin_key(params_path: Path, layout: dict, bf16_names, layers_dir: Path) -> 
                 if v[0] == "step" and v[2].get("weights")]
     for tag, k, w in sorted(patches, key=lambda t: (t[0], str(t[1]))):
         h.update(json.dumps([tag, str(k), w], sort_keys=True, default=str).encode())
-        h.update(_sha256_file(layers_dir.parent / w["file"]).encode())
+        h.update(_digest_file(layers_dir.parent / w["file"]).encode())
     return h.hexdigest()
 
 
@@ -342,9 +344,7 @@ def _wbin_reusable(wbin: Path, key: str, size: int) -> bool:
         rec = json.loads(side.read_text())
         if rec.get("key") != key or not wbin.is_file() or wbin.stat().st_size != size:
             return False
-        if rec.get("stat") == _wbin_stat(wbin):
-            return True
-        return rec.get("sha256") == _sha256_file(wbin)
+        return rec.get("sha1") == _digest_file(wbin)   # always content: no stat shortcut
     except (OSError, ValueError):
         return False
 
@@ -352,7 +352,7 @@ def _wbin_reusable(wbin: Path, key: str, size: int) -> bool:
 def _wbin_record(wbin: Path, key: str) -> None:
     side = wbin.parent / _WBIN_SIDECAR
     tmp = side.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"key": key, "sha256": _sha256_file(wbin),
+    tmp.write_text(json.dumps({"key": key, "sha1": _digest_file(wbin),
                                "stat": _wbin_stat(wbin)}))
     os.replace(tmp, side)
 
