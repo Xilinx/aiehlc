@@ -630,10 +630,53 @@ def recorded_groups(workdir) -> list:
     return list(_read(workdir).get("groups", []))
 
 
+# record_group's last write per file: the exact text, the doc it encodes (never handed out) and the
+# indent=2 text of each top-level value / each group.  json.dumps(indent=2) runs the pure-Python
+# encoder (~17 ms per 0.7 MB doc), and a UNet build records 139 groups one by one (8 s); with the
+# cache only the new group is encoded.  Reused only when the file still holds exactly that text.
+_REC_CACHE: dict = {}
+
+
+def _ind(text: str, n: int) -> str:
+    return text.replace("\n", "\n" + " " * n)
+
+
+def _dump_cached(doc: dict, parts: dict, gtexts: dict) -> str:
+    """== ``json.dumps(doc, indent=2)``, reusing *parts* (top-level key -> value text) and
+    *gtexts* (group name -> group text); fills both."""
+    if not doc:
+        return "{}"
+    items = []
+    for k, v in doc.items():
+        if k == "groups":
+            names = [g.get("name") if isinstance(g, dict) else None for g in v] if isinstance(v, list) else []
+            if not v or None in names or len(set(names)) != len(names):
+                vt = _ind(json.dumps(v, indent=2), 2)      # empty / odd / duplicate names: in full
+                items.append("  " + json.dumps(k) + ": " + vt)
+                continue
+            for g in v:
+                if g["name"] not in gtexts:
+                    gtexts[g["name"]] = json.dumps(g, indent=2)
+            vt = "[\n" + ",\n".join("    " + _ind(gtexts[g["name"]], 4) for g in v) + "\n  ]"
+        else:
+            if k not in parts:
+                parts[k] = _ind(json.dumps(v, indent=2), 2)
+            vt = parts[k]
+        items.append("  " + json.dumps(k) + ": " + vt)
+    return "{\n" + ",\n".join(items) + "\n}"
+
+
 def record_group(workdir, plan: GroupPlan, source: str = None) -> dict:
     """Write (or replace) the group in ``layers/partition.json``; a call may belong to
     one group only."""
-    doc = _read(workdir)
+    p = _part(workdir)
+    text = p.read_text() if p.is_file() else None
+    hit = _REC_CACHE.get(str(p.resolve()))
+    if hit is not None and text is not None and hit[0] == text:
+        _, doc, parts, gtexts = hit
+    else:
+        doc = json.loads(text) if text is not None else {"layers": []}
+        parts, gtexts = {}, {}
     groups = [g for g in doc.get("groups", []) if g["name"] != plan.group.name]
     mine = set(plan.group.calls)
     for g in groups:
@@ -645,11 +688,16 @@ def record_group(workdir, plan: GroupPlan, source: str = None) -> dict:
     rec = plan.record()
     if source is not None:
         rec["source"] = str(source)
-    groups.append(rec)
+    rtext = json.dumps(rec, indent=2)
+    groups.append(json.loads(rtext))            # the cached doc never aliases the caller's rec
     doc["groups"] = sorted(groups, key=lambda g: g["calls"][0])
-    p = _part(workdir)
+    gtexts = {n: t for n, t in gtexts.items() if n != plan.group.name}
+    gtexts[plan.group.name] = rtext
+    out = _dump_cached(doc, parts, gtexts) + "\n"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(doc, indent=2) + "\n")
+    p.write_text(out)
+    _REC_CACHE.clear()                          # one file per process is the normal case
+    _REC_CACHE[str(p.resolve())] = (out, doc, parts, gtexts)
     return rec
 
 
