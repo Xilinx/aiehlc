@@ -5,7 +5,7 @@
 A white-box model that predicts, **without a board**, how long one AIE launch (and so one site or a whole
 network) takes on a given board, and says *where* the time goes (K, L or N). Calibrated parameters are
 frozen per board in `params/`. Everything below cites the code (`file:line`, paths relative to this
-directory unless noted). Background: the tutorial chapter 9 (`COSTMODEL.md`, "这个模型是什么，现在能做什么")
+directory unless noted). Background: the tutorial chapter 9 (`COSTMODEL.md`, "what this model is, and what it can do now")
 and the M7 report (`tasks/2026-11-23_M7/REPORT.md`) of the cost channel.
 
 ## 1. What the model is
@@ -217,7 +217,7 @@ instrumentation and were not touched. The build-input keys (`INPUT_PATHS` of
 (where the kernel / host assembly lives since main's unet-decl refactor) but exclude `src/costmodel` and
 `src/aiegraph/test`, so cost-model edits never mark a build stale.
 
-## 6. Limits (from the code and COSTMODEL.md ch. 9 "还没做到的")
+## 6. Limits (from the code and COSTMODEL.md ch. 9 "what is not done yet")
 
 1. **Post-compilation only.** Inputs are a compiled build (static features) and ISS core cycles; there is no
    pre-compile estimate.

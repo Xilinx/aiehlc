@@ -60,7 +60,7 @@ static int gemm_verify(const int8_t *A, const int8_t *B, const int8_t *C) {
                 printf("MISMATCH C[%d][%d] (core %d,%d): got %d, expected %d\n", m, n, m / 16, n / 16, got, want);
         }
     if (mismatches == 0)
-        printf("11/17：PASS: all %d output elements match.\n", GEMM_M * GEMM_N);
+        printf("11/17: PASS: all %d output elements match.\n", GEMM_M * GEMM_N);
     else
         printf("FAIL: %d mismatches out of %d.\n", mismatches, GEMM_M * GEMM_N);
     return mismatches;
