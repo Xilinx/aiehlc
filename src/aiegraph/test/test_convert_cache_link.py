@@ -70,3 +70,4 @@ def test_link_off_copies_all(monkeypatch, tmp_path):
 
 def test_link_knob_not_in_key():
     assert cc.LINK_ENV in cc._ENV_SKIP
+    assert "AIEHLC_WL_CACHE_LINK" in cc._ENV_SKIP
