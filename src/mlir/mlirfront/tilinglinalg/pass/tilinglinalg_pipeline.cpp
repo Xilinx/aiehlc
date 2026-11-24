@@ -1665,6 +1665,11 @@ bool TilingLinalgPipeline::runPipeline(mlir::MLIRContext &ctx, mlir::ModuleOp mo
             stream << "struct aieArray {\n";
             stream << "    int nextMeshId = 0;\n";
             stream << "    XAie_DevInst* _dev = nullptr;\n";
+            // `aieArray device(R, C);` = `device.partition(R, C)`; launches as that mesh (k<<<device>>>)
+            stream << "    aieMesh _mesh{};\n";
+            stream << "    aieArray() = default;\n";
+            stream << "    aieArray(int rows, int cols) { _mesh = partition(rows, cols); }\n";
+            stream << "    operator aieMesh() const { return _mesh; }\n";
             stream << "    aieMesh partition(aiePartition p, int rows, int cols) {\n";
             stream << "        int meshId = nextMeshId++;\n";
             stream

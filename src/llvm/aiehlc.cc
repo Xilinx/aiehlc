@@ -34,6 +34,7 @@
 #include <ostream>
 #include <sstream>
 #include <cstdlib>
+#include <functional>
 #include <regex>
 #include <set>
 #include <unordered_map>
@@ -995,11 +996,43 @@ public:
                         }
                     };
 
+                    // Peel what stands between the launch argument / a mesh initializer and the
+                    // declaration it names: temporaries, a copy construction, and the implicit
+                    // `aieArray -> aieMesh` conversion (`aieArray device(R, C); k<<<device>>>(...)`
+                    // or `aieMesh mesh = device;`), so `device`'s own (R, C) constructor is found.
+                    std::function<const Expr *(const Expr *)> peelMeshExpr = [&](const Expr *E) -> const Expr * {
+                        for (int guard = 0; E && guard < 16; guard++) {
+                            E = E->IgnoreParenImpCasts();
+                            if (const auto *EWC = dyn_cast<ExprWithCleanups>(E))
+                                E = EWC->getSubExpr();
+                            else if (const auto *MTE = dyn_cast<MaterializeTemporaryExpr>(E))
+                                E = MTE->getSubExpr();
+                            else if (const auto *BT = dyn_cast<CXXBindTemporaryExpr>(E))
+                                E = BT->getSubExpr();
+                            else if (const auto *C = dyn_cast<CXXConstructExpr>(E); C && C->getNumArgs() == 1)
+                                E = C->getArg(0);
+                            else if (const auto *MC = dyn_cast<CXXMemberCallExpr>(E);
+                                     MC && isa_and_nonnull<CXXConversionDecl>(MC->getMethodDecl()))
+                                E = MC->getImplicitObjectArgument();
+                            else
+                                return E;
+                        }
+                        return E;
+                    };
+
                     // Helper: extract mesh dims from an aieMesh VarDecl initialized via device.partition(part, rows,
-                    // cols)
+                    // cols), an aieDim / aieArray (rows, cols) constructor, or another such variable
+                    std::function<bool(const VarDecl *, int)> extractDimsFromAieMeshVarAt;
                     auto extractDimsFromAieMeshVar = [&](const VarDecl *VD) -> bool {
-                        if (!VD->hasInit())
+                        return extractDimsFromAieMeshVarAt(VD, 0);
+                    };
+                    extractDimsFromAieMeshVarAt = [&](const VarDecl *VD, int depth) -> bool {
+                        if (!VD->hasInit() || depth > 4)
                             return false;
+                        if (const auto *DR = dyn_cast<DeclRefExpr>(peelMeshExpr(VD->getInit())))
+                            if (const auto *Src = dyn_cast<VarDecl>(DR->getDecl()))
+                                if (Src != VD) // aieMesh mesh = device;
+                                    return extractDimsFromAieMeshVarAt(Src, depth + 1);
                         const Expr *init = VD->getInit()->IgnoreParenImpCasts();
                         // Handle ExprWithCleanups wrapper
                         if (const auto *EWC = dyn_cast<ExprWithCleanups>(init))
@@ -1022,6 +1055,18 @@ public:
                                     }
                                     return true;
                                 }
+                                // device.partition(rows, cols): columns 0..cols-1. Without this the mesh
+                                // read 0x0 and the pipeline fell back to 2x2, while the kernel analysis
+                                // (findMeshShape) traced ROWS x COLS.
+                                if (MD->getNameAsString() == "partition" && MCE->getNumArgs() == 2) {
+                                    clang::Expr::EvalResult r0, r1;
+                                    if (MCE->getArg(0)->EvaluateAsInt(r0, *Context) &&
+                                        MCE->getArg(1)->EvaluateAsInt(r1, *Context)) {
+                                        localMeshRows = r0.Val.getInt().getExtValue();
+                                        localMeshCols = r1.Val.getInt().getExtValue();
+                                    }
+                                    return true;
+                                }
                             }
                         }
                         // Fallback: CXXConstructExpr (aieDim or aggregate init)
@@ -1032,6 +1077,10 @@ public:
                         return false;
                     };
 
+                    // `k<<<device>>>` with `aieArray device(R, C)`: the argument is the
+                    // aieArray -> aieMesh conversion of `device`; continue from `device`.
+                    if (const Expr *peeled = peelMeshExpr(meshArg); isa_and_nonnull<DeclRefExpr>(peeled))
+                        meshArg = peeled;
                     if (const auto *Construct = dyn_cast<CXXConstructExpr>(meshArg)) {
                         if (Construct->getNumArgs() >= 2) {
                             // Direct construction: __aie_launch("k", aieDim(4,4), ...)
@@ -4967,6 +5016,12 @@ public:
                     ret += "struct aieArray {\n";
                     ret += "    int nextMeshId = 0;\n";
                     ret += "    XAie_DevInst* _dev = nullptr;\n";
+                    // `aieArray device(R, C);` = `device.partition(R, C)` (cols 0..C-1); the array
+                    // then launches as that mesh: `k<<<device>>>(...)`.
+                    ret += "    aieMesh _mesh{};\n";
+                    ret += "    aieArray() = default;\n";
+                    ret += "    aieArray(int rows, int cols) { _mesh = partition(rows, cols); }\n";
+                    ret += "    operator aieMesh() const { return _mesh; }\n";
                     ret += "    aieMesh partition(aiePartition p, int rows, int cols) {\n";
                     ret += "        int meshId = nextMeshId++;\n";
                     ret += "        _dev = __Runtime_init_mesh_partition_with(meshId, p.startCol, p.endCol - "
@@ -5766,6 +5821,10 @@ public:
                     stream << "struct aieArray {\n";
                     stream << "    int nextMeshId = 0;\n";
                     stream << "    XAie_DevInst* _dev = nullptr;\n";
+                    stream << "    aieMesh _mesh{};\n"; // aieArray device(R, C): see the parse-time stub
+                    stream << "    aieArray() = default;\n";
+                    stream << "    aieArray(int rows, int cols) { _mesh = partition(rows, cols); }\n";
+                    stream << "    operator aieMesh() const { return _mesh; }\n";
                     stream << "    aieMesh partition(aiePartition p, int rows, int cols) {\n";
                     stream << "        int meshId = nextMeshId++;\n";
                     stream << "        _dev = __Runtime_init_mesh_partition_with(meshId, p.startCol, p.endCol - "

@@ -84,9 +84,13 @@ def elf_segments(path) -> dict:
 def _source_facts(src: Path) -> dict:
     text = src.read_text(errors="replace") if src.is_file() else ""
     m = re.search(r"\.partition\(\s*\{([^}]*)\}\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", text)
+    # aieArray device(R, C) = partition(R, C): columns 0..C-1
+    c = None if m else re.search(r"\baieArray\s+\w+\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", text)
     return {"pragmas": [l.strip() for l in text.splitlines() if l.strip().startswith("#pragma")],
-            "partition": m.group(1).replace(" ", "") if m else None,
-            "mesh": [int(m.group(2)), int(m.group(3))] if m else None,
+            "partition": (m.group(1).replace(" ", "") if m else
+                          f"0,{int(c.group(2)) - 1},0,{int(c.group(1)) - 1}" if c else None),
+            "mesh": ([int(m.group(2)), int(m.group(3))] if m else
+                     [int(c.group(1)), int(c.group(2))] if c else None),
             "todo": len(re.findall(r"TODO\(", text)),
             "backbone": "TODO(compute)" in text,
             "ctrl_init": "ctrl_high_throughput_enable" in text or "control_plane_init" in text}
