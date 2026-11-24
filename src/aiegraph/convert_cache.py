@@ -65,7 +65,8 @@ _MAX_GB_DEFAULT = 20.0
 _ENV_SKIP = {ENV, MAX_ENV, "AIEHLC_KOBJ_CACHE", "AIEHLC_ROOT", "AIEHLC_FAST",
              "EXTRA_DEFS", "AIEHLC_SH_ARGS", "AIEHLC_WL_CACHE", "AIEHLC_ARM_JOBS",
              "AIEHLC_ARM_OBJ_CACHE", "AIEHLC_ARM_OBJ_CACHE_MAX_MB",
-             "AIEHLC_WBIN_REUSE", "AIEGRAPH_CONVERT_CACHE_LINK", "AIEHLC_WL_CACHE_LINK"}
+             "AIEHLC_WBIN_REUSE", "AIEGRAPH_CONVERT_CACHE_LINK", "AIEHLC_WL_CACHE_LINK",
+             "AIEHLC_WL_KEEP_KPAR"}
 LINK_ENV = "AIEGRAPH_CONVERT_CACHE_LINK"
 _LINK_MIN = 16 << 20            # hardlink files at least this big (F10)
 _NO_LINK_DIRS = ("arm_build",)  # first path parts the build rewrites in place

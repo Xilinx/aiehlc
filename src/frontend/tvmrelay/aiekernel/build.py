@@ -140,12 +140,29 @@ def _wl_link_on() -> bool:
     return os.environ.get(_WL_LINK_ENV, "1").strip() != "0"
 
 
+# F16: build/kpar/ is hostcompile.sh's per-kernel scratch for the parallel kernel build. Nothing reads
+# it after hostcompile.sh returns: the next hostcompile.sh run (install) either reuses every
+# kernel_<k>.o (-nt) and never looks at kpar/, or `rm -rf`s it before a rebuild. Its symlinks are
+# absolute and point into the aiehlc run's own worklocal, so in the cache and in aie/ they all dangle
+# (UNet: 12,056 of 12,056 links, 220 files, 458 MB). The wl cache get/put and install drop it.
+# AIEHLC_WL_KEEP_KPAR=1 keeps it (F15 behaviour: files hardlinked, links copied).
+_WL_KEEP_KPAR_ENV = "AIEHLC_WL_KEEP_KPAR"
+_WL_SCRATCH = "build/kpar"
+
+
+def _wl_keep_kpar() -> bool:
+    return os.environ.get(_WL_KEEP_KPAR_ENV, "0").strip() == "1"
+
+
 def _wl_copytree(src: Path, dst: Path, skip=None) -> dict:
-    """copytree(symlinks=True) that hardlinks :func:`_wl_linkable` files (0444).
-    *skip(rel)* -> True drops a file. Returns ``{"linked", "copied", "skipped"}`` counts."""
+    """copytree(symlinks=True) that hardlinks :func:`_wl_linkable` files (0444) and drops the
+    ``build/kpar`` scratch dir (F16, unless AIEHLC_WL_KEEP_KPAR=1).
+    *skip(rel)* -> True drops a file. Returns ``{"linked", "copied", "skipped", "dropped"}`` counts
+    (*dropped*: scratch directories left out)."""
     src = Path(src)
-    n = {"linked": 0, "copied": 0, "skipped": 0}
+    n = {"linked": 0, "copied": 0, "skipped": 0, "dropped": 0}
     link = _wl_link_on()
+    keep_kpar = _wl_keep_kpar()
 
     def _copy(s, d):
         rel = Path(s).relative_to(src).as_posix()
@@ -162,11 +179,18 @@ def _wl_copytree(src: Path, dst: Path, skip=None) -> dict:
         return shutil.copy2(s, d)
 
     def _ignore(d, names):
-        if skip is None:
-            return []
         base = Path(d).relative_to(src)
-        out = [x for x in names if not (Path(d) / x).is_dir() and skip((base / x).as_posix())]
-        n["skipped"] += len(out)
+        out = []
+        if not keep_kpar:
+            drop = [x for x in names if (base / x).as_posix() == _WL_SCRATCH
+                    and (Path(d) / x).is_dir() and not (Path(d) / x).is_symlink()]
+            n["dropped"] += len(drop)
+            out += drop
+        if skip is not None:
+            files = [x for x in names if x not in out and not (Path(d) / x).is_dir()
+                     and skip((base / x).as_posix())]
+            n["skipped"] += len(files)
+            out += files
         return out
 
     shutil.copytree(src, dst, symlinks=True, copy_function=_copy, ignore=_ignore)
