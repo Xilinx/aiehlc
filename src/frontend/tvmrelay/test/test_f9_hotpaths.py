@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """F9 (-fast phase profile): uint32 f32_to_bf16_rne and the regex brace scanner
 must give exactly what the old code gave."""
 import sys

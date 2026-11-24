@@ -88,3 +88,22 @@ tree at once can wipe each other's `thirdparty/alib` (GAP-ALIB-RACE:
 `xaie_feature_config.h: No such file`) -- run them in separate worktrees
 (`script/worktree.sh link-deps --private-alib`) or pass `-serialize` to all of
 them. `AIEHLC_LIBCACHE` keeps its own shared/exclusive locking.
+
+## 2026-11-24: alib is reused, not rebuilt -- default lock is SHARED
+
+`build_hw_lib` no longer runs every time. `aiehlc_alib_ensure` (baremetal) keys alib
+(`aiehlc_libcache_key`: aie-rt tree incl. uncommitted edits, BSP headers/libs/ld,
+toolchain, flags, `AIE_GEN`, the `build_hw_lib` recipe) against
+`alib/.aiehlc_libcache_key` and skips the build when they match. The lock is now taken
+by default: **shared** while a run uses alib as is (parallel runs of the same alib do not
+wait), **exclusive** only to rebuild it. So the one new wait is
+
+    aiehlc.sh: alib needs a rebuild (key ...); waiting for the exclusive alib lock
+
+= this run needs a different alib (other `--aie-version`, edited aie-rt) while another
+run on the same tree is still using the current one. It proceeds when that run exits --
+that is the GAP-ALIB-RACE protection, now without serializing same-alib runs. If it waits
+with no other build running, find the holder exactly as above (`lslocks | grep alib`).
+`-serialize` keeps its old meaning (exclusive for the whole run). The `--prettydebug`
+server is started after `aiehlc_release_alib_lock`, so an open debug UI holds nothing.
+Skill **aiehlcbuildcache** has the rest (kernel + host object caches).

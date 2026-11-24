@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """F15: wl-cache restore and install hardlink the large read-only parts of a worklocal
 (build/*.a, build/kernel_*.o, build/kpar/**) and copy everything written in place."""
 from __future__ import annotations

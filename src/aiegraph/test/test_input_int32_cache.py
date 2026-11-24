@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """F12: boardmain.input_int32 content cache (AIEHLC_I32_CACHE / AIEHLC_FAST)."""
 import os
 import sys

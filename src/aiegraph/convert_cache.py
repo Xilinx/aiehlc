@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Content-addressed cache of ``embedded_convert`` output across build dirs (P3 of -fast).
 
 Opt-in: ``AIEGRAPH_CONVERT_CACHE=<dir>``, or ``AIEHLC_FAST=1`` (aiehlc.sh -fast /

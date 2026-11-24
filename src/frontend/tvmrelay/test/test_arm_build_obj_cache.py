@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """F8: -fast content cache for graph_driver.o (arm_build._obj_cache_*), with the host gcc."""
 import shutil
 import subprocess

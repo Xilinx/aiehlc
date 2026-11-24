@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """F13: content cache for isolate_archive (AIEHLC_ISO_CACHE / AIEHLC_FAST). Toolchain-free: the
 real isolation step is replaced by a fake that rewrites the archive and counts calls."""
 from __future__ import annotations

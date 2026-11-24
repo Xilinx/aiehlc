@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """F4 (-fast): weights.bin reuse in generate_driver.
 
 blob_layout must give exactly what write_aligned_blob writes, and the sidecar

@@ -82,7 +82,9 @@ kernel_stamp() {
 # (host_ctrlpkt_<f>.h, kernel_<f>_ctrlpkt.h, ctrlpkt_<f>/). Measured 2026-11-22 on UNet m3121 vs
 # m31223: same key -> loaded sections of all 88 .o identical (only .debug_* differ by path).
 kobj_cache_key() {
-    local fn="$1" f bcfname
+    local fn="$1" f bcfname deps
+    deps="$(mktemp)" || return 1
+    kobj_kernel_deps "$deps" || { rm -f "$deps"; return 1; }
     {
         kernel_stamp "$fn"
         bcfname=$(sed -nE 's/.*id="bridge.cfg" value="([^"]+)".*/\1/p' "${WORKLOCAL_DIR}/aieml.prx" 2>/dev/null | head -1)
@@ -104,23 +106,66 @@ kobj_cache_key() {
             [ -f "$f" ] && sha256sum < "$f"
         done
         echo "${XILINX_VITIS_AIETOOLS:-} ${XILINX_VITIS:-} ${LLVM_AIE_PATH:-}"
+        echo "defines=${AIEHLC_KERNEL_DEFINES:-} klog=${AIEHLC_KERNEL_LOG:-}"
+        echo "deps"; cat "$deps"
     } | sha256sum | cut -d' ' -f1
+    rm -f "$deps"
 }
 
-# -fast (AIEHLC_FAST=1, set by aiehlc.sh -fast): turn the cache on in a default per-user dir that all
-# build dirs and checkouts share, and prune it to AIEHLC_KOBJ_CACHE_MAX_MB (default 4096) after
-# each store. An explicit AIEHLC_KOBJ_CACHE wins. Without -fast and without AIEHLC_KOBJ_CACHE: off.
-if [ "${AIEHLC_FAST:-0}" = "1" ] && [ -z "${AIEHLC_KOBJ_CACHE:-}" ]; then
-    AIEHLC_KOBJ_CACHE="${XDG_CACHE_HOME:-${HOME}/.cache}/aiehlc/kobj"
-fi
+# kobj_kernel_deps <out>: "<sha256>  <path>" of every file kernel.cc includes, as kc.sh compiles it
+# (same -I list, -include kernel_log.h, the AIE defines, __chess__). kernel.cc #includes the user
+# kernel body (e.g. matmul.cc / conv2d.cc), which can change while the generated kernel.cc stays
+# byte-identical -- hashing only kernel.cc + *.h reused a stale kernel. Host g++ -M -MG lists the
+# includes (~0.4 s; -MG keeps going past headers only the AIE toolchain has). rc 1 = could not list
+# them: the caller then compiles without the cache rather than risk a stale hit.
+kobj_kernel_deps() {
+    local out="$1" xa="${XILINX_VITIS_AIETOOLS:-${XILINX_VITIS:-}/aietools}" arch d f
+    case "${AIE_VERSION:-5}" in 1) arch=10 ;; 2) arch=20 ;; *) arch=22 ;; esac
+    local inc=(-I"${xa}/include" -I"${xa}/include/aie_api")
+    for d in "${AIEHLC_ROOT}/thirdparty/alib/include" "${xa}/include/drivers/aiengine"; do
+        [ -d "$d" ] && inc+=(-I"$d")
+    done
+    inc+=(-I"${AIEHLC_ROOT}/src/mlir/runtime" -I"${AIEHLC_ROOT}/include" -I"${WORKLOCAL_DIR}")
+    # shellcheck disable=SC2086
+    g++ -std=c++20 -M -MG -w -nostdinc -D__chess__ -D__AIENGINE__ -D__AIE_ARCH__=${arch} -D__AIEARCH=${arch} \
+        ${AIEHLC_KERNEL_DEFINES:-} -include "${AIEHLC_ROOT}/src/mlir/runtime/kernel_log.h" "${inc[@]}" \
+        "${WORKLOCAL_DIR}/kernel.cc" -MT k 2>/dev/null > "${out}.mk" || { rm -f "${out}.mk"; return 1; }
+    sed -e 's/^k://' -e 's/\\$//' "${out}.mk" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u |
+    while read -r f; do
+        case "$f" in /*) ;; *) f="${WORKLOCAL_DIR}/$f" ;; esac
+        if [ -f "$f" ]; then sha256sum "$f"; else echo "missing  $f"; fi   # -MG: not on this include path
+    done | sed "s#${WORKLOCAL_DIR}/#<W>/#; s#${AIEHLC_ROOT}/#<R>/#" > "$out"
+    rm -f "${out}.mk"
+    grep -q '<W>/kernel.cc$' "$out"   # sanity: the list must at least name kernel.cc itself
+}
+
+# ON by default: a per-user dir that all build dirs and checkouts share (aiehlc.sh wipes aout/ every
+# run, so the per-dir kernel.stamp reuse above never hits on a plain rerun; xchesscc + xchessmk are
+# ~45 s per kernel). Pruned to AIEHLC_KOBJ_CACHE_MAX_MB (default 4096) after each store.
+# AIEHLC_KOBJ_CACHE=<dir> picks the dir; AIEHLC_KOBJ_CACHE=off (or 0 / none) turns it off;
+# HOSTCOMPILE_KERNEL_REBUILD=1 compiles anyway (an existing entry for the key is kept).
+case "${AIEHLC_KOBJ_CACHE:-}" in
+    off|0|none) AIEHLC_KOBJ_CACHE="" ;;
+    "") AIEHLC_KOBJ_CACHE="${XDG_CACHE_HOME:-${HOME}/.cache}/aiehlc/kobj" ;;
+esac
 
 # kobj_cache_get <fn> <key>: restore an entry into BUILD_DIR / cwd. rc 0 = hit.
 kobj_cache_get() {
     local fn="$1" e="${AIEHLC_KOBJ_CACHE}/$2" f
     [ -f "$e/kernel.o" ] && [ -f "$e/DONE" ] || return 1
     # no -p: restored files must look new to the mtime-based reuse checks and make
+    mkdir -p "${BUILD_DIR}" || return 1   # a fresh aout/ (aiehlc.sh wipes it) has no build/ yet
     cp "$e/kernel.o" "${BUILD_DIR}/kernel.o" || return 1
-    for f in kernel kernel.calltree; do [ -f "$e/$f" ] && cp "$e/$f" "${BUILD_DIR}/$f"; done
+    if [ -d "$e/build" ]; then   # kernel ELF, kernel.lst/.map/.calltree, linemap, kernel_debug, xchessmk.log
+        for f in "$e/build"/*; do cp "$f" "${BUILD_DIR}/" || return 1; done
+    else                         # entries stored before the build/ dir existed
+        for f in kernel kernel.calltree; do [ -f "$e/$f" ] && cp "$e/$f" "${BUILD_DIR}/$f"; done
+    fi
+    if [ -f "$e/bcf.name" ] && [ -f "$e/bcf.after" ]; then
+        # kc.sh shrinks the bcf stack in place when kernel statics overflow DM: replay that edit
+        f="./$(cat "$e/bcf.name")"
+        if ! cmp -s "$e/bcf.after" "$f"; then rm -f "$f"; cp "$e/bcf.after" "$f" || return 1; fi
+    fi
     if [ -d "$e/cwd" ]; then
         for f in "$e/cwd"/* ; do
             [ -e "$f" ] || continue
@@ -140,7 +185,13 @@ kobj_cache_put() {
     mkdir -p "${AIEHLC_KOBJ_CACHE}" || return 0
     t="$(mktemp -d "${AIEHLC_KOBJ_CACHE}/.tmp.XXXXXX")" || return 0
     cp -p "${BUILD_DIR}/kernel.o" "$t/" || { rm -rf "$t"; return 0; }
-    for f in kernel kernel.calltree; do [ -f "${BUILD_DIR}/$f" ] && cp -p "${BUILD_DIR}/$f" "$t/"; done
+    mkdir -p "$t/build"
+    for f in "${BUILD_DIR}"/kernel "${BUILD_DIR}"/kernel.* "${BUILD_DIR}"/kernel_* "${BUILD_DIR}/xchessmk.log"; do
+        case "$(basename "$f")" in kernel.o|kernel.stamp|kernel_*.o) continue ;; esac
+        [ -f "$f" ] && cp -p "$f" "$t/build/"
+    done
+    f=$(sed -nE 's/.*id="bridge.cfg" value="([^"]+)".*/\1/p' ./aieml.prx 2>/dev/null | head -1)
+    if [ -n "$f" ] && [ -f "./$f" ]; then echo "$f" > "$t/bcf.name"; cp -L "./$f" "$t/bcf.after"; fi
     mkdir -p "$t/cwd"
     for f in "./host_ctrlpkt_${fn}.h" "./kernel_${fn}_ctrlpkt.h" "./ctrlpkt_${fn}"; do
         # -L: in the parallel path these may be links into the worklocal that kc.sh wrote through
@@ -201,8 +252,11 @@ compile_one_kernel() {
     rm -f "${BUILD_DIR}/kernel.stamp"
 
     local kobj_key=""
-    if [ -n "${AIEHLC_KOBJ_CACHE:-}" ] && [ "${HOSTCOMPILE_KERNEL_REBUILD:-0}" != "1" ]; then
-        kobj_key="$(cd "${WORKLOCAL_DIR}" && kobj_cache_key "${kernel_func_name}")"
+    if [ -n "${AIEHLC_KOBJ_CACHE:-}" ]; then
+        kobj_key="$(cd "${WORKLOCAL_DIR}" && kobj_cache_key "${kernel_func_name}")" ||
+            { kobj_key=""; echo "[hostcompile] KOBJ cache off for ${kernel_func_name}: could not list kernel.cc's includes"; }
+    fi
+    if [ -n "${kobj_key}" ] && [ "${HOSTCOMPILE_KERNEL_REBUILD:-0}" != "1" ]; then
         if (cd "${WORKLOCAL_DIR}" && kobj_cache_get "${kernel_func_name}" "${kobj_key}"); then
             echo "${kstamp}" > "${BUILD_DIR}/kernel.stamp"
             return 0
@@ -262,8 +316,8 @@ compile_one_kernel() {
     if [ ${kc_rc} -eq 0 ] && [ -f "${BUILD_DIR}/kernel.o" ]; then
         echo "${kstamp}" > "${BUILD_DIR}/kernel.stamp"
         [ -n "${kobj_key}" ] && (cd "${WORKLOCAL_DIR}" && kobj_cache_put "${kernel_func_name}" "${kobj_key}")
-        if [ -n "${kobj_key}" ] && [ "${AIEHLC_FAST:-0}" = "1" ]; then
-            bash "${AIEHLC_ROOT}/script/kobj_cache_prune.sh" "${AIEHLC_KOBJ_CACHE}" || true
+        if [ -n "${kobj_key}" ]; then
+            bash "${AIEHLC_ROOT}/script/kobj_cache_prune.sh" "${AIEHLC_KOBJ_CACHE}" >/dev/null || true
         fi
     fi
     return ${kc_rc}
@@ -796,13 +850,50 @@ _HC_JOBS="${HOSTCOMPILE_HOST_JOBS:-10}"
 if [ "${REBUILD}" -eq 1 ] && [ "${_HC_JOBS}" -gt 1 ] 2>/dev/null; then
     # Same unquoted expansions as the serial blocks (no re-parsing through bash -c, so EXTRA_DEFS
     # word-splits exactly as before).
-    _hc_one() {
+    # _hc_cc <name> c|pp: the object's exact compile command (c), or the same command with -E -P (pp).
+    _hc_cc() {
+        local src flags std
         case "$1" in
-            host)    ${TOOL_PREFIX}g++ ${HOST_OPT_FLAGS} -std=c++20 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -c "${HOST_SRC}" -o host.o ;;
-            routing) ${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++17 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -c "${WORKLOCAL_DIR}/routing.cc" -o routing.o ;;
-            *)       ${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++17 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -c "${AIEHLC_ROOT}/src/mlir/runtime/$1.c" -o "$1.o" ;;
+            host)    src="${HOST_SRC}"; flags="${HOST_OPT_FLAGS}"; std=-std=c++20 ;;
+            routing) src="${WORKLOCAL_DIR}/routing.cc"; flags="${OPT_FLAGS}"; std=-std=c++17 ;;
+            *)       src="${AIEHLC_ROOT}/src/mlir/runtime/$1.c"; flags="${OPT_FLAGS}"; std=-std=c++17 ;;
         esac
+        if [ "$2" = c ]; then
+            ${TOOL_PREFIX}g++ ${flags} ${std} ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -c "${src}" -o "$1.o"
+        else
+            echo "${TOOL_PREFIX}g++ ${flags} ${std} ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag}" |
+                sed -e "s#${BUILD_DIR}#<B>#g" -e "s#${WORKLOCAL_DIR}#<W>#g" -e "s#${AIEHLC_ROOT}#<R>#g"
+            ${TOOL_PREFIX}g++ ${flags} ${std} ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -E -P "${src}"
+        fi
     }
+    # Object cache (step 3, default ON; HOSTCOMPILE_OBJ_CACHE=<dir> | off): ccache's preprocessor mode --
+    # key = compiler --version + the command (build paths masked) + the `-E -P` text, which covers every
+    # header and -D; same key -> byte-identical object, so a hit copies it instead of compiling (the 8
+    # runtime files barely ever change; aie_runtime.c alone is ~1.9 s). Off for -g builds: their objects
+    # record the build directory. Keeps the newest HOSTCOMPILE_OBJ_CACHE_KEEP (default 2000) objects.
+    _HC_OC="${HOSTCOMPILE_OBJ_CACHE:-${XDG_CACHE_HOME:-${HOME}/.cache}/aiehlc/hobj}"
+    case "${_HC_OC}" in off|0|none) _HC_OC="" ;; esac
+    case " ${HOST_OPT_FLAGS} ${OPT_FLAGS} ${DEFS} " in *" -g"*) _HC_OC="" ;; esac
+    [ -n "${_HC_OC}" ] && { mkdir -p "${_HC_OC}" 2>/dev/null || _HC_OC=""; }
+    _HC_CCID="$(${TOOL_PREFIX}g++ --version 2>&1 | head -1)"
+    _hc_one() {
+        local key=""
+        if [ -n "${_HC_OC}" ]; then
+            # a failing -E (e.g. a missing header) gets no key: compile and let the compiler report it
+            if _hc_cc "$1" pp > "hc_$1.pp" 2>/dev/null; then
+                key="$( { echo "hobj1 ${_HC_CCID}"; cat "hc_$1.pp"; } | sha1sum | cut -c1-40)"
+            fi
+            rm -f "hc_$1.pp"
+            if [ -n "$key" ] && cp "${_HC_OC}/${key}.o" "$1.o" 2>/dev/null; then
+                touch "${_HC_OC}/${key}.o" 2>/dev/null; echo "$1" >> hc_cachehit.list; return 0
+            fi
+        fi
+        _hc_cc "$1" c || return 1
+        if [ -n "$key" ] && [ -f "$1.o" ]; then
+            cp "$1.o" "${_HC_OC}/.${key}.$$" 2>/dev/null && mv -f "${_HC_OC}/.${key}.$$" "${_HC_OC}/${key}.o"
+        fi
+    }
+    rm -f hc_cachehit.list
     _hc_names=(host aie_runtime aie_runtime_debug aie_runtime_stream_debug aie_runtime_common
                aie_runtime_control_plan aie_runtime_resource aie_ctrlpkt_encode aie_runtime_xaie_seq)
     [ "${HAS_ROUTING}" -eq 1 ] && _hc_names+=(routing)
@@ -826,6 +917,17 @@ if [ "${REBUILD}" -eq 1 ] && [ "${_HC_JOBS}" -gt 1 ] 2>/dev/null; then
     if [ -n "${_hc_fail}" ]; then
         echo "Error: failed to compile:${_hc_fail}"
         exit 1
+    fi
+    if [ -n "${_HC_OC}" ]; then
+        echo "[hostcompile] object cache ${_HC_OC}: $(wc -l < hc_cachehit.list 2>/dev/null || echo 0) of ${#_hc_names[@]} objects reused"
+        rm -f hc_cachehit.list
+        # prune: keep the newest objects (hits touch theirs)
+        _hc_keep="${HOSTCOMPILE_OBJ_CACHE_KEEP:-2000}"
+        if [ "$(find "${_HC_OC}" -maxdepth 1 -name '*.o' | wc -l)" -gt "${_hc_keep}" ]; then
+            find "${_HC_OC}" -maxdepth 1 -name '*.o' -printf '%T@ %p\n' | sort -rn | tail -n +$((_hc_keep + 1)) |
+                cut -d' ' -f2- | xargs -r rm -f
+        fi
+        find "${_HC_OC}" -maxdepth 1 -name '.*.[0-9]*' -mmin +60 -delete 2>/dev/null || true
     fi
     REBUILD=0
     echo "(compiled in parallel; the 'Skipping ...' lines below are expected)"

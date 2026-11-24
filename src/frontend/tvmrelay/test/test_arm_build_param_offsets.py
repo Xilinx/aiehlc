@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """param_offsets / read_param_names read only the headers (F14).
 
 The payloads are skipped with seek, so a 1.29 GB blob is no longer read twice

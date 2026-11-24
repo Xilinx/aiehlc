@@ -20,7 +20,7 @@ run_cmd() {
 }
 
 usage() {
-    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss] [-serialize] [-fast]"
+    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss] [-serialize] [-fast] [--rebuild-alib]"
     echo "  --platform    baremetal (default) | sim | linux | baremetal_debug"
     echo "                'baremetal_debug' builds a baremetal ELF and writes sim_config.sh so the debug"
     echo "                UI can run either a hardware test or a simulator run from one build."
@@ -30,6 +30,8 @@ usage() {
     echo "  -serialize    take an exclusive lock on thirdparty/alib for the whole run, so parallel aiehlc.sh runs"
     echo "                on this tree wait for each other (also AIEHLC_SERIALIZE=1). Default: no lock -- two runs"
     echo "                at once on one tree can wipe each other's alib; use separate worktrees or -serialize."
+    echo "  --rebuild-alib  rebuild thirdparty/alib (aie-rt) even when its key says it is current (also"
+    echo "                AIEHLC_ALIB_REBUILD=1). Default: skipped when alib/.aiehlc_libcache_key matches."
     echo "  -fast         faster rebuilds, same output: share compiled kernel .o across build dirs (AIEHLC_FAST=1;"
     echo "                cache AIEHLC_KOBJ_CACHE, default ~/.cache/aiehlc/kobj, capped at AIEHLC_KOBJ_CACHE_MAX_MB=4096)"
     return 1
@@ -82,6 +84,8 @@ prepare_raw_xaie_debug_view() {
     elif [ -n "$host_elf" ] && [ -f "$host_elf" ]; then
         server_args+=(--elf "$host_elf")
     fi
+    # build done: drop the alib lock, an open debug UI must not hold off other builds' alib rebuilds
+    aiehlc_release_alib_lock
     python3 "${AIEHLC_DIR}/src/tool/debug/schedule_debug_server.py" \
         "${server_args[@]}"
 }
@@ -146,7 +150,10 @@ build_hw_lib() {
                 cp -rf "$AIE_DRIVER_PARENT_DIR/aie-rt/driver/internal/"* "$AIE_DRIVER_PARENT_DIR/include/"
                 
             elif [[ "$lplatform" == "baremetal" ]]; then
-                bash -c "cd $AIE_DRIVER_PARENT_DIR/aie-rt/driver/src; CC=\${CC:-gcc} CXX=\${CXX:-g++} make -f Makefile.Linux"
+                # Only Makefile.Linux's `include` target is needed here: it refreshes aie-rt/driver/internal/
+                # from src/ (copied into alib/include below). Its default target also built an x86
+                # libxaiengine.{a,so} that nothing in the baremetal flow links (~3.6 s per run).
+                make -s -C "$AIE_DRIVER_PARENT_DIR/aie-rt/driver/src" -f Makefile.Linux include >/dev/null
                 ##keep the order, first copy bsp header, then copy the aiert header, then even bsp header have old aiegnine header
                 ##we still get the latest aiert header
                 cp -rf "$header_dir"/*.h "$AIE_DRIVER_PARENT_DIR/include/"
@@ -168,7 +175,8 @@ build_hw_lib() {
                 fi
 
                 dbg_echo "[INFO] Building library with $compiler"
-                make -C "$AIE_DRIVER_PARENT_DIR/aie-rt/driver/src" -s libs \
+                # -j: the objects are independent (serial 19.7 s -> 1.9 s with -j32). AIEHLC_ALIB_JOBS overrides.
+                make -C "$AIE_DRIVER_PARENT_DIR/aie-rt/driver/src" -s -j"${AIEHLC_ALIB_JOBS:-$(nproc 2>/dev/null || echo 4)}" libs \
                     SHELL=/bin/sh \
                     COMPILER="$compiler" \
                     ASSEMBLER="$assembler" \
@@ -202,7 +210,9 @@ aiehlc_libcache_inputs() {
     local output_lib="$7" lib_dir="$8" ld_dir="$9" lplatform="${10}"
     local rt="${AIE_DRIVER_PARENT_DIR}/aie-rt"
     {
-        echo "aiehlc-libcache v1"
+        echo "aiehlc-libcache v2"
+        # the recipe itself: a change to build_hw_lib (flags, steps) must not reuse an older build
+        declare -f build_hw_lib | sha256sum
         echo "platform=$lplatform aie_gen=$AIE_GEN apu=$output_lib"
         echo "cc=$compiler as=$assembler ar=$archiver"
         echo "cflags=$compiler_flags -DAIE_GEN=$AIE_GEN"
@@ -290,6 +300,57 @@ aiehlc_libcache_lib() {
 }
 
 
+# ---- default: skip the aie-rt rebuild when alib already holds exactly this build ------------------
+# key = aiehlc_libcache_key (aie-rt tree incl. uncommitted edits, BSP headers/libs/ld script, toolchain,
+# flags, AIE_GEN / a72-vs-a78 library, platform, and the build_hw_lib recipe). A build writes the key to
+# alib/.aiehlc_libcache_key; a later run with the same key, the library and the headers present skips
+# build_hw_lib entirely (~23 s). Mere presence is not enough: alib holds ONE build at a time
+# (--aie-version 2 and 5 install different libraries and BSP headers), and an edited aie-rt must rebuild.
+# --rebuild-alib / AIEHLC_ALIB_REBUILD=1 forces the build.
+# Locking (flock on alib/.aiehlc_alib.lock, held until the script exits, released by the kernel): SHARED
+# while this run uses alib as is, EXCLUSIVE only to rebuild it -- runs with the same key go in parallel,
+# a run with another key waits for them instead of wiping alib under their host link. With -serialize the
+# caller already holds the lock exclusively and nothing is taken here.
+aiehlc_alib_ensure() {
+    local alib="${AIE_DRIVER_PARENT_DIR%/}" apu="$7" key mode=hit lk="" force="${AIEHLC_ALIB_REBUILD:-0}"
+    local marker="$alib/.aiehlc_libcache_key"
+    key=$(aiehlc_libcache_key "$@") || return 1
+    [ -n "$key" ] || return 1
+    if [ -z "${AIEHLC_ALIB_LOCK_FD:-}" ] && command -v flock >/dev/null 2>&1; then
+        exec {AIEHLC_ALIB_LOCK_FD}>"$alib/.aiehlc_alib.lock"
+        lk=1
+    fi
+    while :; do
+        [ -n "$lk" ] && flock -s "${AIEHLC_ALIB_LOCK_FD}"
+        if [ "$force" != 1 ] && [ "$(cat "$marker" 2>/dev/null)" = "$key" ] \
+            && [ -s "$alib/lib/$apu" ] && [ -f "$alib/include/xaiengine.h" ]; then
+            break
+        fi
+        [ "$mode" = built ] && { echo "aiehlc.sh: ERROR: alib still not current after build_hw_lib (key $key)"; return 1; }
+        if [ -n "$lk" ]; then
+            flock -u "${AIEHLC_ALIB_LOCK_FD}"
+            echo "aiehlc.sh: alib needs a rebuild (key $key); waiting for the exclusive alib lock"
+            flock -x "${AIEHLC_ALIB_LOCK_FD}"   # waits for every run still using the current alib
+            if [ "$force" != 1 ] && [ "$(cat "$marker" 2>/dev/null)" = "$key" ]; then
+                flock -u "${AIEHLC_ALIB_LOCK_FD}"   # another run built this key meanwhile
+                continue
+            fi
+        fi
+        rm -f "$marker"                          # a half-done build must never look current
+        build_hw_lib "$@"
+        echo "$key" > "$marker"
+        force=0; mode=built
+        [ -n "$lk" ] && flock -u "${AIEHLC_ALIB_LOCK_FD}"   # loop: re-take SHARED and re-verify
+    done
+    if [ "$mode" = hit ]; then
+        echo "aiehlc.sh: alib up to date (key $key) -- aie-rt build skipped (--rebuild-alib forces it)"
+    else
+        echo "aiehlc.sh: alib rebuilt (key $key)"
+    fi
+    return 0
+}
+
+
 # Close an alib lock fd (GAP-ALIB-RACE below) that a shell still holds from an OLDER aiehlc.sh, which
 # took the lock in the caller's shell when sourced. The current script never does: main runs in a
 # subshell (see the end of this file), so the lock dies with it.
@@ -363,6 +424,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --debug-syms)
             DEBUG_SYMS=1
+            shift
+            ;;
+        --rebuild-alib)
+            export AIEHLC_ALIB_REBUILD=1
             shift
             ;;
         -serialize|--serialize)
@@ -558,25 +623,22 @@ if [ -d "${AIE_DRIVER_PARENT_DIR}/aie-rt/driver/" ] && [[ "$platform" != "sim" ]
     else
     # main runs in a subshell, so this fd belongs to that process: the kernel releases the lock when
     # it exits -- normally, on error, on Ctrl-C or kill -- and the caller's shell never holds it.
-    # Opt-in (-serialize / AIEHLC_SERIALIZE=1): by default no lock is taken, so a run never waits on
-    # another; concurrent runs on one tree then need separate worktrees.
+    # -serialize / AIEHLC_SERIALIZE=1: one run at a time on this tree (exclusive for the whole run).
+    # Default (baremetal): aiehlc_alib_ensure takes the lock SHARED when alib is current and exclusive
+    # only to rebuild it, so parallel runs with the same alib no longer wait or wipe each other.
     if [ "$SERIALIZE" = "1" ] && command -v flock >/dev/null 2>&1; then
         exec {AIEHLC_ALIB_LOCK_FD}>"${AIE_DRIVER_PARENT_DIR}/.aiehlc_alib.lock"
         echo "aiehlc.sh: waiting for alib lock ${AIE_DRIVER_PARENT_DIR}.aiehlc_alib.lock"
         flock "${AIEHLC_ALIB_LOCK_FD}"
         echo "aiehlc.sh: alib lock held"
     fi
-    build_hw_lib \
-        "${ARCH_APU_AINC}" \
-        ${TOOL_PREFIX}gcc \
-        ${TOOL_PREFIX}as \
-        ${TOOL_PREFIX}ar \
-        "-O2 -c" \
-        "$hw_lib_cflags" \
-        "$AIELIB_APU_NAME" \
-        "$ARCH_APU_ALIB" \
-        "$ARCH_APU_LD" \
-                "$platform"
+    hw_lib_args=("${ARCH_APU_AINC}" ${TOOL_PREFIX}gcc ${TOOL_PREFIX}as ${TOOL_PREFIX}ar "-O2 -c" "$hw_lib_cflags"
+                 "$AIELIB_APU_NAME" "$ARCH_APU_ALIB" "$ARCH_APU_LD" "$platform")
+    if [[ "$platform" == baremetal* ]]; then
+        aiehlc_alib_ensure "${hw_lib_args[@]}" || return 1
+    else
+        build_hw_lib "${hw_lib_args[@]}"   # linux: different outputs (aie-rt/driver/src), always rebuilt
+    fi
     fi
 
     if [[ $aie_version == "1" || $aie_version == "2" ]]; then
@@ -824,6 +886,8 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
             if [ -f "${HOST_BUILD_DIR}/main.elf" ]; then
                 PD_ELF_ARGS=(--elf "${HOST_BUILD_DIR}/main.elf")
             fi
+            # build done: drop the alib lock, an open debug UI must not hold off other builds' alib rebuilds
+            aiehlc_release_alib_lock
             python3 "${AIEHLC_DIR}/src/tool/debug/schedule_debug_server.py" \
                 "${WORKLOCAL_DIR}" \
                 "${PD_ELF_ARGS[@]}" \

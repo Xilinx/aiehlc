@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """write_aligned_blob packs weights in a deterministic order.
 
 TVM's ``save_param_dict`` writes params in an unordered-map order that changes

@@ -1,4 +1,8 @@
 #!/bin/bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # kobj_cache_prune.sh [cache_dir] [max_mb]
 # Prune the F2 kernel-object cache (AIEHLC_KOBJ_CACHE, see hostcompile.sh) to max_mb (default
 # AIEHLC_KOBJ_CACHE_MAX_MB or 4096), oldest entries first. Age = mtime of the entry's DONE file,

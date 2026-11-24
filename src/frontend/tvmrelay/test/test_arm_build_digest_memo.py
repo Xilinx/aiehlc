@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """F23: per-process memo of _digest_file (params.bin + layer weight files).
 
 The memo may only answer while the file is provably unchanged: same
