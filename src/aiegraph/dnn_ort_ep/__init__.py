@@ -15,8 +15,9 @@ compiled_partition_execute (aiednn_ort_ep.cc). Everything aiednn does not claim 
 Compile, the fastest implementation pinned. Runs in workstation emulation (the AIE kernels' C references
 stand in for the array); the board path stays dnn_build apps.
 
-Build needs ORT's C headers, which the wheel does not ship: $AIEDNN_ORT_INCLUDE, else the release
-tarball of the installed version is fetched once into worklocal/aiednn/ort_headers/<version>/.
+Build needs ORT's C headers, which the wheel does not ship: $AIEDNN_ORT_INCLUDE, else the headers of the
+installed version are fetched once into worklocal/aiednn/ort_headers/<version>/ -- from the GitHub release
+tarball, or, when that is unreachable, from the Microsoft.ML.OnnxRuntime NuGet package (the same headers).
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ import os
 import subprocess
 import tarfile
 import urllib.request
+import zipfile
 from pathlib import Path
 
 from .. import _env
@@ -41,21 +43,52 @@ def ort_include() -> Path:
         return Path(env)
     ver = ort.__version__.split("+")[0]
     root = _env.repo_root() / "worklocal" / "aiednn" / "ort_headers" / ver
-    inc = root / f"onnxruntime-linux-x64-{ver}" / "include"
-    if (inc / "onnxruntime_ep_c_api.h").is_file():
-        return inc
+    tar_inc = root / f"onnxruntime-linux-x64-{ver}" / "include"     # the GitHub release tarball's layout
+    nuget_inc = root / "nuget" / "include"
+    for inc in (tar_inc, nuget_inc):
+        if (inc / "onnxruntime_ep_c_api.h").is_file():
+            return inc
     root.mkdir(parents=True, exist_ok=True)
+    errors = []
+    try:
+        _fetch_release_headers(ver, root)
+        return tar_inc
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"GitHub release: {exc}")
+    try:                     # github.com/microsoft/onnxruntime answers 404 from some networks; NuGet carries them too
+        _fetch_nuget_headers(ver, nuget_inc)
+        return nuget_inc
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"NuGet: {exc}")
+    raise AiegraphError("dnn_ort_ep", f"no ONNX Runtime {ver} headers ({'; '.join(errors)})",
+                        hint="set AIEDNN_ORT_INCLUDE to the include/ of the matching onnxruntime release")
+
+
+def _fetch_release_headers(ver: str, root: Path) -> None:
     tgz = root / "ort.tgz"
     url = f"https://github.com/microsoft/onnxruntime/releases/download/v{ver}/onnxruntime-linux-x64-{ver}.tgz"
     try:
         urllib.request.urlretrieve(url, tgz)
         with tarfile.open(tgz) as t:
             t.extractall(root, members=[m for m in t.getmembers() if "/include/" in m.name])
-    except Exception as exc:  # noqa: BLE001
-        raise AiegraphError("dnn_ort_ep", f"no ONNX Runtime {ver} headers ({exc})",
-                            hint="set AIEDNN_ORT_INCLUDE to the include/ of the matching onnxruntime release")
-    tgz.unlink(missing_ok=True)
-    return inc
+    finally:
+        tgz.unlink(missing_ok=True)
+
+
+def _fetch_nuget_headers(ver: str, inc: Path) -> None:
+    """build/native/include/ of the Microsoft.ML.OnnxRuntime package: the release headers, CRLF line ends"""
+    pkg = inc.parent / "ort.nupkg"
+    inc.mkdir(parents=True, exist_ok=True)
+    try:
+        urllib.request.urlretrieve(f"https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime/{ver}", pkg)
+        with zipfile.ZipFile(pkg) as z:
+            names = [n for n in z.namelist() if n.startswith("build/native/include/") and not n.endswith("/")]
+            if not any(n.endswith("/onnxruntime_ep_c_api.h") for n in names):
+                raise AiegraphError("dnn_ort_ep", f"Microsoft.ML.OnnxRuntime {ver} has no onnxruntime_ep_c_api.h")
+            for n in names:
+                (inc / n.rsplit("/", 1)[1]).write_bytes(z.read(n))
+    finally:
+        pkg.unlink(missing_ok=True)
 
 
 def build_ep(out=None, mesh=None) -> Path:
