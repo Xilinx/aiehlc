@@ -172,7 +172,14 @@ static inline void klog(const char *, int) {}
 #include "aie_api_x86emu.h"
 // host side of the launch
 struct aieMesh { int rows, cols; };
-struct aieArray { aieMesh partition(std::initializer_list<int>, int r, int c) { return {r, c}; } };
+struct aieArray {
+    aieMesh m{};
+    aieArray() = default;
+    aieArray(int r, int c) : m{r, c} {}  // aieArray device(R, C); k<<<device>>>(...)
+    aieMesh partition(std::initializer_list<int>, int r, int c) { return {r, c}; }
+    aieMesh partition(int r, int c) { return {r, c}; }
+    operator aieMesh() const { return m; }
+};
 static inline void aieSetDevice(int) {}
 void *__Runtime_Alloc(size_t bytes) { void *p = nullptr; return posix_memalign(&p, 64, (bytes + 63) & ~(size_t)63) ? nullptr : p; }
 namespace kemu {

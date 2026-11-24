@@ -28,6 +28,27 @@ matches the build, because `aiehlc.sh` adds that directory with `-I`.
 Still not followed: headers from another directory and nested `-I` paths.
 For those, use literals or define the macro in the `.cc`.
 
+Two declaration forms give the mesh (2026-11-23): `device.partition({...}, R, C)`
+/ `partition(R, C)`, and `aieArray device(R, C);` launched as `k<<<device>>>` (or
+`aieMesh mesh = device;`). Before, the constructor form failed with "no
+device.partition(...) call was found". The text side is `findMeshShape`
+(partition call first, then an `aieArray` / `aieDim` `name(R, C)` declaration;
+`aieArray device;` without arguments has no shape); the AST side
+(`aiehlc.cc`, `__aie_launch` visitor) follows the launch argument through the
+implicit `aieArray -> aieMesh` conversion (`peelMeshExpr`) to `device`'s
+constructor. The stubs (`aiehlc.cc` x2, `tilinglinalg_pipeline.cpp`,
+`aiegraph/kemu.py`) give `aieArray` the `(rows, cols)` constructor + `operator
+aieMesh()`; aiekernel lint L015 and `aiegraph/aiperf.py` accept the form too.
+Cases: `test_trace_routing.cpp` `testLaunchMeshForms`.
+
+Also fixed then: the AST read **no** dims from the 2-argument
+`device.partition(R, C)` (it only matched 3 arguments), so the pipeline fell back
+to a **2x2** mesh (`MeshKernelDesc ... mesh=0x0`, `routingcreatehwmesh row = 2,
+col = 2`) while kernel analysis traced R x C. All three forms now give the same
+kernel.cc / routing.cc / bcf / prx (verified on `simpleconv2dkernel_port.cc`).
+`example/tileprogram/ccode/simple.cc` (`partition(4, 4)`, kernel sized for 4x4)
+now builds 4x4 instead of 2x2 -- not yet re-run on a board.
+
 ## 1b. Misspelled / missing header reported as an undefined macro
 `#include <aiehlcpm_gemm1——3.h>` (no such file) used to report
 ``ROWS `HW_ROWS` ... no `#define HW_ROWS` `` and never Clang's "file not

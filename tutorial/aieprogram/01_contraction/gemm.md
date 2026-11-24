@@ -245,6 +245,17 @@ the mesh: `aie::program_id` ranges over it, and the compiler places the 16
 cores in it. The compiler also **reads this call** -- it is how the kernel
 analysis knows to trace a 4 x 4 mesh.
 
+Short form, when columns 0..C-1 are the partition: construct the array with the
+mesh and launch the array itself --
+
+```cpp
+    aieArray device(HW_ROWS, HW_COLS);          // = device.partition(HW_ROWS, HW_COLS)
+    gemm<<<device>>>(A, B, C, GEMM_M, GEMM_N, GEMM_K);   // or: aieMesh mesh = device;
+```
+The compiler reads `aieArray device(ROWS, COLS)` the same way; the generated
+`kernel.cc` / `routing.cc` / bcf / prx are those of the `partition({...}, ROWS,
+COLS)` form (the runtime places the partition at column 0 instead of 3).
+
 ```cpp
     int8_t *A = (int8_t *)__Runtime_Alloc(GEMM_M * GEMM_K);
     int8_t *B = (int8_t *)__Runtime_Alloc(GEMM_N * GEMM_K);
