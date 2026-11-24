@@ -4,17 +4,17 @@
 # section aie: builds example/perf/aie_microbench.cc (aiehlc.sh, bare-metal A78 host, AIE2PS), runs it on the board with
 # script/test/apppaltest.py --netload (bare-metal xsdb/netboot, the same path as LAUNCH split -> path="baremetal"),
 # prints the console (CR stripped; the BOARD marker gets " board=<name>"), fits the raw "MB ..." lines and writes
-# script/perf/params/<name>.json: aie_clk_mhz pmu_hz ddr_rd_gbps ddr_wr_gbps dma_b_per_cyc dma_first_byte_cyc
+# src/aiegraph/costmodel/params/<name>.json: aie_clk_mhz pmu_hz ddr_rd_gbps ddr_wr_gbps dma_b_per_cyc dma_first_byte_cyc
 # bd_switch_cyc lock_acq_cyc dm_bank_conflict_cyc ss_hop_cyc board path log, then
 #   PARAMS <name>.json written (<n> params) section=aie
 # section ddr (costmodel K2d): builds example/perf/ddr_microbench.cc, same board path, and MERGES into the existing
-# script/perf/params/<name>.json (every section=aie key kept): ddr_rd_gbps/ddr_wr_gbps = aggregate over ddr_rd_cols
+# src/aiegraph/costmodel/params/<name>.json (every section=aie key kept): ddr_rd_gbps/ddr_wr_gbps = aggregate over ddr_rd_cols
 # columns from the MEDIAN rep (MB ddr bytes= is the TOTAL over reps and cols), ddr_*_cols_points for cols 1..4,
 # ddr_*_reps, ddr_burst_points [[bytes, aie cyc per burst]] (32..256 B at 4 KiB stride), ddr_burst_cyc0, then
 #   PARAMS <name>.json written (<len(merged json)> params) section=ddr
 # section all = aie then ddr.
 # section scatter (costmodel SCMB): builds example/perf/scatter_microbench.cc (host uc_scatter16, 24-point grid
-# N x yout align x cache), prints the console and the SCMB lines of script/perf/scmb_fit.py; writes nothing to params/.
+# N x yout align x cache), prints the console and the SCMB lines of src/aiegraph/costmodel/tools/scmb_fit.py; writes nothing to params/.
 # section launch: stub for the later L sprint (MMIO / ctrlpkt / PM-load); not implemented here.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,9 +76,9 @@ cat "$RUN"
 echo "[mb] apppaltest rc=$RRC log=$RUN"
 [ "$RRC" -eq 0 ] || { echo "[mb] apppaltest rc=$RRC"; return "$RRC"; }
 if [ "$SEC" = scatter ]; then
-    "$PY" -I "$HERE/scmb_fit.py" "$RUN"   # SCMB: prints only, nothing written to params/
+    "$PY" -I "$ROOT/src/aiegraph/costmodel/tools/scmb_fit.py" "$RUN"   # SCMB: prints only, nothing written to params/
 else
-    "$PY" -I "$HERE/mb_fit.py" "$RUN" "$HERE/params/$NAME.json" "$NAME" "$SEC"
+    "$PY" -I "$ROOT/src/aiegraph/costmodel/tools/mb_fit.py" "$RUN" "$ROOT/src/aiegraph/costmodel/params/$NAME.json" "$NAME" "$SEC"
 fi
 }
 case "$SECTION" in

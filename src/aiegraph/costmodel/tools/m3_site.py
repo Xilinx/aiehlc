@@ -71,7 +71,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from n_fit import measure  # noqa: E402
 
 SITES_PER_CFG = {"linear": 72, "conv": 48, "fa": 18}
@@ -155,8 +155,8 @@ def _g6(x):
 
 
 def k_params():
-    prm = json.load(open(HERE / "params" / "palmyra213.json"))
-    cal = json.load(open(HERE / "params" / "palmyra213_kcal.json"))
+    prm = json.load(open(HERE.parent / "params" / "palmyra213.json"))
+    cal = json.load(open(HERE.parent / "params" / "palmyra213_kcal.json"))
     prm.update({k: v for k, v in cal.items() if isinstance(v, (int, float))})
     prm["ddr_model"] = cal.get("ddr_model", "bytes")
     return prm
@@ -206,7 +206,7 @@ def l_sites(build, cfg, params=None, kfirst="site"):
     from aiegraph.costmodel import launch_l
     from aiegraph.costmodel.static_feat import unet_site_feat
     from site_feat import site_feats
-    lp = launch_l.load_params(str(params or HERE / "params" / "l_palmyra213.json"))
+    lp = launch_l.load_params(str(params or HERE.parent / "params" / "l_palmyra213.json"))
     seq = unet_site_feat(build)
     kw, kk = kload_per_launch(build, kfirst)
     if kk != [d["kernel"] for d in seq]:

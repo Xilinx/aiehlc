@@ -59,7 +59,7 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import nnls
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from aiegraph.costmodel.n_feat import sites as n_sites  # noqa: E402
 from aiegraph.costmodel.unet_seq import read  # noqa: E402
 
@@ -322,7 +322,7 @@ def floor_mode(a, root):
 LOG_FIELDS = frozenset(("part", "ms", "site_ms", "aie_ms", "glue", "flush", "inval", "N"))  # measure() adds these
 TSHARE_GATE = 0.100
 TSV_COLS = ("cfg", "run", "part", "site", "launches", "site_ms", "N_meas", "N_hat", "ovl_meas", "ovl_hat")
-L_PARAMS = Path(__file__).resolve().parent / "params" / "l_palmyra213.json"
+L_PARAMS = Path(__file__).resolve().parents[1] / "params" / "l_palmyra213.json"
 
 
 def static_rows(build):

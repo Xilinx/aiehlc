@@ -8,7 +8,7 @@ sys.path.insert(0, str(SRC))
 
 
 def _kf(name):
-    spec = importlib.util.spec_from_file_location(name, SRC.parent / "script" / "perf" / "k_dmafeat.py")
+    spec = importlib.util.spec_from_file_location(name, SRC / "aiegraph" / "costmodel" / "tools" / "k_dmafeat.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m

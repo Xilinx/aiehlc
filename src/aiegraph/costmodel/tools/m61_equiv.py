@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """M6.1 P1: aiegraph.costmodel.estimate() site mode == the frozen board-validated K+L+N model (M34 PZ).
 
-  python3 -I script/perf/m61_equiv.py --golden GOLDEN.tsv --build-root DIR [--tol 1e-6] [--params m3122]
+  python3 -I src/aiegraph/costmodel/tools/m61_equiv.py --golden GOLDEN.tsv --build-root DIR [--tol 1e-6] [--params m3122]
 
 GOLDEN.tsv: cfg site launches T_hat (kln_frozen.sh with KLN_K_JSON=k m3122, T_hat ms per launch; 2 cfgs x 138).
 Imports aiegraph.costmodel from THIS worktree (python -I ignores PYTHONPATH, so <worktree>/src is put first on
@@ -27,7 +27,7 @@ import os
 import sys
 from pathlib import Path
 
-WT = Path(__file__).resolve().parents[2]
+WT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(WT / "src"))
 
 _OPENED = []

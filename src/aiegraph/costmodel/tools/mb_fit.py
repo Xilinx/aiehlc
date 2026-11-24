@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fit the raw "MB ..." lines of example/perf/aie_microbench.cc into script/perf/params/<board>.json (costmodel K1a).
+"""Fit the raw "MB ..." lines of example/perf/aie_microbench.cc into src/aiegraph/costmodel/params/<board>.json (costmodel K1a).
 
 usage: mb_fit.py <console log> <out json> <board name> [aie|ddr]
 Exits non-zero (no JSON written) if the BOARD marker is missing, any point is data=BAD, MB END is not PASS, or a

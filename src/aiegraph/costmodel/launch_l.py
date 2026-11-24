@@ -13,7 +13,7 @@ switching kernels on the same tiles, writes ~20x the warm words) and rst = core_
 launch (split_detail).  split_words' rst_n is not used: it is 33 on every off point.
 
 predict_l(calls, words, cfg) -> ms per launch, with parameters from
-script/perf/params/l_palmyra213.json (fitted by script/perf/l_fit.py).
+src/aiegraph/costmodel/params/l_palmyra213.json (fitted by src/aiegraph/costmodel/tools/l_fit.py).
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from .launch_split import lines, parse
 
 CFGS = ("off", "off-cold", "aot", "aot-kco")
 FEATURES = ("const", "bdcfg_calls", "startio_calls", "bdcfg_w", "cp_w", "kload_w", "rst")
-PARAMS = Path(__file__).resolve().parents[3] / "script" / "perf" / "params" / "l_palmyra213.json"
+PARAMS = Path(__file__).resolve().parent / "params" / "l_palmyra213.json"
 
 _WORDS = re.compile(r"LAUNCH split_words (.*)$")
 _KV = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(-?[0-9]+(?:\.[0-9]+)?)")

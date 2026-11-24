@@ -9,8 +9,8 @@ import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
-PERF = ROOT / "script" / "perf"
-PR = PERF / "params"
+PERF = ROOT / "src" / "aiegraph" / "costmodel" / "tools"
+PR = PERF.parent / "params"
 J0 = PR / "n_unet_palmyra213.m3121.json"
 JN = PR / "n_unet_palmyra213.m3125.json"
 O0 = Path("/scratch/staff/huaj/tmp/costmodel_m3121")

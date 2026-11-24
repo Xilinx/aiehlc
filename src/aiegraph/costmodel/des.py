@@ -36,7 +36,7 @@ Terms:
             stream (BDs issued first) and the cores already run.  Only the DES timeline after the wait start is
             predicted: per round max(0, round + round_fixed_cyc - overlap - b_overlap_cyc * b/(a+b)), b/(a+b) = the
             b-port share of the round's bytes (S/(S+1)); sum over rounds.
-Calibrated keys (script/perf/costmodel_fit.py, defaults = uncalibrated physics): CAL_DEFAULTS.  The palmyra213
+Calibrated keys (src/aiegraph/costmodel/tools/costmodel_fit.py, defaults = uncalibrated physics): CAL_DEFAULTS.  The palmyra213
 calibration (K2c) uses 6: chunk_ovh_cyc (compute), ddr_bw_scale + ddr_run0_b (bytes-only DDR, ddr_model="bytes"),
 b_prefetch_b, round_fixed_cyc and compute_exposed.  compute_exposed calibrates to ~0: inside the host's wait window
 the round is DDR-tail-limited; the board PERFIO split (R=1 yolo launches) shows >=88 % of the core compute runs

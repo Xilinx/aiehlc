@@ -2,7 +2,7 @@
 """Frozen L on a cnn net (resnet18, M4.1 P1): static L calls per launch from the build only, checked against the
 board's LAUNCH split_detail, and the frozen L params (no refit) against the board L per launch.
 
-  l_net.py --net resnet18 --params script/perf/params/l_palmyra213.m3121.json --build-root R CFG=LOG[,LOG..] ...
+  l_net.py --net resnet18 --params src/aiegraph/costmodel/params/l_palmyra213.m3121.json --build-root R CFG=LOG[,LOG..] ...
 
 Build R/<net>_<cfg> (read only):
   ag_work/arm_build/graph_driver.c   aiednn_conv / aiednn_dense calls in order: part [n], cid, px, kg
@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parents[1] / "src"))
+sys.path.insert(0, str(HERE.parents[2]))
 from aiegraph.costmodel import kload_static as ks  # noqa: E402
 from aiegraph.costmodel import launch_l  # noqa: E402
 from aiegraph.costmodel import static_feat as sf  # noqa: E402

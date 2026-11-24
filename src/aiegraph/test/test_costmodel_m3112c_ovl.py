@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-PERF = Path(__file__).resolve().parents[3] / "script" / "perf"
+PERF = Path(__file__).resolve().parents[1] / "costmodel" / "tools"
 
 
 def test_k_ovl_check_selftest_npred():

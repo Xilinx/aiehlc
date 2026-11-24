@@ -47,7 +47,10 @@ from typing import Any, Dict, List, Optional
 
 from . import des
 
-PARAMS_DIR = Path(__file__).resolve().parents[3] / "script" / "perf" / "params"
+PKG_DIR = Path(__file__).resolve().parent
+PARAMS_DIR = PKG_DIR / "params"        # frozen per-board calibration files (was script/perf/params)
+TOOLS_DIR = PKG_DIR / "tools"          # fitting / site-extraction tools, imported by bare name (was script/perf)
+REPO_ROOT = PKG_DIR.parents[2]         # relpaths reported in r["params"] / md5 files are relative to this
 CYCLES = "/scratch/staff/huaj/aiengineers/maxwell/tasks/2026-11-19_kernel-cycles/aie2ps_kernel_cycles.json"
 KACC_PREFIX = "kacc_"  # kacc_gemm_bf16, kacc_conv3x3_bf16, ...: same 4x4 kacc instance (des.geometry)
 _CAL_EXTRA = ("ddr_model",)
@@ -189,6 +192,15 @@ KLN_AUX = {"off_corr": "l_palmyra213.json"}
 KLN_CFGS = ("off", "aot-kco")
 
 
+def _rel(p: Any) -> str:
+    """repo-relative path of a params file (absolute if it lives outside the repo, e.g. a custom params_dir)"""
+    q = Path(p).resolve()
+    try:
+        return str(q.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(q)
+
+
 def _md5(path: Path) -> str:
     import hashlib
     with open(path, "rb") as f:
@@ -235,7 +247,7 @@ def estimate_sites(spec: Dict[str, Any], board: str = "palmyra213", params: str 
              "unpriced": [], "cfg", "board", "model"}."""
     import sys
     pd = Path(params_dir) if params_dir else PARAMS_DIR
-    perf = str(pd.parent)
+    perf = str(TOOLS_DIR)
     if perf not in sys.path:
         sys.path.insert(0, perf)
     try:
@@ -252,7 +264,7 @@ def estimate_sites(spec: Dict[str, Any], board: str = "palmyra213", params: str 
     if not Path(build).is_dir():
         raise FileNotFoundError("no UNet build dir %s" % build)
     P = {k: pd / v for k, v in files.items()}
-    rel = lambda p: str(Path(p).resolve().relative_to(pd.parents[2]))  # noqa: E731
+    rel = _rel
     pmd5 = {rel(P[k]): _md5(P[k]) for k in ("k", "l", "n", "kcyc", "kdw")}
     aux = {rel(pd / v): _md5(pd / v) for v in KLN_AUX.values()}
 
@@ -324,7 +336,7 @@ def estimate_sites(spec: Dict[str, Any], board: str = "palmyra213", params: str 
 # ------------------------------------------------------------------ M6 net mode: one entry for the 3 nets
 # {"net": unet|resnet18|yolo26n, "build": ROOT, "cfg": ..., "sites": None|[...]}.  unet -> estimate_sites (M34 PZ,
 # params "m3122"); resnet18 / yolo26n -> k_net's predict path (k_net.static_rows + k_net.k_predict) with the frozen
-# set listed in script/perf/params/<md5 file> (M4.1 / M4.2 PF), T_hat rounded like the KSITE line (%.4f).
+# set listed in src/aiegraph/costmodel/params/<md5 file> (M4.1 / M4.2 PF), T_hat rounded like the KSITE line (%.4f).
 NET_PARAMS = {"palmyra213": {
     "resnet18": {"m41": ("m41_frozen.md5", "resnet18", ("off", "aot-kco"))},
     "yolo26n": {"m42": ("m42_frozen.md5", "yolo26n", ("off", "aot"))},
@@ -367,7 +379,7 @@ def estimate_net(spec: Dict[str, Any], board: str = "palmyra213", params: Option
         return r
     import sys
     pd = Path(params_dir) if params_dir else PARAMS_DIR
-    perf = str(pd.parent)
+    perf = str(TOOLS_DIR)
     if perf not in sys.path:
         sys.path.insert(0, perf)
     try:
@@ -383,9 +395,9 @@ def estimate_net(spec: Dict[str, Any], board: str = "palmyra213", params: Option
     bdir = build / ("%s_%s" % (net, cfg))
     if not bdir.is_dir():
         raise FileNotFoundError("no %s build dir %s" % (net, bdir))
-    wt = pd.parents[2]
+    wt = REPO_ROOT
     P = _frozen_files(pd / md5f, wt)
-    rel = lambda p: str(Path(p).resolve().relative_to(wt))  # noqa: E731
+    rel = _rel
     pmd5 = {rel(f): _md5(f) for f in P.values()}
     import k_net
     import l_net

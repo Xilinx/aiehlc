@@ -37,13 +37,13 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from aiegraph.costmodel.launch_split import lines  # noqa: E402
 from aiegraph.costmodel.launch_l import CFGS, FEATURES, feature_row, point, predict_l, load_params  # noqa: E402
 
 
 def _l_static():
-    """script/perf/l_static.py (python -I does not put the script dir on sys.path)"""
+    """src/aiegraph/costmodel/tools/l_static.py (python -I does not put the script dir on sys.path)"""
     import importlib.util
     spec = importlib.util.spec_from_file_location("l_static", Path(__file__).resolve().with_name("l_static.py"))
     mod = importlib.util.module_from_spec(spec)

@@ -65,7 +65,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parents[1] / "src"))
+sys.path.insert(0, str(HERE.parents[2]))
 
 KLN_SITE = "conv121"
 MEAS_FIELDS = ("K_meas", "L_meas", "N_meas", "ovl_meas", "compute_cyc", "lock", "stream", "wait", "site_ms")

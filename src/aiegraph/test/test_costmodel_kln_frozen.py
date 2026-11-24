@@ -78,9 +78,9 @@ def test_never_writes_build_root_kln(env):
 def test_k_json_env_default_and_override(env, tmp_path):
     b, d, o, e = env
     rc, out = _run(b, d, o, e)
-    assert rc == 0 and "KLNFROZEN PARAMS file=script/perf/params/k_palmyra213.m3112c.json md5=" in out
+    assert rc == 0 and "KLNFROZEN PARAMS file=src/aiegraph/costmodel/params/k_palmyra213.m3112c.json md5=" in out
     alt = tmp_path / "k_alt.json"
-    alt.write_text((ROOT / "script/perf/params/k_palmyra213.m3112c.json").read_text())
+    alt.write_text((ROOT / "src/aiegraph/costmodel/params/k_palmyra213.m3112c.json").read_text())
     rc, out = _run(b, d, o, dict(e, KLN_K_JSON=str(alt)))
     assert rc == 0 and "KLNFROZEN PARAMS file=%s md5=" % alt in out
     calls = Path(e["STUB_LOG"]).read_text().splitlines()

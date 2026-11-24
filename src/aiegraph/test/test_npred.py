@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-PERF = Path(__file__).resolve().parents[3] / "script" / "perf"
+PERF = Path(__file__).resolve().parents[1] / "costmodel" / "tools"
 
 
 def _nf():

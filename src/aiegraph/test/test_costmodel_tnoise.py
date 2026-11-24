@@ -1,10 +1,10 @@
-"""M3.1.2.2 PN: script/perf/t_noise.py -- per-site T (site_ms) a/b/c jitter; runs under python -I."""
+"""M3.1.2.2 PN: src/aiegraph/costmodel/tools/t_noise.py -- per-site T (site_ms) a/b/c jitter; runs under python -I."""
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-PY = ROOT / "script" / "perf" / "t_noise.py"
+PY = ROOT / "src" / "aiegraph" / "costmodel" / "tools" / "t_noise.py"
 HDR = "cfg\trun\tpart\tsite\tkind\tlaunches\tsite_ms\tL_meas\tL_hat\n"
 
 

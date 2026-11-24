@@ -8,11 +8,11 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SRC))
-J = SRC.parent / "script" / "perf" / "params" / "kdw_palmyra213.m3112c.json"
+J = SRC / "aiegraph" / "costmodel" / "params" / "kdw_palmyra213.m3112c.json"
 
 
 def _kf(name):
-    spec = importlib.util.spec_from_file_location(name, SRC.parent / "script" / "perf" / "k_dmafeat.py")
+    spec = importlib.util.spec_from_file_location(name, SRC / "aiegraph" / "costmodel" / "tools" / "k_dmafeat.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m

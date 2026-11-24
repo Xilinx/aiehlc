@@ -4,7 +4,7 @@
   static_feat.py --build-root <root with k_<cfg>/<kernel>/ and unet_<cfg>/>
                  [--kernel-logs <dir with <cfg>/<kernel>.log>]
                  [--unet cfg=LOG [cfg=LOG ...]]      UNet ELF builds <build-root>/unet_<cfg>, LOG = board log
-                 [--params script/perf/params/palmyra213.json] [--kcal script/perf/params/palmyra213_kcal.json]
+                 [--params src/aiegraph/costmodel/params/palmyra213.json] [--kcal src/aiegraph/costmodel/params/palmyra213_kcal.json]
                  [--cycles <aie2ps_kernel_cycles.json>]
 
 UNet (--unet, P3): the launch sequence (258 launches: 48 uc_conv, 78 uc_linear, 132 fa_run_o over 44 kernels) and
@@ -378,8 +378,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-root", required=True)
     ap.add_argument("--kernel-logs")
-    ap.add_argument("--params", default=str(ROOT / "script/perf/params/palmyra213.json"))
-    ap.add_argument("--kcal", default=str(ROOT / "script/perf/params/palmyra213_kcal.json"))
+    ap.add_argument("--params", default=str(ROOT / "src/aiegraph/costmodel/params/palmyra213.json"))
+    ap.add_argument("--kcal", default=str(ROOT / "src/aiegraph/costmodel/params/palmyra213_kcal.json"))
     ap.add_argument("--cycles", default=CYCLES)
     ap.add_argument("--unet", action="extend", nargs="+", default=[], metavar="cfg=PATH",
                     help="UNet board log of cfg; build = <build-root>/unet_<cfg> (P3)")

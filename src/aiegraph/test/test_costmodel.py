@@ -193,7 +193,7 @@ def test_des_import():
     from aiegraph.costmodel.des import predict_launch
 
     assert callable(predict_launch) and callable(rl.roofline)
-    fit = SRC.parent / "script" / "perf" / "costmodel_fit.py"
+    fit = SRC / "aiegraph" / "costmodel" / "tools" / "costmodel_fit.py"
     spec = importlib.util.spec_from_file_location("costmodel_fit", fit)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -217,7 +217,7 @@ def test_costmodel_fit_form_m5():
     # wait_io count, compute_exposed 0) are fit back to ~0 error; the default form keeps its 6-constant shape.
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location("costmodel_fit_m5", SRC.parent / "script" / "perf" / "costmodel_fit.py")
+    spec = importlib.util.spec_from_file_location("costmodel_fit_m5", SRC / "aiegraph" / "costmodel" / "tools" / "costmodel_fit.py")
     fit = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fit)
     params = dict(_HAND_PARAMS)
@@ -313,7 +313,7 @@ def test_l_interleaved_host_line(tmp_path):
 
 
 # ---- L segment M1.2.2 P4: L prediction from static (build-directory) features only ----
-PERF = SRC.parent / "script" / "perf"
+PERF = SRC / "aiegraph" / "costmodel" / "tools"
 KBUILD = DATA / "build_off_u_lin_1024x320x320"  # trimmed k_off/u_lin_1024x320x320 build, see its README
 KLOG = DATA / "l_off_u_lin_1024x320x320.log"    # board log of the same build (M1-L/kernels/off)
 
@@ -369,7 +369,7 @@ def test_l_static_ignores_log_counts(tmp_path):
 # shuhua/clones/cost/tasks/2026-11-20_M2c/unet_{off,aot-kco}.b.log ('LAUNCH warm' carries launches= for NSUM).
 # The site features come from the UNet build dirs (~10 MB of host.cc / graph_driver.c / aiek_unetconv.cc read
 # out of 31 GB), not committed: N_BUILD_ROOT overrides the default M2c build root.
-NPARAMS = PERF / "params" / "n_unet_palmyra213.json"
+NPARAMS = PERF.parent / "params" / "n_unet_palmyra213.json"
 NBUILD = Path(__import__("os").environ.get("N_BUILD_ROOT", "/scratch/staff/huaj/tmp/costmodel_m2c"))
 
 
@@ -411,7 +411,7 @@ def test_k_diag_selftest():
     """k_diag.py (M3.1 K anchor): split, bound, class, bucket and the K-floor fit on synthetic known-answer data"""
     import re
     import subprocess
-    k_diag = SRC.parent / "script" / "perf" / "k_diag.py"
+    k_diag = SRC / "aiegraph" / "costmodel" / "tools" / "k_diag.py"
     r = subprocess.run([sys.executable, "-I", str(k_diag), "--selftest"], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stdout + r.stderr
     m = re.search(r"^KDIAG SELFTEST PASS \((\d+)/(\d+)\)$", r.stdout, re.M)
@@ -425,7 +425,7 @@ def test_k_diag_spreadx(capsys):
     """k_diag.py SPREADX (M3.1.2.2 PR): own per-site spread vs a spread_abc.tsv; exact -> PASS,
     0.002 ms off / missing / extra site -> FAIL"""
     import importlib.util
-    path = SRC.parent / "script" / "perf" / "k_diag.py"
+    path = SRC / "aiegraph" / "costmodel" / "tools" / "k_diag.py"
     spec = importlib.util.spec_from_file_location("k_diag_spreadx", path)
     kd = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(kd)
@@ -445,7 +445,7 @@ def test_k_noise_spread(tmp_path):
     n_runs!=3 -> FAIL rc=1; plus the built-in selftest"""
     import re
     import subprocess
-    kn = SRC.parent / "script" / "perf" / "k_noise.py"
+    kn = SRC / "aiegraph" / "costmodel" / "tools" / "k_noise.py"
     r = subprocess.run([sys.executable, "-I", str(kn), "--selftest"], capture_output=True, text=True, timeout=120)
     assert r.returncode == 0 and re.search(r"^KNOISE SELFTEST PASS \((\d+)/\1\)$", r.stdout, re.M), r.stdout + r.stderr
     cmp = "CMP unet board=palmyra213 a=1 aie_launches=9 b=2 run_rc=0 c=3 PASS\n"
@@ -477,7 +477,7 @@ def test_k_diag_noscale():
     """k_diag.py (M3.1.1 counter window): perf_n < launches is short (never scaled, out of KSANITY);
     optional pre_io_act_cyc/snap_gap_cyc tail; KSANITY denominator is K_meas + snap_gap"""
     import importlib.util
-    path = SRC.parent / "script" / "perf" / "k_diag.py"
+    path = SRC / "aiegraph" / "costmodel" / "tools" / "k_diag.py"
     spec = importlib.util.spec_from_file_location("k_diag_noscale", path)
     kd = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(kd)
@@ -508,7 +508,7 @@ def test_k_diag_sanity_only():
     import contextlib
     import importlib.util
     import io
-    path = SRC.parent / "script" / "perf" / "k_diag.py"
+    path = SRC / "aiegraph" / "costmodel" / "tools" / "k_diag.py"
     spec = importlib.util.spec_from_file_location("k_diag_sanity", path)
     kd = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(kd)
@@ -549,7 +549,7 @@ def test_k_diag_sanity_only():
 def test_k_diag_ovl_model():
     """k_diag.py --model ovl (M3.1.2): compute/ovl tail parsed; sum / max overlap forms; old lines refused"""
     import importlib.util
-    path = SRC.parent / "script" / "perf" / "k_diag.py"
+    path = SRC / "aiegraph" / "costmodel" / "tools" / "k_diag.py"
     spec = importlib.util.spec_from_file_location("k_diag_ovl", path)
     kd = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(kd)
@@ -579,7 +579,7 @@ def test_k_diag_tol_3runs(capsys):
     """k_diag.py (M3.1.2.1): per-site tol = max(0.15 K_i, 2 spread_abc, 0.01) over runs a/b/c, kge0.1 scope -> KSMALL,
     KRESID terms sum to K_hat - K_meas"""
     import importlib.util
-    path = SRC.parent / "script" / "perf" / "k_diag.py"
+    path = SRC / "aiegraph" / "costmodel" / "tools" / "k_diag.py"
     spec = importlib.util.spec_from_file_location("k_diag_tol", path)
     kd = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(kd)
@@ -606,7 +606,7 @@ def test_k_diag_tol_3runs(capsys):
 
 def _k_diag_mod(name):
     import importlib.util
-    path = SRC.parent / "script" / "perf" / "k_diag.py"
+    path = SRC / "aiegraph" / "costmodel" / "tools" / "k_diag.py"
     spec = importlib.util.spec_from_file_location(name, path)
     kd = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(kd)
@@ -649,7 +649,7 @@ def test_ksem_line_pass_and_fail(capsys):
 
 def _kdmaf_mod(name):
     import importlib.util
-    spec = importlib.util.spec_from_file_location(name, SRC.parent / "script" / "perf" / "k_dmafeat.py")
+    spec = importlib.util.spec_from_file_location(name, SRC / "aiegraph" / "costmodel" / "tools" / "k_dmafeat.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
@@ -659,7 +659,7 @@ def test_kdmaf_perch_selftest():
     """k_dmafeat.py --selftest (M3.1.2.3 RA): >= 12 cases incl. dominant-channel pick, constant drop, nan reject"""
     import re
     import subprocess
-    p = SRC.parent / "script" / "perf" / "k_dmafeat.py"
+    p = SRC / "aiegraph" / "costmodel" / "tools" / "k_dmafeat.py"
     r = subprocess.run([sys.executable, "-I", str(p), "--selftest"], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stdout + r.stderr
     m = re.search(r"^KDMAF SELFTEST PASS \((\d+)/(\d+)\)$", r.stdout, re.M)
@@ -686,7 +686,7 @@ def test_kdmaf_perch_dom_and_rank():
 def test_kdmaf_perch_no_resid_needed(tmp_path):
     """--perch does not require --resid (argparse error rc=2 only without --build-root / runs); plain mode still does"""
     import subprocess
-    p = SRC.parent / "script" / "perf" / "k_dmafeat.py"
+    p = SRC / "aiegraph" / "costmodel" / "tools" / "k_dmafeat.py"
     r = subprocess.run([sys.executable, "-I", str(p), "--perch"], capture_output=True, text=True, timeout=60)
     assert r.returncode == 2 and "--perch needs" in r.stderr and "--resid" not in r.stderr.split("error:")[-1]
     r = subprocess.run([sys.executable, "-I", str(p), "--build-root", str(tmp_path), "x=y"], capture_output=True,
@@ -703,7 +703,7 @@ def test_kdmaf_perch_unet_logs():
     logs = [d / "unet_off.a.log", d / "unet_aot-kco.a.log"]
     if not (b.is_dir() and all(x.is_file() for x in logs)):
         pytest.skip("UNet build dir / logs not present")
-    p = SRC.parent / "script" / "perf" / "k_dmafeat.py"
+    p = SRC / "aiegraph" / "costmodel" / "tools" / "k_dmafeat.py"
     r = subprocess.run([sys.executable, "-I", str(p), "--perch", "--build-root", str(b), "off=%s" % logs[0],
                         "aot-kco=%s" % logs[1]], capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr
@@ -718,7 +718,7 @@ def _kcore_mod(name, monkeypatch, fa_src="iss", fa_pred=900.0, lin_pred=1000.0):
     """k_core_check with a fake k_diag (one log, two sites: linear0 + fa1, compute_cyc 1000 each) and a fake kcyc"""
     import importlib.util
     import types
-    spec = importlib.util.spec_from_file_location(name, SRC.parent / "script" / "perf" / "k_core_check.py")
+    spec = importlib.util.spec_from_file_location(name, SRC / "aiegraph" / "costmodel" / "tools" / "k_core_check.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     kd = types.ModuleType("k_diag")
@@ -771,7 +771,7 @@ def test_kcore_maxrel_kcyc_fa_src(tmp_path):
     """kcyc_unet: fa_src from the data (iss only when every FA site has an md5-matching ISS value), variants"""
     import hashlib
     import importlib.util
-    spec = importlib.util.spec_from_file_location("kcyc_unet_rf", SRC.parent / "script" / "perf" / "kcyc_unet.py")
+    spec = importlib.util.spec_from_file_location("kcyc_unet_rf", SRC / "aiegraph" / "costmodel" / "tools" / "kcyc_unet.py")
     k = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(k)
     assert (k.fa_src_of(18, 18), k.fa_src_of(0, 18), k.fa_src_of(6, 18)) == ("iss", "formula_noloo", "mixed")
@@ -788,7 +788,7 @@ def test_kcore_maxrel_kcyc_fa_src(tmp_path):
 
 def _m3_lpred_mod(monkeypatch, l_hat, tmp_path):
     import importlib.util
-    spec = importlib.util.spec_from_file_location("m3_site_lp", SRC.parent / "script" / "perf" / "m3_site.py")
+    spec = importlib.util.spec_from_file_location("m3_site_lp", SRC / "aiegraph" / "costmodel" / "tools" / "m3_site.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     monkeypatch.setattr(m, "SITES_PER_CFG", {"fa": 1})
@@ -867,7 +867,7 @@ def test_kdmaf_ddrt_unet_logs(tmp_path):
     logs = [d / "unet_off.a.log", d / "unet_aot-kco.a.log"]
     if not (b.is_dir() and all(x.is_file() for x in logs)):
         pytest.skip("UNet build dir / logs not present")
-    p = SRC.parent / "script" / "perf" / "k_dmafeat.py"
+    p = SRC / "aiegraph" / "costmodel" / "tools" / "k_dmafeat.py"
     t = tmp_path / "kln" / "dmach.tsv"
     r = subprocess.run([sys.executable, "-I", str(p), "--perch", "--ddrt", "--tsv", str(t), "--build-root", str(b),
                         "off=%s" % logs[0], "aot-kco=%s" % logs[1]], capture_output=True, text=True, timeout=600)
@@ -965,7 +965,7 @@ def test_kln_insample_tsv_only(tmp_path, capsys):
 def _m3_lrefit_mod(monkeypatch, tmp_path, l_meas):
     """2 sites per log; site_ms 1.0; base L_hat 0.1; feats: (launches, kswitch) = (2, 1) and (1, 0)"""
     import importlib.util
-    spec = importlib.util.spec_from_file_location("m3_site_lr", SRC.parent / "script" / "perf" / "m3_site.py")
+    spec = importlib.util.spec_from_file_location("m3_site_lr", SRC / "aiegraph" / "costmodel" / "tools" / "m3_site.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     monkeypatch.setattr(m, "SITES_PER_CFG", {"fa": 1, "linear": 1})
@@ -1041,11 +1041,11 @@ M61_BUILD = os.environ.get("COSTMODEL_UNET_BUILD", "/scratch/staff/huaj/tmp/cost
 M61_GOLDEN = DATA / "m61_golden_that.tsv"
 # the 5 frozen K+L+N parameter files of M34 PZ (script/perf/kln_frozen.sh KLN_K_JSON=k m3122)
 M61_PZ_MD5 = {
-    "script/perf/params/k_palmyra213.m3122.json": "3f9f2123fd09ee34100028c64fef1dc4",
-    "script/perf/params/l_palmyra213.m3121.json": "ade402695101ca3816935dd78c9800e9",
-    "script/perf/params/n_unet_palmyra213.m3121.json": "951402a1beafb38a698c2462d6129e8b",
-    "script/perf/params/kcyc_unet_iss.json": "599a25137259750b85a9431551525536",
-    "script/perf/params/kdw_palmyra213.m3112c.json": "786032f24141823c59c8abb5d61a984d",
+    "src/aiegraph/costmodel/params/k_palmyra213.m3122.json": "3f9f2123fd09ee34100028c64fef1dc4",
+    "src/aiegraph/costmodel/params/l_palmyra213.m3121.json": "ade402695101ca3816935dd78c9800e9",
+    "src/aiegraph/costmodel/params/n_unet_palmyra213.m3121.json": "951402a1beafb38a698c2462d6129e8b",
+    "src/aiegraph/costmodel/params/kcyc_unet_iss.json": "599a25137259750b85a9431551525536",
+    "src/aiegraph/costmodel/params/kdw_palmyra213.m3112c.json": "786032f24141823c59c8abb5d61a984d",
 }
 _M61_CACHE = {}
 

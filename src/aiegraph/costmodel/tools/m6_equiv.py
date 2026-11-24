@@ -22,7 +22,7 @@ import re
 import sys
 from pathlib import Path
 
-WT = Path(__file__).resolve().parents[2]
+WT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(WT / "src"))
 
 _KS = re.compile(r"^KSITE net=(\S+) cfg=(\S+) run=\S+ part=(\d+) launches=(\d+) .*?\bT_hat=([0-9.eE+-]+)")

@@ -24,7 +24,7 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from aiegraph.costmodel import static_feat as sf  # noqa: E402
 from aiegraph.costmodel.kload_static import kload_static  # noqa: E402
 from aiegraph.costmodel.launch_l import point  # noqa: E402

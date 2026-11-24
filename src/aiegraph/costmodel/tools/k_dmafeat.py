@@ -96,7 +96,7 @@ from pathlib import Path
 NET = "unet"   # --net (net_sites.set_net)
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parents[1] / "src"))
+sys.path.insert(0, str(HERE.parents[2]))
 
 FEATS = ("run_b", "num_dims", "burst_b", "shim_ch", "rw_ratio", "bd_n", "ddr_b")
 FEATS_CH = ("run_b", "shim_ch", "rw_ratio", "bd_n", "ddr_b", "dom_run_b", "dom_bytes", "dom_bd_n", "maxch_t")

@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from aiegraph.costmodel.n_layout import layout_sites  # noqa: E402
 from aiegraph.costmodel.unet_seq import read  # noqa: E402
 

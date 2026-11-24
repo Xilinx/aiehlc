@@ -46,7 +46,7 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))  # python -I: no implicit src on sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # python -I: no implicit src on sys.path
 from aiegraph.costmodel.n_feat import base_sites as n_sites  # noqa: E402
 from aiegraph.costmodel.static_feat import unet_site_feat  # noqa: E402
 from aiegraph.costmodel.unet_seq import read  # noqa: E402

@@ -100,7 +100,7 @@ from scipy.optimize import minimize, nnls
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parents[1] / "src"))
+sys.path.insert(0, str(HERE.parents[2]))
 
 AIE_MHZ = 1e3
 RUNB_EDGES = (64, 1024)          # bucket 0: run_b <= 64, 1: <= 1024, 2: > 1024

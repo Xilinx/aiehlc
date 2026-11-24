@@ -2,7 +2,7 @@
 """Per-launch AIE core cycles (core_cyc) for every UNet AIE site (costmodel M3 P1, K = DES(core_cyc)).
 
   kcyc_unet.py --build-root <unet build dir> --iss <aie2ps_kernel_cycles.json> --out <json>
-               [--build-log <dir>.build.log] [--iss-unet script/perf/params/kcyc_unet_iss.json]
+               [--build-log <dir>.build.log] [--iss-unet src/aiegraph/costmodel/params/kcyc_unet_iss.json]
 
 Sites: n_feat.sites(build, build.log) (graph_driver.c order). Counts are cross-checked with the build log line
   '[build_unet] linked driver: <c> call sites -> aiednn_aie_conv + <l> -> aiednn_aie_linear (AIE) ...; <a> -> aiednn_aie_attn'
@@ -45,7 +45,7 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import nnls
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from aiegraph.costmodel.n_feat import gfa_classes, sites as n_sites  # noqa: E402
 from aiegraph.costmodel.unet_seq import read  # noqa: E402
 
@@ -121,7 +121,7 @@ def main(argv=None):
     ap.add_argument("--build-root", required=True)
     ap.add_argument("--build-log")
     ap.add_argument("--iss", required=True)
-    ap.add_argument("--iss-unet", default=str(HERE / "params" / "kcyc_unet_iss.json"))
+    ap.add_argument("--iss-unet", default=str(HERE.parent / "params" / "kcyc_unet_iss.json"))
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     build = a.build_root.rstrip("/")

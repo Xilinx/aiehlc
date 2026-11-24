@@ -20,7 +20,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 _spec = importlib.util.spec_from_file_location("n_fit", str(Path(__file__).resolve().parent / "n_fit.py"))
 n_fit = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(n_fit)

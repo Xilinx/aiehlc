@@ -156,7 +156,7 @@ def inwin_calls(txt, fn):
 def off_corr_sites(build, coef):
     """[(kind, cid, corr_ms per launch-sum, info)] of the launches>0 sites of a UNet build in graph_driver order"""
     import os
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
     from aiegraph.costmodel.n_feat import base_sites
     from aiegraph.costmodel.static_feat import UNET_WL, host_counts, feat_of_counts, unet_site_feat
     host = os.path.join(build, UNET_WL, "host.cc")

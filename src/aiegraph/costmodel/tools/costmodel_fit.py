@@ -2,7 +2,7 @@
 """Cost-model fit, stage K (AIE side): DES (src/aiegraph/costmodel/des.py) prediction of rt_wait_io per launch vs the
 board (palmyra213) per-kernel logs of script/perf/p0_one_kernel.sh.
 
-  costmodel_fit.py --stage K --params script/perf/params/<board>.json --cycles <aie2ps_kernel_cycles.json>
+  costmodel_fit.py --stage K --params src/aiegraph/costmodel/params/<board>.json --cycles <aie2ps_kernel_cycles.json>
                    --kboard <board_compute.json> --logs <dir of <kernel>.log> [--rerun-kernel first|<name>] [--board <ip>] --out k_pred_vs_meas.tsv
                    [--cal-out <json>] [--no-calibrate --cal <json>]
 
@@ -34,7 +34,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from aiegraph.costmodel import des  # noqa: E402
@@ -228,7 +228,7 @@ def loo_maxrel(points, params, detail=None, form="default", worst_out=None):
 def rerun(kernel, board, outdir):
     os.makedirs(outdir, exist_ok=True)
     log = os.path.join(outdir, kernel + ".log")
-    cmd = ["bash", os.path.join(HERE, "p0_one_kernel.sh"), "--board", board, "--kernel", kernel]
+    cmd = ["bash", os.path.join(ROOT, "script", "perf", "p0_one_kernel.sh"), "--board", board, "--kernel", kernel]
     print("[fit] rerun: %s > %s" % (" ".join(cmd), log), flush=True)
     with open(log, "w") as f:
         rc = subprocess.call(cmd, stdout=f, stderr=subprocess.STDOUT, cwd=ROOT)

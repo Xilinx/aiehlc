@@ -9,7 +9,7 @@ from pathlib import Path
 
 from test_costmodel_m3112c_khats import _w
 
-PERF = Path(__file__).resolve().parents[3] / "script" / "perf"
+PERF = Path(__file__).resolve().parents[1] / "costmodel" / "tools"
 
 
 def _kd():
