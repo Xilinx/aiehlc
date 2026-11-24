@@ -635,10 +635,15 @@ cd "${BUILD_DIR}"
 # KERNEL_OBJ_LIST is set above (single file or multiple files for multi-kernel)
 
 echo "Kernel object(s):"
+if [ "${AIEHLC_FAST:-0}" = "1" ]; then
+    # -fast (F18): the nm listing is log only and costs ~1.4 s for UNet's 44 kernel objects.
+    echo "  $(echo ${KERNEL_OBJ_LIST} | wc -w) object(s) (nm listing skipped with -fast)"
+else
 for kobj in ${KERNEL_OBJ_LIST}; do
     echo "  $(basename ${kobj}):"
     nm "${kobj}" | grep _binary_ || true
 done
+fi
 echo ""
 
 # Library vs executable mode.
@@ -708,6 +713,64 @@ void host_canonicalized();\
         "${WORKLOCAL_DIR}/host.cc" > "${HOST_FIXED}"
 fi
 HOST_SRC="${HOST_FIXED}"
+
+# F18 (-fast): content cache for the library archive. In aiegraph's install step this script rebuilds
+# a byte-identical archive on every warm build (UNet carrier: host.o + 8 runtime objects + ar of
+# 430 MB of kernel objects, ~9 s). The key is ccache's preprocessor mode for every object it would
+# compile (compiler --version, the exact flags with the build dir masked, `-E -P` of the source,
+# which covers every header and -D) plus the bytes of the kernel objects, the object list, the
+# archive name, ar --version and this script. A hit hardlinks the archive (0444) and skips the
+# compiles and ar. Only for library mode with a full rebuild and no -g (a -g object holds paths).
+# HOSTCOMPILE_ARCHIVE_CACHE=<dir> or AIEHLC_FAST=1 (${XDG_CACHE_HOME:-~/.cache}/aiehlc/hca);
+# keeps the newest HOSTCOMPILE_ARCHIVE_CACHE_KEEP (default 3) entries.
+_HCA_DIR="${HOSTCOMPILE_ARCHIVE_CACHE:-}"
+if [ -z "${_HCA_DIR}" ] && [ "${AIEHLC_FAST:-0}" = "1" ]; then
+    _HCA_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/aiehlc/hca"
+fi
+_HCA_KEY=""
+case " ${HOST_OPT_FLAGS} ${OPT_FLAGS} ${EXTRA_DEFS:-} " in *" -g"*) _HCA_DIR="" ;; esac
+if [ -n "${_HCA_DIR}" ] && [ "${HOST_ENTRY_KIND}" = "library" ] && [ "${REBUILD}" -eq 1 ]; then
+    _hca_pp() {   # same compiler + flags as _hc_one / the serial blocks below, -E -P instead of -c -o
+        case "$1" in
+            host)    echo "${TOOL_PREFIX}g++ ${HOST_OPT_FLAGS} -std=c++20 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag}"
+                     ${TOOL_PREFIX}g++ ${HOST_OPT_FLAGS} -std=c++20 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -E -P "${HOST_SRC}" ;;
+            routing) echo "${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++17 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag}"
+                     ${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++17 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -E -P "${WORKLOCAL_DIR}/routing.cc" ;;
+            *)       echo "${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++17 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} $1"
+                     ${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++17 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -E -P "${AIEHLC_ROOT}/src/mlir/runtime/$1.c" ;;
+        esac
+    }
+    _hca_names=(host aie_runtime aie_runtime_debug aie_runtime_stream_debug aie_runtime_common
+                aie_runtime_control_plan aie_runtime_resource aie_ctrlpkt_encode aie_runtime_xaie_seq)
+    [ "${HAS_ROUTING}" -eq 1 ] && _hca_names+=(routing)
+    _hca_t="$(mktemp -d)"
+    for _n in "${_hca_names[@]}"; do
+        ( _hca_pp "${_n}" | sed -e "1s#${BUILD_DIR}#<B>#g" -e "1s#${WORKLOCAL_DIR}#<W>#g" | sha1sum > "${_hca_t}/${_n}"
+          [ "${PIPESTATUS[0]}" -eq 0 ] || echo fail > "${_hca_t}/${_n}.fail" ) 2>/dev/null &
+    done
+    # sha1 of every kernel object (in parallel: 430 MB for UNet), sorted by basename
+    _hca_kobj="$(printf '%s\n' ${KERNEL_OBJ_LIST} | xargs -r -P 8 -n 8 sha1sum | sed -e 's#  .*/#  #' | LC_ALL=C sort -k2 | sha1sum)"
+    wait
+    if ! ls "${_hca_t}"/*.fail >/dev/null 2>&1; then
+        _HCA_KEY="$( { echo hca1; echo "${HOST_LIB_NAME} ${HAS_ROUTING}"; ${TOOL_PREFIX}g++ --version; ${TOOL_PREFIX}ar --version
+                       sha1sum < "${BASH_SOURCE[0]}"; echo "${_hca_kobj}"
+                       for _n in "${_hca_names[@]}"; do echo "${_n} $(cat "${_hca_t}/${_n}")"; done; } | sha1sum | cut -c1-40)"
+    fi
+    rm -rf "${_hca_t}"
+    if [ -n "${_HCA_KEY}" ] && [ -f "${_HCA_DIR}/${_HCA_KEY}/lib.a" ]; then
+        rm -f "${HOST_LIB_NAME}"
+        ln "${_HCA_DIR}/${_HCA_KEY}/lib.a" "${HOST_LIB_NAME}" 2>/dev/null || cp "${_HCA_DIR}/${_HCA_KEY}/lib.a" "${HOST_LIB_NAME}"
+        touch "${_HCA_DIR}/${_HCA_KEY}"   # LRU hint
+        echo "[hostcompile] archive cache hit ${_HCA_KEY:0:12}: ${BUILD_DIR}/${HOST_LIB_NAME} (no compile, no ar)"
+        ls -l "${HOST_LIB_NAME}"
+        AOUT_DIR="$(dirname "${WORKLOCAL_DIR}")"
+        # hardlink, never copy: this inode is the cache entry (0444; nothing writes an archive in place)
+        ln -f "${HOST_LIB_NAME}" "${AOUT_DIR}/${HOST_LIB_NAME}" 2>/dev/null || cp -f "${HOST_LIB_NAME}" "${AOUT_DIR}/${HOST_LIB_NAME}"
+        echo "Published: ${AOUT_DIR}/${HOST_LIB_NAME} (hardlink)"
+        cd "${_HOSTCOMPILE_ORIG_PWD}"
+        exit 0
+    fi
+fi
 
 # HOSTCOMPILE_HOST_JOBS: compile host.cc, the 8 aie_runtime*.c files and routing.cc at once
 # (default 10; 1 = the old serial blocks below). Same commands and flags as the serial blocks,
@@ -896,6 +959,19 @@ if [ "${HOST_ENTRY_KIND}" = "library" ]; then
         echo "Error: failed to archive ${HOST_LIB_NAME}"
         exit 1
     fi
+    if [ -n "${_HCA_KEY}" ] && [ ! -e "${_HCA_DIR}/${_HCA_KEY}" ]; then   # F18 store (never fails the build)
+        _hca_tmp="${_HCA_DIR}/.tmp-${_HCA_KEY}-$$"
+        # hardlink (cp fallback): the build's archive becomes 0444 too, same as on a hit
+        if mkdir -p "${_hca_tmp}" 2>/dev/null && { ln "${HOST_LIB_NAME}" "${_hca_tmp}/lib.a" 2>/dev/null \
+                || cp "${HOST_LIB_NAME}" "${_hca_tmp}/lib.a" 2>/dev/null; } \
+           && chmod 0444 "${_hca_tmp}/lib.a" && mv -T "${_hca_tmp}" "${_HCA_DIR}/${_HCA_KEY}" 2>/dev/null; then
+            echo "[hostcompile] archive cache store ${_HCA_KEY:0:12}"
+            ls -1dt "${_HCA_DIR}"/[0-9a-f]*/ 2>/dev/null | tail -n +$(( ${HOSTCOMPILE_ARCHIVE_CACHE_KEEP:-3} + 1 )) \
+                | while read -r _old; do rm -rf "${_old}"; done
+        fi
+        rm -rf "${_hca_tmp}" 2>/dev/null
+        find "${_HCA_DIR}" -maxdepth 1 -name '.tmp-*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+    fi
     # No ranlib: `ar rcs` already writes the symbol index (ranlib left the 430 MB UNet carrier
     # archive byte-identical and cost 3.0 s).
 
@@ -931,8 +1007,14 @@ if [ "${HOST_ENTRY_KIND}" = "library" ]; then
     # Publish next to the ELF the executable path would have produced, so
     # callers have one predictable location to look in.
     AOUT_DIR="$(dirname "${WORKLOCAL_DIR}")"
-    cp -f "${HOST_LIB_NAME}" "${AOUT_DIR}/${HOST_LIB_NAME}"
-    echo "Published: ${AOUT_DIR}/${HOST_LIB_NAME}"
+    if [ "${AIEHLC_FAST:-0}" = "1" ] && ln -f "${HOST_LIB_NAME}" "${AOUT_DIR}/${HOST_LIB_NAME}" 2>/dev/null; then
+        # -fast (F18): hardlink instead of a 430 MB copy (2.2 s for UNet). ar, isolate and install
+        # replace archives by name (rm/rename), never in place, so the two names stay equal.
+        echo "Published: ${AOUT_DIR}/${HOST_LIB_NAME} (hardlink)"
+    else
+        cp -f "${HOST_LIB_NAME}" "${AOUT_DIR}/${HOST_LIB_NAME}"
+        echo "Published: ${AOUT_DIR}/${HOST_LIB_NAME}"
+    fi
 
     cd "${_HOSTCOMPILE_ORIG_PWD}"
     exit 0
