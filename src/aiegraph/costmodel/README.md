@@ -202,8 +202,10 @@ Stayed in `script/perf/`, on purpose:
 | `win_lint.py` | C lint of timing windows in runtime instrumentation, not cost-model code. |
 
 Runtime profiling hooks (`src/mlir/runtime`, `src/aiednn` host timers, `src/aiegraph/aiperf.py`) are
-instrumentation and were not touched. `src/aiegraph/costmodel/` is outside the UNet build-input key
-(`build_unet_cfg.sh:55`), so the move does not mark any build stale.
+instrumentation and were not touched. The build-input keys (`INPUT_PATHS` of
+`example/aiegraph/unet_bk_sdm_tiny/build_unet_cfg.sh:55` and `script/perf/build_net_cfg.sh:67`) include `src/aiegraph`
+(where the kernel / host assembly lives since main's unet-decl refactor) but exclude `src/aiegraph/costmodel` and
+`src/aiegraph/test`, so cost-model edits never mark a build stale.
 
 ## 6. Limits (from the code and COSTMODEL.md ch. 9 "还没做到的")
 
