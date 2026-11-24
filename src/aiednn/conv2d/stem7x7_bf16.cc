@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // aiednn/conv2d/stem7x7_bf16.cc -- 7x7 stride-2 stem conv (ResNet conv1: 3x224x224 -> 64x112x112, pad 3),
 // bf16 in / out, fp32 accumulation, bias + optional ReLU fused (ACT: 0 none, 1 ReLU, 2 SiLU).
 // Implicit GEMM on aie::mmul<4,8,4,bf16,bf16,accfloat>: the 3 input channels are one K chunk (K = 147, zero tail

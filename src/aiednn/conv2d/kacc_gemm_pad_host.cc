@@ -1,12 +1,17 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* aiednn/conv2d/kacc_gemm_pad_host.cc -- any-shape conv2d_NCHWc / dense on the gemm_kacc instances (aiegraph.cnn).
  *
  * The layer GEMM is Y[n][m] = sum_k W[n][k] X[m][k] (n = output channel, m = output pixel, k = c*KH*KW + kh*KW + kw).
  * One gemm_kacc instance (Ng, Kg, PX) per distinct padded shape: Ng = ceil64(N), Kg = ceil64(K), PX = the pixel
- * width of one launch (aiegraph.cnn.instance; a small K runs on a larger-K instance, cnn.merge_small_k). The pixels are walked in ceil(M / PX) launches; every padded row /
- * column is zero. Host side per call: W natural [N][K] bf16 (pre-laid by aiegraph at build time) -> the kacc
- * chunk layout; per launch im2col of PX pixels (fp32 -> bf16 RNE) -> launch -> scatter of the valid [N][px]
- * block into the NCHWc output with the fused adds (per-channel [N] or the output's own shape, argument order)
- * and an optional ReLU (act = 1). Needs kacc_conv_host.cc before it (uc_kalloc, uc_kacc_launch, uc_sync_*).
+ * width of one launch (aiegraph.cnn.instance; a small K runs on a larger-K instance, cnn.merge_small_k). The pixels are
+ * walked in ceil(M / PX) launches; every padded row / column is zero. Host side per call: W natural [N][K] bf16
+ * (pre-laid by aiegraph at build time) -> the kacc chunk layout; per launch im2col of PX pixels (fp32 -> bf16 RNE) ->
+ * launch -> scatter of the valid [N][px] block into the NCHWc output with the fused adds (per-channel [N] or the
+ * output's own shape, argument order) and an optional ReLU (act = 1). Needs kacc_conv_host.cc before it (uc_kalloc,
+ * uc_kacc_launch, uc_sync_*).
  *
  * Entries (C linkage, the "args" ABI of an aiegraph one-call group; px / kg = the instance's PX / Kg):
  *   aiednn_conv(cid, args, nargs, wbf, sh, sw, ph, pw, act, px, kg)   x [1,C/cb,H,W,cb], w [O/ob,C/ib,KH,KW,ib,ob]

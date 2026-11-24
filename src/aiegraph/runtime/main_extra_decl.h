@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 void aiednn_prof_print(double graph_run_ms, double aie_wall_ms); /* graph_driver.c (P1 PROF) */
 int aiednn_aie_stats(int *launches, int *run_rc, int *calls, unsigned long long *macs);
 int aiednn_aie_launch_stats(double *aie_ms, int *kloads, unsigned *cold_tiles);

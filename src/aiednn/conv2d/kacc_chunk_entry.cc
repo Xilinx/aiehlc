@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 
 /* the step every offloaded conv call site runs (aiegraph group step, "args" ABI) */
 extern "C" int @K@_aie_conv(int cid, void *args, int nargs, int sh, int sw, int ph, int pw, int act, int dw, int np,

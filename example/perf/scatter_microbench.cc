@@ -5,7 +5,7 @@
 /* Host scatter microbench (costmodel SCMB), bare-metal A78 (palmyra213), no AIE work.
  * Driven by script/perf/run_microbench.sh --section scatter; script/perf/scmb_fit.py reads the log (writes nothing
  * to script/perf/params/).
- * Function under test: uc_scatter16 (src/aiednn/conv2d/kacc_conv_host.cc:103, NEON), body copied verbatim below,
+ * Function under test: uc_scatter16 (src/aiednn/conv2d/kacc_conv_host.cc:107, NEON), body copied verbatim below,
  * with uc_tr4 from src/aiednn/layout/neon_tr4_f32.cc; g_uc_var = 214 = the UNet build value
  * (costmodel_m2/unet_{off,aot-kco}/aiek_src/aiek_unetconv.cc: #define UC_VAR 214).
  * Call = the linear site form: uc_scatter16(Y, P=M, N, tr=0, 0, M, yout, M, yb=0, no epilogue).
@@ -62,7 +62,7 @@ static inline void uc_tr4(float32x4_t &r0, float32x4_t &r1, float32x4_t &r2, flo
     r2 = vreinterpretq_f32_f64(vtrn2q_f64(vreinterpretq_f64_f32(t01.val[0]), vreinterpretq_f64_f32(t23.val[0])));
     r3 = vreinterpretq_f32_f64(vtrn2q_f64(vreinterpretq_f64_f32(t01.val[1]), vreinterpretq_f64_f32(t23.val[1])));
 }
-/* ---- uc_scatter16: verbatim copy of src/aiednn/conv2d/kacc_conv_host.cc:97-265 ---- */
+/* ---- uc_scatter16: verbatim copy of src/aiednn/conv2d/kacc_conv_host.cc:101-269 ---- */
 /* GHL: scatter of one launch's tiled fp32 block Y (P4bx: [N][P] normal, [P][N] transposed walk) into the output,
  * 16 n x 16 px per tile, m-tiles outer / n-tiles inner: a tile reads 1 KiB of Y in contiguous chunks at a fixed
  * stride and every output row gets whole 64-B pieces. For one n the 8 px of an 8-aligned group are 8 contiguous

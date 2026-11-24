@@ -1,4 +1,8 @@
 #!/bin/bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # build_unet_cfg.sh -- the exact UNet (bk-sdm-tiny 256) build used by the cost-model M2 N-fit
 # (try5, 2026-11-20: p4a partition, 258 launches, kincore + flash-attn, per-site AHS_GLUE).
 #

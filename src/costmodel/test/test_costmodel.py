@@ -84,16 +84,16 @@ SPLIT_LOGS = ["c16.log", "p7_yboard0.log.excerpt", "u_lin_1024x320x320.log",
 
 @pytest.mark.parametrize("name", SPLIT_LOGS)
 def test_split_partition(name):
-    """Board logs (palmyra213 / yboard0): each split column is exactly rt_* + host_* (main_launch_line.c:31-32).
+    """Board logs (palmyra213 / yboard0): each split column is exactly rt_* + host_* (main_launch_line.c:35-36).
 
     L (M1) = kload (incl. core_reset) + coreen + rt_bdcfg + rt_startio; N (M2) = host_glue_bdcfg +
     host_flush_startio + host_inval_wait_io; K = rt_wait_io. Split fields are 3-decimal, rt/host are
     4-decimal, so the identity holds to <= 0.002 ms.
 
-    sp_call (printed as gemm_call) goes into NO split column (main_launch_line.c:29-34: c_kl/c_bd/c_si/
+    sp_call (printed as gemm_call) goes into NO split column (main_launch_line.c:33-38: c_kl/c_bd/c_si/
     c_ce/c_wi use ph[*], wio, sp_pre, sp_glue, sp_post only) and must never be added to L or N.
     It IS a superset of ph[*]: sp_call = gemm_bf16 call = sp_glue + the ph[0..3] cycles accrued in
-    the call + the part of wait_io accrued inside the call (tile64_conv_host.cc:273-275), so
+    the call + the part of wait_io accrued inside the call (tile64_conv_host.cc:277-279), so
       kload + coreen + bdcfg + rt_startio <= gemm_call <= that + rt_wait_io.
     c16: gemm_call=2.6463 vs bdcfg+startio+coreen+kload=1.492 (lower bound 1.3456, upper 2.7139);
     u_lin and p7 sit on the upper bound (all of wait_io happens inside the call).

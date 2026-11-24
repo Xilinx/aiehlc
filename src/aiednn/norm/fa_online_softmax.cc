@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* online softmax of one 32-key block (Maxwell blk() without its final pv) */
 __attribute__((noinline)) static void soft(const float *R st, bfloat16 *R pt, float *R ot, float *R m, float *R l, bool first) {
   const VF mo = aie::load_v<L>(m);

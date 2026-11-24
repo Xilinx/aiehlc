@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Tests for build_unet_cfg.sh build-input stamping (M3.1.2 PF): BUILDCMD inputs=/dirty=,
 dirty refusal (rc=3), <outroot>/unet_<cfg>.src and --check-fresh.
 

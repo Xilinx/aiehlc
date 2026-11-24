@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 
 /* P1 (b), build_unet.py --aie conv: A78 wall time of every call site in graph_run (XTime),
  * always on. AIE sites count only their A78 part (site time - aie_wall of their launches);

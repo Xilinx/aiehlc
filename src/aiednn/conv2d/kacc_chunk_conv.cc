@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* aiednn/conv2d/kacc_chunk_conv.cc -- any NCHWc conv2d (stride / pad / KxK / depthwise) as bf16 GEMMs on ONE
  * gemm_kacc instance per (Np, Kk, MC): the output pixels are cut into chunks of MC (one launch each), the
  * output channels padded to Np, K = C*KH*KW padded to Kp (zero rows / columns). fp32 accumulation in the

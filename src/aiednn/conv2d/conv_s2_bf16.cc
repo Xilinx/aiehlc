@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // aiednn/conv2d/conv_s2_bf16.cc -- KxK stride-2 conv (the 3x3 s2 downsampling convs of ResNet / YOLO),
 // bf16 in / out, fp32 accumulation over TCI-channel K chunks, bias + optional activation fused
 // (ACT: 0 none, 1 ReLU, 2 SiLU). Implicit GEMM on aie::mmul<4,8,4,bf16,bf16,accfloat>.

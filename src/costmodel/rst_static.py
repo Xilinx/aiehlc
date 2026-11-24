@@ -9,9 +9,9 @@ The measured side is ``LAUNCH split_detail calls ... core_reset=<n>`` divided by
 
 1. Which main prints split_detail and what it prints for ``core_reset``:
    * aiegraph boardmain (UNet, ``<build>/ag_work/arm_build/main.c``, template
-     src/aiegraph/runtime/main_launch_line.c:52,57) prints ``core_reset=%u`` with ``krstn`` =
+     src/aiegraph/runtime/main_launch_line.c:56,61) prints ``core_reset=%u`` with ``krstn`` =
      runtime counter ``g_kl_rst_n`` (__Runtime_kload_split_cycles, src/mlir/runtime/aie_runtime.c:334-344).
-   * the P0 kernel host (``<build>/kacc_gemm.cc``, from script/perf/p0_kacc_host.cc:169) prints a
+   * the P0 kernel host (``<build>/kacc_gemm.cc``, from script/perf/p0_kacc_host.cc:173) prints a
      literal ``core_reset=0``: the resets still happen on the board (its split_words rst_n is 33.0, which
      is why launch_l.py does not use rst_n), but split_detail reports 0.
 2. ``g_kl_rst_n`` only counts under ``-DAIEHLC_PROFILING=1`` (RT_PROF_ADD, aie_runtime.c:107-125; the
@@ -92,7 +92,7 @@ def rst_static(build_dir) -> Dict[str, Any]:
     m = _DETAIL_RST.search(main.read_text(errors="replace"))
     if m is None:
         raise ValueError(f"{main}: split_detail printf has no core_reset field")
-    if m.group(1) != "%u":  # literal (p0_kacc_host.cc:169): the counter is not reported
+    if m.group(1) != "%u":  # literal (p0_kacc_host.cc:173): the counter is not reported
         return {"rst": float(m.group(1)), "why": f"literal core_reset={m.group(1)} in {main.name}",
                 "main": str(main), "sites": 0}
     logs = _build_logs(b)

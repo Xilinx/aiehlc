@@ -37,7 +37,7 @@ Per-site prediction of K + L (ms, whole site = launches x per-launch) against th
   L       sum over the site's launches of launch_l.predict_l(static per-launch features, cfg), params
           l_palmyra213.json; features: static_feat.unet_site_feat (bdcfg/startio calls, bdcfg_w/cp_w + rr), per-launch
           kload_w replayed as kload_static.kload_static, core_reset = 0: core_reset is timed inside kload
-          (main_launch_line.c:28), the site L (dma - glue - flush - inval) counts kload once, while launch_l's l_def
+          (main_launch_line.c:32), the site L (dma - glue - flush - inval) counts kload once, while launch_l's l_def
           adds core_reset a second time (rst term).
 Fit: per cfg, minimax relative error of K+L on the --fit sites; kacc sites depend only on ddr_bw_scale and fa sites
 only on kfa_scale, so each is a 1-D grid (KL_S_GRID, KL_F_GRID).  LOO = leave-one-site-out refit on the fit log,

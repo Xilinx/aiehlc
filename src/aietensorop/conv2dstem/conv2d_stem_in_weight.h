@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* Written by graph_driver.c under `make TRACE=1` -- regenerated every run, do not edit.
  * call [01]
  * tvmgen_default_fused_nn_contrib_conv2d_NCHWc_subtract_add_subtract_fixed_point_multiply_per_axi_1a1eefcf0256215e_ --

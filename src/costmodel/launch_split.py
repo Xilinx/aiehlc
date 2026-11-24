@@ -5,10 +5,10 @@
 """Parse the measured side of a board run log.
 
 Line formats (printed by the runtime on the board):
-  * ``LAUNCH split ...`` / ``LAUNCH split_detail ...``  -- src/aiegraph/runtime/main_launch_line.c:33-45
+  * ``LAUNCH split ...`` / ``LAUNCH split_detail ...``  -- src/aiegraph/runtime/main_launch_line.c:37-49
     All *_ms / phase values are per launch in ms; ``pmu_hz`` is the A78 PMU clock (NOT the AIE clock).
     split_detail keeps the runtime-only phases (``rt_*``) apart from host glue (``host_*``).
-  * ``PROF part=<i> op=... ms=...`` and ``PROF aie_host_split part=<i> ...``  -- src/aiegraph/runtime/site_prof.c:36-42,61
+  * ``PROF part=<i> op=... ms=...`` and ``PROF aie_host_split part=<i> ...``  -- src/aiegraph/runtime/site_prof.c:40-46,65
   * ``[PERF] tag= tile=(c,r) rc= active_cyc= vec_instr= stream_stall= lock_stall=``,
     ``[PERFIO] tag= tile=(c,r) pre_io_active= pre_io_lock_stall= io_active= io_lock_stall=``,
     ``[PERFSUM] tag= tiles= active_cyc min= max= mean=``  -- src/mlir/runtime/aie_runtime.c:427-439

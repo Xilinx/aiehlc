@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* lwIP options for the netboot supervisor (A78, standalone, SDT BSP).
  * Derived from the aiebaremetal example_lwip_echo configuration (RAW API,
  * NO_SYS, polled xemacif_input), with the TCP window raised for bulk ELF

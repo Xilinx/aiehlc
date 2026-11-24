@@ -1,8 +1,12 @@
-    char expect[16];
-    int aio_rc = aiehlc_io_check();
-    if (aio_rc != 0 || aiehlc_io_n() != @MU@_N_INPUTS) {
-        printf("@M@: .aiehlc_io section invalid rc=%d n_in=%d\n", aio_rc, aiehlc_io_n());
-        return 1;
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
+char expect[16];
+int aio_rc = aiehlc_io_check();
+if (aio_rc != 0 || aiehlc_io_n() != @MU @_N_INPUTS) {
+    printf("@M@: .aiehlc_io section invalid rc=%d n_in=%d\n", aio_rc, aiehlc_io_n());
+    return 1;
     }
     uint32_t aio_crc = aiehlc_io_crc();   /* the expect: computed here from the (patched) section */
     snprintf(expect, sizeof expect, "%08x", (unsigned)aio_crc);

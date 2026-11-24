@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // aiednn/gemm/fc_gemm_bf16.cc -- fully connected layer at batch 1 (ONNX Gemm transB=1, e.g. the ResNet
 // classifier 512 -> 1000): y[n] = sum_k x[k] w[n][k] + b[n], bf16 x / w, fp32 accumulation and fp32 out (logits).
 // The core keeps x resident and streams NB-row blocks of w; per row, 16-lane aie::mac (accfloat) over K and

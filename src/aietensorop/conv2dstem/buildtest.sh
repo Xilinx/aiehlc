@@ -53,6 +53,10 @@ IN_SRC="${HEX_DIR}/${LAYER}_in.h"
 OUT_SRC="${HEX_DIR}/${LAYER}_out.h"
 IN_DST="${APP_DIR}/conv2d_stem_in_weight.h"
 OUT_DST="${APP_DIR}/conv2d_stem_out_golden.h"
+LICENSE_HDR='/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/'
 ENTRY="${APP_DIR}/test_conv2d.cc"
 
 AIE_VERSION="${AIE_VERSION:-5}"
@@ -169,8 +173,9 @@ for f in "${IN_SRC}" "${OUT_SRC}"; do
        named ${LAYER} -- ls ${HEX_DIR#"${REPO}"/}"
 done
 if [ "${IN_SRC}" != "${IN_DST}" ]; then
-    cp -f "${IN_SRC}" "${IN_DST}" || die "copy failed: ${IN_DST}"
-    cp -f "${OUT_SRC}" "${OUT_DST}" || die "copy failed: ${OUT_DST}"
+    # The copies are tracked in the repo, so they carry the license header (script/ci/check_opensource.py).
+    { printf '%s\n' "${LICENSE_HDR}"; cat "${IN_SRC}"; } > "${IN_DST}" || die "copy failed: ${IN_DST}"
+    { printf '%s\n' "${LICENSE_HDR}"; cat "${OUT_SRC}"; } > "${OUT_DST}" || die "copy failed: ${OUT_DST}"
 fi
 printf '    %-28s %s\n' "$(basename "${IN_DST}")" "$(du -h "${IN_DST}" | cut -f1)"
 printf '    %-28s %s\n' "$(basename "${OUT_DST}")" "$(du -h "${OUT_DST}" | cut -f1)"

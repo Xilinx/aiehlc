@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """M6.1 demo: a UNet partition decision made by costmodel.estimate() (frozen K+L+N, M34 PZ),
 checked against what the board measured.
 

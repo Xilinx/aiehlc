@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """M6 P2: a per-build cfg decision made ONLY by costmodel.estimate() on build dirs, for unet / resnet18 /
 yolo26n, scored against what palmyra213 measured.
 

@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 
 /* GATT (--aie conv,linear,attn; GAP-aiegraph-attn-site): one TVM nn_batch_matmul call site (an attention QK^T or
  * PV bmm of an aiegraph.partition.match_attention group) on the AIE. TVM batch_matmul is transpose_b:

@@ -94,7 +94,7 @@ def base_sites(build, build_log):
 
 
 def pack_slow_elems(M, K):
-    """x elements uc_linear packs on the scalar slow path (kacc_linear_host.cc:45,96-100): rows are padded to
+    """x elements uc_linear packs on the scalar slow path (kacc_linear_host.cc:49,100-104): rows are padded to
     Mp = (M+63)&~63; the NEON 8x8 path takes only full 8-row groups below M (m0 % 8 == 0 and m0+8 <= M), every
     other padded row (M % 8 tail + zero padding up to Mp) goes through the 4-row scalar path, K elements each.
     Linear sites only (0 for conv / fa / attn)."""

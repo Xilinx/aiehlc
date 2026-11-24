@@ -5,7 +5,7 @@
 """Discrete-event model of ONE gemm_kacc launch on the 4x4 AIE mesh (AIE side, segment K of the cost layer).
 
 Predicted quantity: the host time spent in ``__Runtime_wait_io`` per launch (``rt_wait_io`` of
-``LAUNCH split_detail``, src/aiegraph/runtime/main_launch_line.c:45) = the AIE-side time the host's own BD issue
+``LAUNCH split_detail``, src/aiegraph/runtime/main_launch_line.c:49) = the AIE-side time the host's own BD issue
 does not hide.  Host glue / launch overhead are NOT predicted here (segment L); the measured host BD-issue cost
 per BD enters only as the unit of the issue/AIE overlap (``op['host']['bd_us']``, see host_from_split).
 

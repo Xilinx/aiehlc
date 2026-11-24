@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* App-core park routine (runs on A78 core 1, EL3, with the FINISHED app's MMU on).
  *
  * The supervisor patches the app's _exit into "ldr x16,#8; br x16; .quad nb_park"

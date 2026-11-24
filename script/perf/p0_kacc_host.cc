@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* script/perf/p0_kacc_host.cc -- cost-model P0 probe host for one gemm_kacc instance (kacc_gemm.py, KACC_HOST_FILE).
  * Same data/numerics as src/aiednn/gemm/kacc_bench_gemm_host.cc, plus:
  *   - "BOARD machine=aarch64 midr=0x%08lx" (MIDR_EL1) first; the wrapper appends " board=<name>";

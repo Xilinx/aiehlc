@@ -213,7 +213,7 @@ Stayed in `script/perf/`, on purpose:
 
 Runtime profiling hooks (`src/mlir/runtime`, `src/aiednn` host timers, `src/aiegraph/aiperf.py`) are
 instrumentation and were not touched. The build-input keys (`INPUT_PATHS` of
-`example/aiegraph/unet_bk_sdm_tiny/build_unet_cfg.sh:55` and `script/perf/build_net_cfg.sh:71`) include `src/aiegraph`
+`example/aiegraph/unet_bk_sdm_tiny/build_unet_cfg.sh:59` and `script/perf/build_net_cfg.sh:71`) include `src/aiegraph`
 (where the kernel / host assembly lives since main's unet-decl refactor) but exclude `src/costmodel` and
 `src/aiegraph/test`, so cost-model edits never mark a build stale.
 

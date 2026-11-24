@@ -1,7 +1,11 @@
-    /* M1.2.1 T-J2: the split / split_detail / split_words lines print for every AIE build (cold included);
-     * only the summary line differs: literal "LAUNCH warm" under the boardmain header define
-     * @MU@_LAUNCH_WARM, else literal "LAUNCH cold" with the same fields (l_fit _WARM regex keys on them).
-     * No AIEHLC_PROFILING #if here: main.c is not compiled with the runtime EXTRA_DEFS. */
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
+/* M1.2.1 T-J2: the split / split_detail / split_words lines print for every AIE build (cold included);
+ * only the summary line differs: literal "LAUNCH warm" under the boardmain header define
+ * @MU@_LAUNCH_WARM, else literal "LAUNCH cold" with the same fields (l_fit _WARM regex keys on them).
+ * No AIEHLC_PROFILING #if here: main.c is not compiled with the runtime EXTRA_DEFS. */
 #ifndef @MU@_CTRLPKT
 #define @MU@_CTRLPKT "na"
 #endif

@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* aiednn/conv2d/kacc_chunk_board.cc -- board glue of kacc_chunk_conv.cc (A78 + aiehlc runtime): port buffers,
  * cache sync, the gemm_kacc dispatch of every (Np, Kk, MC) instance, and the host ABI the generated board
  * main / driver read (<K>_aie_stats, <K>_aie_launch_stats, <K>_aie_split_stats, <K>_aie_host_split_*), and the

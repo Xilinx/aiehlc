@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* Host stub of the lwIP RAW TCP API server.c uses (x86 unit test). The test
  * driver implements the functions: it plays the client by calling the recv
  * callback with pbuf chains and collects what the server writes. */

@@ -1,4 +1,8 @@
-    return 0;
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
+return 0;
 }
 
 extern "C" int aiednn_aie_conv(int cid, void *args, int nargs, const uint16_t *wbf, int sh, int sw, int ph, int pw) {

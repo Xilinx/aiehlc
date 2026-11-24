@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // gemm_kacc: K-in-core bf16 GEMM (fp32 accumulator in the c window) on the 4x4 mesh, one C++ template kernel
 // instantiated by aiehlc per launch gemm_kacc<CH, KDIM, PX, KW, AROWS, BROWS, TKW, KCH, NKC, NT, S, TR>.
 // The template arguments come from the walk geometry (aiegraph kacc_geom -> aiednn.gemm_kacc_targs):

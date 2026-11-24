@@ -5,7 +5,7 @@
 ###############################################################################
 """build_fresh -- is <outroot>/unet_<cfg> (main.elf) still the build of the current UNet build inputs?
 
-Content-based successor of `build_unet_cfg.sh --check-fresh` (same rule as build_unet_cfg.sh:55-87, which is
+Content-based successor of `build_unet_cfg.sh --check-fresh` (same rule as build_unet_cfg.sh:59-91, which is
 NOT modified: it is itself in INPUT_PATHS). Reads <outroot>/unet_<cfg>.src ("BUILDSRC inputs=<h> start=<epoch>
 site_perf=<n> kincore=<n>", written by the real build); reads no stamp of its own and writes nothing.
 

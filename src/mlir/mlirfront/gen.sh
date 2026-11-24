@@ -25,4 +25,13 @@ ${LLVM_BIN}/mlir-tblgen -gen-op-decls ./aieops.td -I /usr/local/include/  ${MLIR
 
 ${LLVM_BIN}/mlir-tblgen -gen-typedef-defs ./aietypes.td --typedefs-dialect=Aie -I /usr/local/include/  ${MLIR_INCLUDES} -asmformat-error-is-fatal=false > ./aietype.cc.inc
 ${LLVM_BIN}/mlir-tblgen -gen-typedef-decls ./aietypes.td --typedefs-dialect=Aie -I /usr/local/include/  ${MLIR_INCLUDES} -asmformat-error-is-fatal=false > ./aietype.h.inc
+# The generated .inc files are tracked: give each the license header (script/ci/check_opensource.py).
+for f in ./*.inc; do
+  if ! grep -q SPDX-License-Identifier "$f"; then
+    { printf '%s\n\n' '/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/'; cat "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
+  fi
+done
 popd
