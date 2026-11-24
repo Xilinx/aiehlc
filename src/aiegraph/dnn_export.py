@@ -477,30 +477,52 @@ def to_fx(ep, example_inputs=None):
 
 def compile_exported(ep, x, *, mode: str = "int8", name: str = "model", target: str = "x86", out=None,
                      vitis_settings: str = None, mlir: bool = True, prefer: str = "fastest", mesh=None,
-                     top1_range=None, eager=None, custom_sources=()):
+                     top1_range=None, eager=None, custom_sources=(), eager_mesh: str = "4x4",
+                     synth_weights: bool = False):
     """An exported program -> the program for *target* (x86 | vek280 | vek385): flow 4 on to_fx(ep), built, not
     run. Returns (DnnBuild, AGraph, reference); run it with run(). *mode* f32 | int8 (calibrated on *x*);
     *top1_range*: a detector's class-score window (zoo's model.top1_range). *eager*: None builds the
     fixed-megakernel program; ``"plan"`` eager mode on instances generated for this model's layer shapes
     (dnn_eager.plan); ``"library"`` eager mode on the premade template library (dnn_eager.LIBRARY), no
-    per-model kernels. *custom_sources*: C files implementing the program's framework custom ops
-    (dnn_torch.custom_c_symbol), run on the host CPU."""
+    per-model kernels. *eager_mesh*: the instances' mesh, ``"RxC"`` with R in 4 / 6 / 8 and C = 4 (8x4 with
+    warm launch is the fastest on VEK280). *custom_sources*: C files implementing the program's framework custom ops
+    (dnn_torch.custom_c_symbol), run on the host CPU.
+    *synth_weights*: the app generates its large int8 weights on the device (dnn_torch.synthesize_weights)
+    instead of carrying them, so a board ELF downloads in seconds; the reference is then the aiednn graph run
+    on the workstation with the same weights, so this checks the build and its timing, not accuracy."""
     from . import dnn_torch as dt
     from ._env import repo_root
     from .dnn import dnn_build
     gm = to_fx(ep, [x])
     if top1_range is not None:
         gm.top1_range = top1_range
-    out = Path(out or repo_root() / "worklocal" / "aiednn" / "export" / (f"{name}_{mode}" + (f"_eager_{eager}" if eager else "")))
+    out = Path(out or repo_root() / "worklocal" / "aiednn" / "export" / (
+        f"{name}_{mode}" + (f"_eager_{eager}" + (f"_{eager_mesh}" if eager_mesh != "4x4" else "") if eager else "")
+        + ("_synth" if synth_weights else "")))
     g, ref, yf = dt.references(gm, x, mode, name, mlir=mlir)
-    app = dt.emit_app(g, out, ref, dt.TOL[mode], dt._top1(yf, g.top1_range)[0], prefer=prefer,
+    float_top1 = dt._top1(yf, g.top1_range)[0]
+    if synth_weights:                  # golden = the same graph with the same synthetic weights, on the workstation
+        import numpy as np
+
+        from .dnn_ctypes import AiednnLib
+        moved = dt.synthesize_weights(g)
+        lib = AiednnLib.build(out / "x86lib")
+        ref = np.asarray(dt.run_ctypes(g, lib, x.numpy())[0], np.float32).reshape(ref.shape)
+        float_top1 = -1
+        print(f"synthetic weights: {len(g.synth)} int8 tensors, {moved / 1e6:.1f} MB generated on the device", flush=True)
+    app = dt.emit_app(g, out, ref, dt.TOL[mode], float_top1, prefer=prefer,
                       custom_sources=custom_sources)
     kw = {}
     if eager:                          # every layer on a template instance, its kernel loaded right before it runs
         from . import dnn_eager
         if eager not in ("plan", "library"):
             raise AiegraphError("dnn_export", f"eager={eager!r}", hint="'plan' or 'library'")
-        plan = dnn_eager.library_plan(name) if eager == "library" else dnn_eager.plan(g, name)
+        rows, _, cols = eager_mesh.partition("x")
+        if not rows.isdigit() or int(rows) not in dnn_eager.MESH_ROWS or cols != "4":
+            raise AiegraphError("dnn_export", f"eager_mesh={eager_mesh!r}",
+                                hint=f"RxC with R in {dnn_eager.MESH_ROWS} and C = 4")
+        rows = int(rows)
+        plan = dnn_eager.library_plan(name, rows) if eager == "library" else dnn_eager.plan(g, name, rows)
         print(plan.summary(), flush=True)
         kw = dict(mode="eager", eager=plan)
     rep = dnn_build(app, target=target, out=out / target, run=False, vitis_settings=vitis_settings, mesh=mesh, **kw)

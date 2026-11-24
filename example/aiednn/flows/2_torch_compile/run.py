@@ -20,6 +20,10 @@ ELF carrying the AIE megakernel. The exported program is saved (.pt2) and can be
     python example/aiednn/flows/2_torch_compile/run.py --export --model gpt2_small --target vek385 \\
         --board portobello13 --vitis-settings <.../Vitis/settings64.sh>               # -> board ELF, run there
     python example/aiednn/flows/2_torch_compile/run.py --pt2 model.pt2 --model resnet18 # a saved program
+    python example/aiednn/flows/2_torch_compile/run.py --export --eager plan --eager-mesh 8x4 --model gpt2_small \\
+        --target vek280 --board <host> --vitis-settings <.../Vitis/settings64.sh>    # eager template kernels, 8x4
+    python example/aiednn/flows/2_torch_compile/run.py --export --eager plan --eager-mesh 8x4 --synth-weights \\
+        --model gpt2_small --target vek280 --board <host> ...           # weights generated on the board: small ELF
 """
 import argparse
 import sys
@@ -57,7 +61,8 @@ def run_compile(m, x, model: str) -> int:
 
 def run_export(m, x, a) -> int:
     from aiegraph import dnn_export
-    out = OUT / (f"flow2_export_{a.model}_{a.mode}" + (f"_eager_{a.eager}" if a.eager else ""))
+    out = OUT / (f"flow2_export_{a.model}_{a.mode}" + (f"_eager_{a.eager}" + (f"_{a.eager_mesh}" if a.eager_mesh != "4x4" else "")
+                                                     if a.eager else "") + ("_synth" if a.synth_weights else ""))
     out.mkdir(parents=True, exist_ok=True)
     if a.pt2:                                  # a program exported earlier (torch.export.save)
         ep = torch.export.load(a.pt2)
@@ -68,7 +73,7 @@ def run_export(m, x, a) -> int:
         print(f"exported: {out / f'{a.model}.pt2'}")
     rep, g, _ = dnn_export.compile_exported(ep, x, mode=a.mode, name=a.model, target=a.target, out=out,
                                             vitis_settings=a.vitis_settings, top1_range=getattr(m, "top1_range", None),
-                                            eager=a.eager)
+                                            eager=a.eager, eager_mesh=a.eager_mesh, synth_weights=a.synth_weights)
     print(g.summary())
     if rep.ok and (a.target == "x86" or a.board):   # the program is built; running it is a separate step
         dnn_export.run(rep, board=a.board)
@@ -92,6 +97,11 @@ def main() -> int:
                     help="--export: eager mode -- every layer on a template kernel instance loaded right before it "
                          "runs; 'library' (default) the premade template library, 'plan' instances generated for "
                          "this model's shapes")
+    ap.add_argument("--eager-mesh", default="4x4", choices=["4x4", "6x4", "8x4"],
+                    help="--eager: the instances' mesh (rows x 4); 8x4 is the fastest on VEK280")
+    ap.add_argument("--synth-weights", action="store_true",
+                    help="--export: the app generates its large int8 weights on the device (a board ELF downloads in "
+                         "seconds); checked against the graph run on the workstation with the same weights")
     ap.add_argument("--target", default="x86", choices=["x86", "vek280", "vek385"])
     ap.add_argument("--board", default=None, help="run the built ELF on this board (a non-x86 --target)")
     ap.add_argument("--vitis-settings", default=None)

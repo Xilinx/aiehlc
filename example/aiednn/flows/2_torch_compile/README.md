@@ -46,7 +46,22 @@ python example/aiednn/flows/2_torch_compile/run.py --export [--model resnet18]  
 python example/aiednn/flows/2_torch_compile/run.py --export --model gpt2_small --target vek385 \
     --board portobello13 --vitis-settings <.../Vitis/settings64.sh>                     # board ELF, run there
 python example/aiednn/flows/2_torch_compile/run.py --pt2 model.pt2 --model resnet18      # a saved program
+python example/aiednn/flows/2_torch_compile/run.py --export --model gpt2_small --eager plan --eager-mesh 8x4 \
+    --synth-weights --target vek280 --board <host> --vitis-settings <.../Vitis/settings64.sh>  # eager, small ELF
 ```
+
+### Eager mode and synthetic weights
+
+`--eager plan` builds one template kernel instance per layer shape, each loaded right before its layer runs
+(`--eager library`: the premade instances); `--eager-mesh 8x4` uses all eight VEK280 core rows.
+
+`--synth-weights` is for timing runs of big models. A board ELF loads over JTAG at ~0.1 MB/s, so gpt2_small's
+86 MB of int8 weights take ~15 minutes per run. With the flag the app generates every int8 constant of 16 KB
+or more on the device from a counter hash (`dnn_torch.synthesize_weights`; gpt2_small: 72 tensors, blob
+86.2 -> 1.3 MB), and the scales, zero points, biases and tables stay real. The reference is the same graph with
+the same weights run through aiednn on the workstation, so a PASS checks the build, the AIE kernels (every int8
+GEMM is still compared bit for bit on the device) and the timing. It does not check the model's accuracy: drop
+the flag for that.
 
 The exported program goes through the **offline model compiler** (flow 4), not the partition graph API:
 `aiegraph.dnn_export.to_fx` turns its ATen graph back into the torch-level graph flow 4 lowers -- ops with

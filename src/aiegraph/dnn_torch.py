@@ -82,6 +82,7 @@ class AGraph:
     plan: dict = None      # tensor id -> arena byte offset (--aiednn-plan-memory; None: _plan_memory)
     arena: int = None      # arena bytes of that plan
     top1_range: tuple = None  # (lo, hi, group): top-1 = (argmax over [lo, hi) - lo) // group per image (model.top1_range)
+    synth: dict = None     # tensor id -> seed: synthetic weights the app generates on the device (synthesize_weights)
 
     def new(self, shape, dt="f32", kind="act", data=None, base=None) -> int:
         self.tensors.append(Tensor(len(self.tensors), tuple(int(d) for d in shape), dt, kind, data, base))
@@ -1208,6 +1209,50 @@ def _int_gemm(g: AGraph, op: Op) -> bool:
     return op.fn in _GEMM_FNS and g.tensors[op.create[0][1]].dt != "f32"
 
 
+# ── synthetic weights: the board app generates its large int8 weights instead of carrying them ──
+# A board ELF downloads over JTAG at ~0.1 MB/s, so gpt2_small's 92 MB of weights cost ~15 min per run. With
+# synthetic weights the app fills every large s8 constant on the device from a counter hash (SYNTH_HASH_C, the
+# same function as synth_s8), and the golden is the aiednn graph run on the workstation with those same weights
+# (run_ctypes). Small constants (scales, zero points, biases, tables) stay real. This tests the code path and
+# its timing, not the model's accuracy.
+
+SYNTH_MIN_BYTES = 16384
+
+SYNTH_HASH_C = [
+    "static void synth_fill(int8_t *p, unsigned long n, unsigned seed) { /* = dnn_torch.synth_s8 */",
+    "    for (unsigned long i = 0; i < n; i++) {",
+    "        unsigned v = ((unsigned)i * 0x9E3779B1u) ^ (seed * 0x85EBCA6Bu);",
+    "        v ^= v >> 15; v *= 0x2C1B3C6Du; v ^= v >> 12;",
+    "        const int b = (int)(v >> 24) - 128;",
+    "        p[i] = (int8_t)(b == -128 ? -127 : b);",
+    "    }",
+    "}"]
+
+
+def synth_s8(n: int, seed: int) -> np.ndarray:
+    """n int8 values in [-127, 127] from the counter hash the app's synth_fill computes"""
+    with np.errstate(over="ignore"):
+        i = np.arange(n, dtype=np.uint64).astype(np.uint32)
+        v = (i * np.uint32(0x9E3779B1)) ^ np.uint32((seed * 0x85EBCA6B) & 0xFFFFFFFF)
+        v ^= v >> np.uint32(15)
+        v *= np.uint32(0x2C1B3C6D)
+        v ^= v >> np.uint32(12)
+    b = (v >> np.uint32(24)).astype(np.int32) - 128
+    return np.where(b == -128, -127, b).astype(np.int8)
+
+
+def synthesize_weights(g: AGraph, min_bytes: int = SYNTH_MIN_BYTES) -> int:
+    """Replace every s8 constant of at least *min_bytes* with synth_s8 values (seed = tensor id + 1) and record
+    them in g.synth, so emit_app generates them on the device. Returns the bytes taken out of the blob."""
+    g.synth, moved = {}, 0
+    for t in g.tensors:
+        if t.base is None and t.kind == "const" and t.dt == "s8" and t.data is not None and t.data.nbytes >= min_bytes:
+            t.data = synth_s8(t.data.size, t.id + 1).reshape(t.data.shape)
+            g.synth[t.id] = t.id + 1
+            moved += t.data.nbytes
+    return moved
+
+
 def emit_app(g: AGraph, out: Path, golden: np.ndarray, tol: float, float_top1: int = -1,
              verify_gemm: bool = True, autotune=None, prefer: str = "aie", custom_sources=()) -> Path:
     """C app running *g* through aiednn on the x86 / board build, checking the output
@@ -1216,9 +1261,12 @@ def emit_app(g: AGraph, out: Path, golden: np.ndarray, tol: float, float_top1: i
     (on the device, so every AIE layer is checked where it ran)."""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    blob, coff = bytearray(), {}
+    blob, coff, soff, synth_bytes = bytearray(), {}, {}, 0
+    for tid in sorted(g.synth or {}):       # synthetic weights: generated on the device, not in the blob
+        soff[tid] = synth_bytes
+        synth_bytes += g.tensors[tid].data.nbytes + (-g.tensors[tid].data.nbytes % 64)
     for t in g.tensors:
-        if t.base is None and t.kind in ("const", "input"):
+        if t.base is None and t.kind in ("const", "input") and t.id not in soff:
             coff[t.id] = len(blob)
             blob += np.ascontiguousarray(t.data, DT_NP[t.dt]).tobytes()
             blob += b"\0" * (-len(blob) % 64)
@@ -1234,9 +1282,17 @@ def emit_app(g: AGraph, out: Path, golden: np.ndarray, tol: float, float_top1: i
     lines += [f"#define VERIFY_GEMM {int(verify_gemm)}",
               f"static unsigned char g_check[{check}] __attribute__((aligned(64)));",
               "static int g_gemm_checked, g_gemm_bad;", ""]
+    if soff:
+        lines += [f"static int8_t g_synth[{synth_bytes}] __attribute__((aligned(64)));  /* synthetic weights */",
+                  *SYNTH_HASH_C,
+                  "static void synth_weights(void) {",
+                  *[f"    synth_fill(g_synth + {soff[tid]}, {g.tensors[tid].data.nbytes}UL, {g.synth[tid]}u);"
+                    for tid in sorted(soff)],
+                  "}", ""]
     for t in g.tensors:
         r = g.root(t.id)
-        base = f"g_blob + {coff[r]}" if r in coff else f"g_arena + {aoff.get(r, 0)}"
+        base = (f"g_synth + {soff[r]}" if r in soff else f"g_blob + {coff[r]}" if r in coff
+                else f"g_arena + {aoff.get(r, 0)}")
         lines.append(f"#define P{t.id} ((void *)({base}))")
     lines += ["", "static int run_net(void) {", "    aiednn_status_t st;", "    aiednn_primitive_t p;"]
     for i, op in enumerate(g.ops):
@@ -1458,6 +1514,8 @@ def _app_main(g: AGraph, autotune=None, prefer: str = "aie") -> list:
         '    printf("=== aiednn model " MODEL_NAME " [" MODE "] ===\\n");', *_autotune_lines(autotune),
         *(["    aiednn_set_preference(aiednn_prefer_fastest); /* cost refusals: small ops on ref: when faster */"]
           if prefer == "fastest" else []),
+        *(['    synth_weights();  /* the large int8 weights are synthetic (dnn_torch.synthesize_weights) */',
+           f'    printf("SYNTH weights: {len(g.synth)} tensors generated on the device\\n");'] if g.synth else []),
         "    /* run 1 (cold, untimed for time_ms, no per-layer check): one-time work -- weight reorders and",
         "     * packed weight blocks (constant weights are cached), the AIE ELF load and partition setup;",
         "     * run 2 is the steady state: time_ms, the per-layer check and every stat are from it */",
@@ -1500,7 +1558,8 @@ def _app_main(g: AGraph, autotune=None, prefer: str = "aie") -> list:
         "    if (!(rel < TOL) || miss || g_gemm_bad) {",
         '        printf("FAIL: aiednn model " MODEL_NAME " differs from its reference (rel %.3e, tol %g)\\n", rel, TOL);',
         "        return 1;", "    }",
-        '    printf("PASS: aiednn model " MODEL_NAME " [" MODE "] matches PyTorch, rel %.3e, top-1 %d\\n", rel, top);',
+        f'    printf("PASS: aiednn model " MODEL_NAME " [" MODE "] matches '
+        f'{"its workstation reference (synthetic weights)" if g.synth else "PyTorch"}, rel %.3e, top-1 %d\\n", rel, top);',
         "    return 0;", "}"]
 
 
