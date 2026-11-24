@@ -1,5 +1,5 @@
 module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], routing.control_packet_mode = 0 : i64, routing.control_plan_dedicated_shim = 0 : i64, routing.control_plan_group_reg_write = 0 : i64, routing.control_plan_op_control_packet = 0 : i64, routing.control_plan_shim_bd_ctrl = 0 : i64, routing.fullconnect_auto = 0 : i64, routing.kernel_config_offload = 0 : i64, routing.output_tile_major = 0 : i64} {
-  func.func @routing(%arg0: !emitc.ptr<!emitc.opaque<"XAie_DevInst">>, %arg1: memref<230x230x4xi8>, %arg2: memref<64x7x7x4xi8>, %arg3: memref<112x112x64xi8>) attributes {routing.kernel_tiling = #routing.kernel_tiling<out_rounds = 16>} {
+  func.func @routing(%arg0: !emitc.ptr<!emitc.opaque<"XAie_DevInst">>, %arg1: memref<230x230x4xi8>, %arg2: memref<64x7x7x4xi8>, %arg3: memref<112x112x64xi8>) {
     %c3_i32 = arith.constant 3 : i32
     %c2_i32 = arith.constant 2 : i32
     %c1_i32 = arith.constant 1 : i32

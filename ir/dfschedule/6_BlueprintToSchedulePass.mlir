@@ -1,5 +1,5 @@
 module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], routing.control_packet_mode = 0 : i64, routing.control_plan_dedicated_shim = 0 : i64, routing.control_plan_group_reg_write = 0 : i64, routing.control_plan_op_control_packet = 0 : i64, routing.control_plan_shim_bd_ctrl = 0 : i64, routing.fullconnect_auto = 0 : i64, routing.kernel_config_offload = 0 : i64, routing.output_tile_major = 0 : i64} {
-  func.func @main(%arg0: memref<230x230x4xi8>, %arg1: memref<64x7x7x4xi8>, %arg2: memref<112x112x64xi8>) attributes {routing.kernel_tiling = #routing.kernel_tiling<out_rounds = 16>} {
+  func.func @main(%arg0: memref<230x230x4xi8>, %arg1: memref<64x7x7x4xi8>, %arg2: memref<112x112x64xi8>) {
     %c3_i32 = arith.constant 3 : i32
     %c2_i32 = arith.constant 2 : i32
     %c1_i32 = arith.constant 1 : i32
@@ -1003,96 +1003,86 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
         %subview_39 = memref.subview %arg2[0, 0, 0] [28, 112, 16] [1, 1, 1] : memref<112x112x64xi8> to memref<28x112x16xi8, strided<[7168, 64, 1]>>
         %47 = dfschedule.declaretile {col = 3 : i32, row = 0 : i32} : !dfschedule.tile
         %c1_i32_40 = arith.constant 1 : i32
-        %48 = dfschedule.declaretile {col = 0 : i32, row = 3 : i32} : !dfschedule.tile
-        %subview_41 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1]>> to memref<7x28x16xi8, strided<[7168, 64, 1]>>
-        %49 = dfschedule.memref_mapping %subview_41 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1]>>) -> memref<7x28x16xi8>
-        %50 = dfschedule.bind_core_buffer(%49, %48) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %51 = dfschedule.bind_core_buffer(%49, %48) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
         %c5_i32 = arith.constant 5 : i32
-        %c0_i32_42 = arith.constant 0 : i32
-        %c1_i32_43 = arith.constant 1 : i32
-        %c2_i32_44 = arith.constant 2 : i32
-        %52 = dfschedule.config.dma_bd(%51, %48, %c5_i32, %c0_i32_42, %c1_i32_43, %c2_i32_44) {
-          len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 4 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+        %c37632_i32 = arith.constant 37632 : i32
         %c4_i32 = arith.constant 4 : i32
-        %c0_i32_45 = arith.constant 0 : i32
-        %c1_i32_46 = arith.constant 1 : i32
-        %c2_i32_47 = arith.constant 2 : i32
-        %53 = dfschedule.config.dma_bd(%50, %48, %c4_i32, %c0_i32_45, %c1_i32_46, %c2_i32_47, %52) {
+        %c-1_i32_41 = arith.constant -1 : i32
+        %48 = dfschedule.config.dma_bd(%subview_39, %47, %c5_i32, %c37632_i32, %c4_i32, %c-1_i32_41) {
           len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 5 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %54 = dfschedule.config.create_io(%53, %48) {
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1]>>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+        %c4_i32_42 = arith.constant 4 : i32
+        %c25088_i32 = arith.constant 25088 : i32
+        %c3_i32_43 = arith.constant 3 : i32
+        %c-1_i32_44 = arith.constant -1 : i32
+        %49 = dfschedule.config.dma_bd(%subview_39, %47, %c4_i32_42, %c25088_i32, %c3_i32_43, %c-1_i32_44, %48) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1]>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %c3_i32_45 = arith.constant 3 : i32
+        %c12544_i32 = arith.constant 12544 : i32
+        %c2_i32_46 = arith.constant 2 : i32
+        %c-1_i32_47 = arith.constant -1 : i32
+        %50 = dfschedule.config.dma_bd(%subview_39, %47, %c3_i32_45, %c12544_i32, %c2_i32_46, %c-1_i32_47, %49) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1]>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %c2_i32_48 = arith.constant 2 : i32
+        %c0_i32_49 = arith.constant 0 : i32
+        %c1_i32_50 = arith.constant 1 : i32
+        %c-1_i32_51 = arith.constant -1 : i32
+        %51 = dfschedule.config.dma_bd(%subview_39, %47, %c2_i32_48, %c0_i32_49, %c1_i32_50, %c-1_i32_51, %50) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1]>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %52 = dfschedule.config.create_io(%51, %47) {
           channel = 0,
-          direction = "MM2S",
-          io_operation = "SEND",
-          enable_out_of_order = false
+          direction = "S2MM",
+          io_operation = "RECV",
+          enable_out_of_order = true
         } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %55 = dfschedule.schedule.getbdid(%48) : (!dfschedule.tile) -> i32
-        %56 = dfschedule.declaretile {col = 1 : i32, row = 3 : i32} : !dfschedule.tile
-        %subview_48 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1]>> to memref<7x28x16xi8, strided<[7168, 64, 1]>>
-        %57 = dfschedule.memref_mapping %subview_48 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1]>>) -> memref<7x28x16xi8>
-        %58 = dfschedule.bind_core_buffer(%57, %56) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %59 = dfschedule.bind_core_buffer(%57, %56) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32_49 = arith.constant 5 : i32
-        %c0_i32_50 = arith.constant 0 : i32
-        %c2_i32_51 = arith.constant 2 : i32
-        %c3_i32_52 = arith.constant 3 : i32
-        %60 = dfschedule.config.dma_bd(%59, %56, %c5_i32_49, %c0_i32_50, %c2_i32_51, %c3_i32_52) {
-          len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 4 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-        %c4_i32_53 = arith.constant 4 : i32
+        %53 = dfschedule.declaretile {col = 0 : i32, row = 3 : i32} : !dfschedule.tile
+        %subview_52 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1]>> to memref<7x28x16xi8, strided<[7168, 64, 1]>>
+        %54 = dfschedule.memref_mapping %subview_52 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1]>>) -> memref<7x28x16xi8>
+        %55 = dfschedule.bind_core_buffer(%54, %53) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %56 = dfschedule.bind_core_buffer(%54, %53) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_53 = arith.constant 5 : i32
         %c0_i32_54 = arith.constant 0 : i32
-        %c2_i32_55 = arith.constant 2 : i32
-        %c3_i32_56 = arith.constant 3 : i32
-        %61 = dfschedule.config.dma_bd(%58, %56, %c4_i32_53, %c0_i32_54, %c2_i32_55, %c3_i32_56, %60) {
-          len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 5 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %62 = dfschedule.config.create_io(%61, %56) {
-          channel = 0,
-          direction = "MM2S",
-          io_operation = "SEND",
-          enable_out_of_order = false
-        } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %63 = dfschedule.schedule.getbdid(%56) : (!dfschedule.tile) -> i32
-        %64 = dfschedule.declaretile {col = 2 : i32, row = 3 : i32} : !dfschedule.tile
-        %subview_57 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1]>> to memref<7x28x16xi8, strided<[7168, 64, 1]>>
-        %65 = dfschedule.memref_mapping %subview_57 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1]>>) -> memref<7x28x16xi8>
-        %66 = dfschedule.bind_core_buffer(%65, %64) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %67 = dfschedule.bind_core_buffer(%65, %64) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32_58 = arith.constant 5 : i32
-        %c0_i32_59 = arith.constant 0 : i32
-        %c3_i32_60 = arith.constant 3 : i32
-        %c4_i32_61 = arith.constant 4 : i32
-        %68 = dfschedule.config.dma_bd(%67, %64, %c5_i32_58, %c0_i32_59, %c3_i32_60, %c4_i32_61) {
+        %c1_i32_55 = arith.constant 1 : i32
+        %c2_i32_56 = arith.constant 2 : i32
+        %57 = dfschedule.config.dma_bd(%56, %53, %c5_i32_53, %c0_i32_54, %c1_i32_55, %c2_i32_56) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 4 : i32,
@@ -1102,37 +1092,37 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-        %c4_i32_62 = arith.constant 4 : i32
+        %c4_i32_57 = arith.constant 4 : i32
+        %c0_i32_58 = arith.constant 0 : i32
+        %c1_i32_59 = arith.constant 1 : i32
+        %c2_i32_60 = arith.constant 2 : i32
+        %58 = dfschedule.config.dma_bd(%55, %53, %c4_i32_57, %c0_i32_58, %c1_i32_59, %c2_i32_60, %57) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 5 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %59 = dfschedule.config.create_io(%58, %53) {
+          channel = 0,
+          direction = "MM2S",
+          io_operation = "SEND",
+          enable_out_of_order = false
+        } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
+        %60 = dfschedule.schedule.getbdid(%53) : (!dfschedule.tile) -> i32
+        %61 = dfschedule.declaretile {col = 1 : i32, row = 3 : i32} : !dfschedule.tile
+        %subview_61 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1]>> to memref<7x28x16xi8, strided<[7168, 64, 1]>>
+        %62 = dfschedule.memref_mapping %subview_61 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1]>>) -> memref<7x28x16xi8>
+        %63 = dfschedule.bind_core_buffer(%62, %61) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %64 = dfschedule.bind_core_buffer(%62, %61) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_62 = arith.constant 5 : i32
         %c0_i32_63 = arith.constant 0 : i32
-        %c3_i32_64 = arith.constant 3 : i32
-        %c4_i32_65 = arith.constant 4 : i32
-        %69 = dfschedule.config.dma_bd(%66, %64, %c4_i32_62, %c0_i32_63, %c3_i32_64, %c4_i32_65, %68) {
-          len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 5 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %70 = dfschedule.config.create_io(%69, %64) {
-          channel = 0,
-          direction = "MM2S",
-          io_operation = "SEND",
-          enable_out_of_order = false
-        } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %71 = dfschedule.schedule.getbdid(%64) : (!dfschedule.tile) -> i32
-        %72 = dfschedule.declaretile {col = 3 : i32, row = 3 : i32} : !dfschedule.tile
-        %subview_66 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1]>> to memref<7x28x16xi8, strided<[7168, 64, 1]>>
-        %73 = dfschedule.memref_mapping %subview_66 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1]>>) -> memref<7x28x16xi8>
-        %74 = dfschedule.bind_core_buffer(%73, %72) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %75 = dfschedule.bind_core_buffer(%73, %72) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32_67 = arith.constant 5 : i32
-        %c0_i32_68 = arith.constant 0 : i32
-        %c4_i32_69 = arith.constant 4 : i32
-        %c5_i32_70 = arith.constant 5 : i32
-        %76 = dfschedule.config.dma_bd(%75, %72, %c5_i32_67, %c0_i32_68, %c4_i32_69, %c5_i32_70) {
+        %c2_i32_64 = arith.constant 2 : i32
+        %c3_i32_65 = arith.constant 3 : i32
+        %65 = dfschedule.config.dma_bd(%64, %61, %c5_i32_62, %c0_i32_63, %c2_i32_64, %c3_i32_65) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 4 : i32,
@@ -1142,11 +1132,11 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-        %c4_i32_71 = arith.constant 4 : i32
-        %c0_i32_72 = arith.constant 0 : i32
-        %c4_i32_73 = arith.constant 4 : i32
-        %c5_i32_74 = arith.constant 5 : i32
-        %77 = dfschedule.config.dma_bd(%74, %72, %c4_i32_71, %c0_i32_72, %c4_i32_73, %c5_i32_74, %76) {
+        %c4_i32_66 = arith.constant 4 : i32
+        %c0_i32_67 = arith.constant 0 : i32
+        %c2_i32_68 = arith.constant 2 : i32
+        %c3_i32_69 = arith.constant 3 : i32
+        %66 = dfschedule.config.dma_bd(%63, %61, %c4_i32_66, %c0_i32_67, %c2_i32_68, %c3_i32_69, %65) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 5 : i32,
@@ -1156,116 +1146,104 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %78 = dfschedule.config.create_io(%77, %72) {
+        %67 = dfschedule.config.create_io(%66, %61) {
           channel = 0,
           direction = "MM2S",
           io_operation = "SEND",
           enable_out_of_order = false
         } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %79 = dfschedule.schedule.getbdid(%72) : (!dfschedule.tile) -> i32
-        %80 = dfschedule.schedule.getbdid(%47) : (!dfschedule.tile) -> i32
-        %81 = dfschedule.config.load_kernel_group(%48, %56, %64, %72) {
+        %68 = dfschedule.schedule.getbdid(%61) : (!dfschedule.tile) -> i32
+        %69 = dfschedule.declaretile {col = 2 : i32, row = 3 : i32} : !dfschedule.tile
+        %subview_70 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1]>> to memref<7x28x16xi8, strided<[7168, 64, 1]>>
+        %70 = dfschedule.memref_mapping %subview_70 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1]>>) -> memref<7x28x16xi8>
+        %71 = dfschedule.bind_core_buffer(%70, %69) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %72 = dfschedule.bind_core_buffer(%70, %69) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_71 = arith.constant 5 : i32
+        %c0_i32_72 = arith.constant 0 : i32
+        %c3_i32_73 = arith.constant 3 : i32
+        %c4_i32_74 = arith.constant 4 : i32
+        %73 = dfschedule.config.dma_bd(%72, %69, %c5_i32_71, %c0_i32_72, %c3_i32_73, %c4_i32_74) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 4 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+        %c4_i32_75 = arith.constant 4 : i32
+        %c0_i32_76 = arith.constant 0 : i32
+        %c3_i32_77 = arith.constant 3 : i32
+        %c4_i32_78 = arith.constant 4 : i32
+        %74 = dfschedule.config.dma_bd(%71, %69, %c4_i32_75, %c0_i32_76, %c3_i32_77, %c4_i32_78, %73) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 5 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %75 = dfschedule.config.create_io(%74, %69) {
+          channel = 0,
+          direction = "MM2S",
+          io_operation = "SEND",
+          enable_out_of_order = false
+        } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
+        %76 = dfschedule.schedule.getbdid(%69) : (!dfschedule.tile) -> i32
+        %77 = dfschedule.declaretile {col = 3 : i32, row = 3 : i32} : !dfschedule.tile
+        %subview_79 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1]>> to memref<7x28x16xi8, strided<[7168, 64, 1]>>
+        %78 = dfschedule.memref_mapping %subview_79 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1]>>) -> memref<7x28x16xi8>
+        %79 = dfschedule.bind_core_buffer(%78, %77) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %80 = dfschedule.bind_core_buffer(%78, %77) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_80 = arith.constant 5 : i32
+        %c0_i32_81 = arith.constant 0 : i32
+        %c4_i32_82 = arith.constant 4 : i32
+        %c5_i32_83 = arith.constant 5 : i32
+        %81 = dfschedule.config.dma_bd(%80, %77, %c5_i32_80, %c0_i32_81, %c4_i32_82, %c5_i32_83) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 4 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+        %c4_i32_84 = arith.constant 4 : i32
+        %c0_i32_85 = arith.constant 0 : i32
+        %c4_i32_86 = arith.constant 4 : i32
+        %c5_i32_87 = arith.constant 5 : i32
+        %82 = dfschedule.config.dma_bd(%79, %77, %c4_i32_84, %c0_i32_85, %c4_i32_86, %c5_i32_87, %81) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 5 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %83 = dfschedule.config.create_io(%82, %77) {
+          channel = 0,
+          direction = "MM2S",
+          io_operation = "SEND",
+          enable_out_of_order = false
+        } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
+        %84 = dfschedule.schedule.getbdid(%77) : (!dfschedule.tile) -> i32
+        %85 = dfschedule.schedule.getbdid(%47) : (!dfschedule.tile) -> i32
+        %86 = dfschedule.config.load_kernel_group(%53, %61, %69, %77) {
           callee = [@dskernel_receiver]
         } : (!dfschedule.tile, !dfschedule.tile, !dfschedule.tile, !dfschedule.tile) -> !dfschedule.kernelgroup
-        %82 = dfschedule.schedule.launch_kernel_group(%81) : (!dfschedule.kernelgroup) -> !dfschedule.event
-        %83 = dfschedule.schedule.start_io(%54, %55) {flow_index = 5 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %84 = dfschedule.schedule.start_io(%62, %63) {flow_index = 5 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %85 = dfschedule.schedule.start_io(%70, %71) {flow_index = 5 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %86 = dfschedule.schedule.start_io(%78, %79) {flow_index = 5 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %c0 = arith.constant 0 : index
-        %c4 = arith.constant 4 : index
-        %c1 = arith.constant 1 : index
-        scf.for %arg4 = %c0 to %c4 step %c1 {
-          %87 = arith.index_cast %arg4 : index to i32
-          %c50176_i32 = arith.constant 50176 : i32
-          %88 = arith.muli %87, %c50176_i32 : i32
-          %c5_i32_75 = arith.constant 5 : i32
-          %c48_i32 = arith.constant 48 : i32
-          %89 = arith.addi %88, %c48_i32 : i32
-          %c4_i32_76 = arith.constant 4 : i32
-          %c-1_i32_77 = arith.constant -1 : i32
-          %90 = dfschedule.config.dma_bd(%subview_39, %47, %c5_i32_75, %89, %c4_i32_76, %c-1_i32_77) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1]>>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-          %c4_i32_78 = arith.constant 4 : i32
-          %c32_i32 = arith.constant 32 : i32
-          %91 = arith.addi %88, %c32_i32 : i32
-          %c3_i32_79 = arith.constant 3 : i32
-          %c-1_i32_80 = arith.constant -1 : i32
-          %92 = dfschedule.config.dma_bd(%subview_39, %47, %c4_i32_78, %91, %c3_i32_79, %c-1_i32_80, %90) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1]>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-          %c3_i32_81 = arith.constant 3 : i32
-          %c16_i32 = arith.constant 16 : i32
-          %93 = arith.addi %88, %c16_i32 : i32
-          %c2_i32_82 = arith.constant 2 : i32
-          %c-1_i32_83 = arith.constant -1 : i32
-          %94 = dfschedule.config.dma_bd(%subview_39, %47, %c3_i32_81, %93, %c2_i32_82, %c-1_i32_83, %92) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1]>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-          %c2_i32_84 = arith.constant 2 : i32
-          %c0_i32_85 = arith.constant 0 : i32
-          %95 = arith.addi %88, %c0_i32_85 : i32
-          %c1_i32_86 = arith.constant 1 : i32
-          %c-1_i32_87 = arith.constant -1 : i32
-          %96 = dfschedule.config.dma_bd(%subview_39, %47, %c2_i32_84, %95, %c1_i32_86, %c-1_i32_87, %94) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1]>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-          %97 = dfschedule.config.create_io(%96, %47) {
-            channel = 0,
-            direction = "S2MM",
-            io_operation = "RECV",
-            enable_out_of_order = true
-          } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-          %98 = dfschedule.schedule.getbdid(%47) : (!dfschedule.tile) -> i32
-          %99 = dfschedule.schedule.start_io(%97, %98) {flow_index = 5 : i32, repeat_count = 16 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-          dfschedule.schedule.wait(%99) : (!dfschedule.event)
-        }
-        dfschedule.schedule.wait(%82) : (!dfschedule.event)
+        %87 = dfschedule.schedule.launch_kernel_group(%86) : (!dfschedule.kernelgroup) -> !dfschedule.event
+        %88 = dfschedule.schedule.start_io(%59, %60) {flow_index = 5 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %89 = dfschedule.schedule.start_io(%67, %68) {flow_index = 5 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %90 = dfschedule.schedule.start_io(%75, %76) {flow_index = 5 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %91 = dfschedule.schedule.start_io(%83, %84) {flow_index = 5 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %92 = dfschedule.schedule.start_io(%52, %85) {flow_index = 5 : i32, repeat_count = 16 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        dfschedule.schedule.wait(%87, %92) : (!dfschedule.event, !dfschedule.event)
         dfschedule.free_device_mem %subview_39 : memref<28x112x16xi8, strided<[7168, 64, 1]>>
         "routing.yield"() : () -> ()
       }
@@ -1472,16 +1450,86 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
         %subview_39 = memref.subview %arg2[28, 0, 0] [28, 112, 16] [1, 1, 1] : memref<112x112x64xi8> to memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>>
         %47 = dfschedule.declaretile {col = 3 : i32, row = 0 : i32} : !dfschedule.tile
         %c6_i32 = arith.constant 6 : i32
-        %48 = dfschedule.declaretile {col = 0 : i32, row = 4 : i32} : !dfschedule.tile
-        %subview_40 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>
-        %49 = dfschedule.memref_mapping %subview_40 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>) -> memref<7x28x16xi8>
-        %50 = dfschedule.bind_core_buffer(%49, %48) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %51 = dfschedule.bind_core_buffer(%49, %48) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32 = arith.constant 5 : i32
-        %c0_i32_41 = arith.constant 0 : i32
-        %c5_i32_42 = arith.constant 5 : i32
+        %c10_i32 = arith.constant 10 : i32
+        %c37632_i32 = arith.constant 37632 : i32
+        %c8_i32 = arith.constant 8 : i32
+        %c-1_i32_40 = arith.constant -1 : i32
+        %48 = dfschedule.config.dma_bd(%subview_39, %47, %c10_i32, %c37632_i32, %c8_i32, %c-1_i32_40) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+        %c9_i32 = arith.constant 9 : i32
+        %c25088_i32 = arith.constant 25088 : i32
         %c7_i32 = arith.constant 7 : i32
-        %52 = dfschedule.config.dma_bd(%51, %48, %c5_i32, %c0_i32_41, %c5_i32_42, %c7_i32) {
+        %c-1_i32_41 = arith.constant -1 : i32
+        %49 = dfschedule.config.dma_bd(%subview_39, %47, %c9_i32, %c25088_i32, %c7_i32, %c-1_i32_41, %48) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %c8_i32_42 = arith.constant 8 : i32
+        %c12544_i32 = arith.constant 12544 : i32
+        %c6_i32_43 = arith.constant 6 : i32
+        %c-1_i32_44 = arith.constant -1 : i32
+        %50 = dfschedule.config.dma_bd(%subview_39, %47, %c8_i32_42, %c12544_i32, %c6_i32_43, %c-1_i32_44, %49) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %c7_i32_45 = arith.constant 7 : i32
+        %c0_i32_46 = arith.constant 0 : i32
+        %c5_i32 = arith.constant 5 : i32
+        %c-1_i32_47 = arith.constant -1 : i32
+        %51 = dfschedule.config.dma_bd(%subview_39, %47, %c7_i32_45, %c0_i32_46, %c5_i32, %c-1_i32_47, %50) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %52 = dfschedule.config.create_io(%51, %47) {
+          channel = 1,
+          direction = "S2MM",
+          io_operation = "RECV",
+          enable_out_of_order = true
+        } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
+        %53 = dfschedule.declaretile {col = 0 : i32, row = 4 : i32} : !dfschedule.tile
+        %subview_48 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>
+        %54 = dfschedule.memref_mapping %subview_48 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>) -> memref<7x28x16xi8>
+        %55 = dfschedule.bind_core_buffer(%54, %53) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %56 = dfschedule.bind_core_buffer(%54, %53) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_49 = arith.constant 5 : i32
+        %c0_i32_50 = arith.constant 0 : i32
+        %c5_i32_51 = arith.constant 5 : i32
+        %c7_i32_52 = arith.constant 7 : i32
+        %57 = dfschedule.config.dma_bd(%56, %53, %c5_i32_49, %c0_i32_50, %c5_i32_51, %c7_i32_52) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 4 : i32,
@@ -1492,10 +1540,10 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
         %c4_i32 = arith.constant 4 : i32
-        %c0_i32_43 = arith.constant 0 : i32
-        %c5_i32_44 = arith.constant 5 : i32
-        %c7_i32_45 = arith.constant 7 : i32
-        %53 = dfschedule.config.dma_bd(%50, %48, %c4_i32, %c0_i32_43, %c5_i32_44, %c7_i32_45, %52) {
+        %c0_i32_53 = arith.constant 0 : i32
+        %c5_i32_54 = arith.constant 5 : i32
+        %c7_i32_55 = arith.constant 7 : i32
+        %58 = dfschedule.config.dma_bd(%55, %53, %c4_i32, %c0_i32_53, %c5_i32_54, %c7_i32_55, %57) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 5 : i32,
@@ -1505,23 +1553,23 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %54 = dfschedule.config.create_io(%53, %48) {
+        %59 = dfschedule.config.create_io(%58, %53) {
           channel = 0,
           direction = "MM2S",
           io_operation = "SEND",
           enable_out_of_order = false
         } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %55 = dfschedule.schedule.getbdid(%48) : (!dfschedule.tile) -> i32
-        %56 = dfschedule.declaretile {col = 1 : i32, row = 4 : i32} : !dfschedule.tile
-        %subview_46 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>
-        %57 = dfschedule.memref_mapping %subview_46 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>) -> memref<7x28x16xi8>
-        %58 = dfschedule.bind_core_buffer(%57, %56) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %59 = dfschedule.bind_core_buffer(%57, %56) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32_47 = arith.constant 5 : i32
-        %c0_i32_48 = arith.constant 0 : i32
-        %c6_i32_49 = arith.constant 6 : i32
-        %c8_i32 = arith.constant 8 : i32
-        %60 = dfschedule.config.dma_bd(%59, %56, %c5_i32_47, %c0_i32_48, %c6_i32_49, %c8_i32) {
+        %60 = dfschedule.schedule.getbdid(%53) : (!dfschedule.tile) -> i32
+        %61 = dfschedule.declaretile {col = 1 : i32, row = 4 : i32} : !dfschedule.tile
+        %subview_56 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>
+        %62 = dfschedule.memref_mapping %subview_56 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>) -> memref<7x28x16xi8>
+        %63 = dfschedule.bind_core_buffer(%62, %61) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %64 = dfschedule.bind_core_buffer(%62, %61) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_57 = arith.constant 5 : i32
+        %c0_i32_58 = arith.constant 0 : i32
+        %c6_i32_59 = arith.constant 6 : i32
+        %c8_i32_60 = arith.constant 8 : i32
+        %65 = dfschedule.config.dma_bd(%64, %61, %c5_i32_57, %c0_i32_58, %c6_i32_59, %c8_i32_60) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 4 : i32,
@@ -1531,11 +1579,11 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-        %c4_i32_50 = arith.constant 4 : i32
-        %c0_i32_51 = arith.constant 0 : i32
-        %c6_i32_52 = arith.constant 6 : i32
-        %c8_i32_53 = arith.constant 8 : i32
-        %61 = dfschedule.config.dma_bd(%58, %56, %c4_i32_50, %c0_i32_51, %c6_i32_52, %c8_i32_53, %60) {
+        %c4_i32_61 = arith.constant 4 : i32
+        %c0_i32_62 = arith.constant 0 : i32
+        %c6_i32_63 = arith.constant 6 : i32
+        %c8_i32_64 = arith.constant 8 : i32
+        %66 = dfschedule.config.dma_bd(%63, %61, %c4_i32_61, %c0_i32_62, %c6_i32_63, %c8_i32_64, %65) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 5 : i32,
@@ -1545,77 +1593,37 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %62 = dfschedule.config.create_io(%61, %56) {
+        %67 = dfschedule.config.create_io(%66, %61) {
           channel = 0,
           direction = "MM2S",
           io_operation = "SEND",
           enable_out_of_order = false
         } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %63 = dfschedule.schedule.getbdid(%56) : (!dfschedule.tile) -> i32
-        %64 = dfschedule.declaretile {col = 2 : i32, row = 4 : i32} : !dfschedule.tile
-        %subview_54 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>
-        %65 = dfschedule.memref_mapping %subview_54 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>) -> memref<7x28x16xi8>
-        %66 = dfschedule.bind_core_buffer(%65, %64) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %67 = dfschedule.bind_core_buffer(%65, %64) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32_55 = arith.constant 5 : i32
-        %c0_i32_56 = arith.constant 0 : i32
-        %c7_i32_57 = arith.constant 7 : i32
-        %c9_i32 = arith.constant 9 : i32
-        %68 = dfschedule.config.dma_bd(%67, %64, %c5_i32_55, %c0_i32_56, %c7_i32_57, %c9_i32) {
-          len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 4 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-        %c4_i32_58 = arith.constant 4 : i32
-        %c0_i32_59 = arith.constant 0 : i32
-        %c7_i32_60 = arith.constant 7 : i32
-        %c9_i32_61 = arith.constant 9 : i32
-        %69 = dfschedule.config.dma_bd(%66, %64, %c4_i32_58, %c0_i32_59, %c7_i32_60, %c9_i32_61, %68) {
-          len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 5 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %70 = dfschedule.config.create_io(%69, %64) {
-          channel = 0,
-          direction = "MM2S",
-          io_operation = "SEND",
-          enable_out_of_order = false
-        } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %71 = dfschedule.schedule.getbdid(%64) : (!dfschedule.tile) -> i32
-        %72 = dfschedule.declaretile {col = 3 : i32, row = 4 : i32} : !dfschedule.tile
-        %subview_62 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>
-        %73 = dfschedule.memref_mapping %subview_62 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>) -> memref<7x28x16xi8>
-        %74 = dfschedule.bind_core_buffer(%73, %72) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %75 = dfschedule.bind_core_buffer(%73, %72) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32_63 = arith.constant 5 : i32
-        %c0_i32_64 = arith.constant 0 : i32
-        %c8_i32_65 = arith.constant 8 : i32
-        %c10_i32 = arith.constant 10 : i32
-        %76 = dfschedule.config.dma_bd(%75, %72, %c5_i32_63, %c0_i32_64, %c8_i32_65, %c10_i32) {
-          len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 4 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-        %c4_i32_66 = arith.constant 4 : i32
+        %68 = dfschedule.schedule.getbdid(%61) : (!dfschedule.tile) -> i32
+        %69 = dfschedule.declaretile {col = 2 : i32, row = 4 : i32} : !dfschedule.tile
+        %subview_65 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>
+        %70 = dfschedule.memref_mapping %subview_65 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>) -> memref<7x28x16xi8>
+        %71 = dfschedule.bind_core_buffer(%70, %69) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %72 = dfschedule.bind_core_buffer(%70, %69) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_66 = arith.constant 5 : i32
         %c0_i32_67 = arith.constant 0 : i32
-        %c8_i32_68 = arith.constant 8 : i32
-        %c10_i32_69 = arith.constant 10 : i32
-        %77 = dfschedule.config.dma_bd(%74, %72, %c4_i32_66, %c0_i32_67, %c8_i32_68, %c10_i32_69, %76) {
+        %c7_i32_68 = arith.constant 7 : i32
+        %c9_i32_69 = arith.constant 9 : i32
+        %73 = dfschedule.config.dma_bd(%72, %69, %c5_i32_66, %c0_i32_67, %c7_i32_68, %c9_i32_69) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 4 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+        %c4_i32_70 = arith.constant 4 : i32
+        %c0_i32_71 = arith.constant 0 : i32
+        %c7_i32_72 = arith.constant 7 : i32
+        %c9_i32_73 = arith.constant 9 : i32
+        %74 = dfschedule.config.dma_bd(%71, %69, %c4_i32_70, %c0_i32_71, %c7_i32_72, %c9_i32_73, %73) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 5 : i32,
@@ -1625,116 +1633,64 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %78 = dfschedule.config.create_io(%77, %72) {
+        %75 = dfschedule.config.create_io(%74, %69) {
           channel = 0,
           direction = "MM2S",
           io_operation = "SEND",
           enable_out_of_order = false
         } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %79 = dfschedule.schedule.getbdid(%72) : (!dfschedule.tile) -> i32
-        %80 = dfschedule.schedule.getbdid(%47) : (!dfschedule.tile) -> i32
-        %81 = dfschedule.config.load_kernel_group(%48, %56, %64, %72) {
+        %76 = dfschedule.schedule.getbdid(%69) : (!dfschedule.tile) -> i32
+        %77 = dfschedule.declaretile {col = 3 : i32, row = 4 : i32} : !dfschedule.tile
+        %subview_74 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>
+        %78 = dfschedule.memref_mapping %subview_74 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 200704>>) -> memref<7x28x16xi8>
+        %79 = dfschedule.bind_core_buffer(%78, %77) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %80 = dfschedule.bind_core_buffer(%78, %77) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_75 = arith.constant 5 : i32
+        %c0_i32_76 = arith.constant 0 : i32
+        %c8_i32_77 = arith.constant 8 : i32
+        %c10_i32_78 = arith.constant 10 : i32
+        %81 = dfschedule.config.dma_bd(%80, %77, %c5_i32_75, %c0_i32_76, %c8_i32_77, %c10_i32_78) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 4 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+        %c4_i32_79 = arith.constant 4 : i32
+        %c0_i32_80 = arith.constant 0 : i32
+        %c8_i32_81 = arith.constant 8 : i32
+        %c10_i32_82 = arith.constant 10 : i32
+        %82 = dfschedule.config.dma_bd(%79, %77, %c4_i32_79, %c0_i32_80, %c8_i32_81, %c10_i32_82, %81) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 5 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %83 = dfschedule.config.create_io(%82, %77) {
+          channel = 0,
+          direction = "MM2S",
+          io_operation = "SEND",
+          enable_out_of_order = false
+        } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
+        %84 = dfschedule.schedule.getbdid(%77) : (!dfschedule.tile) -> i32
+        %85 = dfschedule.schedule.getbdid(%47) : (!dfschedule.tile) -> i32
+        %86 = dfschedule.config.load_kernel_group(%53, %61, %69, %77) {
           callee = [@dskernel_receiver]
         } : (!dfschedule.tile, !dfschedule.tile, !dfschedule.tile, !dfschedule.tile) -> !dfschedule.kernelgroup
-        %82 = dfschedule.schedule.launch_kernel_group(%81) : (!dfschedule.kernelgroup) -> !dfschedule.event
-        %83 = dfschedule.schedule.start_io(%54, %55) {flow_index = 7 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %84 = dfschedule.schedule.start_io(%62, %63) {flow_index = 7 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %85 = dfschedule.schedule.start_io(%70, %71) {flow_index = 7 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %86 = dfschedule.schedule.start_io(%78, %79) {flow_index = 7 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %c0 = arith.constant 0 : index
-        %c4 = arith.constant 4 : index
-        %c1 = arith.constant 1 : index
-        scf.for %arg4 = %c0 to %c4 step %c1 {
-          %87 = arith.index_cast %arg4 : index to i32
-          %c50176_i32 = arith.constant 50176 : i32
-          %88 = arith.muli %87, %c50176_i32 : i32
-          %c10_i32_70 = arith.constant 10 : i32
-          %c48_i32 = arith.constant 48 : i32
-          %89 = arith.addi %88, %c48_i32 : i32
-          %c8_i32_71 = arith.constant 8 : i32
-          %c-1_i32_72 = arith.constant -1 : i32
-          %90 = dfschedule.config.dma_bd(%subview_39, %47, %c10_i32_70, %89, %c8_i32_71, %c-1_i32_72) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-          %c9_i32_73 = arith.constant 9 : i32
-          %c32_i32 = arith.constant 32 : i32
-          %91 = arith.addi %88, %c32_i32 : i32
-          %c7_i32_74 = arith.constant 7 : i32
-          %c-1_i32_75 = arith.constant -1 : i32
-          %92 = dfschedule.config.dma_bd(%subview_39, %47, %c9_i32_73, %91, %c7_i32_74, %c-1_i32_75, %90) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-          %c8_i32_76 = arith.constant 8 : i32
-          %c16_i32 = arith.constant 16 : i32
-          %93 = arith.addi %88, %c16_i32 : i32
-          %c6_i32_77 = arith.constant 6 : i32
-          %c-1_i32_78 = arith.constant -1 : i32
-          %94 = dfschedule.config.dma_bd(%subview_39, %47, %c8_i32_76, %93, %c6_i32_77, %c-1_i32_78, %92) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-          %c7_i32_79 = arith.constant 7 : i32
-          %c0_i32_80 = arith.constant 0 : i32
-          %95 = arith.addi %88, %c0_i32_80 : i32
-          %c5_i32_81 = arith.constant 5 : i32
-          %c-1_i32_82 = arith.constant -1 : i32
-          %96 = dfschedule.config.dma_bd(%subview_39, %47, %c7_i32_79, %95, %c5_i32_81, %c-1_i32_82, %94) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-          %97 = dfschedule.config.create_io(%96, %47) {
-            channel = 1,
-            direction = "S2MM",
-            io_operation = "RECV",
-            enable_out_of_order = true
-          } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-          %98 = dfschedule.schedule.getbdid(%47) : (!dfschedule.tile) -> i32
-          %99 = dfschedule.schedule.start_io(%97, %98) {flow_index = 7 : i32, repeat_count = 16 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-          dfschedule.schedule.wait(%99) : (!dfschedule.event)
-        }
-        dfschedule.schedule.wait(%82) : (!dfschedule.event)
+        %87 = dfschedule.schedule.launch_kernel_group(%86) : (!dfschedule.kernelgroup) -> !dfschedule.event
+        %88 = dfschedule.schedule.start_io(%59, %60) {flow_index = 7 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %89 = dfschedule.schedule.start_io(%67, %68) {flow_index = 7 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %90 = dfschedule.schedule.start_io(%75, %76) {flow_index = 7 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %91 = dfschedule.schedule.start_io(%83, %84) {flow_index = 7 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %92 = dfschedule.schedule.start_io(%52, %85) {flow_index = 7 : i32, repeat_count = 16 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        dfschedule.schedule.wait(%87, %92) : (!dfschedule.event, !dfschedule.event)
         dfschedule.free_device_mem %subview_39 : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 200704>>
         "routing.yield"() : () -> ()
       }
@@ -1941,56 +1897,86 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
         %subview_39 = memref.subview %arg2[56, 0, 0] [28, 112, 16] [1, 1, 1] : memref<112x112x64xi8> to memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>>
         %47 = dfschedule.declaretile {col = 2 : i32, row = 0 : i32} : !dfschedule.tile
         %c2_i32_40 = arith.constant 2 : i32
-        %48 = dfschedule.declaretile {col = 0 : i32, row = 5 : i32} : !dfschedule.tile
-        %subview_41 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>
-        %49 = dfschedule.memref_mapping %subview_41 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>) -> memref<7x28x16xi8>
-        %50 = dfschedule.bind_core_buffer(%49, %48) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %51 = dfschedule.bind_core_buffer(%49, %48) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c6_i32 = arith.constant 6 : i32
+        %c37632_i32 = arith.constant 37632 : i32
+        %c12_i32 = arith.constant 12 : i32
+        %c-1_i32_41 = arith.constant -1 : i32
+        %48 = dfschedule.config.dma_bd(%subview_39, %47, %c6_i32, %c37632_i32, %c12_i32, %c-1_i32_41) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
         %c5_i32 = arith.constant 5 : i32
-        %c0_i32_42 = arith.constant 0 : i32
-        %c9_i32 = arith.constant 9 : i32
-        %c3_i32_43 = arith.constant 3 : i32
-        %52 = dfschedule.config.dma_bd(%51, %48, %c5_i32, %c0_i32_42, %c9_i32, %c3_i32_43) {
+        %c25088_i32 = arith.constant 25088 : i32
+        %c11_i32 = arith.constant 11 : i32
+        %c-1_i32_42 = arith.constant -1 : i32
+        %49 = dfschedule.config.dma_bd(%subview_39, %47, %c5_i32, %c25088_i32, %c11_i32, %c-1_i32_42, %48) {
           len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 4 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
         %c4_i32 = arith.constant 4 : i32
-        %c0_i32_44 = arith.constant 0 : i32
-        %c9_i32_45 = arith.constant 9 : i32
-        %c3_i32_46 = arith.constant 3 : i32
-        %53 = dfschedule.config.dma_bd(%50, %48, %c4_i32, %c0_i32_44, %c9_i32_45, %c3_i32_46, %52) {
+        %c12544_i32 = arith.constant 12544 : i32
+        %c10_i32 = arith.constant 10 : i32
+        %c-1_i32_43 = arith.constant -1 : i32
+        %50 = dfschedule.config.dma_bd(%subview_39, %47, %c4_i32, %c12544_i32, %c10_i32, %c-1_i32_43, %49) {
           len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 5 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %54 = dfschedule.config.create_io(%53, %48) {
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %c3_i32_44 = arith.constant 3 : i32
+        %c0_i32_45 = arith.constant 0 : i32
+        %c9_i32 = arith.constant 9 : i32
+        %c-1_i32_46 = arith.constant -1 : i32
+        %51 = dfschedule.config.dma_bd(%subview_39, %47, %c3_i32_44, %c0_i32_45, %c9_i32, %c-1_i32_46, %50) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %52 = dfschedule.config.create_io(%51, %47) {
           channel = 0,
-          direction = "MM2S",
-          io_operation = "SEND",
-          enable_out_of_order = false
+          direction = "S2MM",
+          io_operation = "RECV",
+          enable_out_of_order = true
         } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %55 = dfschedule.schedule.getbdid(%48) : (!dfschedule.tile) -> i32
-        %56 = dfschedule.declaretile {col = 1 : i32, row = 5 : i32} : !dfschedule.tile
+        %53 = dfschedule.declaretile {col = 0 : i32, row = 5 : i32} : !dfschedule.tile
         %subview_47 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>
-        %57 = dfschedule.memref_mapping %subview_47 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>) -> memref<7x28x16xi8>
-        %58 = dfschedule.bind_core_buffer(%57, %56) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %59 = dfschedule.bind_core_buffer(%57, %56) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %54 = dfschedule.memref_mapping %subview_47 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>) -> memref<7x28x16xi8>
+        %55 = dfschedule.bind_core_buffer(%54, %53) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %56 = dfschedule.bind_core_buffer(%54, %53) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
         %c5_i32_48 = arith.constant 5 : i32
         %c0_i32_49 = arith.constant 0 : i32
-        %c10_i32 = arith.constant 10 : i32
-        %c4_i32_50 = arith.constant 4 : i32
-        %60 = dfschedule.config.dma_bd(%59, %56, %c5_i32_48, %c0_i32_49, %c10_i32, %c4_i32_50) {
+        %c9_i32_50 = arith.constant 9 : i32
+        %c3_i32_51 = arith.constant 3 : i32
+        %57 = dfschedule.config.dma_bd(%56, %53, %c5_i32_48, %c0_i32_49, %c9_i32_50, %c3_i32_51) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 4 : i32,
@@ -2000,11 +1986,11 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-        %c4_i32_51 = arith.constant 4 : i32
-        %c0_i32_52 = arith.constant 0 : i32
-        %c10_i32_53 = arith.constant 10 : i32
-        %c4_i32_54 = arith.constant 4 : i32
-        %61 = dfschedule.config.dma_bd(%58, %56, %c4_i32_51, %c0_i32_52, %c10_i32_53, %c4_i32_54, %60) {
+        %c4_i32_52 = arith.constant 4 : i32
+        %c0_i32_53 = arith.constant 0 : i32
+        %c9_i32_54 = arith.constant 9 : i32
+        %c3_i32_55 = arith.constant 3 : i32
+        %58 = dfschedule.config.dma_bd(%55, %53, %c4_i32_52, %c0_i32_53, %c9_i32_54, %c3_i32_55, %57) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 5 : i32,
@@ -2014,23 +2000,23 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %62 = dfschedule.config.create_io(%61, %56) {
+        %59 = dfschedule.config.create_io(%58, %53) {
           channel = 0,
           direction = "MM2S",
           io_operation = "SEND",
           enable_out_of_order = false
         } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %63 = dfschedule.schedule.getbdid(%56) : (!dfschedule.tile) -> i32
-        %64 = dfschedule.declaretile {col = 2 : i32, row = 5 : i32} : !dfschedule.tile
-        %subview_55 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>
-        %65 = dfschedule.memref_mapping %subview_55 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>) -> memref<7x28x16xi8>
-        %66 = dfschedule.bind_core_buffer(%65, %64) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %67 = dfschedule.bind_core_buffer(%65, %64) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32_56 = arith.constant 5 : i32
-        %c0_i32_57 = arith.constant 0 : i32
-        %c11_i32 = arith.constant 11 : i32
-        %c5_i32_58 = arith.constant 5 : i32
-        %68 = dfschedule.config.dma_bd(%67, %64, %c5_i32_56, %c0_i32_57, %c11_i32, %c5_i32_58) {
+        %60 = dfschedule.schedule.getbdid(%53) : (!dfschedule.tile) -> i32
+        %61 = dfschedule.declaretile {col = 1 : i32, row = 5 : i32} : !dfschedule.tile
+        %subview_56 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>
+        %62 = dfschedule.memref_mapping %subview_56 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>) -> memref<7x28x16xi8>
+        %63 = dfschedule.bind_core_buffer(%62, %61) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %64 = dfschedule.bind_core_buffer(%62, %61) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_57 = arith.constant 5 : i32
+        %c0_i32_58 = arith.constant 0 : i32
+        %c10_i32_59 = arith.constant 10 : i32
+        %c4_i32_60 = arith.constant 4 : i32
+        %65 = dfschedule.config.dma_bd(%64, %61, %c5_i32_57, %c0_i32_58, %c10_i32_59, %c4_i32_60) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 4 : i32,
@@ -2040,11 +2026,11 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-        %c4_i32_59 = arith.constant 4 : i32
-        %c0_i32_60 = arith.constant 0 : i32
-        %c11_i32_61 = arith.constant 11 : i32
-        %c5_i32_62 = arith.constant 5 : i32
-        %69 = dfschedule.config.dma_bd(%66, %64, %c4_i32_59, %c0_i32_60, %c11_i32_61, %c5_i32_62, %68) {
+        %c4_i32_61 = arith.constant 4 : i32
+        %c0_i32_62 = arith.constant 0 : i32
+        %c10_i32_63 = arith.constant 10 : i32
+        %c4_i32_64 = arith.constant 4 : i32
+        %66 = dfschedule.config.dma_bd(%63, %61, %c4_i32_61, %c0_i32_62, %c10_i32_63, %c4_i32_64, %65) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 5 : i32,
@@ -2054,37 +2040,37 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %70 = dfschedule.config.create_io(%69, %64) {
+        %67 = dfschedule.config.create_io(%66, %61) {
           channel = 0,
           direction = "MM2S",
           io_operation = "SEND",
           enable_out_of_order = false
         } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %71 = dfschedule.schedule.getbdid(%64) : (!dfschedule.tile) -> i32
-        %72 = dfschedule.declaretile {col = 3 : i32, row = 5 : i32} : !dfschedule.tile
-        %subview_63 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>
-        %73 = dfschedule.memref_mapping %subview_63 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>) -> memref<7x28x16xi8>
-        %74 = dfschedule.bind_core_buffer(%73, %72) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %75 = dfschedule.bind_core_buffer(%73, %72) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32_64 = arith.constant 5 : i32
-        %c0_i32_65 = arith.constant 0 : i32
-        %c12_i32 = arith.constant 12 : i32
-        %c6_i32 = arith.constant 6 : i32
-        %76 = dfschedule.config.dma_bd(%75, %72, %c5_i32_64, %c0_i32_65, %c12_i32, %c6_i32) {
-          len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 4 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-        %c4_i32_66 = arith.constant 4 : i32
+        %68 = dfschedule.schedule.getbdid(%61) : (!dfschedule.tile) -> i32
+        %69 = dfschedule.declaretile {col = 2 : i32, row = 5 : i32} : !dfschedule.tile
+        %subview_65 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>
+        %70 = dfschedule.memref_mapping %subview_65 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>) -> memref<7x28x16xi8>
+        %71 = dfschedule.bind_core_buffer(%70, %69) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %72 = dfschedule.bind_core_buffer(%70, %69) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_66 = arith.constant 5 : i32
         %c0_i32_67 = arith.constant 0 : i32
-        %c12_i32_68 = arith.constant 12 : i32
-        %c6_i32_69 = arith.constant 6 : i32
-        %77 = dfschedule.config.dma_bd(%74, %72, %c4_i32_66, %c0_i32_67, %c12_i32_68, %c6_i32_69, %76) {
+        %c11_i32_68 = arith.constant 11 : i32
+        %c5_i32_69 = arith.constant 5 : i32
+        %73 = dfschedule.config.dma_bd(%72, %69, %c5_i32_66, %c0_i32_67, %c11_i32_68, %c5_i32_69) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 4 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+        %c4_i32_70 = arith.constant 4 : i32
+        %c0_i32_71 = arith.constant 0 : i32
+        %c11_i32_72 = arith.constant 11 : i32
+        %c5_i32_73 = arith.constant 5 : i32
+        %74 = dfschedule.config.dma_bd(%71, %69, %c4_i32_70, %c0_i32_71, %c11_i32_72, %c5_i32_73, %73) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 5 : i32,
@@ -2094,116 +2080,64 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %78 = dfschedule.config.create_io(%77, %72) {
+        %75 = dfschedule.config.create_io(%74, %69) {
           channel = 0,
           direction = "MM2S",
           io_operation = "SEND",
           enable_out_of_order = false
         } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %79 = dfschedule.schedule.getbdid(%72) : (!dfschedule.tile) -> i32
-        %80 = dfschedule.schedule.getbdid(%47) : (!dfschedule.tile) -> i32
-        %81 = dfschedule.config.load_kernel_group(%48, %56, %64, %72) {
+        %76 = dfschedule.schedule.getbdid(%69) : (!dfschedule.tile) -> i32
+        %77 = dfschedule.declaretile {col = 3 : i32, row = 5 : i32} : !dfschedule.tile
+        %subview_74 = memref.subview %subview_39[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>
+        %78 = dfschedule.memref_mapping %subview_74 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 401408>>) -> memref<7x28x16xi8>
+        %79 = dfschedule.bind_core_buffer(%78, %77) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %80 = dfschedule.bind_core_buffer(%78, %77) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_75 = arith.constant 5 : i32
+        %c0_i32_76 = arith.constant 0 : i32
+        %c12_i32_77 = arith.constant 12 : i32
+        %c6_i32_78 = arith.constant 6 : i32
+        %81 = dfschedule.config.dma_bd(%80, %77, %c5_i32_75, %c0_i32_76, %c12_i32_77, %c6_i32_78) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 4 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+        %c4_i32_79 = arith.constant 4 : i32
+        %c0_i32_80 = arith.constant 0 : i32
+        %c12_i32_81 = arith.constant 12 : i32
+        %c6_i32_82 = arith.constant 6 : i32
+        %82 = dfschedule.config.dma_bd(%79, %77, %c4_i32_79, %c0_i32_80, %c12_i32_81, %c6_i32_82, %81) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 5 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %83 = dfschedule.config.create_io(%82, %77) {
+          channel = 0,
+          direction = "MM2S",
+          io_operation = "SEND",
+          enable_out_of_order = false
+        } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
+        %84 = dfschedule.schedule.getbdid(%77) : (!dfschedule.tile) -> i32
+        %85 = dfschedule.schedule.getbdid(%47) : (!dfschedule.tile) -> i32
+        %86 = dfschedule.config.load_kernel_group(%53, %61, %69, %77) {
           callee = [@dskernel_receiver]
         } : (!dfschedule.tile, !dfschedule.tile, !dfschedule.tile, !dfschedule.tile) -> !dfschedule.kernelgroup
-        %82 = dfschedule.schedule.launch_kernel_group(%81) : (!dfschedule.kernelgroup) -> !dfschedule.event
-        %83 = dfschedule.schedule.start_io(%54, %55) {flow_index = 9 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %84 = dfschedule.schedule.start_io(%62, %63) {flow_index = 9 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %85 = dfschedule.schedule.start_io(%70, %71) {flow_index = 9 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %86 = dfschedule.schedule.start_io(%78, %79) {flow_index = 9 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %c0 = arith.constant 0 : index
-        %c4 = arith.constant 4 : index
-        %c1 = arith.constant 1 : index
-        scf.for %arg4 = %c0 to %c4 step %c1 {
-          %87 = arith.index_cast %arg4 : index to i32
-          %c50176_i32 = arith.constant 50176 : i32
-          %88 = arith.muli %87, %c50176_i32 : i32
-          %c6_i32_70 = arith.constant 6 : i32
-          %c48_i32 = arith.constant 48 : i32
-          %89 = arith.addi %88, %c48_i32 : i32
-          %c12_i32_71 = arith.constant 12 : i32
-          %c-1_i32_72 = arith.constant -1 : i32
-          %90 = dfschedule.config.dma_bd(%subview_39, %47, %c6_i32_70, %89, %c12_i32_71, %c-1_i32_72) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-          %c5_i32_73 = arith.constant 5 : i32
-          %c32_i32 = arith.constant 32 : i32
-          %91 = arith.addi %88, %c32_i32 : i32
-          %c11_i32_74 = arith.constant 11 : i32
-          %c-1_i32_75 = arith.constant -1 : i32
-          %92 = dfschedule.config.dma_bd(%subview_39, %47, %c5_i32_73, %91, %c11_i32_74, %c-1_i32_75, %90) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-          %c4_i32_76 = arith.constant 4 : i32
-          %c16_i32 = arith.constant 16 : i32
-          %93 = arith.addi %88, %c16_i32 : i32
-          %c10_i32_77 = arith.constant 10 : i32
-          %c-1_i32_78 = arith.constant -1 : i32
-          %94 = dfschedule.config.dma_bd(%subview_39, %47, %c4_i32_76, %93, %c10_i32_77, %c-1_i32_78, %92) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-          %c3_i32_79 = arith.constant 3 : i32
-          %c0_i32_80 = arith.constant 0 : i32
-          %95 = arith.addi %88, %c0_i32_80 : i32
-          %c9_i32_81 = arith.constant 9 : i32
-          %c-1_i32_82 = arith.constant -1 : i32
-          %96 = dfschedule.config.dma_bd(%subview_39, %47, %c3_i32_79, %95, %c9_i32_81, %c-1_i32_82, %94) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-          %97 = dfschedule.config.create_io(%96, %47) {
-            channel = 0,
-            direction = "S2MM",
-            io_operation = "RECV",
-            enable_out_of_order = true
-          } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-          %98 = dfschedule.schedule.getbdid(%47) : (!dfschedule.tile) -> i32
-          %99 = dfschedule.schedule.start_io(%97, %98) {flow_index = 9 : i32, repeat_count = 16 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-          dfschedule.schedule.wait(%99) : (!dfschedule.event)
-        }
-        dfschedule.schedule.wait(%82) : (!dfschedule.event)
+        %87 = dfschedule.schedule.launch_kernel_group(%86) : (!dfschedule.kernelgroup) -> !dfschedule.event
+        %88 = dfschedule.schedule.start_io(%59, %60) {flow_index = 9 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %89 = dfschedule.schedule.start_io(%67, %68) {flow_index = 9 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %90 = dfschedule.schedule.start_io(%75, %76) {flow_index = 9 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %91 = dfschedule.schedule.start_io(%83, %84) {flow_index = 9 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %92 = dfschedule.schedule.start_io(%52, %85) {flow_index = 9 : i32, repeat_count = 16 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        dfschedule.schedule.wait(%87, %92) : (!dfschedule.event, !dfschedule.event)
         dfschedule.free_device_mem %subview_39 : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 401408>>
         "routing.yield"() : () -> ()
       }
@@ -2410,16 +2344,86 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
         %subview_38 = memref.subview %arg2[84, 0, 0] [28, 112, 16] [1, 1, 1] : memref<112x112x64xi8> to memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>>
         %47 = dfschedule.declaretile {col = 2 : i32, row = 0 : i32} : !dfschedule.tile
         %c7_i32 = arith.constant 7 : i32
-        %48 = dfschedule.declaretile {col = 0 : i32, row = 6 : i32} : !dfschedule.tile
-        %subview_39 = memref.subview %subview_38[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>
-        %49 = dfschedule.memref_mapping %subview_39 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>) -> memref<7x28x16xi8>
-        %50 = dfschedule.bind_core_buffer(%49, %48) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %51 = dfschedule.bind_core_buffer(%49, %48) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32 = arith.constant 5 : i32
-        %c0_i32_40 = arith.constant 0 : i32
-        %c13_i32 = arith.constant 13 : i32
+        %c11_i32_39 = arith.constant 11 : i32
+        %c37632_i32 = arith.constant 37632 : i32
+        %c16_i32 = arith.constant 16 : i32
+        %c-1_i32_40 = arith.constant -1 : i32
+        %48 = dfschedule.config.dma_bd(%subview_38, %47, %c11_i32_39, %c37632_i32, %c16_i32, %c-1_i32_40) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+        %c10_i32 = arith.constant 10 : i32
+        %c25088_i32 = arith.constant 25088 : i32
+        %c15_i32 = arith.constant 15 : i32
+        %c-1_i32_41 = arith.constant -1 : i32
+        %49 = dfschedule.config.dma_bd(%subview_38, %47, %c10_i32, %c25088_i32, %c15_i32, %c-1_i32_41, %48) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %c9_i32 = arith.constant 9 : i32
+        %c12544_i32 = arith.constant 12544 : i32
+        %c14_i32 = arith.constant 14 : i32
+        %c-1_i32_42 = arith.constant -1 : i32
+        %50 = dfschedule.config.dma_bd(%subview_38, %47, %c9_i32, %c12544_i32, %c14_i32, %c-1_i32_42, %49) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
         %c8_i32 = arith.constant 8 : i32
-        %52 = dfschedule.config.dma_bd(%51, %48, %c5_i32, %c0_i32_40, %c13_i32, %c8_i32) {
+        %c0_i32_43 = arith.constant 0 : i32
+        %c13_i32 = arith.constant 13 : i32
+        %c-1_i32_44 = arith.constant -1 : i32
+        %51 = dfschedule.config.dma_bd(%subview_38, %47, %c8_i32, %c0_i32_43, %c13_i32, %c-1_i32_44, %50) {
+          len = 3136 : i32,
+          enable_packet = false,
+          next_bd = 4294967295 : i32,
+          acquire_lock_id = -1 : i32,
+          acquire_lock_val = 0 : i32,
+          release_lock_id = -1 : i32,
+          release_lock_val = 0 : i32,
+          data_id = 2 : i32,
+          iter_step_size = 0 : i32,
+          iter_wrap = 4 : i32
+        } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %52 = dfschedule.config.create_io(%51, %47) {
+          channel = 1,
+          direction = "S2MM",
+          io_operation = "RECV",
+          enable_out_of_order = true
+        } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
+        %53 = dfschedule.declaretile {col = 0 : i32, row = 6 : i32} : !dfschedule.tile
+        %subview_45 = memref.subview %subview_38[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>
+        %54 = dfschedule.memref_mapping %subview_45 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>) -> memref<7x28x16xi8>
+        %55 = dfschedule.bind_core_buffer(%54, %53) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %56 = dfschedule.bind_core_buffer(%54, %53) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32 = arith.constant 5 : i32
+        %c0_i32_46 = arith.constant 0 : i32
+        %c13_i32_47 = arith.constant 13 : i32
+        %c8_i32_48 = arith.constant 8 : i32
+        %57 = dfschedule.config.dma_bd(%56, %53, %c5_i32, %c0_i32_46, %c13_i32_47, %c8_i32_48) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 4 : i32,
@@ -2430,10 +2434,10 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
         %c4_i32 = arith.constant 4 : i32
-        %c0_i32_41 = arith.constant 0 : i32
-        %c13_i32_42 = arith.constant 13 : i32
-        %c8_i32_43 = arith.constant 8 : i32
-        %53 = dfschedule.config.dma_bd(%50, %48, %c4_i32, %c0_i32_41, %c13_i32_42, %c8_i32_43, %52) {
+        %c0_i32_49 = arith.constant 0 : i32
+        %c13_i32_50 = arith.constant 13 : i32
+        %c8_i32_51 = arith.constant 8 : i32
+        %58 = dfschedule.config.dma_bd(%55, %53, %c4_i32, %c0_i32_49, %c13_i32_50, %c8_i32_51, %57) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 5 : i32,
@@ -2443,23 +2447,23 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %54 = dfschedule.config.create_io(%53, %48) {
+        %59 = dfschedule.config.create_io(%58, %53) {
           channel = 0,
           direction = "MM2S",
           io_operation = "SEND",
           enable_out_of_order = false
         } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %55 = dfschedule.schedule.getbdid(%48) : (!dfschedule.tile) -> i32
-        %56 = dfschedule.declaretile {col = 1 : i32, row = 6 : i32} : !dfschedule.tile
-        %subview_44 = memref.subview %subview_38[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>
-        %57 = dfschedule.memref_mapping %subview_44 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>) -> memref<7x28x16xi8>
-        %58 = dfschedule.bind_core_buffer(%57, %56) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %59 = dfschedule.bind_core_buffer(%57, %56) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32_45 = arith.constant 5 : i32
-        %c0_i32_46 = arith.constant 0 : i32
-        %c14_i32 = arith.constant 14 : i32
-        %c9_i32 = arith.constant 9 : i32
-        %60 = dfschedule.config.dma_bd(%59, %56, %c5_i32_45, %c0_i32_46, %c14_i32, %c9_i32) {
+        %60 = dfschedule.schedule.getbdid(%53) : (!dfschedule.tile) -> i32
+        %61 = dfschedule.declaretile {col = 1 : i32, row = 6 : i32} : !dfschedule.tile
+        %subview_52 = memref.subview %subview_38[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>
+        %62 = dfschedule.memref_mapping %subview_52 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>) -> memref<7x28x16xi8>
+        %63 = dfschedule.bind_core_buffer(%62, %61) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %64 = dfschedule.bind_core_buffer(%62, %61) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_53 = arith.constant 5 : i32
+        %c0_i32_54 = arith.constant 0 : i32
+        %c14_i32_55 = arith.constant 14 : i32
+        %c9_i32_56 = arith.constant 9 : i32
+        %65 = dfschedule.config.dma_bd(%64, %61, %c5_i32_53, %c0_i32_54, %c14_i32_55, %c9_i32_56) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 4 : i32,
@@ -2469,11 +2473,11 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-        %c4_i32_47 = arith.constant 4 : i32
-        %c0_i32_48 = arith.constant 0 : i32
-        %c14_i32_49 = arith.constant 14 : i32
-        %c9_i32_50 = arith.constant 9 : i32
-        %61 = dfschedule.config.dma_bd(%58, %56, %c4_i32_47, %c0_i32_48, %c14_i32_49, %c9_i32_50, %60) {
+        %c4_i32_57 = arith.constant 4 : i32
+        %c0_i32_58 = arith.constant 0 : i32
+        %c14_i32_59 = arith.constant 14 : i32
+        %c9_i32_60 = arith.constant 9 : i32
+        %66 = dfschedule.config.dma_bd(%63, %61, %c4_i32_57, %c0_i32_58, %c14_i32_59, %c9_i32_60, %65) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 5 : i32,
@@ -2483,77 +2487,37 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %62 = dfschedule.config.create_io(%61, %56) {
+        %67 = dfschedule.config.create_io(%66, %61) {
           channel = 0,
           direction = "MM2S",
           io_operation = "SEND",
           enable_out_of_order = false
         } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %63 = dfschedule.schedule.getbdid(%56) : (!dfschedule.tile) -> i32
-        %64 = dfschedule.declaretile {col = 2 : i32, row = 6 : i32} : !dfschedule.tile
-        %subview_51 = memref.subview %subview_38[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>
-        %65 = dfschedule.memref_mapping %subview_51 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>) -> memref<7x28x16xi8>
-        %66 = dfschedule.bind_core_buffer(%65, %64) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %67 = dfschedule.bind_core_buffer(%65, %64) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32_52 = arith.constant 5 : i32
-        %c0_i32_53 = arith.constant 0 : i32
-        %c15_i32 = arith.constant 15 : i32
-        %c10_i32 = arith.constant 10 : i32
-        %68 = dfschedule.config.dma_bd(%67, %64, %c5_i32_52, %c0_i32_53, %c15_i32, %c10_i32) {
-          len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 4 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-        %c4_i32_54 = arith.constant 4 : i32
-        %c0_i32_55 = arith.constant 0 : i32
-        %c15_i32_56 = arith.constant 15 : i32
-        %c10_i32_57 = arith.constant 10 : i32
-        %69 = dfschedule.config.dma_bd(%66, %64, %c4_i32_54, %c0_i32_55, %c15_i32_56, %c10_i32_57, %68) {
-          len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 5 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %70 = dfschedule.config.create_io(%69, %64) {
-          channel = 0,
-          direction = "MM2S",
-          io_operation = "SEND",
-          enable_out_of_order = false
-        } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %71 = dfschedule.schedule.getbdid(%64) : (!dfschedule.tile) -> i32
-        %72 = dfschedule.declaretile {col = 3 : i32, row = 6 : i32} : !dfschedule.tile
-        %subview_58 = memref.subview %subview_38[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>
-        %73 = dfschedule.memref_mapping %subview_58 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>) -> memref<7x28x16xi8>
-        %74 = dfschedule.bind_core_buffer(%73, %72) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %75 = dfschedule.bind_core_buffer(%73, %72) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
-        %c5_i32_59 = arith.constant 5 : i32
-        %c0_i32_60 = arith.constant 0 : i32
-        %c16_i32 = arith.constant 16 : i32
-        %c11_i32_61 = arith.constant 11 : i32
-        %76 = dfschedule.config.dma_bd(%75, %72, %c5_i32_59, %c0_i32_60, %c16_i32, %c11_i32_61) {
-          len = 3136 : i32,
-          enable_packet = true,
-          next_bd = 4 : i32,
-          acquire_lock_id = 5 : i32,
-          acquire_lock_val = -1 : i32,
-          release_lock_id = 4 : i32,
-          release_lock_val = 1 : i32,
-          data_id = -1 : i32
-        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-        %c4_i32_62 = arith.constant 4 : i32
+        %68 = dfschedule.schedule.getbdid(%61) : (!dfschedule.tile) -> i32
+        %69 = dfschedule.declaretile {col = 2 : i32, row = 6 : i32} : !dfschedule.tile
+        %subview_61 = memref.subview %subview_38[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>
+        %70 = dfschedule.memref_mapping %subview_61 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>) -> memref<7x28x16xi8>
+        %71 = dfschedule.bind_core_buffer(%70, %69) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %72 = dfschedule.bind_core_buffer(%70, %69) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_62 = arith.constant 5 : i32
         %c0_i32_63 = arith.constant 0 : i32
-        %c16_i32_64 = arith.constant 16 : i32
-        %c11_i32_65 = arith.constant 11 : i32
-        %77 = dfschedule.config.dma_bd(%74, %72, %c4_i32_62, %c0_i32_63, %c16_i32_64, %c11_i32_65, %76) {
+        %c15_i32_64 = arith.constant 15 : i32
+        %c10_i32_65 = arith.constant 10 : i32
+        %73 = dfschedule.config.dma_bd(%72, %69, %c5_i32_62, %c0_i32_63, %c15_i32_64, %c10_i32_65) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 4 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+        %c4_i32_66 = arith.constant 4 : i32
+        %c0_i32_67 = arith.constant 0 : i32
+        %c15_i32_68 = arith.constant 15 : i32
+        %c10_i32_69 = arith.constant 10 : i32
+        %74 = dfschedule.config.dma_bd(%71, %69, %c4_i32_66, %c0_i32_67, %c15_i32_68, %c10_i32_69, %73) {
           len = 3136 : i32,
           enable_packet = true,
           next_bd = 5 : i32,
@@ -2563,116 +2527,64 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
           release_lock_val = 1 : i32,
           data_id = -1 : i32
         } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-        %78 = dfschedule.config.create_io(%77, %72) {
+        %75 = dfschedule.config.create_io(%74, %69) {
           channel = 0,
           direction = "MM2S",
           io_operation = "SEND",
           enable_out_of_order = false
         } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-        %79 = dfschedule.schedule.getbdid(%72) : (!dfschedule.tile) -> i32
-        %80 = dfschedule.schedule.getbdid(%47) : (!dfschedule.tile) -> i32
-        %81 = dfschedule.config.load_kernel_group(%48, %56, %64, %72) {
+        %76 = dfschedule.schedule.getbdid(%69) : (!dfschedule.tile) -> i32
+        %77 = dfschedule.declaretile {col = 3 : i32, row = 6 : i32} : !dfschedule.tile
+        %subview_70 = memref.subview %subview_38[0, 0, 0] [7, 28, 16] [1, 1, 1] {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>> to memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>
+        %78 = dfschedule.memref_mapping %subview_70 {tiling = #routing.tiling<d0 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4, slice_tiling = #routing.level<base = 28, total = 28, slice = 7, step = 7, rounds = 4>>, axis = 1>, d1 = #routing.dim<outer = #routing.level<base = 112, total = 112, slice = 28, step = 28, rounds = 4>>, d2 = #routing.dim<outer = #routing.level<base = 64, total = 64, slice = 16, step = 16, rounds = 4>, axis = 2>>} : (memref<7x28x16xi8, strided<[7168, 64, 1], offset: 602112>>) -> memref<7x28x16xi8>
+        %79 = dfschedule.bind_core_buffer(%78, %77) {offset = 48320 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %80 = dfschedule.bind_core_buffer(%78, %77) {offset = 51456 : i64} : (memref<7x28x16xi8>, !dfschedule.tile) -> memref<7x28x16xi8>
+        %c5_i32_71 = arith.constant 5 : i32
+        %c0_i32_72 = arith.constant 0 : i32
+        %c16_i32_73 = arith.constant 16 : i32
+        %c11_i32_74 = arith.constant 11 : i32
+        %81 = dfschedule.config.dma_bd(%80, %77, %c5_i32_71, %c0_i32_72, %c16_i32_73, %c11_i32_74) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 4 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
+        %c4_i32_75 = arith.constant 4 : i32
+        %c0_i32_76 = arith.constant 0 : i32
+        %c16_i32_77 = arith.constant 16 : i32
+        %c11_i32_78 = arith.constant 11 : i32
+        %82 = dfschedule.config.dma_bd(%79, %77, %c4_i32_75, %c0_i32_76, %c16_i32_77, %c11_i32_78, %81) {
+          len = 3136 : i32,
+          enable_packet = true,
+          next_bd = 5 : i32,
+          acquire_lock_id = 5 : i32,
+          acquire_lock_val = -1 : i32,
+          release_lock_id = 4 : i32,
+          release_lock_val = 1 : i32,
+          data_id = -1 : i32
+        } : (memref<7x28x16xi8>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
+        %83 = dfschedule.config.create_io(%82, %77) {
+          channel = 0,
+          direction = "MM2S",
+          io_operation = "SEND",
+          enable_out_of_order = false
+        } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
+        %84 = dfschedule.schedule.getbdid(%77) : (!dfschedule.tile) -> i32
+        %85 = dfschedule.schedule.getbdid(%47) : (!dfschedule.tile) -> i32
+        %86 = dfschedule.config.load_kernel_group(%53, %61, %69, %77) {
           callee = [@dskernel_receiver]
         } : (!dfschedule.tile, !dfschedule.tile, !dfschedule.tile, !dfschedule.tile) -> !dfschedule.kernelgroup
-        %82 = dfschedule.schedule.launch_kernel_group(%81) : (!dfschedule.kernelgroup) -> !dfschedule.event
-        %83 = dfschedule.schedule.start_io(%54, %55) {flow_index = 11 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %84 = dfschedule.schedule.start_io(%62, %63) {flow_index = 11 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %85 = dfschedule.schedule.start_io(%70, %71) {flow_index = 11 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %86 = dfschedule.schedule.start_io(%78, %79) {flow_index = 11 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-        %c0 = arith.constant 0 : index
-        %c4 = arith.constant 4 : index
-        %c1 = arith.constant 1 : index
-        scf.for %arg4 = %c0 to %c4 step %c1 {
-          %87 = arith.index_cast %arg4 : index to i32
-          %c50176_i32 = arith.constant 50176 : i32
-          %88 = arith.muli %87, %c50176_i32 : i32
-          %c11_i32_66 = arith.constant 11 : i32
-          %c48_i32 = arith.constant 48 : i32
-          %89 = arith.addi %88, %c48_i32 : i32
-          %c16_i32_67 = arith.constant 16 : i32
-          %c-1_i32_68 = arith.constant -1 : i32
-          %90 = dfschedule.config.dma_bd(%subview_38, %47, %c11_i32_66, %89, %c16_i32_67, %c-1_i32_68) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>>, !dfschedule.tile, i32, i32, i32, i32) -> !dfschedule.bd_handle
-          %c10_i32_69 = arith.constant 10 : i32
-          %c32_i32 = arith.constant 32 : i32
-          %91 = arith.addi %88, %c32_i32 : i32
-          %c15_i32_70 = arith.constant 15 : i32
-          %c-1_i32_71 = arith.constant -1 : i32
-          %92 = dfschedule.config.dma_bd(%subview_38, %47, %c10_i32_69, %91, %c15_i32_70, %c-1_i32_71, %90) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-          %c9_i32_72 = arith.constant 9 : i32
-          %c16_i32_73 = arith.constant 16 : i32
-          %93 = arith.addi %88, %c16_i32_73 : i32
-          %c14_i32_74 = arith.constant 14 : i32
-          %c-1_i32_75 = arith.constant -1 : i32
-          %94 = dfschedule.config.dma_bd(%subview_38, %47, %c9_i32_72, %93, %c14_i32_74, %c-1_i32_75, %92) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-          %c8_i32_76 = arith.constant 8 : i32
-          %c0_i32_77 = arith.constant 0 : i32
-          %95 = arith.addi %88, %c0_i32_77 : i32
-          %c13_i32_78 = arith.constant 13 : i32
-          %c-1_i32_79 = arith.constant -1 : i32
-          %96 = dfschedule.config.dma_bd(%subview_38, %47, %c8_i32_76, %95, %c13_i32_78, %c-1_i32_79, %94) {
-            len = 3136 : i32,
-            enable_packet = false,
-            next_bd = 4294967295 : i32,
-            acquire_lock_id = -1 : i32,
-            acquire_lock_val = 0 : i32,
-            release_lock_id = -1 : i32,
-            release_lock_val = 0 : i32,
-            data_id = 2 : i32,
-            dim_strides = [4, 64, 7168],
-            dim_wraps = [4, 28, 7],
-            iter_step_size = 1792 : i32,
-            iter_wrap = 4 : i32
-          } : (memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>>, !dfschedule.tile, i32, i32, i32, i32, !dfschedule.bd_handle) -> !dfschedule.bd_handle
-          %97 = dfschedule.config.create_io(%96, %47) {
-            channel = 1,
-            direction = "S2MM",
-            io_operation = "RECV",
-            enable_out_of_order = true
-          } : (!dfschedule.bd_handle, !dfschedule.tile) -> !dfschedule.io_handle
-          %98 = dfschedule.schedule.getbdid(%47) : (!dfschedule.tile) -> i32
-          %99 = dfschedule.schedule.start_io(%97, %98) {flow_index = 11 : i32, repeat_count = 16 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
-          dfschedule.schedule.wait(%99) : (!dfschedule.event)
-        }
-        dfschedule.schedule.wait(%82) : (!dfschedule.event)
+        %87 = dfschedule.schedule.launch_kernel_group(%86) : (!dfschedule.kernelgroup) -> !dfschedule.event
+        %88 = dfschedule.schedule.start_io(%59, %60) {flow_index = 11 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %89 = dfschedule.schedule.start_io(%67, %68) {flow_index = 11 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %90 = dfschedule.schedule.start_io(%75, %76) {flow_index = 11 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %91 = dfschedule.schedule.start_io(%83, %84) {flow_index = 11 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        %92 = dfschedule.schedule.start_io(%52, %85) {flow_index = 11 : i32, repeat_count = 16 : i32} : (!dfschedule.io_handle, i32) -> !dfschedule.event
+        dfschedule.schedule.wait(%87, %92) : (!dfschedule.event, !dfschedule.event)
         dfschedule.free_device_mem %subview_38 : memref<28x112x16xi8, strided<[7168, 64, 1], offset: 602112>>
         "routing.yield"() : () -> ()
       }

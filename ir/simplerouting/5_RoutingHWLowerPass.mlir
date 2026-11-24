@@ -7,7 +7,7 @@ module attributes {codegen.headers = ["stdint.h", "stdio.h", "custom_lib.h"], ro
   emitc.func private @XAie_StrmPktSwSlaveSlotEnable(!emitc.ptr<!emitc.opaque<"XAie_DevInst">>, !emitc.opaque<"XAie_LocType">, !emitc.ptr<i8>, i32, i32, !emitc.opaque<"XAie_Packet">, i32, i32, i32) -> i32
   emitc.func private @XAie_StrmPktSwMstrPortEnable(!emitc.ptr<!emitc.opaque<"XAie_DevInst">>, !emitc.opaque<"XAie_LocType">, !emitc.ptr<i8>, i32, !emitc.ptr<i8>, i32, i32) -> i32
   emitc.func private @XAie_StrmPktSwSlavePortEnable(!emitc.ptr<!emitc.opaque<"XAie_DevInst">>, !emitc.opaque<"XAie_LocType">, !emitc.ptr<i8>, i32) -> i32
-  func.func @routing(%arg0: !emitc.ptr<!emitc.opaque<"XAie_DevInst">>, %arg1: memref<230x230x4xi8>, %arg2: memref<64x7x7x4xi8>, %arg3: memref<112x112x64xi8>) attributes {routing.kernel_tiling = #routing.kernel_tiling<out_rounds = 16>} {
+  func.func @routing(%arg0: !emitc.ptr<!emitc.opaque<"XAie_DevInst">>, %arg1: memref<230x230x4xi8>, %arg2: memref<64x7x7x4xi8>, %arg3: memref<112x112x64xi8>) {
     %0 = "emitc.constant"() <{value = #emitc.opaque<"XAie_PacketInit(16, 0)">}> : () -> !emitc.opaque<"XAie_Packet">
     %1 = "emitc.constant"() <{value = #emitc.opaque<"XAie_PacketInit(15, 0)">}> : () -> !emitc.opaque<"XAie_Packet">
     %2 = "emitc.constant"() <{value = #emitc.opaque<"XAie_PacketInit(14, 0)">}> : () -> !emitc.opaque<"XAie_Packet">
