@@ -100,7 +100,9 @@ def _tree_sha(root: Path, h):
 
 def key(model, quantize, calib, image, repo_root: Path) -> tuple:
     """(hex key, dict of the parts) -- the dict goes into meta.json for debugging."""
-    parts = {"v": _KEY_VERSION, "model": _file_sha(model.onnx_path).hexdigest(),
+    dig = getattr(model, "file_digests", None)   # F22: shares Model.sha's single read pass
+    msha = dig()["sha256"] if callable(dig) else _file_sha(model.onnx_path).hexdigest()
+    parts = {"v": _KEY_VERSION, "model": msha,
              "quantize": quantize,
              "calib": [_file_sha(c).hexdigest() for c in calib] if calib else None,
              "image": _file_sha(image).hexdigest() if image else None,
