@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Cross-check the from-scratch PyTorch ResNet-18 against the ONNX reference.
 
 Runs the same preprocessed input through onnxruntime and the PyTorch model and

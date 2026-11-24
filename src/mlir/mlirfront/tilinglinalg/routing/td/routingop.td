@@ -280,7 +280,7 @@ def Routing_RoutingCreate : routingop<"RoutingCreate", [SymbolTable]> {
       // Note that we must provide the attribute's name as a string.
       $_state.addAttribute("Memo", Memo);
 
-      // 2. Region 和 Block
+      // 2. Region and block
       auto *bodyRegion = $_state.addRegion();
       Block *bodyBlock = new Block();
       bodyRegion->push_back(bodyBlock);

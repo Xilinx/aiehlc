@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """P4t K-accumulation plan for the 37 AIE conv layers of partition.json (analytic, x86 only, no kernel change).
 
 Ported from steve/work/r18_tilecap/ic_split.py (R18 int8, int32 acc) and redone for bf16 GEMM:
@@ -23,44 +27,10 @@ Limits (source):
   L1_MAX=57344 B per core (64 KiB - 8 KiB stack) ASSUMED (ic_split default)
   WRAP_MAX=1023 per BD dim, ITER_MAX=64, STRIDE_MAX=2^20 words   ASSUMED (not in Amit's notes)
 usage: kplan.py --partition partition.json [--json out.json]"""
-import argparse, json, math
+import argparse, json, os, sys
 
-MESH_R, MESH_C = 4, 4
-TM = TN = 16                 # per-core output tile (fp32 acc 16x16 = 1 KiB)
-KC = 64                      # K chunk per core loop trip
-ACC_MAX = 1024
-PORT_MAX = 8192
-L1_MAX = 57344
-SHIM_BDS = 16
-TILE_BDS = 16
-WRAP_MAX, ITER_MAX, STRIDE_MAX = 1023, 64, 1 << 20
-BF16, FP32 = 2, 4
-
-
-def plan(m, k, n):
-    why = []
-    mt_rows, nt_cols = MESH_R * TM, MESH_C * TN          # 64 x 64 macro tile
-    if m % mt_rows: why.append(f"M%{mt_rows}")
-    if n % nt_cols: why.append(f"N%{nt_cols}")
-    if k % KC: why.append(f"K%{KC}")
-    mt, nt, kch = -(-m // mt_rows), -(-n // nt_cols), -(-k // KC)
-    acc = TM * TN * FP32
-    a_core, b_core, c_core = TM * KC * BF16, KC * TN * BF16, TM * TN * BF16
-    a_port, b_port = mt_rows * KC * BF16, KC * nt_cols * BF16
-    l1 = 2 * (a_core + b_core + c_core) + acc
-    if acc > ACC_MAX: why.append(f"acc{acc}>{ACC_MAX}")
-    if max(a_port, b_port) > PORT_MAX: why.append(f"port{max(a_port, b_port)}>{PORT_MAX}")
-    if l1 > L1_MAX: why.append(f"l1{l1}>{L1_MAX}")
-    if 6 > TILE_BDS: why.append("tile_bds")
-    # A BD dims: d0 = KC*2/4 words, d1 = 64 rows (stride K/2 words), d2 = kch chunks
-    for name, v in (("d0", KC * BF16 // 4), ("d1", mt_rows), ("d2", kch)):
-        if v > WRAP_MAX: why.append(f"A.{name}{v}>{WRAP_MAX}")
-    if k * BF16 // 4 > STRIDE_MAX: why.append("A.stride")
-    if n * BF16 // 4 > STRIDE_MAX: why.append("B.stride")
-    launches = -(-mt // SHIM_BDS) * -(-nt // ITER_MAX)
-    return dict(m=m, k=k, n=n, mt=mt, nt=nt, k_chunks=kch, out_tiles_per_core=mt * nt,
-                acc=acc, l1=l1, a_port=a_port, b_port=b_port, launches=launches,
-                launches_k_only=mt * nt, legal=not why, why=why)
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../src")))
+from aiegraph.kincore import MESH_C, MESH_R, KC, TM, TN, kplan as plan  # noqa: E402,F401  (moved: aiegraph.kincore)
 
 
 def main():

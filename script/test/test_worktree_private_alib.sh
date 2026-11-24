@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Self-test for `script/worktree.sh link-deps --private-alib`
 # (GAP-aiehlc-build-61a37e / d69027, GAP-aiehlc-script-aiehlc.sh-f2e008: the shared
 # thirdparty/alib was rebuilt in place by concurrent aiehlc.sh runs).

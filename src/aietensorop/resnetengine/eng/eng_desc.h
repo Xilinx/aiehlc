@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* eng_desc.h -- the persistent conv engine's per-layer contract, shared by the
  * AIE kernel, the host driver and gen_engine.py (which writes the bytes).
  * Plain C, no includes. doc/design/resnet_aie_engine.md has the full picture.

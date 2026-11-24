@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
 # Cross-Track Timeline Analysis — host / core / port / DMA on tile `0,3`
 
 **Date:** 2026-08-26
@@ -266,7 +268,7 @@ can't produce output until the host releases the lock, so the output DMA starves
 
 ---
 
-## 6. Whole-time pie (饼图) — every behavior as a % of the 633.493 µs run
+## 6. Whole-time pie chart — every behavior as a % of the 633.493 µs run
 
 > Rendered by any Mermaid-aware viewer (GitHub, VS Code, most markdown previewers).
 > Slice values are µs; Mermaid prints the % automatically.

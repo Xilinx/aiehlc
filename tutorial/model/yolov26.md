@@ -36,14 +36,14 @@ aiegraph modules used: [`aiegraph/cut.py`](../../src/aiegraph/cut.py) (cut the g
 
 ## 1. Prerequisites
 
-Same as sections 1–3 of the [UNet tutorial](tiny-sdm-unet.md): check out the `unet_m4` branch, link the BSP workspace, build aiehlc. The rest uses these variables:
+Same as sections 1–3 of the [UNet tutorial](tiny-sdm-unet.md): check out the `unet_m4` branch, link the BSP workspace, build aiehlc. The rest uses these variables: Replace each `<...>` placeholder (`<repo>`, `<venv>`, `<modelzoo>`, ...) with the path on your machine.
 
 ```bash
-export AIEHLC=/scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj
+export AIEHLC=<repo>
 export T=$AIEHLC/.worktrees/unet_m4                  # worktree of the unet_m4 branch
-export PY=/scratch/staff/huaj/aiehlc/.venv/bin/python3
+export PY=<venv>/bin/python3
 export WORK=$HOME/yolo_work; mkdir -p $WORK
-export ONNX=/scratch/staff/huaj/modelzoo/artifacts/yolo26/yolo26n_e2e_trained_op17.onnx
+export ONNX=<modelzoo>/artifacts/yolo26/yolo26n_e2e_trained_op17.onnx
 unset AR                                             # make would use $AR as the archiver
 ```
 
@@ -56,7 +56,7 @@ The model is the **trained** yolo26n (COCO, 80 classes), ultralytics end2end exp
 Preprocessing matches ultralytics: resize to 640 keeping the aspect ratio, pad with gray (114) around it, centered, RGB, /255, NCHW fp32. This uses COCO val2017 `000000000139.jpg` (a living room):
 
 ```bash
-IMG=/scratch/staff/huaj/modelzoo/data/coco/images/val2017/000000000139.jpg
+IMG=<modelzoo>/data/coco/images/val2017/000000000139.jpg
 $PY - "$IMG" $WORK/img0.bin <<'PY'
 import sys, numpy as np
 from PIL import Image

@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
 # bk-sdm-tiny UNet on the Palmyra APU + AIE
 
 One UNet step of bk-sdm-tiny (256×256 image, latent 4×32×32, timestep, text
@@ -8,17 +10,22 @@ states 77×768) built with aiegraph → TVM C for the A78, with the conv layers 
 | File | What |
 |---|---|
 | `build_unet.py` | Build entry: ONNX → aiegraph.convert (a78, fp32 graph, bf16 weights) → `main.elf` with the 3 real inputs embedded and a cos/maxabs check against x86 ORT |
-| `unet_aie.py` | `--aie conv`: maps each partition layer (ONNX Conv) to its TVM call, builds the AIE archive on one carrier layer, patches `graph_driver.c` so those call sites call `aiednn_aie_conv()` |
+| `unet_offload.py` | `--aie conv[,linear[,attn]] --kincore`: declares the partition layers as aiegraph groups (generic `aiegraph.kincore` / `aiegraph.attnsite` / `aiegraph.flashattn` code), builds the AIE archive on one carrier layer |
+| `kacc_gemm.py`, `kacc_bench.sh` | stand-alone gemm_kacc bench (`aiegraph.kaccbench`, bench text in `bench/`) |
 | `partition.json` | The 37 conv layers on the AIE, 86,600 planned launches, aie_flop_frac 0.417 |
 | `p5_board.log` | The board run (P5) these files produced |
 
-No C text lives in this directory (except `build_unet.py`'s `MAIN_C`): every kernel and host-glue
+UNet-only C text lives in this directory: `build_unet.py`'s `MAIN_C` and the bench text in `bench/`.
+The 64×64×64 tile path (`--aie` without `--kincore`, its kernel text and the core-timer build option) was dropped in unet-decl;
+it can be recovered at commit d5e9f15.
+The attention sites, the flash-attention groups and the driver glue are generic aiegraph code (`aiegraph.attnsite`,
+`aiegraph.flashattn`; their tests and the x86 harness are in `src/aiegraph/test/`). Every generic kernel and host-glue
 template is read from the aiednn library, the board compare tool from the aiegraph runtime:
 
 | Template | What |
 |---|---|
-| [`src/aiednn/conv2d/`](../../../src/aiednn/conv2d/) | `bf16_gemm_convin.cc` (`gemm_bf16`, one 64×64×64 bf16 tile per launch), `kacc_conv_host*.cc` (im2col / scatter glue of the K-in-core conv), `tile64_conv_*.cc`, `conv_bf16_carrier_ref.c` |
-| [`src/aiednn/gemm/`](../../../src/aiednn/gemm/) | `bf16_gemm_kacc.cc`, `gemm_kacc_kernel.cc` (one instance per layer shape), `kacc_linear_host.cc`, control-packet pragmas, `kacc_bench_*` |
+| [`src/aiednn/conv2d/`](../../../src/aiednn/conv2d/) | `kacc_conv_host*.cc` (im2col / scatter glue of the K-in-core conv), `tile64_conv_*.cc`, `conv_bf16_carrier_ref.c` |
+| [`src/aiednn/gemm/`](../../../src/aiednn/gemm/) | `gemm_kacc_kernel.cc` (one instance per layer shape), `kacc_linear_host.cc`, control-packet pragmas |
 | [`src/aiednn/attention/`](../../../src/aiednn/attention/) | flash attention (`fa_*.cc`), the bmm host glue `kacc_bmm_host.cc` |
 | [`src/aiednn/norm/`](../../../src/aiednn/norm/) | `fa_online_softmax.cc` (online softmax + 1/l rescale) |
 | [`src/aiednn/elementwise/`](../../../src/aiednn/elementwise/) | `epilogue_bias_residual.cc` (bias / temb / residual adds) |
@@ -27,6 +34,10 @@ template is read from the aiednn library, the board compare tool from the aiegra
 
 Lookup: `aiednn.template("<category>/<file>")` (verbatim text), `aiednn.params(...)` (its `@NAME@`
 parameters), `aiednn.render(..., NAME=value)`.
+
+The kacc micro-bench text (`kacc_bench.sh` / `kacc_gemm.py` only, not model-generic) lives in
+[`bench/`](bench/): `kacc_bench_data_{conv,gemm,bmm}.h`, `kacc_bench_prelude_{gemm,bmm}.cc`,
+`kacc_bench_{gemm,bmm}_host.cc` and `bf16_gemm_kacc.cc`; the bench scripts load it by path.
 
 ## Build and run
 ```sh

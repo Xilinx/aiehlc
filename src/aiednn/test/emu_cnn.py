@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """x86 emulation harness for the aiednn CNN templates (conv2d/*_bf16.cc, gemm/fc_gemm_bf16.cc).
 
 A template is a C++ ``template <...> __global__`` kernel, read verbatim with :func:`aiednn.template` and launched

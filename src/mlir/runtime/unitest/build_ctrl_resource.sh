@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Build and run the control-plane reservation table unit tests.
 # The table is C; the harness is C++ with extern "C". Compile the table as C,
 # then link.

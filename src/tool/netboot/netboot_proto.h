@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* Wire protocol shared by the netboot supervisor (board) and netload.py (host).
  * Little endian, packed. Keep in step with netload.py's struct formats.
  *

@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
 # rcom — ROCm/HIP GEMM → AIE (example directory)
 
 This directory is the **ROCm/HIP front-end example** for AIEHLC. It holds the

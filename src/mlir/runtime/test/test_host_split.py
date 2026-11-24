@@ -1,5 +1,9 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """GAP-RT1 x86 tests of the aie_host split (src/mlir/runtime/aie_host_split.h) and its UNet wiring
-(example/aiegraph/unet_bk_sdm_tiny/unet_aie.py):
+(aiednn templates + aiegraph.kincore / attnsite / boardmain; the example unet_aie.py is gone since unet-decl P4d):
 1. the header alone: site selection, phase accumulation, window split dma + wait == window, PROF line format;
 2. the generated attention host code (unet_aie.ATTN_HOST, verbatim) with a counting XTime / wait counter:
    pack/scatter/dma/wait land on the site, dma + wait == g_uc_aie_ticks (the aie_ms window is split, not moved);
@@ -20,8 +24,22 @@ import numpy as np
 RT = Path(__file__).resolve().parents[1]
 ROOT = RT.parents[2]
 UNET = ROOT / "example/aiegraph/unet_bk_sdm_tiny"
-sys.path.insert(0, str(UNET))
-import unet_aie as ua  # noqa: E402
+sys.path.insert(0, str(ROOT / "src"))
+import aiednn  # noqa: E402
+from aiegraph import attnsite, boardmain as _bm  # noqa: E402
+
+
+class ua:  # noqa: N801
+    """the texts the deleted example unet_aie.py exposed (unet-decl P4d), from the aiednn templates / aiegraph"""
+    HOST_CC = (aiednn.template("conv2d/tile64_conv_host.cc") + aiednn.template("elementwise/epilogue_bias_residual.cc")
+               + aiednn.template("conv2d/tile64_conv_entry.cc"))
+    KACC_HOST = (aiednn.template("conv2d/kacc_conv_host_head.cc") + aiednn.template("layout/neon_tr4_f32.cc")
+                 + aiednn.template("conv2d/kacc_conv_host.cc"))
+    LINEAR_HOST = aiednn.template("gemm/kacc_linear_host.cc")
+    ATTN_HOST = attnsite.ATTN_HOST
+    PROF_C = _bm.prof_c()
+    bmm_geom = staticmethod(attnsite.bmm_geom)
+    prof_c_attn = staticmethod(attnsite.prof_c_attn)
 
 GLUE = r" glue_ms=[\d.]+ flush_ms=[\d.]+ inval_ms=[\d.]+ launches=\d+"   # M2: appended, old fields unchanged
 LINE = re.compile(r"^PROF aie_host_split part=(\d+) kind=(attn|conv|linear|fa) pack_ms=([\d.]+) scatter_ms=([\d.]+) "
@@ -298,7 +316,10 @@ def test_no_aie_sites_total_zero():
 def test_kernel_sources_wired():
     assert ua.HOST_CC.count('extern "C" void aiednn_aie_host_split_site(int site)') == 1
     assert ua.HOST_CC.count('extern "C" int aiednn_aie_host_split_line(int site') == 1
-    for host, kind in ((ua.KACC_HOST, "AHS_KIND_CONV"), (ua.LINEAR_HOST, "AHS_KIND_LINEAR"),
+    import aiednn   # the kacc conv / linear host glue aiegraph.kincore assembles
+    kacc_host = "".join(aiednn.template(t) for t in ("conv2d/kacc_conv_host_head.cc", "layout/neon_tr4_f32.cc",
+                                                     "conv2d/kacc_conv_host.cc"))
+    for host, kind in ((kacc_host, "AHS_KIND_CONV"), (aiednn.template("gemm/kacc_linear_host.cc"), "AHS_KIND_LINEAR"),
                        (ua.ATTN_HOST, "AHS_KIND_ATTN")):
         assert f"ahs_begin(&g_ahs, {kind});" in host
         for ph in ("AHS_PACK", "AHS_SCATTER"):
@@ -310,9 +331,9 @@ def test_kernel_sources_wired():
     assert "__Runtime_host_split_wait_ticks" in ua.HOST_CC
     rt = (RT / "aie_runtime.c").read_text()
     assert "void __Runtime_host_split_wait_ticks(" in rt and "g_hs_wait_ticks += ahs_now() - __hs_t0;" in rt
-    src = Path(ua.__file__).read_text()
-    assert src.count('"export    aiednn_aie_host_split_site\\\\n"') == 2
-    assert src.count('"export    aiednn_aie_host_split_line\\\\n"') == 2
+    # the kacc kernel writer (aiegraph.kincore) exports both entry points (unet-decl P4d removed the 64x64 writer)
+    from aiegraph import kincore
+    assert {"aiednn_aie_host_split_site", "aiednn_aie_host_split_line"} <= set(kincore.EXPORTS_TAIL)
 
 
 # ---------------------------------------------------------------- 5. M2 N segment: in-launch glue per site
@@ -404,9 +425,9 @@ def test_glue_header_fields_kinds_and_length():
 
 
 def test_glue_fa_host_split():
-    """the generated FA host (fa_attn.fa_host: kind=fa, from zero) books glue/flush/inval/launches on its site and
+    """the generated FA host (aiegraph.flashattn.fa_host: kind=fa, from zero) books glue/flush/inval/launches on its site and
     the same values into the global g_sp_* (split_detail); the QK (pack) site gets kind=fa with 0 launches"""
-    import fa_attn
+    from aiegraph import flashattn as fa_attn
     att = [dict(group=0, role="qk", xshape=[8, 128, 40], wshape=[8, 77, 40], yshape=[8, 128, 77]),
            dict(group=0, role="pv", xshape=[8, 128, 77], wshape=[8, 40, 77], yshape=[8, 128, 40])]
     cls = fa_attn.fa_classes(att)

@@ -217,10 +217,10 @@ Replace USER with your username.
 
 ```bash
 # check for a free board
-/proj/systest/bin/cluster-ping vek280
+<systest>/bin/cluster-ping vek280
 
 # assuming vek280-2 is free
-/proj/systest/bin/systest vek280-2
+<systest>/bin/systest vek280-2
 power 0 power 1
 xsdb
 conn
@@ -286,10 +286,10 @@ Replace USER with your username.
 
 ```bash
 # check for a free board
-/proj/systest/bin/cluster-ping vek385
+<systest>/bin/cluster-ping vek385
 
 # assuming vek385-6 is free
-/proj/systest/bin/systest vek385-6
+<systest>/bin/systest vek385-6
 power 0 power 1
 xsdb
 conn
@@ -360,7 +360,7 @@ cp ../thirdparty/alib/aie-rt/driver/src/libxaiengine.so.3 ~/vek280/
 
 ```bash
 mkdir -p ./bootbin/build
-source /proj/petalinux/2025.1/petalinux-v2025.1_daily_latest/tool/petalinux-v2025.1-final/settings.sh
+source <petalinux-2025.1>/tool/petalinux-v2025.1-final/settings.sh
 ```
 
 #### Create/Build Project
@@ -368,7 +368,7 @@ source /proj/petalinux/2025.1/petalinux-v2025.1_daily_latest/tool/petalinux-v202
 This step may take some time.
 
 ```bash
-petalinux-create -t project -s /proj/petalinux/2025.1/petalinux-v2025.1_daily_latest/bsp/release/xilinx-vek280-v2025.1-final.bsp
+petalinux-create -t project -s <petalinux-2025.1>/bsp/release/xilinx-vek280-v2025.1-final.bsp
 cd xilinx-vek280-2025.1
 export PETALINUX_FOLDER=`pwd`
 petalinux-devtool modify linux-xlnx
@@ -397,10 +397,10 @@ This only works on board vek280-7 to vek280-12, so choose a non-reserved board i
 
 ```bash
 # check for a free board
-/proj/systest/bin/cluster-ping vek280
+<systest>/bin/cluster-ping vek280
 
 # assuming vek280-8 is free
-/proj/systest/bin/systest vek280-8
+<systest>/bin/systest vek280-8
 tftpd "/home/USER/vek280"
 nfsroot3 "/home/USER/vek280"
 xsdb

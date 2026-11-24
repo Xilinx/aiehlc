@@ -3,7 +3,7 @@
 ## Summary
 - **Matrix:** C[8x8] = A[8x8] * B^T[8x8], int8, 4x4 mesh (16 tiles)
 - **Result:** 64/64 mismatches -- every single element is wrong
-- **Applog:** `/scratch/staff/huaj/aiehlc/aiehlc/applog` (May 31, 380KB)
+- **Applog:** `<repo>/applog` (May 31, 380KB)
 - **Note:** This applog was generated with the **pre-fix** `matmul` kernel code
 
 ## Pattern 1: Almost-all-zeros output

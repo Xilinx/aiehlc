@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Self-check for frontend.convtune (no board, no aiehlc.sh run).
 
     PYTHONPATH=src python src/frontend/convtune/test_convtune.py

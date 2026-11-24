@@ -53,19 +53,19 @@ Key points:
 | What | Path used in this tutorial | Notes |
 |---|---|---|
 | aiehlc source, `unet_m4` branch | the `aiehlchj` repository | all the code in this tutorial is on this branch |
-| LLVM/MLIR build | `/scratch/staff/huaj/llvm-project/build` | to build aiehlc |
+| LLVM/MLIR build | `<llvm-build>` | to build aiehlc |
 | Vitis 2026.x and the aarch64 bare-metal toolchain | found by `script/setup.sh` | same as for any aiehlc use |
-| Python environment (numpy, onnx, onnxruntime, Pillow, and aiegraph's dependencies) | `/scratch/staff/huaj/aiehlc/.venv/bin/python3` | used for building and for image generation |
-| bk-sdm-tiny ONNX | `/scratch/staff/huaj/modelzoo/artifacts/bk-sdm-tiny/` (`unet_sim.onnx`, `unet.onnx`, `pipeline_ref_256/p00_steps.npz`, `p1/parts/`) | for the build |
-| bk-sdm-tiny model zoo | `/scratch/staff/huaj/aiehlc/model_zoo/bk-sdm-tiny/` (text encoder, UNet, VAE, tokenizer) | for image generation |
-| `aie_imagegen` (with `palmyra_stage_runner`) | `/scratch/staff/huaj/aiehlc/aiehlc-sdxl-wt/palmyra-runner/script` | aiehlc-sdxl repository, branch `jane/palmyra-stage-runner`, at least 7245e1f (includes the read-back fix) |
+| Python environment (numpy, onnx, onnxruntime, Pillow, and aiegraph's dependencies) | `<venv>/bin/python3` | used for building and for image generation |
+| bk-sdm-tiny ONNX | `<modelzoo>/artifacts/bk-sdm-tiny/` (`unet_sim.onnx`, `unet.onnx`, `pipeline_ref_256/p00_steps.npz`, `p1/parts/`) | for the build |
+| bk-sdm-tiny model zoo | `<model-zoo>/bk-sdm-tiny/` (text encoder, UNet, VAE, tokenizer) | for image generation |
+| `aie_imagegen` (with `palmyra_stage_runner`) | `<aiehlc-sdxl>/palmyra-runner/script` | aiehlc-sdxl repository, branch `jane/palmyra-stage-runner`, at least 7245e1f (includes the read-back fix) |
 
-The rest of the tutorial uses these variables:
+The rest of the tutorial uses these variables: Replace each `<...>` placeholder (`<repo>`, `<venv>`, `<modelzoo>`, ...) with the path on your machine.
 
 ```bash
-export AIEHLC=/scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj   # repository root
+export AIEHLC=<repo>   # repository root
 export WORK=$HOME/unet_work                                          # your work directory (inputs, build output, images)
-export PY=/scratch/staff/huaj/aiehlc/.venv/bin/python3
+export PY=<venv>/bin/python3
 mkdir -p $WORK
 ```
 
@@ -94,7 +94,7 @@ Files used in this tutorial:
 |---|---|
 | [`build_unet.py`](../../example/aiegraph/unet_bk_sdm_tiny/build_unet.py) | build entry point (full listing in section 5): declares the inputs and options, calls aiegraph |
 | [`unet_offload.py`](../../example/aiegraph/unet_bk_sdm_tiny/unet_offload.py) | the UNet's offload declaration: conv / linear / attention groups, the keep-layout plan; no C text |
-| [`kacc_gemm.py`](../../example/aiegraph/unet_bk_sdm_tiny/kacc_gemm.py), [`fa_attn.py`](../../example/aiegraph/unet_bk_sdm_tiny/fa_attn.py), [`unet_aie.py`](../../example/aiegraph/unet_bk_sdm_tiny/unet_aie.py) | instantiate the gemm_kacc / flash-attention templates in `src/aiednn` per layer shape |
+| [`kacc_gemm.py`](../../example/aiegraph/unet_bk_sdm_tiny/kacc_gemm.py), [`aiegraph/kincore.py`](../../src/aiegraph/kincore.py), [`aiegraph/kaccbench.py`](../../src/aiegraph/kaccbench.py), [`aiegraph/flashattn.py`](../../src/aiegraph/flashattn.py), [`aiegraph/attnsite.py`](../../src/aiegraph/attnsite.py) | instantiate the gemm_kacc / flash-attention templates in `src/aiednn` per layer shape (attention + driver glue: generic aiegraph) |
 | [`partition_p4a.json`](../../example/aiegraph/unet_bk_sdm_tiny/partition_p4a.json) | which layers go to the AIE |
 | [`a78_layer_cflags.txt`](../../example/aiegraph/unet_bk_sdm_tiny/a78_layer_cflags.txt) | compiler flags for the TVM C code on the A78 (NEON) |
 | [`export_real_io.py`](../../example/aiegraph/unet_bk_sdm_tiny/export_real_io.py) | exports one real UNet input and the x86 reference output |
@@ -118,8 +118,8 @@ For aiegraph itself, see the [aiegraph tutorial](../../doc/tutorial_aiegraph.md)
 
 ```bash
 cmake -S $T -B $T/build \
-      -DLLVM_DIR=/scratch/staff/huaj/llvm-project/build/lib/cmake/llvm \
-      -DMLIR_DIR=/scratch/staff/huaj/llvm-project/build/lib/cmake/mlir
+      -DLLVM_DIR=<llvm-build>/lib/cmake/llvm \
+      -DMLIR_DIR=<llvm-build>/lib/cmake/mlir
 cmake --build $T/build --target aiehlc -j 32          # about 1 minute
 ls -la $T/build/aiehlc
 ```
@@ -133,7 +133,7 @@ You must use the aiehlc built from this branch (it has the two KCO fixes: the `k
 The build needs one real input, both as the initial contents of the `.aiehlc_io` section and for the self-check on the board:
 
 ```bash
-/scratch/staff/huaj/modelzoo/venv/bin/python -I $T/example/aiegraph/unet_bk_sdm_tiny/export_real_io.py \
+<modelzoo-venv>/bin/python -I $T/example/aiegraph/unet_bk_sdm_tiny/export_real_io.py \
     --step 0 --branch cond --out $WORK/real_io
 ```
 
@@ -191,7 +191,6 @@ def main(argv=None) -> int:
     ap.add_argument("--partition", type=Path, default=None, help="partition.json (layers on the AIE)")
     ap.add_argument("--launch-opt", choices=("cold", "warm"), default="cold", help="warm: kernel loaded once")
     ap.add_argument("--ctrlpkt", choices=("off", "aot", "aot-kco"), default="off", help="control-packet plan")
-    ap.add_argument("--ktimer", action="store_true", help="AIE core timer tail per launch (64x64 path only)")
     ap.add_argument("--kincore", action="store_true", help="one launch per layer, K in the core (gemm_kacc)")
     ap.add_argument("--kincore-layers", default="all", help="--kincore probe subset: partition conv indices")
     ap.add_argument("--arm-layer-cflags-file", type=Path, default=None, help="extra CFLAGS of the TVM layer objects")
@@ -200,10 +199,9 @@ def main(argv=None) -> int:
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
     log = lambda msg: print(f"[build_unet] {msg}", flush=True)
-    if a.ctrlpkt == "aot-kco":  # before unet_aie is imported: it reads UNET_CTRLPKT_KCO at import time
-        os.environ["UNET_CTRLPKT_KCO"], a.ctrlpkt = "1", "aot"
-    elif "unet_aie" not in sys.modules:
-        os.environ.pop("UNET_CTRLPKT_KCO", None)
+    a.ctrlpkt_kco = a.ctrlpkt == "aot-kco"   # aot-kco = the aot plan + KERNELCONFIGOFFLOAD (aiegraph.kincore)
+    if a.ctrlpkt_kco:
+        a.ctrlpkt = "aot"
     import aiegraph as ag
     from aiegraph import boardmain as bm
     errs = [m for bad, m in (
@@ -211,7 +209,7 @@ def main(argv=None) -> int:
         (a.keep_layout and not a.attn_fa, "--keep-layout needs --attn-fa"),
         (a.dump_out and not a.runtime_io, "--dump-out needs --runtime-io"),
         (a.kincore_layers != "all" and not a.kincore, "--kincore-layers needs --kincore"),
-        (a.kincore and (a.aie == "none" or a.ktimer), "--kincore needs --aie conv and no --ktimer"),
+        (a.kincore and a.aie == "none", "--kincore needs --aie conv"),
         (a.ctrlpkt == "aot" and a.aie == "none", "--ctrlpkt aot needs --aie conv"),
         (a.launch_opt == "warm" and a.aie == "none", "--launch-opt warm needs --aie conv")) if bad]
     try:
@@ -263,7 +261,7 @@ def main(argv=None) -> int:
         import unet_offload
         defs, n_patched = unet_offload.offload(a, emod, out)
         bm.append_defines(hdr, "unet", defs)
-    main_c = bm.main_c("unet", [Path(f).stem for _, _, f, _ in ins], aie=a.aie != "none", ktimer=a.ktimer,
+    main_c = bm.main_c("unet", [Path(f).stem for _, _, f, _ in ins], aie=a.aie != "none",
                        runtime_io=a.runtime_io, note=(1, "timestep"))
     rio = [(Path(f).stem, real_io / f) for _, _, f, _ in ins] if a.runtime_io else None
     rep = emod.build(target="a78", verbose=a.verbose, main_c=main_c,
@@ -315,7 +313,7 @@ These are the only things it asks of aiegraph:
 ```bash
 cd $T/example/aiegraph/unet_bk_sdm_tiny
 env -u AIEHLC_ROOT AIEHLC_BIN=$T/build/aiehlc $PY build_unet.py \
-    --onnx /scratch/staff/huaj/modelzoo/artifacts/bk-sdm-tiny/unet_sim.onnx \
+    --onnx <modelzoo>/artifacts/bk-sdm-tiny/unet_sim.onnx \
     --real-io $WORK/real_io \
     --wdtype bf16 \
     --partition partition_p4a.json \
@@ -407,9 +405,9 @@ Parameters: prompt "a photo of an orange, citrus fruit, high quality", negative 
 **Compare with the host version (optional).** First generate a reference image on the host with the same parameters, then let `run_orange.sh` also compute PSNR and cos:
 
 ```bash
-cd $WORK && PYTHONPATH=/scratch/staff/huaj/aiehlc/aiehlc-sdxl-wt/palmyra-runner/script $PY -m aie_imagegen \
+cd $WORK && PYTHONPATH=<aiehlc-sdxl>/palmyra-runner/script $PY -m aie_imagegen \
     -p "a photo of an orange, citrus fruit, high quality" --negative-prompt "blurry, deformed, low quality" \
-    -o $WORK/host_seed2.png --backend host --zoo /scratch/staff/huaj/aiehlc/model_zoo \
+    -o $WORK/host_seed2.png --backend host --zoo <model-zoo> \
     --model bk-sdm-tiny --size 256 --steps 25 --seed 2 --guidance 7.5 --decoder vae
 cd $T/example/aiegraph/unet_bk_sdm_tiny
 REF=$WORK/host_seed2.png ./run_orange.sh $WORK/build/main.elf $WORK/img 2 25

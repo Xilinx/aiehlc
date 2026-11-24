@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """unet-m4 P2 (gap 2): pure-permutation check on saved Relay op semantics (aiegraph.pure_perm).
 
 x86 only. ``pos`` tests: calls that only permute data (+ the allowed element-wise ops) pass, both on hand-written

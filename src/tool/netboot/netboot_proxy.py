@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """stdio <-> TCP relay to the netboot supervisor. Lives on the lab host (PALIP).
 
 The dev box cannot reach the board's network (10.10.70.0/24 hangs off PALIP's

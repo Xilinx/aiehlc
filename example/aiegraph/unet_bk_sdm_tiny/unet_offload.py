@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """The UNet's AIE offload declarations for build_unet.py (unet-m4 P4: moved out of build_unet.py).
 
 offload(a, emod, out) maps the partition's conv / linear / attention layers to aiegraph groups (match /
@@ -13,17 +17,21 @@ import sys
 from pathlib import Path
 
 
+ENTRY = "aiek_unetconv"   # the carrier's aiek entry (aiegraph.kincore.write_source names the unit after it)
+
+
 def log(msg):
     print(f"[build_unet] {msg}", flush=True)
 
 
-def keep_layout_step(ua, onnx_path, part: dict, layers: list, out: Path):
-    """GAP-B: partition rows with ``keep_layout`` -- the output stays in the AIE layout, Transposes / Reshapes
-    to its AIE consumers are labels only (aiegraph.partition.plan_keep_layout). Tags ``layers``, writes
-    <out>/keep_layout.json, prints KEEP_LAYOUT. None when no row has the field (build unchanged)."""
+def keep_layout_step(onnx_path, part: dict, layers: list, out: Path, folds=None):
+    """GAP-B: partition rows with ``keep_layout`` (aiegraph.fold.keep_layout_plan; with *folds* each kept
+    producer must be realized by a layout fold). Tags ``layers``, writes <out>/keep_layout.json, prints
+    KEEP_LAYOUT. None when no row has the field (build unchanged)."""
     if not any(L.get("keep_layout") for L in part["layers"]):
         return None
-    keep = ua.keep_layout_plan(onnx_path, part, layers)
+    from aiegraph.fold import keep_layout_plan
+    keep = keep_layout_plan(onnx_path, part, layers, folds=folds)
     out.mkdir(parents=True, exist_ok=True)
     (out / "keep_layout.json").write_text(json.dumps(keep, indent=1))
     log(f"KEEP_LAYOUT edges={keep['kept']} label_ops={keep['label_ops']} "
@@ -33,14 +41,14 @@ def keep_layout_step(ua, onnx_path, part: dict, layers: list, out: Path):
 
 def fa_offload_groups(emod, att: list, kcc: Path, out: Path) -> int:
     """S3 (design 2026-11-16 §5.2): every attention group = one aiegraph group offload with the four FA steps
-    (fa_attn.FA_STEPS, checked against their AIEK_STEP declarations); aiegraph places them, removes the other
+    (aiegraph.flashattn.FA_STEPS, checked against their AIEK_STEP declarations); aiegraph places them, removes the other
     calls (QK bmm, softmax, O merge) after its liveness / external-reader / early-write checks, and records the
     group in layers/partition.json, from which arm_build emits the driver."""
     import aiegraph as ag
-    import fa_attn
+    from aiegraph import flashattn as fa
     from aiegraph.group import reset_groups
     stepsrc = out / "aiek_src" / "fa_steps.cc"
-    stepsrc.write_text(fa_attn.fa_steps())
+    stepsrc.write_text(fa.FA_STEPS)
     specs = ag.load_steps(stepsrc)
     reset_groups(emod.workdir)
     by = {}
@@ -52,9 +60,9 @@ def fa_offload_groups(emod, att: list, kcc: Path, out: Path) -> int:
         g = qk["ag_group"]
         if qk["fa"] != pv["fa"] or qk["fa"] != g.cls:
             raise SystemExit(f"{name}: FA class {qk['fa']}/{pv['fa']} != aiegraph class {g.cls}")
-        steps = fa_attn.fa_group_steps(ag, g, qk["cid"], pv["cid"], qk["fa"])
+        steps = fa.fa_group_steps(ag, g, qk["cid"], pv["cid"], qk["fa"])
         ag.check_steps(specs, steps)
-        plan = emod.offload_group(g, source=str(kcc), steps=steps, emit=fa_attn.fa_step_emit(g))
+        plan = emod.offload_group(g, source=str(kcc), steps=steps, emit=fa.fa_step_emit(g))
         want = {"fa_step_pack_q": g.q_call, "fa_step_pack_k": g.k_call, "fa_step_pack_v": g.v_call,
                 "fa_step_run_o": g.pv}
         if plan.placement != want or sorted(plan.removed) != sorted([g.qk, g.softmax, g.merge]):
@@ -74,12 +82,16 @@ def offload(a, emod, out: Path):
     import aiegraph._env as env
     from aiegraph import boardmain as bm
     env.frontend("")
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import unet_aie as ua
+    if not a.kincore:
+        # unet-decl P4: the 64x64x64 tile path (one launch per tile, the example's own kernel text) is gone;
+        # it can be recovered at d5e9f15 (example/aiegraph/unet_bk_sdm_tiny/unet_aie.py write_kernel)
+        raise SystemExit("--aie without --kincore (64x64 tile path) was dropped in unet-decl; see d5e9f15")
     import aiegraph as ag
+    from aiegraph import attnsite, flashattn, kincore
     import frontend.tvmrelay.arm_build as ab
     import onnx
-    from aiegraph.callsite import all_conv_calls
+    from aiegraph.callsite import all_conv_calls, check_conv_arg0, pick_carrier
+    from aiegraph.wlayout import kacc_dense_wlayout, kacc_wlayout
     part = json.loads(a.partition.resolve().read_text())
     work = Path(emod.workdir)
     # S1 (unet-m3): aiegraph matches every partition conv / linear row to its TVM call -- one group
@@ -90,7 +102,7 @@ def offload(a, emod, out: Path):
     assert all("proj_in" in x for x in folded), f"weight mismatch outside proj_in: {folded}"
     sel = [dict(g.info, group=g) for g in cgroups]
     for c in sel:
-        launches = ua.ceil64(c["M"]) * ua.ceil64(c["N"]) * ua.ceil64(c["K"])
+        launches = -(-c["M"] // 64) * -(-c["N"] // 64) * -(-c["K"] // 64)
         L = next(L for L in part["layers"] if L["idx"] == c["cid"])
         assert launches == L["launches"], (c["onnx"], launches, L["launches"])
         c["launches"] = launches
@@ -103,7 +115,7 @@ def offload(a, emod, out: Path):
         # PDN: the partition's linear layers (TVM nn_contrib_dense_pack) -> aiednn_aie_linear, gemm_kacc
         lin = [dict(g.info, group=g) for g in emod.match("linear", partition=part, model=onnx_model)]
         for c in lin:
-            c["S"], c["pxs"] = ua.kacc_split(c["N"], c["K"], -(-c["M"] // 64) * 64)
+            c["S"], c["pxs"] = kincore.kacc_split(c["N"], c["K"], -(-c["M"] // 64) * 64)
             c["launches"] = c["S"]
         log(f"aiegraph match('linear'): {len(lin)} partition linear layers -> one-call groups "
             f"(weights equal by value), {sum(c['S'] for c in lin)} gemm_kacc launches")
@@ -122,7 +134,7 @@ def offload(a, emod, out: Path):
             raise SystemExit("--aie conv,linear,attn: partition has no attn layers (autopart --mode attn)")
         if not a.kincore:
             raise SystemExit("--aie conv,linear,attn needs --kincore (gemm_kacc)")
-        att = ua.map_attn(part, work, onnx=a.onnx.resolve())   # S3: aiegraph attention matcher
+        att = attnsite.attn_sites(part, work, onnx=a.onnx.resolve(), log=log)   # S3: aiegraph attention matcher
         if len(att) != natt_part:
             raise SystemExit(f"mapped {len(att)} attn layers, partition has {natt_part}")
     fa = []
@@ -130,18 +142,15 @@ def offload(a, emod, out: Path):
         # GFA (P2): each attention group = ONE flash-attention (online softmax) on the AIE; TVM softmax removed
         if not att:
             raise SystemExit("--attn-fa needs --aie conv,linear,attn")
-        import fa_attn
-        fa = fa_attn.fa_classes(att)
+        fa = flashattn.fa_classes(att)
         for c in att:
             c["launches"] = fa[c["fa"]]["launches"] if c["role"] == "pv" else 0
         for k in fa:
             log(f"GFA class {k['idx']} {k['name']} split={k['split']} nkv={k['nkv']} kvl={k['kvl']} units={k['units']} "
                 f"launches/site={k['launches']}")
-    keep = keep_layout_step(ua, a.onnx.resolve(), part, sel + lin + att, out)
     if a.kincore:
-        # P4bg: one launch per layer from kplan.py (K in the core) -- the partition.json N (64x64x64
+        # P4bg: one launch per layer (aiegraph.kincore.kplan, K in the core) -- the partition.json N (64x64x64
         # tile launches) does not apply on this path
-        import kplan
         if a.kincore_layers != "all":
             # P4bp: probe subset -- unselected layers keep their TVM C call site (no aiegraph group for them)
             want = sorted({int(x) for x in a.kincore_layers.split(",") if x.strip()})
@@ -150,24 +159,13 @@ def offload(a, emod, out: Path):
                 raise SystemExit(f"--kincore-layers {a.kincore_layers}: indices must be in 0..{len(sel) - 1}")
             sel = [sel[i] for i in want]
             log(f"KINCORE subset --kincore-layers {','.join(map(str, want))} -> cids {[c['cid'] for c in sel]}")
-        for c in sel:
-            kp = kplan.plan(c["M"], c["K"], c["N"])
-            if not kp["legal"] or kp["launches"] != 1:
-                raise SystemExit(f"kplan: layer {c['cid']} M={c['M']} K={c['K']} N={c['N']} "
-                                 f"legal={kp['legal']} launches={kp['launches']} why={kp['why']}")
-            c["launches"] = kp["launches"]
+        shapes, linrows = kincore.plan_kincore(sel, lin)
         convsel = sel
         sel = sel + lin
         planned = sum(c["launches"] for c in sel + att)
-        shapes = sorted({(c["N"], c["K"], c["M"]) for c in convsel} | {(c["N"], c["K"], c["pxs"]) for c in lin} |
-                        (set() if fa else set(ua.attn_shapes(att))))
+        shapes = sorted(set(shapes) | (set() if fa else set(attnsite.attn_shapes(att))))
         log(f"KINCORE layers={len(sel) + len(att)} launches_planned={planned} kernel=bf16_gemm_kacc; "
             f"shapes={len(shapes)} (old 64x64x64 launches {part['N']})")
-    else:
-        convsel = sel
-        planned = sum(c["launches"] for c in sel)
-        if planned != int(part["N"]):
-            raise SystemExit(f"planned launches {planned} != partition.json N {part['N']}")
     if att:
         log(f"aie_launches_planned={planned} (partition.json N={part['N']}, {len(sel) + len(att)} layers: "
             f"{len(sel) - len(lin)} conv + {len(lin)} linear + {len(att)} attn, "
@@ -188,28 +186,23 @@ def offload(a, emod, out: Path):
         log(f"  aie attn {c['cid']:3d} {c['role']} g{c['group']} {c['onnx']} -> node {c['node']} {c['func']} "
             f"H={g['H']} M={c['M']} K={c['K']} N={c['N']} swap={g['swap']} ch={g['chs']} k={g['Kp']} px={g['pxs']} "
             f"S={g['S']} launches={c['launches']}")
-    ua.check_data_arg0(work / "layers", convsel)
-    lidx, car = ua.pick_carrier(convsel, convs, work / "layers")
+    n = check_conv_arg0(work / "layers", [c["symbol"] for c in convsel])
+    log(f"checked {n} TVM conv kernels: activation = arg 0, weight = arg 1")
+    lidx, car = pick_carrier(convsel, convs, work / "layers")
     log(f"carrier layer {lidx} ({car['func']}): aiegraph offload builds the gemm_bf16 archive on it")
-    p = emod.offload_prototype(lidx, entry=ua.ENTRY)
-    if a.kincore:
-        kcc = ua.write_kernel_kacc(out / "aiek_src", p.spec(), shapes, warm=(a.launch_opt == "warm"),
-                                   ctrlpkt=a.ctrlpkt,
-                                   lin=[(c["N"], c["K"], -(-c["M"] // 64) * 64, c["pxs"]) for c in lin],
-                                   **({"att": att} if att else {}), **({"fa": fa} if fa else {}))
-    else:
-        kcc = ua.write_kernel(out / "aiek_src", p.spec(), max(c["M"] * c["N"] for c in sel),
-                              warm=(a.launch_opt == "warm"), ctrlpkt=a.ctrlpkt, ktimer=a.ktimer)
+    p = emod.offload_prototype(lidx, entry=ENTRY)
+    ctrlpkt = "aot-kco" if a.ctrlpkt == "aot" and getattr(a, "ctrlpkt_kco", False) else a.ctrlpkt
+    parts = flashattn.fa_kernel_parts(fa) if fa else attnsite.attn_kernel_parts(att) if att else {}
+    kcc = kincore.write_source(out / "aiek_src", p.spec(), shapes, entry=ENTRY, warm=(a.launch_opt == "warm"),
+                               ctrlpkt=ctrlpkt, lin=linrows, **parts)
     if a.ctrlpkt == "aot":
-        log(f"ctrlpkt=aot pragmas={ua.CTRLPKT_NPRAGMAS}")
+        log(f"ctrlpkt=aot pragmas={kincore.ctrlpkt_npragmas(ctrlpkt)}")
     log(f"kernel source {kcc}")
     if fa:
         fa_offload_groups(emod, att, kcc, out)
 
     # S1: conv / linear call sites through aiegraph -- one-call groups, the "args" step ABI, bf16 weights
     # pre-laid out for gemm_kacc in weights.bin (aiegraph drops their graph_bf16_expand)
-    if not a.kincore:
-        raise SystemExit("aiegraph conv/linear groups need --kincore (kacc weight layout)")
     # P3 (unet-m4): --keep-layout = fold declarations -- match("conv+layout") (the conv scatter writes the
     # NCHW / NHWC its reader wants), match("linear+layout") (residual into the linear scatter, the next conv
     # reads [M][C] as NHWC), match("dense+silu") (SiLU scale on the dense input, weight pre-packed); every
@@ -217,6 +210,7 @@ def offload(a, emod, out: Path):
     from aiegraph.fold import step_io
     by_call = {c["group"].calls[0]: c for c in sel}
     groups = [c["group"] for c in sel]
+    folds = None
     if a.keep_layout:
         convg = [c["group"] for c in sel if c["kind"] != "linear"]
         f1 = emod.match("conv+layout", base=convg, log=log)
@@ -224,12 +218,9 @@ def offload(a, emod, out: Path):
         groups += f1 + f2
         log(f"aiegraph match: conv+layout={len(f1)} linear+layout={len(f2)} (folds, removed calls "
             f"{sum(len(g.info['fold'].removed) for g in f1 + f2)})")
-        if keep is not None:   # partition keep_layout edges: each producer must be folded
-            folded = {k for g in f1 + f2 for k in g.calls}
-            miss = [e["node"] for e in keep["edges"] if next(c for c in sel + lin + att
-                                                              if c.get("onnx") == e["node"])["call"] not in folded]
-            if miss:
-                raise SystemExit(f"planned keep_layout edges not realized by a fold: {miss}")
+        folds = f1 + f2
+    # partition keep_layout rows: each kept producer must be one of these folds (--keep-layout)
+    keep = keep_layout_step(a.onnx.resolve(), part, sel + att, out, folds=folds)
     cg = emod.call_graph()
     nw = ng = 0
     for g in emod.merge_groups(groups):
@@ -241,13 +232,13 @@ def offload(a, emod, out: Path):
             rd, wr, args = step_io(cg, g, k) if g.info.get("fold") else (c["group"].x, c["group"].y, None)
             if c["kind"] == "linear":
                 steps.append(ag.step("aiednn_aie_linear", reads=rd, writes=wr, args=args, at=k if args else None,
-                                     weights=c["group"].w.as_bf16(layout=lambda w, c=c: ua.kacc_dense_wlayout(
+                                     weights=c["group"].w.as_bf16(layout=lambda w, c=c: kacc_dense_wlayout(
                                          w, c["N"], c["K"], c["pxs"])),
                                      consts=dict(cid=c["cid"], S=c["S"]), call=("cid", "args", "nargs", "wbf", "S"),
                                      wrap=("UP_AIE_BEGIN", "UP_AIE_END"), tag=f"aie aiednn_aie_lin {c['cid']}"))
             else:
                 steps.append(ag.step("aiednn_aie_conv", reads=rd, writes=wr, args=args, at=k if args else None,
-                                     weights=c["group"].w.as_bf16(layout=lambda w, c=c: ua.kacc_wlayout(
+                                     weights=c["group"].w.as_bf16(layout=lambda w, c=c: kacc_wlayout(
                                          w, c["N"], c["K"], c["M"])),
                                      consts=dict(cid=c["cid"], sh=c["sh"], sw=c["sw"], ph=c["ph"], pw=c["pw"]),
                                      call=("cid", "args", "nargs", "wbf", "sh", "sw", "ph", "pw"),
@@ -278,10 +269,7 @@ def offload(a, emod, out: Path):
     # S6: the C glue (FA kernel declarations, PROF macros, expand timing) is the driver template that
     # aiegraph places at checked anchors of every generated driver -- registered before keep_layout so
     # it runs first; the build_unet.py side only declares groups + this template
-    if att and not all(c.get("fa") is not None and c.get("fa_steps") for c in att):
-        raise SystemExit("attention layers must be aiegraph FA group steps (--attn-fa)")
-    import fa_attn
-    emod.driver_template(**bm.driver_glue(fa_attn.DECL_FA + fa_attn.DECL_KL if att else "", attn=bool(att)))
+    emod.driver_template(**flashattn.fa_driver_glue(att))
     n = len(sel) + len(att)
     log(f"graph_driver.c: {n} partition call sites -> aiednn_aie_conv ({n - len(lin) - len(att)}) + "
         f"aiednn_aie_linear ({len(lin)})" + (f" + aiednn_aie_attn ({len(att)})" if att else "") +
@@ -299,7 +287,6 @@ def offload(a, emod, out: Path):
                 TOTAL_GEMM_MACS=(int(part["total_gemm_macs"]), "ULL"))
     if keep is not None:
         defs["KEEP_LAYOUT_EDGES"] = keep["kept"]
-    log(f"ktimer={'on' if a.ktimer else 'off'}")
     return defs, (len(sel) - len(lin), len(lin), len(att))
 
 

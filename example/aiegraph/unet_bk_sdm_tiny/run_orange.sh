@@ -1,4 +1,8 @@
 #!/bin/bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # run_orange.sh -- text -> 256x256 image with bk-sdm-tiny: the UNet runs on the board (APU + AIE, the ELF
 # built by build_unet.py --runtime-io --dump-out), the text encoder and the VAE decoder run on the host.
 #

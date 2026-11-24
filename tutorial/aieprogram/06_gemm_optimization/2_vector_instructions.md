@@ -11,8 +11,6 @@ same 2048 x 256 x 256 as 6.1.
 <!-- code: example/tileprogram/ccode/simplegemm_dataflow.cc -->
 ```cpp
 /******************************************************************************
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
- * SPDX-License-Identifier: Apache-2.0
  *
  * Kernel-only GEMM with dataflow options: the DMA is derived from the kernel,
  * and three optional load / store options steer it.

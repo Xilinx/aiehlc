@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Unit tests for hws + the palmyra backend, with a fake 213 (mocked ssh, tmux, nc, xsdb)."""
 import os
 import re

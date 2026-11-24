@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """In-process unit test for __Runtime_core_trace_decode via Cython.
 
 Unlike test_core_trace_decode.py (which compiles a main() harness and shells

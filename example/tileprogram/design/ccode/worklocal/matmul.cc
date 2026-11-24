@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // User-provided compute kernel (extracted from __global__ function)
 // C_tile[4x4] = A_tile[4x16] * B_tile^T[4x16], int8
 // B transposed: C[i][j] = dot(A_row[i,:], B_row[j,:])

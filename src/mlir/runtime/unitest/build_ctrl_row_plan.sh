@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Build and run the pure row-control planner unit tests.
 # The planner is C; the test harness is C++ with extern "C", so compile the
 # planner as C first, then link. ACR_VALIDATE_RESERVED turns on the planner's

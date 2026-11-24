@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* TCP protocol (netboot_proto.h) on lwIP RAW. One request per connection.
  * The callbacks only move bytes; the work (SHA, placement, launch) runs from
  * server_poll() in the main loop, outside lwIP's call stack.

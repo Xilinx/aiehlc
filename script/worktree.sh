@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 ###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
+###############################################################################
 # Git Worktree Helper for AIEHLC
 #
 # Manages git worktrees under .worktrees/ for parallel development.

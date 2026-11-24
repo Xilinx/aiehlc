@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """x86 test of aie_kacc_pack.h (runtime kacc operand pack / output un-tile) against the build-time numpy
 reference (unet_bk_sdm_tiny/kacc_gemm.layout + kacc_yidx), for the 4 attention bmm geometries of PBK.
 Run: python3 src/mlir/runtime/test/test_aie_kacc_pack.py   (needs gcc + numpy)"""
@@ -13,7 +17,7 @@ RT = Path(__file__).resolve().parents[1]
 ROOT = RT.parents[2]
 sys.path.insert(0, str(ROOT / "example/aiegraph/unet_bk_sdm_tiny"))
 import kacc_gemm as kg  # noqa: E402
-import unet_aie as ua  # noqa: E402
+from aiegraph import kaccbench as ua  # noqa: E402
 
 SRC = r"""
 #include "aie_kacc_pack.h"

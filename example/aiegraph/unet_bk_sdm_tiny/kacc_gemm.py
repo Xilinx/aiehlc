@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""PDK: kacc_bench.sh --gemm -- the K-in-core gemm_kacc kernel (aiednn gemm/gemm_kacc_kernel.cc template, unet_aie.KACC_KERNEL) as a dense GEMM.
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
+"""PDK: kacc_bench.sh --gemm -- the K-in-core gemm_kacc kernel (aiednn gemm/gemm_kacc_kernel.cc template, aiegraph.kaccbench.KACC_KERNEL) as a dense GEMM.
 
   kacc_gemm.py <op_golden matmul dir> <out dir>   -> <out>/kacc_gemm.cc + kacc_{w,x,y}.bin + kacc_data.h
 
 Golden dir: a.npy [1, M, K] f32, b.npy [K, N] f32, y.npy [1, M, N] f32, meta.json (op_golden p0 MatMul).
-Mapping onto gemm_kacc(ch, k, px) (Y[ch][px] = W[ch, :] . X[px, :], see unet_aie.kacc_geom):
+Mapping onto gemm_kacc(ch, k, px) (Y[ch][px] = W[ch, :] . X[px, :], see aiegraph.kaccbench.kacc_geom):
   ch = N (out features, W = b^T [N][K]), px = M padded to a multiple of 64 (zero rows, not compared), k = K.
 If one instance does not fit the core (kacc_geom asserts: the fp32 accumulator window is too big), the GEMM is
 split into S launches of one instance, along px first (X rows contiguous), then along ch (W rows contiguous).
@@ -14,6 +18,7 @@ no bias; KCMP cos is against the fp32 golden y.npy.
 """
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -23,11 +28,30 @@ import sys as _sys  # noqa: E402
 _SRC = _os.path.normpath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "../../../src"))
 if _SRC not in _sys.path:  # C text lives in src/aiednn/<cat>/ (kernels) and src/aiegraph/runtime/
     _sys.path.insert(0, _SRC)
-from aiednn import render as _render, runtime_source as _rt, template as _tpl  # noqa: E402
+from aiednn import runtime_source as _rt  # noqa: E402
+
+BENCH = Path(__file__).resolve().parent / "bench"   # bench-only text (kacc_bench_*), loaded by path, not aiednn templates
+
+
+def _bench(name: str) -> str:
+    """bench/<name> text, verbatim"""
+    with open(BENCH / name, encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+def _bench_render(name: str, **kv) -> str:
+    """bench/<name> with every @NAME@ filled; missing or unknown parameters are errors (as aiednn.render)"""
+    t = _bench(name)
+    want = set(re.findall(r"@([A-Z][A-Z0-9_]*)@", t))
+    if set(kv) != want:
+        raise SystemExit(f"[kacc_gemm] bench/{name}: missing {sorted(want - set(kv))} unknown {sorted(set(kv) - want)}")
+    for k, v in kv.items():
+        t = t.replace(f"@{k}@", str(v))
+    return t
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import unet_aie as ua  # noqa: E402
+from aiegraph import kaccbench as ua  # noqa: E402
 
 
 def bf16(a):  # round to nearest even
@@ -57,7 +81,7 @@ def plan(N, K, Mp):
 
 def layout(rows_bf16, kp, kch, wside):
     """natural [R][kp] bf16 -> kacc chunk layout: 16-row block, chunk j at j*kch of each row, in-chunk flat
-    f = hi*8*kch + kb*64 + (W: mm*8 + kk | X: kk*8 + nn)  (unet_aie.kacc_wlayout / uc_conv im2col table)"""
+    f = hi*8*kch + kb*64 + (W: mm*8 + kk | X: kk*8 + nn)  (aiegraph.wlayout.kacc_wlayout / uc_conv im2col table)"""
     R = rows_bf16.shape[0]
     t = rows_bf16.reshape(R // 16, 2, 8, kp // kch, kch // 8, 8)       # blk hi lo j kb kk
     t = t.transpose(0, 3, 1, 4, 2, 5) if wside else t.transpose(0, 3, 1, 4, 5, 2)
@@ -101,10 +125,10 @@ def main():
     data = "op_golden/" + "/".join(str(g).rstrip("/").split("/")[-2:])
     data = data[:data.rindex("/") + 5]  # op_golden/<set>/cNNN
     tag = data.split("/")[-1] + "-kacc-gemm"
-    (out / "kacc_data.h").write_text(_render("gemm/kacc_bench_data_gemm.h", CHS=chs, DATA=data, GMAC=f"{gmac:.6f}", GOLDEN=g, K=K, KP=kp, M=M, MP=Mp, N=N, OUT=out, PXS=pxs, S=S, SPLIT_PX=int(mode == 'px'), TAG=tag, TR=tr, Y_SHA=ysha))
+    (out / "kacc_data.h").write_text(_bench_render("kacc_bench_data_gemm.h", CHS=chs, DATA=data, GMAC=f"{gmac:.6f}", GOLDEN=g, K=K, KP=kp, M=M, MP=Mp, N=N, OUT=out, PXS=pxs, S=S, SPLIT_PX=int(mode == 'px'), TAG=tag, TR=tr, Y_SHA=ysha))
     name = ua.kacc_name(chs, K, pxs)
     args = "Xs, Ws, Ys" if tr else "Ws, Xs, Ys"
-    src = (ua.CTRLPKT_PRAGMAS + _tpl("gemm/kacc_bench_prelude_gemm.cc") + ua.KACC_KERNEL + "\n" +
+    src = (ua.CTRLPKT_PRAGMAS + _bench("kacc_bench_prelude_gemm.cc") + ua.KACC_KERNEL + "\n" +
            HOST.replace("@NAME@", name).replace("@ARGS@", args))
     (out / "kacc_gemm.cc").write_text(src)
     print(f"[kacc_bench] data={data} tag={tag} kernel={name} launches_per_pass={S}")
@@ -112,7 +136,7 @@ def main():
 
 # KACC_HOST_FILE=<path>: an alternative bench host (same @NAME@/@ARGS@ fields), e.g. script/perf/p0_kacc_host.cc
 HOST = (Path(_os.environ["KACC_HOST_FILE"]).read_text() if _os.environ.get("KACC_HOST_FILE")
-        else _tpl("gemm/kacc_bench_gemm_host.cc"))
+        else _bench("kacc_bench_gemm_host.cc"))
 
 def main_bmm(g, out):
     """PBK: attention bmm (a.npy [1,H,M,K], b.npy [1,H,K,N]) -- B and A packed by the HOST at run time
@@ -170,16 +194,16 @@ def main_bmm(g, out):
     y.astype("<f4").reshape(-1).tofile(out / "kacc_y.bin")
     data = "op_golden/" + "/".join(str(g).rstrip("/").split("/")[-2:])
     tag = data.split("/")[-1][:4] + "-kacc-bmm"
-    (out / "kacc_data.h").write_text(_render("gemm/kacc_bench_data_bmm.h", CHP=CHP, CHR=CHR, CHS=chs, DATA=data, GMAC=f"{gmac:.6f}", GOLDEN=g, H=H, K=K, KCH=kch, KP=kp, M=M, N=N, OUT=out, PXP=PXP, PXR=PXR, PXS=pxs, S=S, SPLIT_PX=int(mode == 'px'), SWAP=swap, TAG=tag, TR=tr, Y_SHA=ysha))
+    (out / "kacc_data.h").write_text(_bench_render("kacc_bench_data_bmm.h", CHP=CHP, CHR=CHR, CHS=chs, DATA=data, GMAC=f"{gmac:.6f}", GOLDEN=g, H=H, K=K, KCH=kch, KP=kp, M=M, N=N, OUT=out, PXP=PXP, PXR=PXR, PXS=pxs, S=S, SPLIT_PX=int(mode == 'px'), SWAP=swap, TAG=tag, TR=tr, Y_SHA=ysha))
     name = ua.kacc_name(chs, Kp, pxs)
     args = "Xs, Ws, Ys" if tr else "Ws, Xs, Ys"
-    src = (ua.CTRLPKT_PRAGMAS + _tpl("gemm/kacc_bench_prelude_bmm.cc") +
+    src = (ua.CTRLPKT_PRAGMAS + _bench("kacc_bench_prelude_bmm.cc") +
            ua.KACC_KERNEL + "\n" + HOST_BMM.replace("@NAME@", name).replace("@ARGS@", args))
     (out / "kacc_gemm.cc").write_text(src)
     print(f"[kacc_bench] data={data} tag={tag} kernel={name} launches_per_pass={H * S}")
 
 
-HOST_BMM = _tpl("gemm/kacc_bench_bmm_host.cc")
+HOST_BMM = _bench("kacc_bench_bmm_host.cc")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Idempotency guard for setup_tvm016.apply_source_fixups."""
 import shutil, tempfile
 from pathlib import Path

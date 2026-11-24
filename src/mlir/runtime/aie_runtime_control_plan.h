@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 #ifndef AIE_RUNTIME_CONTROL_PLAN_H
 #define AIE_RUNTIME_CONTROL_PLAN_H
 #include <stdint.h>

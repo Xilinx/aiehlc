@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Unit tests for aiehlc_elfio.py + arm_build's .aiehlc_io section (GIN, AIEHLC GAP-aiegraph-arm_build-a20e67).
 
 Pins the printed formats the sprint gates match:

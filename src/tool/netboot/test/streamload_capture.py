@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Helpers for streamload_x86.sh (no board involved).
 
   capture OUT netload-args...   run netload.py's main() against a local fake board that

@@ -9,7 +9,8 @@
 # --check-fresh) print usage and exit 2 before any git / python / mkdir.
 #
 # Build inputs: inputs = `git log -1 --format=%h -- INPUT_PATHS`, dirty = `git status --porcelain` lines
-# under INPUT_PATHS = src/mlir/runtime src/aiegraph/runtime src/aiednn example/aiegraph/<dir>
+# under INPUT_PATHS = src/mlir/runtime src/aiegraph src/aiednn example/aiegraph/<dir>, minus src/aiegraph/costmodel and
+# src/aiegraph/test (since the unet-decl refactor the kernel / host assembly lives in src/aiegraph)
 # (dir = resnet18 | yolov26; script/perf is not a build input).
 #
 # --dry-run: writes nothing, prints one line
@@ -63,7 +64,7 @@ out=$outroot/${net}_$cfg
 src=$outroot/${net}_$cfg.src
 blog=$outroot/${net}_$cfg.build.log
 
-INPUT_PATHS=(src/mlir/runtime src/aiegraph/runtime src/aiednn "example/aiegraph/$dir")
+INPUT_PATHS=(src/mlir/runtime src/aiegraph src/aiednn "example/aiegraph/$dir" :!src/aiegraph/costmodel :!src/aiegraph/test)
 head_inputs=$(git -C "$top" log -1 --format=%h -- "${INPUT_PATHS[@]}")
 [ -n "$head_inputs" ] || head_inputs=none
 dirty=$(git --no-optional-locks -C "$top" status --porcelain -- "${INPUT_PATHS[@]}" | wc -l)

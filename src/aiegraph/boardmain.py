@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Board-side ``main.c`` generator + the build glue around it (sprint m4 P4, gaps 3 / 4).
 
 A model example used to carry its own ``MAIN_C`` (C text in Python), the runtime-io rewrite of it,
@@ -334,11 +338,13 @@ def cross_toolchain(root, log=print):
 
 def read_cflags_file(path) -> str:
     """A cflags file's lines joined with single spaces (one string, no shell word-splitting).
-    A missing or empty (whitespace-only) file is an error, never a silent ''."""
+    Lines starting with `#` are comments (e.g. the license header) and are skipped.
+    A missing or empty (whitespace/comment-only) file is an error, never a silent ''."""
     path = Path(path)
     if not path.is_file():
         raise ValueError(f"{path}: no such cflags file")
-    flags = " ".join(path.read_text().split())
+    lines = [ln for ln in path.read_text().splitlines() if not ln.lstrip().startswith("#")]
+    flags = " ".join(" ".join(lines).split())
     if not flags:
         raise ValueError(f"{path}: cflags file is empty")
     return flags

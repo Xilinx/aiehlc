@@ -1,4 +1,8 @@
 #!/bin/bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Build the netboot supervisor (doc/design/lwip_elf_bootloader.md).
 #
 #   src/tool/netboot/build.sh            # -> src/tool/netboot/build/netboot.elf

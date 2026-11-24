@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """apppaltest hws preflight (plan-1109-b1597a s5) against a fake hws, both board types.
 
 No board, ssh or xsdb: the hws library is replaced by FakeHws, whose status/up/

@@ -42,7 +42,8 @@ from .contract import Arg
 from .errors import AiegraphError
 from .group import CallGraph, Group, make_group
 
-__all__ = ["Fold", "conv_layout", "linear_layout", "dense_silu", "merge", "packed_args", "step_io"]
+__all__ = ["Fold", "conv_layout", "linear_layout", "dense_silu", "merge", "packed_args", "step_io",
+           "keep_layout_plan"]
 
 _STAGE = "group"
 
@@ -358,3 +359,48 @@ def step_io(cg: CallGraph, g: Group, call: int) -> tuple:
         if t in outs and t not in writes:
             writes.append(t)
     return [cg.tensor(t) for t in reads], [cg.tensor(t) for t in writes], args
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  partition keep_layout rows -> the layout folds that realize them
+# ═══════════════════════════════════════════════════════════════════════════
+
+_LAYOUT_FOLDS = ("conv+layout", "linear+layout")
+
+
+def keep_layout_plan(model, partition, layers=(), folds=None) -> dict:
+    """The partition rows with ``keep_layout`` (an AIE output stays in the AIE layout; the
+    Transpose / Reshape ops to its AIE consumers are labels only), checked twice:
+
+    * on the ONNX *model*: ``partition.plan_keep_layout`` (every consumer an AIE row, the view
+      row-major in the kept layout);
+    * on the TVM graph, when *folds* (the ``match("conv+layout")`` / ``match("linear+layout")``
+      groups) is given: each kept producer -- the *layers* dict with ``onnx == row node``, its
+      ``call`` -- must be a member call of a layout fold (the fold proved the permutation pure with
+      ``pure_perm`` and removed it). A kept row that no fold realizes raises AiegraphError.
+
+    Tags *layers* (dicts with ``onnx``): producer ``keep_layout=<layout>``, consumer ``keep_in=[producer
+    node, ...]``. Returns ``plan_keep_layout``'s ``dict(edges, label_ops, kept)`` (+ ``folded`` = realized
+    edges when *folds* is given). No row with the field -> ``kept == 0`` and nothing is touched."""
+    from .partition import plan_keep_layout
+    rep = plan_keep_layout(model, partition)
+    by = {c.get("onnx"): c for c in layers}
+    if folds is not None and rep["edges"]:
+        folded = {k for g in folds if g.info.get("kind") in _LAYOUT_FOLDS for k in g.calls}
+        miss = []
+        for e in rep["edges"]:
+            c = by.get(e["node"])
+            if c is None or c.get("call") not in folded:
+                miss.append(e["node"])
+        if miss:
+            raise AiegraphError(_STAGE, f"keep_layout rows not realized by a layout fold: {miss}",
+                                hint="the producer must be an offloaded conv / linear whose permutation "
+                                     "match('conv+layout' | 'linear+layout') folds")
+        rep["folded"] = len(rep["edges"])
+    for e in rep["edges"]:
+        if e["node"] in by:
+            by[e["node"]]["keep_layout"] = e["layout"]
+        for u in e["consumers"]:
+            if u in by:
+                by[u].setdefault("keep_in", []).append(e["node"])
+    return rep

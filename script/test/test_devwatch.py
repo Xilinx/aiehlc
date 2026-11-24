@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """BDD-style tests for the apppaltest self-watchdog and the frozen-holder heartbeat."""
 import io, json, os, signal, subprocess, sys, textwrap, time
 import pytest

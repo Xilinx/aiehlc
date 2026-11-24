@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """bk-sdm-tiny UNet (unet_sim.onnx, 3 inputs) -> aiegraph -> A78 main.elf, conv / linear / attention on the AIE.
 
   $PY build_unet.py --onnx unet_sim.onnx --real-io <real_io> --wdtype bf16 --partition partition_p4a.json \
@@ -36,7 +40,6 @@ def main(argv=None) -> int:
     ap.add_argument("--partition", type=Path, default=None, help="partition.json (layers on the AIE)")
     ap.add_argument("--launch-opt", choices=("cold", "warm"), default="cold", help="warm: kernel loaded once")
     ap.add_argument("--ctrlpkt", choices=("off", "aot", "aot-kco"), default="off", help="control-packet plan")
-    ap.add_argument("--ktimer", action="store_true", help="AIE core timer tail per launch (64x64 path only)")
     ap.add_argument("--kincore", action="store_true", help="one launch per layer, K in the core (gemm_kacc)")
     ap.add_argument("--kincore-layers", default="all", help="--kincore probe subset: partition conv indices")
     ap.add_argument("--arm-layer-cflags-file", type=Path, default=None, help="extra CFLAGS of the TVM layer objects")
@@ -48,10 +51,9 @@ def main(argv=None) -> int:
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
     log = lambda msg: print(f"[build_unet] {msg}", flush=True)
-    if a.ctrlpkt == "aot-kco":  # before unet_aie is imported: it reads UNET_CTRLPKT_KCO at import time
-        os.environ["UNET_CTRLPKT_KCO"], a.ctrlpkt = "1", "aot"
-    elif "unet_aie" not in sys.modules:
-        os.environ.pop("UNET_CTRLPKT_KCO", None)
+    a.ctrlpkt_kco = a.ctrlpkt == "aot-kco"   # aot-kco = the aot plan + KERNELCONFIGOFFLOAD (aiegraph.kincore)
+    if a.ctrlpkt_kco:
+        a.ctrlpkt = "aot"
     import aiegraph as ag
     from aiegraph import boardmain as bm
     errs = [m for bad, m in (
@@ -59,7 +61,7 @@ def main(argv=None) -> int:
         (a.keep_layout and not a.attn_fa, "--keep-layout needs --attn-fa"),
         (a.dump_out and not a.runtime_io, "--dump-out needs --runtime-io"),
         (a.kincore_layers != "all" and not a.kincore, "--kincore-layers needs --kincore"),
-        (a.kincore and (a.aie == "none" or a.ktimer), "--kincore needs --aie conv and no --ktimer"),
+        (a.kincore and a.aie == "none", "--kincore needs --aie conv"),
         (a.ctrlpkt == "aot" and a.aie == "none", "--ctrlpkt aot needs --aie conv"),
         (a.launch_opt == "warm" and a.aie == "none", "--launch-opt warm needs --aie conv"),
         (a.site_perf and a.aie == "none", "--site-perf needs --aie conv")) if bad]
@@ -114,7 +116,7 @@ def main(argv=None) -> int:
         import unet_offload
         defs, n_patched = unet_offload.offload(a, emod, out)
         bm.append_defines(hdr, "unet", defs)
-    main_c = bm.main_c("unet", [Path(f).stem for _, _, f, _ in ins], aie=a.aie != "none", ktimer=a.ktimer,
+    main_c = bm.main_c("unet", [Path(f).stem for _, _, f, _ in ins], aie=a.aie != "none",
                        runtime_io=a.runtime_io, note=(1, "timestep"))
     rio = [(Path(f).stem, real_io / f) for _, _, f, _ in ins] if a.runtime_io else None
     rep = emod.build(target="a78", verbose=a.verbose, main_c=main_c,

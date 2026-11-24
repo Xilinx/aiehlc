@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """TVM AutoTVM integration for the aiehlc conv2d auto-tiling model.
 
 The tunable parameters of a declarative conv2d (``aie::Conv2d`` +

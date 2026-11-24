@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* aie_kernel_runtime.h — AIE2PS (gen5) core-tile DMA config encoder + apply.
  *
  * KERNELCONFIGOFFLOAD: let the AIE CORE self-configure its own DMA buffer

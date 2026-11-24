@@ -28,13 +28,14 @@ linear   TVM ``dense`` calls with a parameter weight, matched by VALUE: the pack
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import AiegraphError
 
 __all__ = ["WeightRef", "WeightSpec", "conv_groups", "linear_groups", "weight_bytes",
-           "params_file"]
+           "params_file", "pick_carrier"]
 
 _STAGE = "group"
 
@@ -314,6 +315,51 @@ def all_conv_calls(cg) -> list:
     return [dict(call=c.call, node=c.node,
                  symbol=c.symbol if c.symbol.startswith("tvmgen_") else "tvmgen_default_" + c.symbol)
             for c in cg.calls if "conv2d" in c.symbol]
+
+
+def pick_carrier(sel: list, all_calls: list, layers_dir) -> tuple:
+    """The layer that carries the AIE archive: the first *sel* call (dicts with ``node`` / ``symbol``)
+    whose TVM function has no call site outside *sel* (*all_calls*: ``all_conv_calls``), so offloading
+    that function moves no CPU call. Its layer directory (``<layers_dir>/<idx>_*/`` holding the one C
+    file that defines the function) gives the layer index. Returns ``(layer index, sel entry)``; raises
+    AiegraphError when every selected function also has CPU call sites, or the function is defined in
+    no or several layer files."""
+    selnodes = {c["node"] for c in sel}
+    for c in sel:
+        if any(x["node"] not in selnodes for x in all_calls if x["symbol"] == c["symbol"]):
+            continue
+        d = [p.parent for p in Path(layers_dir).glob("*/*.c") if f" {c['symbol']}(void* args" in p.read_text()]
+        if len(d) != 1:
+            raise AiegraphError(_STAGE, f"carrier {c['symbol']}: defined in {len(d)} layer files {d}, expected 1")
+        return int(d[0].name.split("_")[0]), c
+    raise AiegraphError(_STAGE, "no carrier: every selected TVM conv function also has CPU call sites")
+
+
+def check_conv_arg0(layers_dir, symbols) -> int:
+    """Every TVM conv function in *symbols* reads its activation from arg 0 and its weight from arg 1: in the
+    one ``<layers_dir>/*/*.c`` file that defines it, the multiply lines that read ``p1_1`` (the weight) read
+    only ``p0_1`` besides (directly, or through ``data_pad`` filled from ``p0_1``). The aiednn conv host takes
+    the activation from args[0], so a function reading a residual / bias arg instead is refused. Returns the
+    number of checked functions; raises AiegraphError."""
+    syms = sorted(set(symbols))
+    for sym in syms:
+        hits = [p for p in Path(layers_dir).glob("*/*.c") if f" {sym}(void* args" in p.read_text()]
+        if len(hits) != 1:
+            raise AiegraphError(_STAGE, f"conv {sym}: defined in {len(hits)} layer files {hits}, expected 1")
+        t = hits[0].read_text()
+        src = set()
+        for line in t.splitlines():
+            if "p1_1)[" in line and "*" in line:
+                src |= {x for x in re.findall(r"\(\(float\*\)(\w+)\)\[", line) if x != "p1_1"}
+        if "data_pad" in src:
+            src.discard("data_pad")
+            for line in t.splitlines():
+                if re.search(r"condval = |data_pad\)\[.*\] = ", line):
+                    src |= set(re.findall(r"\(\(float\*\)(p\d+_1)\)\[", line))
+        if src != {"p0_1"}:
+            raise AiegraphError(_STAGE, f"conv {sym} ({hits[0].name}): activation from {sorted(src)}, expected p0_1",
+                                hint="the aiednn conv host reads the activation from args[0]")
+    return len(syms)
 
 
 def linear_groups(cg, workdir, onnx_path, partition, model=None) -> list:

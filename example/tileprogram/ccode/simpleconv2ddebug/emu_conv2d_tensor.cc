@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // emu_conv2d_tensor.cc -- run the GENERATED kernel of the tensor-form
 // simpleconv2dkernel.cc on x86 for every core of the 4x4 mesh, end to end:
 // the host's own staging (aiehlc_stage: zero border + aligned channels, taken

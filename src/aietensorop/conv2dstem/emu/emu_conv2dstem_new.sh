@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # emu_conv2dstem_new.sh <aout/worklocal of a conv2dstem_uk_new.cc / conv2dstem_new.cc build>:
 # x86-emulate the generated kernel with the library's real host code (see the .cc).
 set -euo pipefail

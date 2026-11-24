@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Rebuild end-to-end routing flows from scanned stream-switch registers alone.
 
 `switch_scan` answers "does the hardware match the routing map".  This answers

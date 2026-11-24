@@ -38,6 +38,10 @@ for _p in (str(EX), str(TOP / "src"), str(TOP / "src/aiegraph")):   # -I mode: n
         sys.path.insert(0, _p)
 
 KNOBS = ("KACC_TR_TKW_CAP", "KACC_KP_PAD")
+# unet-decl P4d (main) deleted the example unet_aie.py: the UNet kernel assembly is aiegraph.kincore / cnn.kacc_geom.
+# Every M3.1.2.1 build is then OUTSIDE (rebuild); the selftest keeps checking the comparison machinery on the last
+# unet_aie.py of the costmodel line.
+UA_LAST = "a6c59eea"
 FUNC = "kacc_geom"
 
 
@@ -149,13 +153,29 @@ def load_src(src: str, name: str, tmpdir: str):
     return m
 
 
+def load_geom(src: str):
+    """only the kacc_geom function of a unet_aie.py source (the rest of an old copy imports aiednn templates that
+    unet-decl P4d removed) -> namespace with .kacc_geom"""
+    import types
+    a, b = func_range(src)
+    ns = {"_os": os, "os": os}
+    exec(compile("\n".join(src.splitlines()[a - 1:b]), "<kacc_geom>", "exec"), ns)
+    return types.SimpleNamespace(kacc_geom=ns[FUNC])
+
+
 def load_base(base: str, tmpdir: str):
     """unet_aie.py at <base> as module 'unet_aie_base' (temp file, work tree untouched)"""
     return load_src(git("show", f"{base}:{UA_REL}"), "unet_aie_base", tmpdir)
 
 
+def head_has_ua() -> bool:
+    return (TOP / UA_REL).is_file()
+
+
 def load_head():
-    """HEAD's unet_aie as 'unet_aie' (same object kacc_gemm imports as ua)"""
+    """HEAD's unet_aie as 'unet_aie' (same object kacc_gemm imported as ua before unet-decl P4d)"""
+    if not head_has_ua():
+        raise RuntimeError(f"{UA_REL} removed at HEAD (unet-decl P4d): no kacc_geom equivalence, rebuild")
     import unet_aie
     return unet_aie
 
@@ -255,6 +275,10 @@ def drive_build(ua, layers: dict, partition=None) -> tuple:
 
 
 def run(a) -> int:
+    if not head_has_ua():
+        print(f"KGEOM ALL base={a.base} scope=input_paths OUTSIDE {UA_REL} removed at HEAD (unet-decl P4d: the UNet "
+              "kernel assembly is aiegraph.kincore / cnn.kacc_geom) -- rebuild DIFF")
+        return 1
     sc = scope_check(a.base)
     print(f"KGEOM scope input_paths={','.join(input_paths())} (test_*.py excluded) files={','.join(sc['files'])}")
     print(f"KGEOM kacc_geom lines base={sc['base_rng'][0]}-{sc['base_rng'][1]} head={sc['head_rng'][0]}-{sc['head_rng'][1]}")
@@ -311,11 +335,12 @@ def selftest() -> int:
         print(f"KGEOM selftest {name} {'ok' if cond else 'FAIL'}")
         if not cond:
             fails.append(name)
-    hsrc = (TOP / UA_REL).read_text()
+    hsrc = (TOP / UA_REL).read_text() if head_has_ua() else git("show", f"{UA_LAST}:{UA_REL}")
     with tempfile.TemporaryDirectory(prefix="kgeom_st_") as td:
-        uh = load_head()
-        ub = load_base("f531f051", td)
-        u2 = load_src(hsrc, "unet_aie_same", td)
+        if head_has_ua():
+            uh, ub, u2 = load_head(), load_base("f531f051", td), load_src(hsrc, "unet_aie_same", td)
+        else:   # unet-decl P4d: geometry function only, from the last costmodel copy
+            uh, ub, u2 = load_geom(hsrc), load_geom(git("show", f"f531f051:{UA_REL}")), load_geom(hsrc)
         # 1. tr and px == k//2: HEAD pads kp by 2*tkw, f531f051 did not -> must be a diff
         g = uh.kacc_geom(320, 2048, 1024)
         check("tr_px_eq_khalf_is_tr", g["tr"] == 1 and 1024 == 2048 // 2)

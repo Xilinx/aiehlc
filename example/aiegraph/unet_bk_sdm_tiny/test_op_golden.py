@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """GAP-SG x86 per-op golden regression for the bk-sdm-tiny UNet (sprint unet_m3-s1).
 
 Wraps the model-zoo gate zoo/op_golden/compare.py (cos >= 0.999 per class) over two golden sets of

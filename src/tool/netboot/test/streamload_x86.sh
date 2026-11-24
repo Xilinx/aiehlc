@@ -1,4 +1,8 @@
 #!/bin/bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # x86 unit test of the streaming netboot supervisor (no board):
 #   1. identity: real app ELFs placed by the old loader (elfload.c at ed72954) and
 #      streamed by the new one into a malloc'd 2 GB stand-in for DDR_LOW0, whole

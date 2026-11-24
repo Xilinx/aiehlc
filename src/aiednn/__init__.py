@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """aiednn -- the AIE kernel / host-glue template library aiegraph offloads with.
 
 Templates are plain source files, one directory per operator category:

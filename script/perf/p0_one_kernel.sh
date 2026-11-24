@@ -13,9 +13,9 @@
 # largest port count); two plain gemm_kacc kernels (3 ports) are fine. The P0 line carries alt=<k2>.
 # --launch (M1.2.1): warm (default) = WARM_DEFS (ZFILL_WIDE PMLOAD_WIDE PM_WARM_SKIP SKIP_BSS_DEFAULT); reload = warm
 # minus PM_WARM_SKIP (program memory reloaded every launch, PMLOAD_WIDE kept); cold = no WARM_DEFS (runtime defaults).
-# --ctrlpkt (M1.1): off = MMIO (UNET_CTRLPKT=off, no control-packet pragmas), aot (default, the 5 aot pragmas),
-# aot-kco (UNET_CTRLPKT_KCO=1, + KERNELCONFIGOFFLOAD; as build_unet.py --ctrlpkt aot-kco). --build-only: stop after
-# BUILD_OK (no --board needed). The stamp carries the ctrlpkt mode + md5 of unet_aie.py / gemm/ctrlpkt_*.h.
+# --ctrlpkt (M1.1): off = MMIO (AIEGRAPH_CTRLPKT=off, no control-packet pragmas), aot (default, the 5 aot pragmas),
+# aot-kco (AIEGRAPH_CTRLPKT_KCO=1, + KERNELCONFIGOFFLOAD; as build_unet.py --ctrlpkt aot-kco). --build-only: stop after
+# BUILD_OK (no --board needed). The stamp carries the ctrlpkt mode + md5 of aiegraph kaccbench/kincore/cnn.py / gemm/ctrlpkt_*.h.
 # Builds (cached by a stamp of shape + host + commit) the gemm_kacc instance of the kernel's GEMM shape (M,K,N) through
 # example/aiegraph/unet_bk_sdm_tiny/kacc_gemm.py with the P0 host script/perf/p0_kacc_host.cc and an aiehlc.sh
 # --profiling host (core perf counters ACTIVE/VEC/STREAM_STALL/LOCK_STALL armed at every launch), runs it with
@@ -52,9 +52,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 case "$CTRLPKT" in
-off) export UNET_CTRLPKT=off; unset UNET_CTRLPKT_KCO ;;
-aot) unset UNET_CTRLPKT UNET_CTRLPKT_KCO ;;
-aot-kco) export UNET_CTRLPKT_KCO=1; unset UNET_CTRLPKT ;;
+off) export AIEGRAPH_CTRLPKT=off; unset AIEGRAPH_CTRLPKT_KCO ;;
+aot) unset AIEGRAPH_CTRLPKT AIEGRAPH_CTRLPKT_KCO ;;
+aot-kco) export AIEGRAPH_CTRLPKT_KCO=1; unset AIEGRAPH_CTRLPKT ;;
 *) echo "p0_one_kernel: --ctrlpkt off|aot|aot-kco (got '$CTRLPKT')" >&2; exit 2 ;;
 esac
 case "$LAUNCH" in
@@ -166,7 +166,8 @@ mkdir -p "$OUT/golden"
 OUT="$(cd "$OUT" && pwd)"
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
 STAMP="$M $K $N reps=$REPS ctrlpkt=$CTRLPKT launch=$LAUNCH $(cat "$HERE/p0_kacc_host.cc" "$ROOT/example/aiegraph/unet_bk_sdm_tiny/kacc_gemm.py" \
-    "$ROOT/example/aiegraph/unet_bk_sdm_tiny/unet_aie.py" "$ROOT"/src/aiednn/gemm/ctrlpkt_aot_pragmas.h \
+    "$ROOT"/src/aiegraph/kaccbench.py "$ROOT"/src/aiegraph/kincore.py "$ROOT"/src/aiegraph/cnn.py \
+    "$ROOT/example/aiegraph/unet_bk_sdm_tiny/bench/kacc_bench_prelude_gemm.cc" "$ROOT"/src/aiednn/gemm/ctrlpkt_aot_pragmas.h \
     "$ROOT"/src/aiednn/gemm/ctrlpkt_kco_pragma.h | md5sum | cut -c1-12) $COMMIT"
 [ -z "$ALT" ] || STAMP="$STAMP alt=$ALT $M2 $K2 $N2 $(md5sum < "${BASH_SOURCE[0]}" | cut -c1-12)"
 echo "[p0] kernel=$KERNEL recipe=$RECIPE M=$M K=$K N=$N ctrlpkt=$CTRLPKT launch=$LAUNCH board=$NAME ($BOARD) out=$OUT commit=$COMMIT"
