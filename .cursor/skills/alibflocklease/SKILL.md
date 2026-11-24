@@ -76,3 +76,15 @@ protection is lost.
 Worktrees made with `script/worktree.sh link-deps --private-alib` have their own
 `thirdparty/alib` and so their own lock file; they are not blocked by the main
 checkout's holder (that is why a worktree reproduction "doesn't hang").
+
+## The lock is opt-in now (2026-11-23): `-serialize`
+
+Default `aiehlc.sh` takes **no** alib lock, so a run never waits on another
+(or on a leaked holder). `-serialize` / `--serialize` / `AIEHLC_SERIALIZE=1`
+restores the exclusive lock for the whole run (`waiting for alib lock` /
+`alib lock held` lines). Verified: with the lock held elsewhere, a default run
+finishes (rc 0) and a `-serialize` run waits. Without the lock, two runs on one
+tree at once can wipe each other's `thirdparty/alib` (GAP-ALIB-RACE:
+`xaie_feature_config.h: No such file`) -- run them in separate worktrees
+(`script/worktree.sh link-deps --private-alib`) or pass `-serialize` to all of
+them. `AIEHLC_LIBCACHE` keeps its own shared/exclusive locking.

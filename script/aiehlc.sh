@@ -20,13 +20,16 @@ run_cmd() {
 }
 
 usage() {
-    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss]"
+    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss] [-serialize]"
     echo "  --platform    baremetal (default) | sim | linux | baremetal_debug"
     echo "                'baremetal_debug' builds a baremetal ELF and writes sim_config.sh so the debug"
     echo "                UI can run either a hardware test or a simulator run from one build."
     echo "  --profiling   build the host with the PMU profiling layer (-DAIEHLC_PROFILING=1)"
     echo "  --skip-bss    skip ALL .bss zero-init on kernel load (-DAIEHLC_SKIP_BSS_DEFAULT=1; unsafe if the kernel reads zeroed statics)"
     echo "  --skip-port-bss  skip zero-init only for DMA port-buffer .bss (buf_in_*/buf_out_*), keep it for the rest (-DAIEHLC_SKIP_BSS_DEFAULT=2)"
+    echo "  -serialize    take an exclusive lock on thirdparty/alib for the whole run, so parallel aiehlc.sh runs"
+    echo "                on this tree wait for each other (also AIEHLC_SERIALIZE=1). Default: no lock -- two runs"
+    echo "                at once on one tree can wipe each other's alib; use separate worktrees or -serialize."
     return 1
 }
 
@@ -178,7 +181,7 @@ build_hw_lib() {
     }
 
 # ---- AIEHLC_LIBCACHE=<dir>: content cache for the build_hw_lib output (alib include/ + lib/) ----------
-# Unset -> nothing below runs and aiehlc.sh behaves as before (exclusive alib flock to exit).
+# Unset -> nothing below runs and aiehlc.sh behaves as before (alib lock only with -serialize).
 # Set (baremetal/baremetal_debug only) -> key = sha256(aie-rt tree + BSP headers/libs/ld + toolchain -v +
 # compiler flags + AIELIB_APU_NAME + AIE_GEN + platform); <dir>/<key>/{include,lib} is written atomically
 # (tmp dir + mv) after a build_hw_lib under the exclusive lock. A build whose key is already in the cache
@@ -312,6 +315,7 @@ DEBUG_OUTPUT=0
 DEBUG_SYMS=0
 platform="baremetal"
 COMPILE_AIELIB_ONLY=0
+SERIALIZE="${AIEHLC_SERIALIZE:-0}" # -serialize: take the alib lock (GAP-ALIB-RACE)
 USE_LOCAL_AIERT_BSP=0
 PRETTY_DEBUG=0
 SIM_TILES=""
@@ -356,6 +360,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --debug-syms)
             DEBUG_SYMS=1
+            shift
+            ;;
+        -serialize|--serialize)
+            SERIALIZE=1
             shift
             ;;
         --aielib-only)
@@ -539,7 +547,9 @@ if [ -d "${AIE_DRIVER_PARENT_DIR}/aie-rt/driver/" ] && [[ "$platform" != "sim" ]
     else
     # main runs in a subshell, so this fd belongs to that process: the kernel releases the lock when
     # it exits -- normally, on error, on Ctrl-C or kill -- and the caller's shell never holds it.
-    if command -v flock >/dev/null 2>&1; then
+    # Opt-in (-serialize / AIEHLC_SERIALIZE=1): by default no lock is taken, so a run never waits on
+    # another; concurrent runs on one tree then need separate worktrees.
+    if [ "$SERIALIZE" = "1" ] && command -v flock >/dev/null 2>&1; then
         exec {AIEHLC_ALIB_LOCK_FD}>"${AIE_DRIVER_PARENT_DIR}/.aiehlc_alib.lock"
         echo "aiehlc.sh: waiting for alib lock ${AIE_DRIVER_PARENT_DIR}.aiehlc_alib.lock"
         flock "${AIEHLC_ALIB_LOCK_FD}"
