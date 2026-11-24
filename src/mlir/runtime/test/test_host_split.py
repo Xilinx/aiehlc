@@ -316,7 +316,6 @@ def test_no_aie_sites_total_zero():
 def test_kernel_sources_wired():
     assert ua.HOST_CC.count('extern "C" void aiednn_aie_host_split_site(int site)') == 1
     assert ua.HOST_CC.count('extern "C" int aiednn_aie_host_split_line(int site') == 1
-    import aiednn   # the kacc conv / linear host glue aiegraph.kincore assembles
     kacc_host = "".join(aiednn.template(t) for t in ("conv2d/kacc_conv_host_head.cc", "layout/neon_tr4_f32.cc",
                                                      "conv2d/kacc_conv_host.cc"))
     for host, kind in ((kacc_host, "AHS_KIND_CONV"), (aiednn.template("gemm/kacc_linear_host.cc"), "AHS_KIND_LINEAR"),
@@ -332,7 +331,13 @@ def test_kernel_sources_wired():
     rt = (RT / "aie_runtime.c").read_text()
     assert "void __Runtime_host_split_wait_ticks(" in rt and "g_hs_wait_ticks += ahs_now() - __hs_t0;" in rt
     # the kacc kernel writer (aiegraph.kincore) exports both entry points (unet-decl P4d removed the 64x64 writer)
-    from aiegraph import kincore
+    from aiegraph import cnn, cnn_chunk, kincore
+    # the 64x64 host glue's entries are found by cnn._EXPORT_RE, the chunked writer adds them in
+    # cnn_chunk._spec_exports, the kacc one lists them in kincore.EXPORTS_TAIL
+    assert {"aiednn_aie_host_split_site", "aiednn_aie_host_split_line"} <= set(cnn._EXPORT_RE.findall(ua.HOST_CC))
+    spec = cnn_chunk._spec_exports('"out y\\n"', "aiednn")
+    assert spec.count('"export    aiednn_aie_host_split_site\\n"') == 1
+    assert spec.count('"export    aiednn_aie_host_split_line\\n"') == 1
     assert {"aiednn_aie_host_split_site", "aiednn_aie_host_split_line"} <= set(kincore.EXPORTS_TAIL)
 
 

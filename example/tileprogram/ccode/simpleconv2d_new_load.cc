@@ -133,11 +133,20 @@ int main() {
     memset(output, 0, OUTPUT_H * OUTPUT_W * NUM_FILTERS * sizeof(int8_t));
     printf("\n--- Launching conv2d_spatial (spatial-halo) on AIE ---\n");
     XTime t_aie_start, t_aie_end;
+    unsigned long long log_t0 = 0, log_t1 = 0;
+    __Runtime_log_dump_ticks(&log_t0, NULL);
     XTime_GetTime(&t_aie_start);
     conv2d_spatial<<<mesh>>>(input, filter, output, M, N, K);
     XTime_GetTime(&t_aie_end);
+    __Runtime_log_dump_ticks(&log_t1, NULL);
     double aie_wall_ms = 1.0 * (t_aie_end - t_aie_start) / COUNTS_PER_SECOND * 1000.0;
     printf("[BENCH] aie_wall_ms=%.3f\n", aie_wall_ms);
+    // klog / AIE_DEBUG_LOG dumps run inside the launch call and print over the UART;
+    // report the launch time without them so timing and logging can coexist.
+    if (log_t1 > log_t0)
+        printf("[BENCH] log_dump_ms=%.3f aie_wall_ms_excl_log=%.3f\n",
+               1.0 * (log_t1 - log_t0) / COUNTS_PER_SECOND * 1000.0,
+               1.0 * ((t_aie_end - t_aie_start) - (log_t1 - log_t0)) / COUNTS_PER_SECOND * 1000.0);
 
     printf("\n--- Verification ---\n");
     int result = 0; //

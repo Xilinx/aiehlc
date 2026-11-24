@@ -54,6 +54,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Make AOUT_DIR absolute: hostcompile.sh cd's into worklocal before it uses
+# WORKLOCAL_DIR again and before kc.sh looks for ../kernel_build_flags.sh.
+if [ -d "${AOUT_DIR}" ]; then
+    AOUT_DIR="$(cd "${AOUT_DIR}" && pwd)"
+fi
+
 # Validate aout directory
 AOUT_WORKLOCAL="${AOUT_DIR}/worklocal"
 if [ ! -d "${AOUT_WORKLOCAL}" ]; then
