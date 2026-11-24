@@ -25,7 +25,8 @@ ${LLVM_BIN}/mlir-tblgen -gen-op-decls ./aielinkops.td ${MLIR_INCLUDES[@]} -I /us
 
 ${LLVM_BIN}/mlir-tblgen -gen-typedef-defs ./aielinktypes.td --typedefs-dialect=AieLink ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -asmformat-error-is-fatal=false > ./aielinktype.cc.inc
 ${LLVM_BIN}/mlir-tblgen -gen-typedef-decls ./aielinktypes.td --typedefs-dialect=AieLink ${MLIR_INCLUDES[@]} -I /usr/local/include ${MLIR_INCLUDES} -asmformat-error-is-fatal=false > ./aielinktype.h.inc
-# The generated .inc files are tracked: give each the license header (script/ci/check_opensource.py).
+# The generated .inc files are build output (gitignored); give each the license header anyway
+# (script/ci/check_opensource.py), so a copy that does get committed stays compliant.
 for f in ./*.inc; do
   if ! grep -q SPDX-License-Identifier "$f"; then
     { printf '%s\n\n' '/******************************************************************************
