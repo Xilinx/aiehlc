@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Source (bash/zsh): point aiehlc's builds at the local LLVM/Clang/MLIR build.
 #   source script/llvm_env.sh            # $AIEHLC_LLVM_SRC or /scratch/staff/$USER/llvm-project
 # Build it first with script/build_llvm.sh. tcsh: source script/llvm_env.csh

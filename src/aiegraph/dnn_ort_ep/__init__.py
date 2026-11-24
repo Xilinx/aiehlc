@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """aiednn as an ONNX Runtime execution provider (plugin EP library, onnxruntime >= 1.23).
 
     from aiegraph import dnn_ort_ep

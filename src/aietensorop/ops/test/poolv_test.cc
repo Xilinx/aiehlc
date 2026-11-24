@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // x86 check of aie_modes_poolv.h (the pool mode's vector path) against AIE_MODE_POOL, through the AIE-API
 // emulation: g++ -std=c++20 -DAIE_POOLV_EMU -I src/mlir/runtime -I src/aietensorop/ops poolv_test.cc
 #include "aie_api_x86emu.h"

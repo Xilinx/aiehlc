@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """``torch.compile(model, backend="aiednn")``: run PyTorch graphs through aiednn.
 
 Dynamo hands the backend an fx graph. The backend splits it into regions aiednn can run and regions it

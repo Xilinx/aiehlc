@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // x86 check of aie_modes_sdpa.h: the core's vector item (aie_sdpa_item_vec) == the scalar reference
 // (aie_sdpa_item_ref) on random items, through the AIE-API emulation.
 #include "aie_api_x86emu.h"

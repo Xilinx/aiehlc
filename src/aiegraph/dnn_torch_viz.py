@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """The op graph at every stage of ``torch.compile(model, backend="aiednn")``.
 
 ``aiegraph.backends.aiednn.dump = <dir>`` makes ``dnn_torch_backend`` record each stage as it happens

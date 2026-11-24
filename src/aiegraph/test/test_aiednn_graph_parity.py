@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Every oneDNN graph op has an aiednn graph counterpart (include/aiednn_graph.h): the 2026-11-14 kinds --
 type_cast, reorder, select, squared_difference, dropout, rms_norm, log-softmax, the norms' training forward
 and the training (backward) ops -- against PyTorch (forward values, autograd gradients).

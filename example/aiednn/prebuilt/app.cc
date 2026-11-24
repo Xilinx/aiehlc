@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* An ordinary app on the PREBUILT aiednn library: plain C++ against aiednn.h, compiled and linked with
  * aarch64-none-elf-g++ (Makefile + <dist>/link.mk) -- no aiehlc, no kernel source. Creating a primitive
  * is the query: dispatch picks the implementation (printed); each result is checked against plain loops. */

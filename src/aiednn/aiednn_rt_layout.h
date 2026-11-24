@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* aiednn_rt_layout.h -- memory formats (aiednn_format_t).
  *
  * An nhwc descriptor keeps its logical [N, C, H, W] dims; its bytes are those of a dense [N, H, W, C].

@@ -1,4 +1,8 @@
 #!/bin/bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Run the four aiednn entry flows on workstation emulation; each prints "PASS: flow N ..." (README.md).
 #   bash example/aiednn/flows/run_all.sh            (from the repo root; PYTHON= picks the interpreter)
 set -u

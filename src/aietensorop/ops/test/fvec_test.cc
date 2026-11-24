@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // x86 check of aie_modes_fvec.h (the FVEC mode) against double precision, through the AIE-API
 // emulation: g++ -std=c++20 -DAIE_FVEC_EMU -I src/mlir/runtime -I src/aietensorop/ops fvec_test.cc
 // Every function aie_fvec_prog builds runs as a program through the core code; one line each with its

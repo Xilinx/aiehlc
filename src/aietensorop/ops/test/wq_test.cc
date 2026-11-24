@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // x86 check of aie_modes_wq.h (the grouped weight-only quant mode) through the AIE-API emulation: run
 // the core's round structure -- int32 8x8-tiled partial sums per 64-K round, aie_wq_flush at each group's
 // last round, the int32 partial and the f32 tile carried across launches -- for group sizes 64 .. 1024

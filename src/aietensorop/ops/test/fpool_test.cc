@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // x86 check of aie_modes_fpool.h: the core's vector item (16 outputs per vector, stride 1 / 2, KD slices)
 // through the AIE-API emulation == the plain C reference, max bit for bit, sum within f32 reassociation
 #include "aie_api_x86emu.h"

@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Float matmul on the GEMM ELF's bf16 mode (aie_modes_bf16.h, aiednn_rt_bf16.h): bf16 x bf16
 (bf16blk:) and f32 x f32 as a bf16x3 split (bf16x3:), through ctypes on the x86 build (the kernel's
 x86 reference, f32 accumulation in K order, stands in for the AIE)."""

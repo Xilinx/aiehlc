@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Flags of ``torch.compile(model, backend="aiednn")`` (aiegraph.dnn_torch_backend), in the spirit of
 ``torch.backends.cudnn``. Importing this module registers the backend with torch.compile.
 

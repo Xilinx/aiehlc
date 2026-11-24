@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Core vector paths of the GEMM ELF's modes vs their scalar code, through the x86 AIE-API emulation."""
 from __future__ import annotations
 

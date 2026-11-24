@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* aiednn_stream_test -- counts heap allocations (interposed malloc / calloc / realloc) during an execute
  * with a caller workspace (the contract: none). */
 #include "aiednn.h"

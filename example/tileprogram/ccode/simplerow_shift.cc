@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 #include "simpleops_load.h"
 // Row op: y[r][c] = x[r][c] - max over c' of x[r][c'], x and y f32[128, 256] carried
 // as bytes. Every core needs WHOLE rows (the max) but writes only a quarter of the

@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """aiednn as an ONNX Runtime execution provider (aiegraph.dnn_ort_ep) vs ORT's CPU EP, workstation emulation."""
 from __future__ import annotations
 

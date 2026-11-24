@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // x86 check of aie_modes_bf16.h (the bf16 GEMM mode's layouts + core round) through the AIE-API emulation:
 // pack A / B as the host does, slice each round's windows as the DMA delivers them, run the core rounds,
 // compare C with the f32 reference.

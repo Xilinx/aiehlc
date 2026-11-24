@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """torch.compile(model, backend="aiednn") (aiegraph.dnn_torch_backend) vs eager, workstation emulation."""
 from __future__ import annotations
 
