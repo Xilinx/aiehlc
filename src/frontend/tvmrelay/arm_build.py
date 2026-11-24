@@ -335,16 +335,49 @@ def _wbin_reuse_on() -> bool:
     return os.environ.get("AIEHLC_FAST", "0").strip() == "1"
 
 
-def _digest_file(path: Path) -> str:
+_DIGEST_MEMO: dict = {}        # F23: str(path) -> (stat tuple, sha1 hex), this process only
+_DIGEST_RACY_NS = 2_000_000_000  # trust a memo only for files last changed >2 s before hashing
+
+
+def _digest_stat(st) -> tuple:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _digest_file(path: Path, memo: bool = True) -> str:
     """Content digest for the reuse key: sha1 (~1.0 s per 1.3 GB here vs sha256 5.9 s at
     load 50 -- v1 with sha256 hashed ~2 GB per call and gave back ~20 of the ~29 s saved).
-    Not a security use. Content, not stat: two writes in one kernel tick keep mtime_ns."""
+    Not a security use.
+
+    F23: a UNet build calls generate_driver twice in one process and hashed params.bin and
+    the 260 layer weight files both times (2 x ~2 s). The digest is memoised per process
+    by (dev, ino, size, mtime_ns, ctime_ns), git's "racy clean" rule guarding the case the
+    old comment warned about (two writes in one kernel tick keep mtime_ns): a result is
+    stored only when the file's mtime and ctime are more than 2 s older than the moment
+    hashing started and the stat did not change while hashing, so a later same-tick,
+    same-size rewrite cannot hide behind an equal stat. memo=False always reads content."""
     import hashlib
+    import time
+    key = str(path)
+    st0 = os.stat(path) if memo else None
+    if memo:
+        hit = _DIGEST_MEMO.get(key)
+        if hit is not None and hit[0] == _digest_stat(st0):
+            return hit[1]
+    t0 = time.time_ns()
     h = hashlib.sha1()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(16 << 20), b""):
             h.update(chunk)
-    return h.hexdigest()
+    dig = h.hexdigest()
+    if memo:
+        st1 = os.stat(path)
+        sig = _digest_stat(st1)
+        if (sig == _digest_stat(st0)
+                and max(st1.st_mtime_ns, st1.st_ctime_ns) < t0 - _DIGEST_RACY_NS):
+            _DIGEST_MEMO[key] = (sig, dig)
+        else:
+            _DIGEST_MEMO.pop(key, None)
+    return dig
 
 
 def _wbin_key(params_path: Path, layout: dict, bf16_names, layers_dir: Path) -> str:
@@ -375,7 +408,7 @@ def _wbin_reusable(wbin: Path, key: str, size: int) -> bool:
         rec = json.loads(side.read_text())
         if rec.get("key") != key or not wbin.is_file() or wbin.stat().st_size != size:
             return False
-        return rec.get("sha1") == _digest_file(wbin)   # always content: no stat shortcut
+        return rec.get("sha1") == _digest_file(wbin, memo=False)   # always content
     except (OSError, ValueError):
         return False
 
@@ -383,7 +416,7 @@ def _wbin_reusable(wbin: Path, key: str, size: int) -> bool:
 def _wbin_record(wbin: Path, key: str) -> None:
     side = wbin.parent / _WBIN_SIDECAR
     tmp = side.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"key": key, "sha1": _digest_file(wbin),
+    tmp.write_text(json.dumps({"key": key, "sha1": _digest_file(wbin, memo=False),
                                "stat": _wbin_stat(wbin)}))
     os.replace(tmp, side)
 
