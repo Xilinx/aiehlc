@@ -7,10 +7,10 @@
 
 Three cases, each using the same model skeleton (Linear -> custom op -> Linear):
 
-  Case A -- inline, CompositeImplicitAutograd registration:
-    The op is registered as CompositeImplicitAutograd, so torch.export traces
-    through it naturally -- no export_inlined() call needed.  The two GEMMs are
-    all the compiler sees.
+  Case A -- inline, the op's Python body found automatically:
+    A torch.library.custom_op op keeps its Python body; export_inlined() finds it
+    and re-exports with the op inlined as ATen IR (older torch without custom_op:
+    a CompositeImplicitAutograd registration, which plain export traces through).
 
   Case B -- inline via explicit body passed to export_inlined():
     The op is registered against the CPU backend only (opaque to the exporter).
@@ -97,26 +97,35 @@ def _run_case(label, ep, x, out_dir, target, board, vitis_settings, custom_sourc
     return 0 if ok else 1
 
 
-# ── Case A: CompositeImplicitAutograd -- inline at export time, no extra step ─
+# ── Case A: a Python-bodied custom op, inlined by export_inlined() ───────────
 
 def case_a(x, target, board, vitis_settings) -> int:
-    """The op is registered as CompositeImplicitAutograd.  torch.export traces
-    through it naturally -- the exporter sees its ATen IR, not a black box.
-    No export_inlined() call is needed; a plain torch.export.export() is enough."""
+    """The op has a Python body written in torch ops.  With torch.library.custom_op (torch >= 2.4 release)
+    export_inlined() finds the body itself and re-exports with the op inlined as ATen IR.  Older torch
+    (no custom_op): the body is registered as the op's CompositeImplicitAutograd kernel, which a plain
+    torch.export traces through -- the same graph either way."""
+    body = lambda t: torch.tanh(t) * 2.0                       # noqa: E731
+    if hasattr(torch.library, "custom_op"):
+        @torch.library.custom_op("custom_op_demo_a::softclip_a", mutates_args=())
+        def softclip_a(t: torch.Tensor) -> torch.Tensor:
+            return body(t)
 
-    _lib_a = torch.library.Library("custom_op_demo_a", "DEF")
-    _lib_a.define("softclip_a(Tensor t) -> Tensor")
-    # CompositeImplicitAutograd: visible to all backends, including the exporter
-    _lib_a.impl("softclip_a", lambda t: torch.tanh(t) * 2.0, "CompositeImplicitAutograd")
+        @softclip_a.register_fake
+        def _(t):
+            return torch.empty_like(t)
 
-    model = _CustomModel(torch.ops.custom_op_demo_a.softclip_a)  # type: ignore[attr-defined]
-    model.eval()
-
-    # plain export -- the CompositeImplicitAutograd impl is traced through
-    ep = torch.export.export(model, (x,))
-    print(f"\n--- Case A: CompositeImplicitAutograd (inline at export, no extra step) ---")
-    return _run_case("case_a_composite", ep, x,
-                     OUT / "case_a", target, board, vitis_settings)
+        model = _CustomModel(softclip_a).eval()
+        ep = dnn_export.export_inlined(model, [x])             # the body is found, no bodies= needed
+        how = "torch.library.custom_op, export_inlined() found the body"
+    else:
+        _lib_a = torch.library.Library("custom_op_demo_a", "DEF")
+        _lib_a.define("softclip_a(Tensor t) -> Tensor")
+        _lib_a.impl("softclip_a", body, "CompositeImplicitAutograd")
+        model = _CustomModel(torch.ops.custom_op_demo_a.softclip_a).eval()  # type: ignore[attr-defined]
+        ep = torch.export.export(model, (x,))                  # traced through the composite kernel
+        how = "no torch.library.custom_op in this torch: CompositeImplicitAutograd registration"
+    print(f"\n--- Case A: Python body, inlined ({how}) ---")
+    return _run_case("case_a_inlined", ep, x, OUT / "case_a", target, board, vitis_settings)
 
 
 # ── Case B: CPU-only op, body passed to export_inlined() ─────────────────────

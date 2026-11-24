@@ -1,154 +1,120 @@
 # Custom PyTorch operators through torch.export → aiednn eager mode
 
-This example shows every way a custom PyTorch operator can be handled when you
-compile a model for the AI Engine with `torch.export` + eager mode.
-
-The model is always the same skeleton:
+This example shows every way a custom PyTorch operator can be handled when you compile a model for the AI
+Engine with `torch.export` + eager mode ([`run.py`](run.py)). The model is always the same skeleton:
 
 ```
 input [32, 256]  →  Linear(256→128)  →  custom op  →  Linear(128→64)  →  output [32, 64]
 ```
 
-The two Linears become AIE GEMM instances.  What happens to the custom op
-depends on the case.
+The two Linears become AIE GEMM instances. What happens to the custom op depends on the case.
+
+`dnn_export.is_custom_op` decides what counts as a custom op: a call of `torch.ops.<ns>.<op>` outside
+PyTorch's own namespaces (`aten`, `prims`, the quantized ones).
 
 ---
 
-## Case A — `torch.library.custom_op` with a Python body (auto-inline)
+## Case A — a Python body, found automatically (inlined)
 
-### How it works
-
-When you define an op with `torch.library.custom_op`, torch keeps the Python
-implementation in its internal `OPDEFS` registry.  `export_inlined()` reads
-that registry, finds the body, and re-exports the model with the op replaced by
-its ATen IR.  The opaque node disappears before the compiler ever sees it.
+The op is written in torch ops. `torch.library.custom_op` keeps that body, and
+`dnn_export.export_inlined()` finds it: it registers the body as the op's `CompositeImplicitAutograd`
+kernel for one more `torch.export`, so the op turns into ordinary ATen ops, then removes the registration.
 
 ```python
-@torch.library.custom_op("demo::softclip_a", mutates_args=())
+@torch.library.custom_op("custom_op_demo_a::softclip_a", mutates_args=())
 def softclip_a(t: torch.Tensor) -> torch.Tensor:
-    return torch.tanh(t) * 2.0          # a pure-PyTorch body
+    return torch.tanh(t) * 2.0
 
 @softclip_a.register_fake
 def _(t):
     return torch.empty_like(t)
 
-ep = dnn_export.export_inlined(model, [x])
-# -- the graph now has only the two Linear ops; softclip_a is gone --
+ep = dnn_export.export_inlined(model, [x])      # softclip_a is gone: tanh and mul in its place
 compile_exported(ep, x, eager="library")
 ```
 
-### What the compiler sees after inlining
+`torch.library.custom_op` needs a torch 2.4 release or newer. On an older torch, `run.py` registers the
+same body as a `CompositeImplicitAutograd` kernel instead, which a plain `torch.export.export` traces
+through, and the compiled graph is the same.
+
+After inlining, the compiler sees ordinary layers:
 
 ```
-call [0] aten.mm          → 32×128  (Linear 1, GEMM on AIE)
-call [1] aten.tanh        → 32×128  (inlined body, stays on host)
-call [2] aten.mul_scalar  → 32×128  (inlined body, stays on host)
-call [3] aten.mm          → 32×64   (Linear 2, GEMM on AIE)
+aten.mm    → 32×128  (Linear 1, GEMM on the AIE)
+aten.tanh  → 32×128  (the inlined body)
+aten.mul   → 32×128  (the inlined body)
+aten.mm    → 32×64   (Linear 2, GEMM on the AIE)
 ```
 
-The `tanh` and `mul` are small elementwise ops that the library puts on `ref:`
-(the A72).  The two GEMMs are on the AIE.
-
-### When to use
-
-Your op is implemented in PyTorch ops.  It may or may not be a bottleneck; you
-just want it out of the way so the surrounding GEMMs see the AIE.
+Use this when the op is implemented in torch ops: it then lowers like any other layer.
 
 ---
 
 ## Case B — older-style registration, body passed explicitly
 
-### How it works
-
-If the op was registered against a backend key (`lib.impl("CPU", fn)`) torch
-does not keep the body in `OPDEFS`.  Pass it yourself:
+An op registered for a backend key (`lib.impl(..., "CPU")`) does not keep a body torch can hand back, so
+pass it yourself:
 
 ```python
-_lib = torch.library.Library("demo_b", "DEF")
+_lib = torch.library.Library("custom_op_demo_b", "DEF")
 _lib.define("softclip_b(Tensor t) -> Tensor")
 _lib.impl("softclip_b", lambda t: torch.tanh(t) * 2.0, "CPU")
 
 ep = dnn_export.export_inlined(model, [x],
-         bodies={"demo_b::softclip_b": lambda t: torch.tanh(t) * 2.0})
+         bodies={"custom_op_demo_b::softclip_b": lambda t: torch.tanh(t) * 2.0})
 ```
 
-The body is registered as `CompositeImplicitAutograd` for the second
-`torch.export` call only, then deregistered.  The result is identical to
-case A.
-
-### When to use
-
-An op already in production, registered the old way, whose body is known.  No
-source changes required; just hand the body to `export_inlined`.
+The body is registered as `CompositeImplicitAutograd` for that second `torch.export` only. The result is
+the same as case A. Use this for an op already registered the old way whose body you know.
 
 ---
 
-## Case C — opaque custom op, C implementation on the host
+## Case C — an opaque op, a C function on the host
 
-### How it works
-
-No Python body is available (or you deliberately keep the op opaque).  The
-exported graph retains one `call_function` node for it.  The compiler maps this
-to an `aiednn_custom` primitive — a function pointer called on the A72 between
-the two AIE GEMMs.
-
-You supply the C file; the compiler copies it into the build and checks the
-symbol is present before linking.
+No Python body is available (or you keep the op opaque on purpose). The exported graph keeps one node for
+it, which the compiler lowers to an `aiednn_custom` primitive: your C function, called on the A72 between
+the two AIE GEMMs. Pass the C file with `custom_sources=` (flow 2: `--custom-c`):
 
 ```python
-# plain export — the op stays opaque
-ep = torch.export.export(model, (x,))
-
-# compile with the C file for the custom op
-compile_exported(ep, x, eager="library",
-                 custom_sources=["softclip_c.c"])
+ep = torch.export.export(model, (x,))           # plain export: the op stays opaque
+compile_exported(ep, x, eager="library", custom_sources=["softclip_c.c"])
 ```
+
+The build copies the file next to the generated app and checks that it defines the function before linking.
 
 ### The C function
 
-The name is derived from the op's qualified name:
+Its name comes from the op's qualified name (`dnn_torch.custom_c_symbol`): `aiednn_custom_` followed by
+the name with `::` and `.` replaced by `_` (any other non-word character too):
 
 ```
-demo::softclip_c.default  →  aiednn_custom_demo_softclip_c_default
+custom_op_demo_c::softclip_c.default  →  aiednn_custom_custom_op_demo_c_softclip_c_default
 ```
-
-Rule: `"aiednn_custom_" + name.replace("::", "_").replace(".", "_")` with any
-remaining non-word characters replaced by `_`.  You can derive it in Python:
 
 ```python
 from aiegraph.dnn_torch import custom_c_symbol
-print(custom_c_symbol("demo::softclip_c.default"))
-# aiednn_custom_demo_softclip_c_default
+custom_c_symbol("custom_op_demo_c::softclip_c.default")
 ```
 
-The signature is always:
+Its signature is `aiednn_custom_fn_t` (`include/aiednn.h`). The runtime has allocated and cache-synced every
+buffer before the call; return 0 on success. [`softclip_c.c`](softclip_c.c), clip to [-1, 1]:
 
 ```c
-int aiednn_custom_demo_softclip_c_default(
-        int nsrc,
-        const aiednn_memory_desc_t *srcs,   /* [nsrc] input descriptors  */
-        const void *const *src_data,         /* [nsrc] input pointers     */
-        const aiednn_memory_desc_t *dst,     /* output descriptor         */
-        void *dst_data,                      /* output pointer            */
-        void *ctx);                          /* NULL unless you passed it */
-```
+#include "aiednn.h"
+#include <stdint.h>
 
-The runtime has already allocated and cache-synced the input and output buffers
-before calling you.  Return 0 for success, non-zero to signal an error.  The
-`aiednn_memory_desc_t` fields give you the shape, dtype, and strides if you
-need them (`aiednn_md_nelems(dst)` is the total element count).
-
-The C for clip-to-[-1,1]:
-
-```c
-int aiednn_custom_demo_softclip_c_default(
-        int nsrc, const aiednn_memory_desc_t *srcs, const void *const *src_data,
-        const aiednn_memory_desc_t *dst, void *dst_data, void *ctx) {
-    (void)srcs; (void)ctx;
-    if (nsrc != 1) return -1;
+int aiednn_custom_custom_op_demo_c_softclip_c_default(int nsrc, const aiednn_memory_desc_t *srcs,
+                                                      const void *const *src_data, const aiednn_memory_desc_t *dst,
+                                                      void *dst_data, void *ctx) {
+    (void)srcs;
+    (void)ctx;
+    if (nsrc != 1)
+        return -1;
     const float *x = (const float *)src_data[0];
     float *y = (float *)dst_data;
-    int64_t n = aiednn_md_nelems(dst);
+    int64_t n = 1;                                  /* element count: the product of dst's dims */
+    for (int d = 0; d < dst->ndims; d++)
+        n *= dst->dims[d];
     for (int64_t i = 0; i < n; i++) {
         float v = x[i];
         y[i] = v < -1.0f ? -1.0f : v > 1.0f ? 1.0f : v;
@@ -157,21 +123,23 @@ int aiednn_custom_demo_softclip_c_default(
 }
 ```
 
-### What the compiler sees
+What the compiler sees, and what the generated app calls:
 
 ```
-call [0] aten.mm          → 32×128  (Linear 1, GEMM on AIE)
-call [1] demo::softclip_c → 32×128  (aiednn_custom on the A72)
-call [2] aten.mm          → 32×64   (Linear 2, GEMM on AIE)
+aten.mm                       → 32×128  (Linear 1, GEMM on the AIE)
+custom_op_demo_c::softclip_c  → 32×128  (aiednn_custom_create: your function, on the A72)
+aten.mm                       → 32×64   (Linear 2, GEMM on the AIE)
 ```
 
-The GEMMs run on the AIE; the custom op runs on the A72 between them.
+```c
+st = aiednn_custom_create(&p, 1, c1, &m2, aiednn_custom_custom_op_demo_c_softclip_c_default, nullptr);
+```
 
-### When to use
+Every C build of the app, the x86 workstation one as well as the board ELF, compiles your function in. Only the
+Python-side reference run (`dnn_torch.run_ctypes`) calls the op through PyTorch itself.
 
-The op calls a library with no torch equivalent (a lookup table, a hardware
-driver, a codec), or you want to control the host-side implementation exactly
-(e.g., NEON intrinsics).
+Use this when the op has no torch equivalent (a lookup table, a driver, a codec), or when you want to control
+the host implementation exactly (e.g. NEON intrinsics).
 
 ---
 
@@ -182,28 +150,22 @@ driver, a codec), or you want to control the host-side implementation exactly
 PYTHONPATH=src python example/aiednn/custom_pytorch_op/run.py
 
 # one case at a time
-PYTHONPATH=src python example/aiednn/custom_pytorch_op/run.py --case a
-PYTHONPATH=src python example/aiednn/custom_pytorch_op/run.py --case b
-PYTHONPATH=src python example/aiednn/custom_pytorch_op/run.py --case c
+PYTHONPATH=src python example/aiednn/custom_pytorch_op/run.py --case a    # or b, c
 
 # board run (VEK280)
 PYTHONPATH=src python example/aiednn/custom_pytorch_op/run.py \
-    --target vek280 --board galerina13 \
-    --vitis-settings /proj/xbuilds/.../Vitis/settings64.sh
+    --target vek280 --board <host> --vitis-settings <.../Vitis/settings64.sh>
 ```
-
----
 
 ## Decision tree
 
 ```
-Is the op implemented in PyTorch ops?
+Is the op implemented in torch ops?
 ├── yes → export_inlined()
-│         ├── torch.library.custom_op?  →  Case A (body auto-found)
-│         └── older lib.impl("CPU")?    →  Case B (pass body=...)
-└── no  → plain torch.export.export() + custom_sources=[file.c]  →  Case C
+│         ├── torch.library.custom_op?   →  case A (body found automatically)
+│         └── older lib.impl("CPU")?     →  case B (pass bodies=)
+└── no  → plain torch.export.export() + custom_sources=[file.c]  →  case C
 ```
 
-If you are not sure: try `export_inlined()` without `bodies=`; if the op is
-still present in the graph after export (check for `is_custom_op` nodes) it has
-no Python body and you need case B or C.
+Not sure? Call `export_inlined()` without `bodies=`: if a node with `dnn_export.is_custom_op(node.target)`
+is still in `ep.graph`, the op has no Python body torch can find, so use case B or C.
