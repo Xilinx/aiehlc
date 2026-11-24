@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -603,7 +604,7 @@ class EmbeddedModel:
               profile: bool = False, verbose: bool = False,
               main_c=None, extra_sources=(), extra_cflags: str = "",
               layer_cflags: str = "", runtime_io=None, dump_out: bool = False,
-              launch: str = None) -> BuildReport:
+              launch: str = None, make: bool = True) -> BuildReport:
         """Link ``main.elf`` (A78; needs the Vitis cross toolchain), or with
         ``target="x86"`` ``main_local.elf`` for this host. ``local=True`` builds
         both. ``profile=True`` links ``main.elf`` with ``make PROFILE=1`` (a
@@ -615,7 +616,9 @@ class EmbeddedModel:
         ``.aiehlc_io`` ELF section (``arm_build.write_runtime_io``; swap them later with
         ``src/tool/elfio/aiehlc_elfio.py patch``), ``dump_out`` sets the section's output-dump flag;
         the built ELF is checked to carry a loadable section. ``launch="warm"`` asserts the warm
-        launch options were set before the kernels were built (``aiegraph.boardmain.launch_env``)."""
+        launch options were set before the kernels were built (``aiegraph.boardmain.launch_env``).
+        ``make=False`` (``-fast`` sched-only, F5): generate the driver, Makefile and weights.bin
+        and stop before ``make``; the report is ok with ``elf=None`` (A78 target only)."""
         if target not in BUILD_TARGETS:
             raise AiegraphError("build", f"target={target!r}", hint=f"one of {', '.join(BUILD_TARGETS)}")
         from . import boardmain
@@ -629,12 +632,17 @@ class EmbeddedModel:
             extra_sources = list(extra_sources) + ab.write_runtime_io(Path(self.workdir) / "runtime_io",
                                                                       list(runtime_io), dump_out=dump_out)
         x86 = target == "x86"
-        res = ab.build_arm_elf(self.workdir, c_name=f"{self._stem()}.c", run_make=not x86,
+        if not make and (x86 or local or profile or output):
+            raise AiegraphError("build", "make=False builds no ELF",
+                                hint="drop target='x86' / local / profile / output")
+        res = ab.build_arm_elf(self.workdir, c_name=f"{self._stem()}.c", run_make=make and not x86,
                                image=self.image, local=local or x86, local_run=False,
                                verbose=verbose, make_vars={"PROFILE": 1} if profile else None,
                                main_c=main_c, extra_sources=extra_sources,
                                extra_cflags=extra_cflags, layer_cflags=layer_cflags)
-        if x86:
+        if not make:
+            rep = BuildReport(bool(res.get("ok")), None, res.get("reason", ""), None)
+        elif x86:
             loc = res.get("local") or {}
             rep = BuildReport(bool(loc.get("ok")), loc.get("elf"), loc.get("reason", ""), loc)
         else:
@@ -921,6 +929,22 @@ def embedded_convert(model, target: str = "a78", quantize: str = "int8", calib=N
             set_current(emod)
             return emod
     _clean(workdir)
+    from . import convert_cache as _cc               # opt-in: AIEGRAPH_CONVERT_CACHE=<dir>
+    ckey = cparts = None
+    if _cc.cache_dir() and not force:
+        _t = time.time()
+        ckey, cparts = _cc.key(m, quantize, calib, image, _env.repo_root())
+        ckey_s = time.time() - _t
+        hit = _cc.restore(ckey, workdir, image)
+        if hit:
+            full = json.loads(stamp.read_text())
+            print(f"[aiegraph] convert cache HIT {ckey} -> {workdir} ({hit['restore_s']} s, "
+                  f"{hit['relocated_files']} files relocated, {hit.get('linked', 0)} linked "
+                  f"{hit.get('linked_bytes', 0) / 1e9:.2f} GB, {hit.get('copied', 0)} copied)")
+            emod = EmbeddedModel(workdir, m, target, image, full)
+            set_current(emod)
+            return emod
+        print(f"[aiegraph] convert cache MISS {ckey} (key {ckey_s:.1f} s)")
     workdir.mkdir(parents=True, exist_ok=True)
     stamp.write_text(json.dumps({**state, "complete": False}, indent=2))
 
@@ -940,6 +964,9 @@ def embedded_convert(model, target: str = "a78", quantize: str = "int8", calib=N
             "cpu_top": res.get("cpu_top"), "quantizer": res.get("quantizer"),
             "layer_count": res.get("layer_count"), "arm_sources": bool(arm.get("makefile"))}
     stamp.write_text(json.dumps(full, indent=2, default=str))
+    if ckey:
+        st = _cc.store(ckey, cparts, workdir, image)
+        print(f"[aiegraph] convert cache STORE {ckey} ({st:.1f} s)")
     emod = EmbeddedModel(workdir, m, target, image, full)
     set_current(emod)
     return emod

@@ -130,12 +130,11 @@ def kernel_param_usage(source: str, symbol: str = None) -> dict:
     body = source
     if symbol and symbol in source:
         try:
-            from frontend.tvmrelay.split_layers import iter_c_functions
+            from frontend.tvmrelay.split_layers import function_spans
 
-            for name, start, end in iter_c_functions(source):
-                if name == symbol:
-                    body = source[start:end]
-                    break
+            span = function_spans(source).get(symbol)
+            if span:
+                body = source[span[0]:span[1]]
         except Exception:
             pass
 

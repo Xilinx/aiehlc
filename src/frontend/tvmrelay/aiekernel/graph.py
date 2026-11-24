@@ -162,7 +162,8 @@ class Network:
         if key not in self._cache:
             off, nbytes = self.offsets[name]
             if "_blob" not in self._cache:
-                self._cache["_blob"] = self.params_path.read_bytes()
+                from frontend.tvmrelay.arm_build import params_view
+                self._cache["_blob"] = params_view(self.params_path)
             arr = np.frombuffer(self._cache["_blob"], dtype=_NP_DTYPE[dtype],
                                 count=nbytes // _bytes(dtype), offset=off)
             self._cache[key] = arr.reshape(tuple(int(d) for d in shape))
@@ -171,8 +172,9 @@ class Network:
     def param_bytes(self, name: str) -> bytes:
         off, nbytes = self.offsets[name]
         if "_blob" not in self._cache:
-            self._cache["_blob"] = self.params_path.read_bytes()
-        return self._cache["_blob"][off:off + nbytes]
+            from frontend.tvmrelay.arm_build import params_view
+            self._cache["_blob"] = params_view(self.params_path)
+        return bytes(self._cache["_blob"][off:off + nbytes])
 
     def layer_source(self, layer: int):
         """The stage-5 ``layers/NN_op/NN_op.c`` holding *layer*'s TVM kernel."""

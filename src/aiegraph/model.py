@@ -60,9 +60,24 @@ class Model:
     ops: dict = field(default_factory=dict)
     input_shapes: dict = field(default_factory=dict)   # name -> shape, every graph input
 
+    _digests: tuple = field(default=None, init=False, repr=False, compare=False)
+
+    def file_digests(self) -> dict:
+        """{"sha1": hex, "sha256": hex} of the ONNX file, hashed in ONE read pass (F22).
+
+        ``sha`` (sha1) and ``convert_cache.key`` (sha256) used to read the 1.29 GB UNet
+        file twice. Memoized on this instance only, and only while the file's
+        (dev, ino, size, mtime_ns) is unchanged.
+        """
+        st = os.stat(self.onnx_path)
+        sig = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+        if self._digests is None or self._digests[0] != sig:
+            self._digests = (sig, file_digests(self.onnx_path, ("sha1", "sha256")))
+        return dict(self._digests[1])
+
     @property
     def sha(self) -> str:
-        return hashlib.sha1(self.onnx_path.read_bytes()).hexdigest()[:16]
+        return self.file_digests()["sha1"][:16]
 
     def __fspath__(self) -> str:
         return str(self.onnx_path)
@@ -81,6 +96,28 @@ class Model:
                 f"  {n} ops: {top}{' ...' if len(self.ops) > 8 else ''}\n"
                 f"  file: {self.onnx_path}\n"
                 f"  next: ag.convert(model, target=\"a78\")")
+
+
+def file_digests(path, algos=("sha1", "sha256"), chunk: int = 8 << 20) -> dict:
+    """Hex digests of ``path`` for every name in ``algos``, reading the file once.
+
+    hashlib releases the GIL on large buffers, so the extra digests run in worker
+    threads on the same chunk while the first runs here.
+    """
+    hs = [hashlib.new(a) for a in algos]
+    with open(path, "rb") as f:
+        if len(hs) == 1:
+            for buf in iter(lambda: f.read(chunk), b""):
+                hs[0].update(buf)
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(len(hs) - 1) as ex:
+                for buf in iter(lambda: f.read(chunk), b""):
+                    futs = [ex.submit(h.update, buf) for h in hs[1:]]
+                    hs[0].update(buf)
+                    for fu in futs:
+                        fu.result()
+    return {a: h.hexdigest() for a, h in zip(algos, hs)}
 
 
 def _dims(value_info) -> list:

@@ -174,20 +174,45 @@ def read_param_names(blob_path: Path) -> list:
     Raises if the magic does not match, which catches a truncated or
     wrong-format file here instead of as silent garbage on target.
     """
-    data = blob_path.read_bytes()
-    magic, _reserved = struct.unpack_from("<QQ", data, 0)
+    with open(blob_path, "rb") as f:
+        return _read_names(f, blob_path)
+
+
+def _read_exact(f, n: int, blob_path: Path, what: str) -> bytes:
+    b = f.read(n)
+    if len(b) != n:
+        raise ValueError(f"{blob_path.name}: truncated at {what} "
+                         f"(offset {f.tell()}, wanted {n} B, got {len(b)})")
+    return b
+
+
+def _read_names(f, blob_path: Path) -> list:
+    """Header + name table from an open blob positioned at 0 (F14: header-only read)."""
+    magic, _reserved, n_names = struct.unpack("<QQQ", _read_exact(f, 24, blob_path, "header"))
     if magic != PARAM_MAGIC:
         raise ValueError(
             f"{blob_path.name}: bad magic 0x{magic:X}, expected "
             f"0x{PARAM_MAGIC:X} (not a relay.save_param_dict blob?)")
-    n_names = struct.unpack_from("<Q", data, 16)[0]
-    names, off = [], 24
+    names = []
     for _ in range(n_names):
-        ln = struct.unpack_from("<Q", data, off)[0]
-        off += 8
-        names.append(data[off:off + ln].decode())
-        off += ln
+        ln = struct.unpack("<Q", _read_exact(f, 8, blob_path, "name length"))[0]
+        names.append(_read_exact(f, ln, blob_path, "name").decode())
     return names
+
+
+def params_view(blob_path: Path):
+    """F21: a read-only view of the whole params blob that does not read it.
+
+    ``np.memmap`` (mode "r") instead of ``read_bytes()``: callers that look up a
+    few parameters by :func:`param_offsets` touch only those pages (the UNet
+    blob is 1.29 GB; three full reads cost ~2.3 s per warm --fast build). The
+    view supports the buffer protocol (``np.frombuffer``, ``struct.unpack_from``,
+    slicing + ``bytes()``); an empty file gives ``b""`` (mmap of 0 bytes fails).
+    """
+    import numpy as np
+    if os.path.getsize(blob_path) == 0:
+        return b""
+    return np.memmap(blob_path, dtype=np.uint8, mode="r")
 
 
 def param_offsets(blob_path: Path) -> dict:
@@ -206,33 +231,32 @@ def param_offsets(blob_path: Path) -> dict:
     and silently computes garbage. Regenerate both together, which
     ``build_arm_elf`` does; never hand-copy one over the other.
     """
-    data = blob_path.read_bytes()
-    names = read_param_names(blob_path)
-    # Skip the header + name table to reach the array payloads.
-    off = 24
-    for name in names:
-        off += 8 + len(name.encode())
-    n_arrays = struct.unpack_from("<Q", data, off)[0]
-    off += 8
-    if n_arrays != len(names):
-        raise ValueError(f"{blob_path.name}: {n_arrays} arrays vs "
-                         f"{len(names)} names")
-
+    # F14: walk the record headers and seek over the payloads. The old version
+    # read the whole blob twice per call (2 x 1.29 GB for the UNet, 9 calls per
+    # build: 12-25 s of read() in a warm --fast build); the result is identical.
+    size = os.path.getsize(blob_path)
     out = {}
-    for name in names:
-        magic = struct.unpack_from("<Q", data, off)[0]
-        if magic != NDARRAY_MAGIC:
-            raise ValueError(f"{blob_path.name}: bad NDArray magic at {off}")
-        off += 8 + 8                      # magic + reserved
-        off += 4 + 4                      # device_type + device_id
-        ndim = struct.unpack_from("<i", data, off)[0]
-        off += 4
-        off += 1 + 1 + 2                  # DLDataType: code, bits, lanes
-        off += 8 * ndim                   # int64 shape
-        nbytes = struct.unpack_from("<q", data, off)[0]
-        off += 8
-        out[name] = (off, nbytes)
-        off += nbytes
+    with open(blob_path, "rb") as f:
+        names = _read_names(f, blob_path)
+        n_arrays = struct.unpack("<Q", _read_exact(f, 8, blob_path, "array count"))[0]
+        if n_arrays != len(names):
+            raise ValueError(f"{blob_path.name}: {n_arrays} arrays vs "
+                             f"{len(names)} names")
+        for name in names:
+            off = f.tell()
+            # magic, reserved, device_type, device_id, ndim, DLDataType(code, bits, lanes)
+            magic, _r, _dt, _di, ndim, _c, _b, _l = struct.unpack(
+                "<QQiiiBBH", _read_exact(f, 32, blob_path, "NDArray header"))
+            if magic != NDARRAY_MAGIC:
+                raise ValueError(f"{blob_path.name}: bad NDArray magic at {off}")
+            _read_exact(f, 8 * ndim, blob_path, "shape")           # int64 shape
+            nbytes = struct.unpack("<q", _read_exact(f, 8, blob_path, "nbytes"))[0]
+            off = f.tell()
+            if nbytes < 0 or off + nbytes > size:
+                raise ValueError(f"{blob_path.name}: {name} payload {nbytes} B at "
+                                 f"{off} runs past end of file ({size} B)")
+            out[name] = (off, nbytes)
+            f.seek(nbytes, os.SEEK_CUR)
     return out
 
 
@@ -256,26 +280,165 @@ def f32_to_bf16_rne(a):
     """fp32 -> bf16 bits (uint16), round-to-nearest-even. Same rounding as
     ``torch.Tensor.to(torch.bfloat16)`` (Shuhua's ``bf()``); NaN stays quiet NaN."""
     import numpy as np
-    u = np.ascontiguousarray(a, dtype="<f4").view("<u4").astype(np.uint64)
-    r = ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16)
-    nan = np.isnan(np.asarray(a, dtype="<f4"))
+    u = np.ascontiguousarray(a, dtype="<f4").view("<u4")
+    # uint32 in place (was uint64 + 4 temporaries: ~40 s per warm UNet build).
+    # u + 0x7FFF + lsb only wraps for NaN bit patterns, which are overwritten below.
+    r = u >> 16
+    r &= 1
+    r += 0x7FFF
+    r += u
+    r >>= 16
+    out = r.astype(np.uint16)
+    nan = (u & 0x7FFFFFFF) > 0x7F800000
     if nan.any():
-        r[nan] = ((u[nan] >> 16) | 0x40).astype(np.uint16)
-    return r
+        out[nan] = ((u[nan] >> 16) | 0x40).astype(np.uint16)
+    return out
+
+
+def _blob_order(offsets: dict, order=()) -> list:
+    """Packing order of :func:`write_aligned_blob`: ``order`` first, then the rest sorted."""
+    rank = {}
+    for name in order:
+        if name in offsets and name not in rank:
+            rank[name] = len(rank)
+    return sorted(offsets, key=lambda n: (0, rank[n], "") if n in rank else (1, 0, n))
+
+
+def blob_layout(offsets: dict, align: int = 64, bf16_names=(), order=()) -> tuple:
+    """``({name: (offset, nbytes)}, total_bytes)`` that :func:`write_aligned_blob`
+    would produce, without reading or writing anything (bf16 halves nbytes)."""
+    new, pos = {}, 0
+    for name in _blob_order(offsets, order):
+        nbytes = offsets[name][1]
+        pos += (-pos) % align
+        n = nbytes // 2 if name in bf16_names else nbytes
+        new[name] = (pos, n)
+        pos += n
+    return new, pos
+
+
+# F4 (-fast): weights.bin reuse. A UNet build writes the same 647 MB weights.bin twice
+# (build_arm_elf offload check + link), ~27-30 s each, with the same bytes both times
+# (tasks/2026-11-23_fast-build-F8-e2e-and-F4-plan.md); the second one is skipped. Under
+# AIEHLC_FAST=1 (or AIEHLC_WBIN_REUSE=1; AIEHLC_WBIN_REUSE=0 forces it off) generate_driver
+# writes a ``weights.bin.key`` sidecar after the blob and its group-step patches:
+# key = sha256 over (sha1 of params.bin content, layout, bf16 names, every group-step weight file + its
+# placement, this file's source) and the result's sha1. The next call skips the
+# write and the patches only if the key matches AND weights.bin still has that sha1. Any other writer -> mismatch -> rewrite.
+_WBIN_SIDECAR = "weights.bin.key"
+
+
+def _wbin_reuse_on() -> bool:
+    v = os.environ.get("AIEHLC_WBIN_REUSE", "").strip()
+    if v:
+        return v == "1"
+    return os.environ.get("AIEHLC_FAST", "0").strip() == "1"
+
+
+_DIGEST_MEMO: dict = {}        # F23: str(path) -> (stat tuple, sha1 hex), this process only
+_DIGEST_RACY_NS = 2_000_000_000  # trust a memo only for files last changed >2 s before hashing
+
+
+def _digest_stat(st) -> tuple:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _digest_file(path: Path, memo: bool = True) -> str:
+    """Content digest for the reuse key: sha1 (~1.0 s per 1.3 GB here vs sha256 5.9 s at
+    load 50 -- v1 with sha256 hashed ~2 GB per call and gave back ~20 of the ~29 s saved).
+    Not a security use.
+
+    F23: a UNet build calls generate_driver twice in one process and hashed params.bin and
+    the 260 layer weight files both times (2 x ~2 s). The digest is memoised per process
+    by (dev, ino, size, mtime_ns, ctime_ns), git's "racy clean" rule guarding the case the
+    old comment warned about (two writes in one kernel tick keep mtime_ns): a result is
+    stored only when the file's mtime and ctime are more than 2 s older than the moment
+    hashing started and the stat did not change while hashing, so a later same-tick,
+    same-size rewrite cannot hide behind an equal stat. memo=False always reads content."""
+    import hashlib
+    import time
+    key = str(path)
+    st0 = os.stat(path) if memo else None
+    if memo:
+        hit = _DIGEST_MEMO.get(key)
+        if hit is not None and hit[0] == _digest_stat(st0):
+            return hit[1]
+    t0 = time.time_ns()
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(16 << 20), b""):
+            h.update(chunk)
+    dig = h.hexdigest()
+    if memo:
+        st1 = os.stat(path)
+        sig = _digest_stat(st1)
+        if (sig == _digest_stat(st0)
+                and max(st1.st_mtime_ns, st1.st_ctime_ns) < t0 - _DIGEST_RACY_NS):
+            _DIGEST_MEMO[key] = (sig, dig)
+        else:
+            _DIGEST_MEMO.pop(key, None)
+    return dig
+
+
+def _wbin_key(params_path: Path, layout: dict, bf16_names, layers_dir: Path) -> str:
+    import hashlib
+    h = hashlib.sha256(b"aiehlc-wbin-v2\0")
+    h.update(hashlib.sha256(Path(__file__).read_bytes()).digest())   # blob/bf16 code
+    h.update(_digest_file(params_path).encode())
+    h.update(json.dumps(sorted((k, list(v)) for k, v in layout.items())).encode())
+    h.update(json.dumps(sorted(bf16_names)).encode())
+    patches = [("S1", k, st["weights"]) for k, st in group_steps(layers_dir).items()
+               if st.get("weights")]
+    patches += [("S3", k, v[2]["weights"]) for k, v in group_sites(layers_dir).items()
+                if v[0] == "step" and v[2].get("weights")]
+    for tag, k, w in sorted(patches, key=lambda t: (t[0], str(t[1]))):
+        h.update(json.dumps([tag, str(k), w], sort_keys=True, default=str).encode())
+        h.update(_digest_file(layers_dir.parent / w["file"]).encode())
+    return h.hexdigest()
+
+
+def _wbin_stat(path: Path) -> list:
+    st = path.stat()
+    return [st.st_size, st.st_mtime_ns, st.st_ino]
+
+
+def _wbin_reusable(wbin: Path, key: str, size: int) -> bool:
+    side = wbin.parent / _WBIN_SIDECAR
+    try:
+        rec = json.loads(side.read_text())
+        if rec.get("key") != key or not wbin.is_file() or wbin.stat().st_size != size:
+            return False
+        return rec.get("sha1") == _digest_file(wbin, memo=False)   # always content
+    except (OSError, ValueError):
+        return False
+
+
+def _wbin_record(wbin: Path, key: str) -> None:
+    side = wbin.parent / _WBIN_SIDECAR
+    tmp = side.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"key": key, "sha1": _digest_file(wbin, memo=False),
+                               "stat": _wbin_stat(wbin)}))
+    os.replace(tmp, side)
 
 
 def write_aligned_blob(params_path: Path, offsets: dict, out_path: Path,
-                       align: int = 64, bf16_names=()) -> dict:
+                       align: int = 64, bf16_names=(), order=()) -> dict:
     """Raw weights, each at an ``align``-byte offset, into ``out_path``.
     Returns the new ``{name: (offset, nbytes)}``. Bytes are copied verbatim,
     except names in ``bf16_names`` (fp32 tensors) which are written as bf16 RNE
-    (nbytes halves)."""
+    (nbytes halves).
+
+    Packing order is deterministic: names in ``order`` (the graph's node
+    order) first, then any remaining names sorted. It does NOT follow the
+    source blob, whose ``save_param_dict`` order changes run to run -- that
+    made two builds of the same config lay weights out differently and
+    shifted per-call timings by a few ms (arm J vs K0, 11-22)."""
     data = params_path.read_bytes()
+    keys = _blob_order(offsets, order)
     new, pos = {}, 0
     with open(out_path, "wb") as f:
-        # name order, not params.bin order: TVM's save_param_dict (a Map) orders the params
-        # differently run to run, which made weights.bin / graph_driver.c / main.elf irreproducible.
-        for name, (off, nbytes) in sorted(offsets.items(), key=lambda kv: kv[0]):
+        for name in keys:
+            off, nbytes = offsets[name]
             pad = (-pos) % align
             f.write(b"\0" * pad)
             pos += pad
@@ -773,6 +936,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
 
     offsets = param_offsets(params_path)
     inplace = params_inplace()
+    wbin_key, wbin_reuse = None, False          # F4 (-fast) weights.bin reuse
     param_eids = set()
     bf16_eids = {}          # eid -> (blob offset, elems) of a bf16-stored fp32 weight
     if inplace:
@@ -783,8 +947,19 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                           and dltypes[row_ptr[i]] == "float32"}
         elif params_wdtype() != "fp32":
             raise ValueError(f"AIEGRAPH_WDTYPE={params_wdtype()!r}: fp32|bf16")
-        offsets = write_aligned_blob(params_path, offsets, out_dir / "weights.bin",
-                                     bf16_names=bf16_names)
+        border = [n["name"] for n in nodes if n.get("op") == "null"]
+        if _wbin_reuse_on():
+            lay, lay_end = blob_layout(offsets, bf16_names=bf16_names, order=border)
+            wbin_key = _wbin_key(params_path, lay, bf16_names, graph_path.parent / "layers")
+            wbin_reuse = _wbin_reusable(out_dir / "weights.bin", wbin_key, lay_end)
+        if wbin_reuse:
+            offsets = lay
+            if verbose:
+                print(f"  [arm] -fast: weights.bin reused ({lay_end:,} B, key {wbin_key[:12]})")
+        else:
+            (out_dir / _WBIN_SIDECAR).unlink(missing_ok=True)
+            offsets = write_aligned_blob(params_path, offsets, out_dir / "weights.bin",
+                                         bf16_names=bf16_names, order=border)
         param_eids = {row_ptr[i] for i, node in enumerate(nodes)
                       if node.get("op") == "null" and node["name"] in offsets}
         bf16_eids = {row_ptr[i]: (offsets[node["name"]][0], offsets[node["name"]][1] // 2)
@@ -801,7 +976,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         if wsteps and not bf16_eids:
             raise ValueError("group steps with bf16 weights need AIEGRAPH_PARAMS_INPLACE=1 "
                              "AIEGRAPH_WDTYPE=bf16")
-        with open(out_dir / "weights.bin", "r+b") as wf:
+        with open(out_dir / "weights.bin", "rb" if wbin_reuse else "r+b") as wf:
             for st in wsteps:
                 w = st["weights"]
                 off, nb = offsets[w["param"]]
@@ -810,8 +985,9 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                     raise ValueError(f"group {st['group']}: weight {w['param']} is "
                                      f"{len(data)} B, weights.bin holds {nb} B "
                                      f"(bf16={w['tensor'] in bf16_eids})")
-                wf.seek(off)
-                wf.write(data)
+                if not wbin_reuse:
+                    wf.seek(off)
+                    wf.write(data)
                 inplace_w[st["at"]] = w["tensor"]
         if verbose and wsteps:
             print(f"  [arm] group steps: {len(steps)} calls, {len(wsteps)} bf16 weights "
@@ -823,7 +999,7 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
         if not bf16_eids:
             raise ValueError("group steps with bf16 weights need AIEGRAPH_PARAMS_INPLACE=1 "
                              "AIEGRAPH_WDTYPE=bf16")
-        with open(out_dir / "weights.bin", "r+b") as wf:
+        with open(out_dir / "weights.bin", "rb" if wbin_reuse else "r+b") as wf:
             for k, st in sorted(s3w.items()):
                 w = st["weights"]
                 off, nb = offsets[w["param"]]
@@ -832,11 +1008,14 @@ def generate_driver(graph_path: Path, params_path: Path, out_dir: Path,
                     raise ValueError(f"group step {st['name']} at [{k}]: weight {w['param']} is "
                                      f"{len(data)} B, weights.bin holds {nb} B "
                                      f"(bf16={w['tensor'] in bf16_eids})")
-                wf.seek(off)
-                wf.write(data)
+                if not wbin_reuse:
+                    wf.seek(off)
+                    wf.write(data)
                 inplace_w[k] = w["tensor"]
         if verbose:
             print(f"  [arm] group steps (emit): {len(s3w)} bf16 weights in the step layout in weights.bin")
+    if wbin_key and not wbin_reuse:
+        _wbin_record(out_dir / "weights.bin", wbin_key)
     act_sids = {sid for e, sid in enumerate(sids) if e not in param_eids}
 
     # One buffer per storage id, sized by the largest tensor assigned to it.
@@ -3013,6 +3192,134 @@ def write_runtime_io(out_dir, inputs, dump_out: bool = False, verbose: bool = Tr
     return [pc, ph]
 
 
+def _make_jobs(jobs: int = 0) -> int:
+    """Parallel ``make -j`` for the ARM link (F7).  Explicit ``jobs`` wins, then
+    ``AIEHLC_ARM_JOBS``; under ``AIEHLC_FAST=1`` (-fast) default to min(16, nproc);
+    otherwise 0 = serial, as before.  UNet: -j1 116.6 s -> -j16 54.8 s at load ~185,
+    main.elf byte-identical (tasks/2026-11-22_fast-build-F7-armjobs.md)."""
+    if jobs:
+        return jobs
+    env = os.environ.get("AIEHLC_ARM_JOBS", "").strip()
+    if env.isdigit():
+        return int(env)
+    if os.environ.get("AIEHLC_FAST", "0").strip() == "1":
+        return min(16, os.cpu_count() or 1)
+    return 0
+
+
+# -fast (F8): content cache for the slow ARM objects. graph_driver.c is ~1.5 MB of generated
+# straight-line glue for UNet (graph_run ~20k lines, graph_init ~12.7k); gcc -O3 spends 89 % of
+# its 45-108 s in "callgraph functions expansion" on those two functions, and with make -j16 that
+# one compile *is* the ARM-make floor (tasks/2026-11-23_fast-build-F8-driver-obj.md). The key is
+# ccache's preprocessor mode: sha256(compiler --version, the exact flags make would use with the
+# build dir masked, `gcc -E -P` of the source) -> every header, -D and make var is covered.
+# AIEHLC_ARM_OBJ_CACHE=<dir> or AIEHLC_FAST=1 (default ${XDG_CACHE_HOME:-~/.cache}/aiehlc/armobj);
+# LRU-pruned to AIEHLC_ARM_OBJ_CACHE_MAX_MB (default 1024) after each store.
+_OBJ_ENV, _OBJ_MAX_ENV = "AIEHLC_ARM_OBJ_CACHE", "AIEHLC_ARM_OBJ_CACHE_MAX_MB"
+_OBJ_CACHED = ("graph_driver.o",)
+
+
+def _obj_cache_dir():
+    d = os.environ.get(_OBJ_ENV, "").strip()
+    if not d and os.environ.get("AIEHLC_FAST", "0").strip() == "1":
+        xdg = os.environ.get("XDG_CACHE_HOME", "").strip() or str(Path.home() / ".cache")
+        d = str(Path(xdg) / "aiehlc" / "armobj")
+    return Path(d).resolve() if d else None
+
+
+def _obj_key(build: Path, obj: str, make_args: list):
+    """sha256 key for *obj* in *build*, or None when it cannot be worked out (-> no caching)."""
+    import hashlib
+    import shlex
+    src = obj[:-2] + ".c"
+    p = subprocess.run(["make", "-n", "-B", "-C", str(build), *make_args, obj],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        return None
+    argv = None
+    for line in p.stdout.splitlines():
+        t = shlex.split(line) if f"-c {src} -o {obj}" in line else None
+        if t and t[-4:] == ["-c", src, "-o", obj]:
+            argv = t[:-4]
+    if not argv:
+        return None
+    try:
+        ver = subprocess.run([argv[0], "--version"], capture_output=True, text=True).stdout
+        pre = subprocess.run([*argv, "-E", "-P", src], cwd=build, capture_output=True)
+    except OSError:
+        return None
+    if pre.returncode != 0:
+        return None
+    h = hashlib.sha256()
+    h.update(ver.encode())
+    h.update(" ".join(argv).replace(str(build), "<B>").encode() + b"\0")
+    h.update(pre.stdout)
+    return h.hexdigest()
+
+
+def _obj_cache_get(build: Path, make_args: list) -> dict:
+    """Restore cached objects into *build* before make. Returns {obj: key} of the misses to store."""
+    c = _obj_cache_dir()
+    if c is None:
+        return {}
+    miss = {}
+    for obj in _OBJ_CACHED:
+        if not (build / (obj[:-2] + ".c")).is_file():
+            continue
+        key = _obj_key(build, obj, make_args)
+        if key is None:
+            continue
+        e = c / key / obj
+        try:
+            shutil.copyfile(e, build / obj)         # fresh mtime -> make sees it up to date
+            os.utime(c / key)                       # LRU hint
+            print(f"  [arm] obj cache hit: {obj} ({key[:12]})")
+        except OSError:
+            miss[obj] = key
+    return miss
+
+
+def _obj_cache_put(build: Path, miss: dict) -> None:
+    c = _obj_cache_dir()
+    if c is None:
+        return
+    for obj, key in miss.items():
+        if not (build / obj).is_file() or (c / key / obj).is_file():
+            continue
+        tmp = c / f".tmp-{key}-{os.getpid()}"
+        try:
+            tmp.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(build / obj, tmp / obj)
+            tmp.rename(c / key)
+        except OSError as ex:                       # never fail a build on the cache
+            print(f"  [arm] obj cache: store failed: {ex}")
+            shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        _obj_cache_prune(c)
+    except Exception as ex:                         # noqa: BLE001
+        print(f"  [arm] obj cache: prune failed: {ex}")
+
+
+def _obj_cache_prune(c: Path) -> list:
+    import time
+    cap = int(os.environ.get(_OBJ_MAX_ENV, "1024")) << 20
+    now, gone = time.time(), []
+    for t in c.glob(".tmp-*"):                      # crashed stores
+        if now - t.stat().st_mtime > 86400:
+            shutil.rmtree(t, ignore_errors=True)
+    ents = sorted((e.stat().st_mtime, e) for e in c.iterdir()
+                  if e.is_dir() and not e.name.startswith("."))
+    sizes = {e: sum(f.stat().st_size for f in e.iterdir() if f.is_file()) for _, e in ents}
+    total = sum(sizes.values())
+    for _, e in ents:                               # oldest first; the newest entry always stays
+        if total <= cap or e == ents[-1][1]:
+            break
+        shutil.rmtree(e, ignore_errors=True)
+        total -= sizes[e]
+        gone.append(e.name)
+    return gone
+
+
 def build_arm_elf(out_dir, repo_root=None, c_name=None,
                   run_make: bool = True, jobs: int = 0, image=None,
                   local: bool = False, local_run: bool = True,
@@ -3049,6 +3356,7 @@ def build_arm_elf(out_dir, repo_root=None, c_name=None,
     under ``["local"]``. Never raises for a missing toolchain -- a box without
     the Vitis cross compiler is a normal place to run the earlier stages.
     """
+    jobs = _make_jobs(jobs)
     out_dir = Path(out_dir).resolve()
     repo_root = Path(repo_root) if repo_root else Path(__file__).resolve().parents[3]
     if c_name is None:   # the one <stem>_graph.json the deploy flow wrote -> <stem>.c
@@ -3145,12 +3453,15 @@ def build_arm_elf(out_dir, repo_root=None, c_name=None,
     cmd = ["make", "-C", str(build)]
     if jobs:
         cmd.append(f"-j{jobs}")
-    cmd += sync_make_vars(build, make_vars)
+    mvars = sync_make_vars(build, make_vars)
+    cmd += mvars
+    miss = _obj_cache_get(build, mvars)             # after sync_make_vars: it may unlink objects
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         summary.update({"ok": False, "reason": "make failed",
                         "stderr": (proc.stderr or proc.stdout)[-3000:]})
         return summary
+    _obj_cache_put(build, miss)
 
     elf = build / "main.elf"
     summary.update({"ok": True, "elf": str(elf), "bytes": elf.stat().st_size})

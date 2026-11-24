@@ -304,15 +304,89 @@ def driver_glue(decls: str = "", attn: bool = False, kprefix: str = None, bf16_e
 
 # ── model / toolchain helpers ─────────────────────────────────────────────────────────────────────────
 
+_I32_VERSION = 1            # bump when input_int32's rewrite changes (part of the F12 cache key)
+I32_CACHE_ENV = "AIEHLC_I32_CACHE"
+
+
+def _i32_cache_dir():
+    """F12: content cache for input_int32. AIEHLC_I32_CACHE=<dir>, or under AIEHLC_FAST=1
+    ${XDG_CACHE_HOME:-~/.cache}/aiehlc/i32; AIEHLC_I32_CACHE=0 disables."""
+    d = os.environ.get(I32_CACHE_ENV, "").strip()
+    if d == "0":
+        return None
+    if not d and os.environ.get("AIEHLC_FAST", "0").strip() == "1":
+        xdg = os.environ.get("XDG_CACHE_HOME", "").strip() or str(Path.home() / ".cache")
+        d = str(Path(xdg) / "aiehlc" / "i32")
+    return Path(d).resolve() if d else None
+
+
+def _i32_key(src: Path, name: str) -> str:
+    import hashlib
+    import onnx
+    h = hashlib.sha1(f"v{_I32_VERSION}\0{name}\0onnx {onnx.__version__}\0".encode())
+    with open(src, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _i32_place(ent: Path, dst: Path) -> str:
+    """Put cache entry *ent* at *dst*: hardlink (entry is 0444) or copy on EXDEV/EPERM."""
+    tmp = dst.with_suffix(".tmp.onnx")
+    tmp.unlink(missing_ok=True)
+    try:
+        os.link(ent, tmp)
+        how = "link"
+    except OSError:
+        shutil.copyfile(ent, tmp)
+        how = "copy"
+    tmp.replace(dst)
+    return how
+
+
 def input_int32(src, dst, name: str, log=print) -> Path:
     """Rewrite graph input *name* int64 -> int32 + Cast(to int64) feeding the old consumers, so the board
-    runtime receives exactly the 4-byte value. Reuses *dst* when newer than *src*."""
-    import onnx
-    from onnx import TensorProto, helper
+    runtime receives exactly the 4-byte value. Reuses *dst* when newer than *src*; with a cache dir
+    (AIEHLC_FAST / AIEHLC_I32_CACHE) the result is also reused across --out dirs by the sha1 of *src*."""
     src, dst = Path(src), Path(dst)
     if dst.is_file() and dst.stat().st_mtime > src.stat().st_mtime:
         log(f"reuse {dst}")
         return dst
+    cdir, ent = _i32_cache_dir(), None
+    if cdir is not None:
+        ent = cdir / f"{_i32_key(src, name)}.onnx"
+        if ent.is_file():
+            how = _i32_place(ent, dst)
+            os.utime(ent)                              # LRU-ish: newest use
+            log(f"{name} int64 -> int32: cache hit {ent.name[:12]} ({how}) -> {dst}")
+            return dst
+    _input_int32_rewrite(src, dst, name)
+    log(f"{name} int64 -> int32 input + Cast: {dst} ({dst.stat().st_size:,} B)")
+    if ent is not None:
+        try:
+            cdir.mkdir(parents=True, exist_ok=True)
+            tmp = ent.with_suffix(f".{os.getpid()}.tmp")
+            tmp.unlink(missing_ok=True)
+            try:
+                os.link(dst, tmp)                      # same fs: dst and the entry share one inode
+                linked = True
+            except OSError:                            # EXDEV -> a copy, then dst points at it too
+                shutil.copyfile(dst, tmp)
+                linked = False
+            os.chmod(tmp, 0o444)                       # shared inode: writers must fail loudly
+            tmp.replace(ent)
+            if not linked:
+                _i32_place(ent, dst)
+            for old in sorted(cdir.glob("*.onnx"), key=lambda p: p.stat().st_mtime)[:-2]:
+                old.unlink(missing_ok=True)            # keep the 2 newest entries (each ~model size)
+        except OSError as e:
+            log(f"i32 cache store failed: {e}")
+    return dst
+
+
+def _input_int32_rewrite(src: Path, dst: Path, name: str):
+    import onnx
+    from onnx import TensorProto, helper
     m = onnx.load(str(src))
     inp = next(i for i in m.graph.input if i.name == name)
     assert inp.type.tensor_type.elem_type == TensorProto.INT64, inp
@@ -325,8 +399,6 @@ def input_int32(src, dst, name: str, log=print) -> Path:
     tmp = dst.with_suffix(".tmp.onnx")
     onnx.save(m, str(tmp))
     tmp.replace(dst)
-    log(f"{name} int64 -> int32 input + Cast: {dst} ({dst.stat().st_size:,} B)")
-    return dst
 
 
 def cross_toolchain(root, log=print):

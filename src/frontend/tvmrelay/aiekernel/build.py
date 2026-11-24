@@ -97,6 +97,180 @@ def _stamp(spec) -> str:
     return h.hexdigest()
 
 
+# -fast: share the aiehlc output tree (worklocal) across build dirs, keyed by _stamp (everything
+# aiehlc reads, incl. AIEHLC_SH_ARGS/EXTRA_DEFS and the aiehlc binary). UNet: the aiehlc stage is
+# ~395 s of a 698 s warm --fast build even with every kernel .o cached; an entry is ~1.3 GB.
+# AIEHLC_WL_CACHE=<dir> or AIEHLC_FAST=1 (default ${XDG_CACHE_HOME:-~/.cache}/aiehlc/wl);
+# LRU-pruned to AIEHLC_WL_CACHE_MAX_MB (default 8192) after each store.
+_WL_ENV, _WL_MAX_ENV = "AIEHLC_WL_CACHE", "AIEHLC_WL_CACHE_MAX_MB"
+
+
+def _wl_cache_dir():
+    d = os.environ.get(_WL_ENV, "").strip()
+    if not d and os.environ.get("AIEHLC_FAST", "0").strip() == "1":
+        xdg = os.environ.get("XDG_CACHE_HOME", "").strip() or str(Path.home() / ".cache")
+        d = str(Path(xdg) / "aiehlc" / "wl")
+    return Path(d).resolve() if d else None
+
+
+# F15: the three ~430 MB parts of a UNet worklocal -- build/*.a, build/kernel_*.o (44 x 10 MB) and
+# build/kpar/** (aiehlc's per-kernel scratch, 44 x 10 MB ELFs) -- are hardlinked, not copied, from the
+# wl cache into worklocal and from worklocal into the layer's aie/ (install). Audit of every writer
+# (hostcompile.sh, install): kernel_<k>.o is only replaced by `mv -f`, kpar/ is `rm -rf`ed before a
+# rebuild, install unlinks build/*.a and build/host.o before hostcompile.sh, and gcc/as/ld/ar unlink
+# or rename their outputs. Files written in place (host.cc, *.stamp, build/kernel, aiehlc_ctrlpkt via
+# cp) are NOT in the set and are still copied. Linked files are made 0444 so a future in-place writer
+# fails loudly instead of corrupting the cache. EXDEV/EPERM -> copy. AIEHLC_WL_CACHE_LINK=0 = copy all.
+_WL_LINK_ENV = "AIEHLC_WL_CACHE_LINK"
+
+
+def _wl_linkable(rel: str) -> bool:
+    """*rel*: path relative to a worklocal root, '/'-separated."""
+    if not rel.startswith("build/"):
+        return False
+    tail = rel[len("build/"):]
+    if tail.startswith("kpar/"):
+        name = tail.rsplit("/", 1)[-1]
+        return name != "aiehlc_ctrlpkt"              # cp -p'd into kpar/<k>/build/ (in place)
+    return "/" not in tail and (tail.endswith(".a") or
+                                (tail.startswith("kernel_") and tail.endswith(".o")))
+
+
+def _wl_link_on() -> bool:
+    return os.environ.get(_WL_LINK_ENV, "1").strip() != "0"
+
+
+# F16: build/kpar/ is hostcompile.sh's per-kernel scratch for the parallel kernel build. Nothing reads
+# it after hostcompile.sh returns: the next hostcompile.sh run (install) either reuses every
+# kernel_<k>.o (-nt) and never looks at kpar/, or `rm -rf`s it before a rebuild. Its symlinks are
+# absolute and point into the aiehlc run's own worklocal, so in the cache and in aie/ they all dangle
+# (UNet: 12,056 of 12,056 links, 220 files, 458 MB). The wl cache get/put and install drop it.
+# AIEHLC_WL_KEEP_KPAR=1 keeps it (F15 behaviour: files hardlinked, links copied).
+_WL_KEEP_KPAR_ENV = "AIEHLC_WL_KEEP_KPAR"
+_WL_SCRATCH = "build/kpar"
+
+
+def _wl_keep_kpar() -> bool:
+    return os.environ.get(_WL_KEEP_KPAR_ENV, "0").strip() == "1"
+
+
+def _wl_copytree(src: Path, dst: Path, skip=None) -> dict:
+    """copytree(symlinks=True) that hardlinks :func:`_wl_linkable` files (0444) and drops the
+    ``build/kpar`` scratch dir (F16, unless AIEHLC_WL_KEEP_KPAR=1).
+    *skip(rel)* -> True drops a file. Returns ``{"linked", "copied", "skipped", "dropped"}`` counts
+    (*dropped*: scratch directories left out)."""
+    src = Path(src)
+    n = {"linked": 0, "copied": 0, "skipped": 0, "dropped": 0}
+    link = _wl_link_on()
+    keep_kpar = _wl_keep_kpar()
+
+    def _copy(s, d):
+        rel = Path(s).relative_to(src).as_posix()
+        if link and _wl_linkable(rel) and not os.path.islink(s):
+            try:
+                if os.stat(s).st_mode & 0o222:
+                    os.chmod(s, 0o444)
+                os.link(s, d)
+                n["linked"] += 1
+                return d
+            except OSError:                       # EXDEV / EPERM / exists -> copy
+                pass
+        n["copied"] += 1
+        return shutil.copy2(s, d)
+
+    def _ignore(d, names):
+        base = Path(d).relative_to(src)
+        out = []
+        if not keep_kpar:
+            drop = [x for x in names if (base / x).as_posix() == _WL_SCRATCH
+                    and (Path(d) / x).is_dir() and not (Path(d) / x).is_symlink()]
+            n["dropped"] += len(drop)
+            out += drop
+        if skip is not None:
+            files = [x for x in names if x not in out and not (Path(d) / x).is_dir()
+                     and skip((base / x).as_posix())]
+            n["skipped"] += len(files)
+            out += files
+        return out
+
+    shutil.copytree(src, dst, symlinks=True, copy_function=_copy, ignore=_ignore)
+    return n
+
+
+def _wl_cache_get(stamp: str, dest: Path, log: Path) -> bool:
+    c = _wl_cache_dir()
+    e = c / stamp if c else None
+    if e is None or not (e / "DONE").is_file() or not (e / "worklocal" / "host.cc").is_file():
+        return False
+    tmp = dest.with_name(dest.name + f".get{os.getpid()}")
+    try:
+        shutil.rmtree(tmp, ignore_errors=True)
+        _wl_copytree(e / "worklocal", tmp)
+        if (e / "aiehlc.log").is_file():
+            shutil.copy2(e / "aiehlc.log", log)
+    except (OSError, shutil.Error):                 # entry pruned under us -> miss
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+    if dest.exists():
+        shutil.rmtree(dest)
+    tmp.rename(dest)
+    (e / "DONE").touch()                            # LRU hint
+    return True
+
+
+def _wl_cache_put(stamp: str, dest: Path, log: Path) -> None:
+    c = _wl_cache_dir()
+    if c is None:
+        return
+    e = c / stamp
+    if (e / "DONE").is_file():
+        return
+    tmp = c / f".tmp-{stamp}-{os.getpid()}"
+    try:
+        c.mkdir(parents=True, exist_ok=True)
+        _wl_copytree(dest, tmp / "worklocal")
+        if log.is_file():
+            shutil.copy2(log, tmp / "aiehlc.log")
+        (tmp / "DONE").write_text(stamp + "\n")
+        tmp.rename(e)
+    except OSError as ex:                           # never fail a build on the cache
+        print(f"  [build] aiehlc wl cache: store failed: {ex}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return
+    try:
+        _wl_cache_prune(c, keep=stamp)
+    except Exception as ex:                         # noqa: BLE001
+        print(f"  [build] aiehlc wl cache: prune failed: {ex}")
+
+
+def _du(p: Path) -> int:
+    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file() and not f.is_symlink())
+
+
+def _wl_cache_prune(c: Path, keep: str = None) -> list:
+    cap = int(os.environ.get(_WL_MAX_ENV, "8192")) << 20
+    now, gone = time.time(), []
+    for t in c.glob(".tmp-*"):                      # crashed stores
+        if now - t.stat().st_mtime > 86400:
+            shutil.rmtree(t, ignore_errors=True)
+    ents = sorted(((e / "DONE").stat().st_mtime, e) for e in c.iterdir()
+                  if not e.name.startswith(".") and (e / "DONE").is_file())
+    sizes = {e: _du(e) for _, e in ents}
+    total = sum(sizes.values())
+    for _, e in ents:                               # oldest first
+        if total <= cap:
+            break
+        if e.name == keep:
+            continue
+        shutil.rmtree(e, ignore_errors=True)
+        total -= sizes[e]
+        gone.append(e.name)
+    if gone:
+        print(f"  [build] aiehlc wl cache: pruned {len(gone)} entr{'y' if len(gone) == 1 else 'ies'}, "
+              f"now {total >> 20} MB")
+    return gone
+
+
 def aiehlc_compile(spec, out_dir, aie_version: int = 5, verbose: bool = True) -> dict:
     """Run aiehlc on the kernel source. Returns ``{"ok", "worklocal"|"reason", "log", "cached"}``."""
     work = Path(out_dir) / "aiek" / spec.name
@@ -106,6 +280,11 @@ def aiehlc_compile(spec, out_dir, aie_version: int = 5, verbose: bool = True) ->
     if (dest / "host.cc").is_file() and stamp_file.is_file() \
             and stamp_file.read_text().strip() == stamp:
         return {"ok": True, "worklocal": dest, "log": str(log), "cached": True}
+    t_get = time.time()
+    if _wl_cache_get(stamp, dest, log):
+        stamp_file.write_text(stamp + "\n")
+        print(f"  [build] aiehlc wl cache hit {stamp} -> {dest} ({time.time() - t_get:.1f}s)")
+        return {"ok": True, "worklocal": dest, "log": str(log), "cached": "wl"}
 
     # Scratch next to the cache, not in /tmp: aiehlc's aout/ is large and /tmp
     # is often a small shared volume (a full one fails the build mid-way).
@@ -142,6 +321,7 @@ def aiehlc_compile(spec, out_dir, aie_version: int = 5, verbose: bool = True) ->
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     stamp_file.write_text(stamp + "\n")
+    _wl_cache_put(stamp, dest, log)
     if verbose:
         print(f"  [build] aiehlc {spec.source.name} -> {dest} ({time.time() - start:.0f}s)")
     return {"ok": True, "worklocal": dest, "log": str(log), "cached": False}
@@ -159,9 +339,128 @@ def _nm(paths, *flags) -> list:
     return rows
 
 
+# F13 -fast: content cache for isolate_archive. The UNet carrier archive is ~430 MB; ar x + ld -r +
+# objcopy + ar rcs take 8-13 s per build although hostcompile.sh rebuilds it byte-identically (F11).
+# AIEHLC_ISO_CACHE=<dir>, or under AIEHLC_FAST=1 ${XDG_CACHE_HOME:-~/.cache}/aiehlc/iso;
+# AIEHLC_ISO_CACHE=0 disables. Key = sha1(version, keep, binutils identity, archive bytes); entries are
+# 0444 and hardlinked into the build (copy on EXDEV); the newest AIEHLC_ISO_CACHE_KEEP (default 3) stay.
+_ISO_VERSION = 1            # bump when isolate_archive's output changes
+_ISO_ENV, _ISO_KEEP_ENV = "AIEHLC_ISO_CACHE", "AIEHLC_ISO_CACHE_KEEP"
+
+
+def _iso_cache_dir():
+    d = os.environ.get(_ISO_ENV, "").strip()
+    if d == "0":
+        return None
+    if not d and os.environ.get("AIEHLC_FAST", "0").strip() == "1":
+        xdg = os.environ.get("XDG_CACHE_HOME", "").strip() or str(Path.home() / ".cache")
+        d = str(Path(xdg) / "aiehlc" / "iso")
+    return Path(d).resolve() if d else None
+
+
+def _iso_key(archive: Path, keep) -> str:
+    h = hashlib.sha1(f"v{_ISO_VERSION}\0{CROSS}\0{chr(1).join(sorted(set(keep)))}\0".encode())
+    for tool in ("ar", "ld", "objcopy", "nm"):     # a toolchain change must miss
+        exe = shutil.which(f"{CROSS}{tool}")
+        if exe:
+            st = Path(exe).resolve().stat()
+            h.update(f"{Path(exe).resolve()}:{st.st_size}:{st.st_mtime_ns}\0".encode())
+    with open(archive, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _iso_backup(archive: Path) -> Path:
+    # The original stays next to the layer for debugging; rename, not copy (430 MB for UNet).
+    backup = archive.parent.parent / f"isolate_backup_{archive.name}.bak"   # not *.a: Makefile wildcard
+    os.replace(archive, backup)
+    return backup
+
+
+def _iso_place(ent: Path, archive: Path) -> None:
+    tmp = archive.with_name(archive.name + f".iso{os.getpid()}")
+    tmp.unlink(missing_ok=True)
+    try:
+        os.link(ent, tmp)
+    except OSError:
+        shutil.copyfile(ent, tmp)
+        os.chmod(tmp, 0o644)
+    tmp.replace(archive)
+
+
+def _iso_cache_get(c: Path, key: str, archive: Path):
+    import json
+    e = c / key
+    try:
+        res = json.loads((e / "result.json").read_text())
+        if not (e / "lib.a").is_file():
+            return None
+        _iso_backup(archive)
+        _iso_place(e / "lib.a", archive)
+    except (OSError, ValueError):
+        return None
+    try:
+        os.utime(e)                                  # LRU hint
+    except OSError:
+        pass
+    return res
+
+
+def _iso_cache_put(c: Path, key: str, archive: Path, res: dict) -> None:
+    import json
+    e = c / key
+    tmp = c / f".tmp-{key}-{os.getpid()}"
+    try:
+        if e.is_dir():
+            return
+        tmp.mkdir(parents=True)
+        try:
+            os.link(archive, tmp / "lib.a")
+        except OSError:
+            shutil.copyfile(archive, tmp / "lib.a")
+        os.chmod(tmp / "lib.a", 0o444)               # an in-place writer must fail loudly
+        (tmp / "result.json").write_text(json.dumps(res))
+        tmp.rename(e)
+    except OSError as ex:                            # never fail a build on the cache
+        print(f"  [build] isolate cache: store failed: {ex}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return
+    try:
+        n = max(1, int(os.environ.get(_ISO_KEEP_ENV, "3")))
+        ents = sorted((x.stat().st_mtime, x) for x in c.iterdir()
+                      if not x.name.startswith(".") and (x / "result.json").is_file())
+        for _, x in ents[:-n]:
+            if x.name != key:
+                shutil.rmtree(x, ignore_errors=True)
+        for t in c.glob(".tmp-*"):
+            if time.time() - t.stat().st_mtime > 86400:
+                shutil.rmtree(t, ignore_errors=True)
+    except (OSError, ValueError) as ex:
+        print(f"  [build] isolate cache: prune failed: {ex}")
+
+
 def isolate_archive(archive: Path, keep, verbose: bool = True) -> dict:
     """Localize every own global of *archive* except *keep* (see module doc)."""
     archive = Path(archive).resolve()
+    keep = list(keep)
+    c = _iso_cache_dir()
+    key = _iso_key(archive, keep) if c else None
+    if key:
+        res = _iso_cache_get(c, key, archive)
+        if res is not None:
+            if verbose:
+                print(f"  [build] isolate {archive.name}: cached ({len(res['kept']) - len(res['missing'])} "
+                      f"entry symbol(s) + {len(res['runtime_hooks'])} runtime hook(s), "
+                      f"{res['localized']} made local)")
+            return res
+    res = _isolate_archive(archive, keep, verbose)
+    if key and res["ok"]:
+        _iso_cache_put(c, key, archive, res)
+    return res
+
+
+def _isolate_archive(archive: Path, keep, verbose: bool) -> dict:
     tmp = Path(tempfile.mkdtemp(prefix="aiek_iso_", dir=archive.parent))
     try:
         subprocess.run([f"{CROSS}ar", "x", str(archive)], cwd=tmp, check=True)
@@ -192,9 +491,7 @@ def isolate_archive(archive: Path, keep, verbose: bool = True) -> dict:
                         str(merged)], check=True)
 
         missing = sorted(k for k in keep if k not in {n for n, t in _nm([merged], "-g", "--defined-only")})
-        backup = archive.parent.parent / f"isolate_backup_{archive.name}.bak"
-        shutil.copy2(archive, backup)       # not *.a: the Makefile wildcard must not see it
-        archive.unlink()
+        _iso_backup(archive)
         subprocess.run([f"{CROSS}ar", "rcs", str(archive), str(merged),
                         *[str(tmp / m) for m in runtime]], check=True)
     finally:
@@ -276,7 +573,10 @@ def install(spec, worklocal: Path, aie_dir: Path, layer_calls, verbose: bool = T
     aie_dir = Path(aie_dir)
     if aie_dir.exists():
         shutil.rmtree(aie_dir)
-    shutil.copytree(worklocal, aie_dir, symlinks=True)
+    # build/*.a and build/host.o are deleted below before hostcompile.sh anyway: don't copy them
+    # (430 MB for UNet). Large read-only parts are hardlinked (F15, _wl_copytree).
+    _wl_copytree(worklocal, aie_dir, skip=lambda rel: rel == "build/host.o" or (
+        rel.startswith("build/") and rel.endswith(".a") and rel.count("/") == 1))
     host = aie_dir / "host.cc"
     text = host.read_text()
     cut = text.find(ADAPTER_MARK)
