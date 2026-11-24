@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M6.1 demo: a UNet partition decision made by aiegraph.costmodel.estimate() (frozen K+L+N, M34 PZ),
+"""M6.1 demo: a UNet partition decision made by costmodel.estimate() (frozen K+L+N, M34 PZ),
 checked against what the board measured.
 
   python3 costmodel_partition_demo.py --build-root DIR --partition partition_p4a.json \
@@ -26,7 +26,7 @@ from pathlib import Path
 WT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(WT / "src"))
 
-from aiegraph.costmodel import estimate  # noqa: E402
+from costmodel import estimate  # noqa: E402
 
 CFGS = ("off", "aot-kco")
 # board-log formats (same regexes as script/perf n_fit._PROF / k_diag._SPLIT used by kln_site.log_sites)

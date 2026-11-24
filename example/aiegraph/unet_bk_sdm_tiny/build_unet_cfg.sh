@@ -51,7 +51,7 @@ CFLAGS=a78_layer_cflags.txt
 out=$outroot/unet_$cfg
 src=$outroot/unet_$cfg.src
 
-# build inputs, relative to the repository top (script/perf, src/aiegraph/costmodel and src/aiegraph/test deliberately excluded)
+# build inputs, relative to the repository top (script/perf, src/aiegraph/costmodel -- the pre-move home of src/costmodel, kept so its old commits stay excluded -- and src/aiegraph/test deliberately excluded)
 INPUT_PATHS=(src/mlir/runtime src/aiegraph src/aiednn example/aiegraph/unet_bk_sdm_tiny :!src/aiegraph/costmodel :!src/aiegraph/test)
 top=$(git -C "$here" rev-parse --show-toplevel)
 head_inputs=$(git -C "$top" log -1 --format=%h -- "${INPUT_PATHS[@]}")

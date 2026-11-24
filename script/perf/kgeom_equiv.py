@@ -379,7 +379,7 @@ def selftest() -> int:
     with tempfile.TemporaryDirectory(prefix="kgeom_imp_") as td:
         p1, p2 = Path(td) / "a.py", Path(td) / "b.py"
         p1.write_text("# costmodel and aiegraph.plan are only named here\nimport os\n")
-        p2.write_text("from aiegraph.costmodel import estimate\nfrom aiegraph import plan\n")
+        p2.write_text("from costmodel import estimate\nfrom aiegraph import plan\n")
         check("imports_comment_free", static_imports([p1])[:2] == (0, 0))
         pu, cm, _ = static_imports([p2])
         check("imports_found", pu >= 1 and cm >= 1)

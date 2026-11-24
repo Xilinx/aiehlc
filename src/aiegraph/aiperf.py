@@ -210,8 +210,8 @@ def cost_model(f: dict) -> dict:
     known = elf_ms + cfg_ms
     measured = f["run"]["measured_ms"]
     est = None
-    if f.get("group"):  # forward to the cost layer (aiegraph.costmodel.estimate) when the facts carry a group
-        from .costmodel import estimate
+    if f.get("group"):  # forward to the cost layer (costmodel.estimate) when the facts carry a group
+        from costmodel import estimate
         est = estimate(f["group"], board=f.get("board", "palmyra213"))
     return {"cores": cores, "estimate": est, "elf_load_ms": round(elf_ms, 3), "elf_words_per_core": int(words),
             "config_ms": round(cfg_ms, 3), "config_words": int(cfg_words),

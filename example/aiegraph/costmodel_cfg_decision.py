@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M6 P2: a per-build cfg decision made ONLY by aiegraph.costmodel.estimate() on build dirs, for unet / resnet18 /
+"""M6 P2: a per-build cfg decision made ONLY by costmodel.estimate() on build dirs, for unet / resnet18 /
 yolo26n, scored against what palmyra213 measured.
 
   python3 costmodel_cfg_decision.py --all [--tie 0.03] [--alt] [--selftest]
@@ -32,7 +32,7 @@ from pathlib import Path
 WT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(WT / "src"))
 
-from aiegraph.costmodel import estimate  # noqa: E402
+from costmodel import estimate  # noqa: E402
 
 SH = Path("/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks")
 NETS = {  # net: (cfg a, cfg b, aie_launches, {run: (log a, log b)})

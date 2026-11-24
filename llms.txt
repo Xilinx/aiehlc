@@ -38,4 +38,5 @@ Status: end to end on the board for contractions (GEMM, conv2d), board-verified 
 - [aiegraph (Python)](doc/tutorial_aiegraph.md): ONNX / PyTorch model to int8 C, offload layers to AIE kernels
 - [Your own kernel in a model](doc/tutorial_userkernel.md)
 - [Performance](doc/reference/performance.md): control-plane cost, measured
+- [Cost model](src/costmodel/README.md): predict a launch / site / network time (K + L + N) from a build, no board
 - [Compiler architecture](doc/tilinglinalg.md): the six MLIR dialects from routing to schedule
