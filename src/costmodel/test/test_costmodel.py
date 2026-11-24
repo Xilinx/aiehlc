@@ -378,8 +378,8 @@ NBUILD = Path(__import__("os").environ.get("N_BUILD_ROOT", "/scratch/staff/huaj/
 
 
 def test_n_fit_frozen_unet(capsys):
-    if not (NBUILD / "unet_off").is_dir() or not (NBUILD / "unet_aot-kco").is_dir():
-        pytest.skip("M2c UNet build root %s missing (set N_BUILD_ROOT)" % NBUILD)
+    if not all((NBUILD / c / "aiek_src" / "aiek_unetconv.cc").is_file() for c in ("unet_off", "unet_aot-kco")):
+        pytest.skip("M2c UNet build root %s missing or pruned (set N_BUILD_ROOT)" % NBUILD)
     nf = _script("n_fit")
     rc = nf.main(["--build-root", str(NBUILD), "--params", str(NPARAMS), "--check",
                   "off=%s" % (DATA / "n_unet_off.b.excerpt"), "aot-kco=%s" % (DATA / "n_unet_aot-kco.b.excerpt")])
@@ -705,8 +705,8 @@ def test_kdmaf_perch_unet_logs():
     b = Path("/scratch/staff/huaj/tmp/costmodel_m3121")
     d = Path("/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks/2026-11-20_M3121")
     logs = [d / "unet_off.a.log", d / "unet_aot-kco.a.log"]
-    if not (b.is_dir() and all(x.is_file() for x in logs)):
-        pytest.skip("UNet build dir / logs not present")
+    if not ((b / "unet_off" / "aiek_src" / "aiek_unetconv.cc").is_file() and all(x.is_file() for x in logs)):
+        pytest.skip("UNet build dir (pruned?) / logs not present")
     p = SRC / "costmodel" / "tools" / "k_dmafeat.py"
     r = subprocess.run([sys.executable, "-I", str(p), "--perch", "--build-root", str(b), "off=%s" % logs[0],
                         "aot-kco=%s" % logs[1]], capture_output=True, text=True, timeout=600)
@@ -869,8 +869,8 @@ def test_kdmaf_ddrt_unet_logs(tmp_path):
     b = Path("/scratch/staff/huaj/tmp/costmodel_m3121")
     d = Path("/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks/2026-11-20_M3121")
     logs = [d / "unet_off.a.log", d / "unet_aot-kco.a.log"]
-    if not (b.is_dir() and all(x.is_file() for x in logs)):
-        pytest.skip("UNet build dir / logs not present")
+    if not ((b / "unet_off" / "aiek_src" / "aiek_unetconv.cc").is_file() and all(x.is_file() for x in logs)):
+        pytest.skip("UNet build dir (pruned?) / logs not present")
     p = SRC / "costmodel" / "tools" / "k_dmafeat.py"
     t = tmp_path / "kln" / "dmach.tsv"
     r = subprocess.run([sys.executable, "-I", str(p), "--perch", "--ddrt", "--tsv", str(t), "--build-root", str(b),

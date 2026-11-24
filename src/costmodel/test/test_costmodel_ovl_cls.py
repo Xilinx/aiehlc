@@ -81,7 +81,8 @@ def test_n_part_unchanged():
             assert n_fit.npred_site(d0[c], s)[0] == n_fit.npred_site(d1[c], s)[0]
 
 
-@pytest.mark.skipif(not (O0 / "unet_off").is_dir() or not (D0 / "unet_off.a.log").is_file(), reason="no M3121 data")
+@pytest.mark.skipif(not (O0 / "unet_off" / "aiek_src" / "aiek_unetconv.cc").is_file()
+                    or not (D0 / "unet_off.a.log").is_file(), reason="no (or pruned) M3121 data")
 def test_refit_reproduces_committed_json(tmp_path):
     out = tmp_path / "n.json"
     p = subprocess.run([sys.executable, "-I", str(PERF / "n_fit.py"), "--fit-ovl", "cls", "--params", str(J0),
