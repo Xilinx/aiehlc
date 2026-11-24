@@ -43,6 +43,7 @@ dnn_export.run(rep, board="<host>")              # separately, on any VEK385 (x8
 
 ```bash
 python example/aiednn/flows/2_torch_compile/run.py --export [--model resnet18]          # x86 C app, run here
+python example/aiednn/flows/2_torch_compile/run.py --export --emit model [--model tiny]  # session API (host-owned main)
 python example/aiednn/flows/2_torch_compile/run.py --export --model gpt2_small --target vek385 \
     --board portobello13 --vitis-settings <.../Vitis/settings64.sh>                     # board ELF, run there
 python example/aiednn/flows/2_torch_compile/run.py --pt2 model.pt2 --model resnet18      # a saved program
@@ -62,6 +63,20 @@ or more on the device from a counter hash (`dnn_torch.synthesize_weights`; gpt2_
 the same weights run through aiednn on the workstation, so a PASS checks the build, the AIE kernels (every int8
 GEMM is still compared bit for bit on the device) and the timing. It does not check the model's accuracy: drop
 the flag for that.
+
+### `--emit model`: session API (you write `main`)
+
+`compile_exported(..., emit="model")` writes `<name>_model.h` / `<name>_model.cc` (weights blob, no `main`) and a thin smoke host that only checks create/run/destroy. Your app:
+
+```c
+#include "tiny_model.h"
+tiny_t *m = tiny_create();
+tiny_run(m, input, output);          // layouts: tiny_input_desc(m) / tiny_output_desc(m)
+tiny_destroy(m);
+```
+
+Build with `dnn-build` on your host (include or `#include` the generated `.cc` in the same workdir). Hand-written
+host example: [`../5_export_session/`](../5_export_session/).
 
 The exported program goes through the **offline model compiler** (flow 4), not the partition graph API:
 `aiegraph.dnn_export.to_fx` turns its ATen graph back into the torch-level graph flow 4 lowers -- ops with

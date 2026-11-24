@@ -74,3 +74,21 @@ def test_compile_exported_builds_and_runs_the_c_app(tmp_path):
     de.run(rep)
     assert rep.run_ok, rep
     assert "PASS" in rep.run_log.read_text()
+
+
+def test_compile_exported_session_api(tmp_path):
+    """emit=model: session header/cc (create/run/destroy) + smoke host; x86 PASS vs PyTorch"""
+    m, x = model_and_input("tiny")
+    out = tmp_path / "session"
+    rep, g, _ = de.compile_exported(torch.export.export(m.eval(), (x,)), x, name="tiny", out=out,
+                                    emit="model", mlir=False)
+    assert (out / "tiny_model.h").is_file() and (out / "tiny_model.cc").is_file()
+    hdr = (out / "tiny_model.h").read_text()
+    assert "tiny_create" in hdr and "tiny_run" in hdr and "tiny_destroy" in hdr
+    assert "tiny_input_desc" in hdr and "tiny_output_desc" in hdr
+    assert "int main(" not in (out / "tiny_model.cc").read_text()
+    assert rep.ok and rep.run_ok is None
+    de.run(rep)
+    assert rep.run_ok, rep
+    log = rep.run_log.read_text()
+    assert "PASS" in log and "session=1" in log

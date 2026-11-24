@@ -1,7 +1,7 @@
-# aiednn: the architecture and the four ways in
+# aiednn: the architecture and the ways in
 
 One small, runnable example for each way a program or model reaches the AI Engine through aiednn. All
-four end in the same library (`include/aiednn.h`), the same dispatch and the same AIE megakernel. The
+of them end in the same library (`include/aiednn.h`), the same dispatch and the same AIE megakernel. The
 deeper references are:
 
 - [`doc/design/aiednn_architecture.md`](../../../doc/design/aiednn_architecture.md): the one-page overview with diagrams and a file map.
@@ -11,22 +11,22 @@ deeper references are:
 ```
             1 C app            2 torch.compile           3 ONNX                 4 model compiler
          (aiednn.h calls)    (backend="aiednn")    (OnnxGraph / ORT EP)     (run_models / dnn_mlir)
-               │                    │ fx graph              │ ONNX graph             │ fx → AGraph → MLIR passes
-               │                    ▼                       ▼                        │ (fusion, requant folds,
-               │          ┌─ PARTITION GRAPH API (aiednn_graph.h) ─┐                │  memory plan)
+               │                    │ fx graph              │ ONNX graph             │ fx → AGraph → MLIR
+               │                    ▼                       ▼                        │
+               │          ┌─ PARTITION GRAPH API (aiednn_graph.h) ─┐                │
                │          │ add ops → get_partitions → compile →   │                │
-               │          │ execute; supported = the fused         │                │
-               │          │ primitive creates; the rest stays in   │                │
-               │          │ the framework                          │                │
+               │          │ execute; rest stays in the framework   │                │
                │          └──────────────────┬─────────────────────┘                │
+               ▼                             ▼                                      ▼
+                                    5 torch.export → session API
+                                      (emit_model: create/run/destroy; you write main)
                ▼                             ▼                                      ▼
  ╔═════════════════════ LIBRARY: include/aiednn.h, src/aiednn/ ══════════════════════════════╗
  ║ describe tensors → *_create → DISPATCH over the impl list (generated from AIEK_SPECs):      ║
  ║ AIE first, most specific acceptor wins, ref: (CPU) last → execute (host pack, launch, wait) ║
  ╚══════════════════════════════════════════════╤═════════════════════════════════════════════╝
                                                 ▼
-       AIE megakernel ELF (src/aietensorop/gemm/gemm_uk.cc + aie_modes_*.h): GEMM, CONV, DW, POOL,
-       LUT, STEPS, FVEC, BF16, SDPA, … modes, selected per launch  →  VEK280 (A72) / VEK385 (A78)
+       AIE megakernel ELF (src/aietensorop/gemm/gemm_uk.cc + aie_modes_*.h) → VEK280 / VEK385
 ```
 
 | # | Way in | Who uses it | Entry point | This directory | What it prints |
@@ -35,16 +35,18 @@ deeper references are:
 | 2 | **`torch.compile(model, backend="aiednn")`**, and **`torch.export` -> a board program** (`--export`) | PyTorch users | `aiegraph.dnn_torch_backend` → graph API; `aiegraph.dnn_export` → the model compiler (flow 4) | [`2_torch_compile/`](2_torch_compile/) | partitions + implementations, PASS vs eager; with `--export`: the C app / board ELF, PASS vs PyTorch |
 | 3 | **ONNX**: `OnnxGraph`, or the ONNX Runtime plugin EP | ONNX / ORT users | `aiegraph.dnn_onnx_graph`, `aiegraph.dnn_ort_ep` → graph API | [`3_onnx/`](3_onnx/) | partitions, PASS vs onnxruntime CPU |
 | 4 | **Offline model compiler**: a whole model → fused primitive sequence → board app | per-model deployment, benchmarks | `aiegraph.dnn_torch` + `dnn_mlir` | [`4_model_compiler/`](4_model_compiler/) | primitives on the AIE, GEMMs checked exact, PASS vs PyTorch |
+| 5 | **`torch.export` → session API**: generated `create`/`run`/`destroy`; **you write `main`** | apps that own the host | `aiegraph.dnn_export` + `dnn_torch.emit_model` | [`5_export_session/`](5_export_session/) | session + hand-written host, PASS on x86 / board |
 
 Flows 2 and 3 go through the **partition graph API**. The library decides what it can take: an anchor op
 (conv, matmul) absorbs its bias, activations, residual add and requantization, and a partition is
 supported when its fused primitive creates. Flow 4 does the whole-model work offline (MLIR passes) and emits
-plain `aiednn.h` calls. Flow 1 is those calls written by hand.
+plain `aiednn.h` calls with a generated benchmark `main`. Flow 5 is the same lowering with a **session
+library** so the host owns `main`. Flow 1 is those calls written by hand.
 
 ## Which model
 
 - **Flow 1** has no model: two primitives on synthetic int8 data in the C file.
-- **Flows 2–4** default to `--model tiny`: the small net in [`model.py`](model.py) (conv-bn-relu, conv with a
+- **Flows 2–5** default to `--model tiny`: the small net in [`model.py`](model.py) (conv-bn-relu, conv with a
   residual add, global pool, fc; random weights and input), so the whole set runs in seconds and every
   partition fits on one screen.
 - **Real models:** `--model <name>` loads them from [`../models/zoo.py`](../models/zoo.py): torchvision
@@ -57,6 +59,7 @@ python example/aiednn/flows/2_torch_compile/run.py --model resnet18
 python example/aiednn/flows/2_torch_compile/run.py --export --model resnet18 [--target vek385 --board <host>]   # torch.export
 python example/aiednn/flows/3_onnx/run.py --onnx worklocal/tvmrelay_deploy/resnet18-v1-7.int8.qdq.onnx
 python example/aiednn/flows/4_model_compiler/run.py --model resnet18          # int8, the MLIR pipeline
+python example/aiednn/flows/5_export_session/run.py [--model tiny]            # export → session API, host-owned main
 ```
 
 ResNet-18 (ImageNet weights, the Samoyed photo, class 258), workstation emulation, 2026-11-16:
@@ -68,7 +71,7 @@ ResNet-18 (ImageNet weights, the Samoyed photo, class 258), workstation emulatio
 | 3 `--onnx resnet18-v1-7.int8.qdq.onnx` | 26 partitions, 140 / 140 nodes | OnnxGraph 0.0, EP 1.1e-2 vs ORT CPU | 258 |
 | 4 `--model resnet18` (int8, MLIR) | 25 primitives, all on the AIE, 21 / 21 int8 GEMMs bit-exact | 2.0e-2 vs PyTorch f32 | 258 |
 
-## Run all four (workstation emulation)
+## Run all five (workstation emulation)
 
 The AIE kernels' C references stand in for the array, so `aie:` in an implementation name means the
 AIE path ran in emulation. From the repo root, with a Python that has torch, onnx and onnxruntime >= 1.23
@@ -78,18 +81,19 @@ AIE path ran in emulation. From the repo root, with a Python that has torch, onn
 bash example/aiednn/flows/run_all.sh
 ```
 
-Each flow ends in `PASS: flow N ...`. Expected, as run on 2026-11-16:
+Each flow ends in `PASS: flow N ...`. Expected, as run on 2026-11-23:
 
 ```
 PASS: flow 1 C API, matmul on blocked:aie:gemm_s8s32, relu on lut:aie:lut8, bit-exact vs ref:
 PASS: flow 2 torch.compile, max rel diff vs eager 2.24e-07
 PASS: flow 3 ONNX
 PASS: flow 4 model compiler (int8, mlir), rel err vs PyTorch 7.16e-08, top-1 8 (reference 8)
+PASS: flow 5 export session [tiny] (int8) -> x86 host-owned main
 ```
 
 ## On a board
 
-Each flow's README has the board command. Flows 1 and 4 build a board ELF with
+Each flow's README has the board command. Flows 1, 4 and 5 build a board ELF with
 `python -m aiegraph dnn-build` / `ag.dnn_build` (`--target vek280|vek385 --board <host>`). Flows 2 and 3 run
 their partitions in-process on the workstation. Their board form is
 [`../models/torch_compile_board.py`](../models/torch_compile_board.py): the same graph-API partitions, emitted
@@ -105,3 +109,5 @@ as a C app and checked on the board against the workstation run (`aiegraph.dnn_g
 | [`../prebuilt/`](../prebuilt/) | an app against the prebuilt static library (`python -m aiegraph dnn-lib`, `link.mk`) |
 | [`../models/`](../models/) | `run_models.py`: the zoo (ResNet, MobileNet, ViT, BERT, GPT-2, TinyLlama, YOLOv8n, …) through flow 4 |
 | [`../resnet18/`](../resnet18/) | TVM's int8 ResNet-18 as aiednn primitives, bit-identical to TVM |
+| [`../llmchat/`](../llmchat/) | GPT-2 small answering prompts on a VEK280 from a web page |
+| [`../model_api/`](../model_api/) | same session flow as [`5_export_session/`](5_export_session/) (standalone gen + host) |

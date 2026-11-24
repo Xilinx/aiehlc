@@ -16,6 +16,9 @@ int8 calibration on the example input, the MLIR pipeline, the C app, the aiehlc 
     ep = torch.export.export(model, (x,))
     rep, g, ref = aiegraph.dnn_export.compile_exported(ep, x, target="vek385")   # the board program (ELF)
     aiegraph.dnn_export.run(rep, board="<host>")                                  # run it on any VEK385
+
+    # Host-owned main: emit="model" writes <name>_model.h (create/run/destroy) + a smoke host for the build.
+    rep, g, ref = aiegraph.dnn_export.compile_exported(ep, x, emit="model", target="x86")
 """
 
 from __future__ import annotations
@@ -477,8 +480,8 @@ def to_fx(ep, example_inputs=None):
 
 def compile_exported(ep, x, *, mode: str = "int8", name: str = "model", target: str = "x86", out=None,
                      vitis_settings: str = None, mlir: bool = True, prefer: str = "fastest", mesh=None,
-                     top1_range=None, eager=None, custom_sources=(), eager_mesh: str = "4x4",
-                     synth_weights: bool = False):
+                     top1_range=None, eager=None, custom_sources=(), emit: str = "app",
+                     eager_mesh: str = "4x4", synth_weights: bool = False):
     """An exported program -> the program for *target* (x86 | vek280 | vek385): flow 4 on to_fx(ep), built, not
     run. Returns (DnnBuild, AGraph, reference); run it with run(). *mode* f32 | int8 (calibrated on *x*);
     *top1_range*: a detector's class-score window (zoo's model.top1_range). *eager*: None builds the
@@ -487,17 +490,24 @@ def compile_exported(ep, x, *, mode: str = "int8", name: str = "model", target: 
     per-model kernels. *eager_mesh*: the instances' mesh, ``"RxC"`` with R in 4 / 6 / 8 and C = 4 (8x4 with
     warm launch is the fastest on VEK280). *custom_sources*: C files implementing the program's framework custom ops
     (dnn_torch.custom_c_symbol), run on the host CPU.
+    *emit*: ``"app"`` (default) writes the full benchmark ``main``; ``"model"`` writes a session library
+    (``<name>_model.h`` / ``.cc``: create / run / destroy) plus a thin smoke host for the build check —
+    replace the smoke with your own host that includes the model header.
     *synth_weights*: the app generates its large int8 weights on the device (dnn_torch.synthesize_weights)
     instead of carrying them, so a board ELF downloads in seconds; the reference is then the aiednn graph run
     on the workstation with the same weights, so this checks the build and its timing, not accuracy."""
     from . import dnn_torch as dt
     from ._env import repo_root
     from .dnn import dnn_build
+    if emit not in ("app", "model"):
+        raise AiegraphError("dnn_export", f"emit={emit!r}", hint="'app' or 'model'")
+    if synth_weights and emit != "app":
+        raise AiegraphError("dnn_export", "synth_weights with emit='model'", hint="synthetic weights are an app option")
     gm = to_fx(ep, [x])
     if top1_range is not None:
         gm.top1_range = top1_range
     out = Path(out or repo_root() / "worklocal" / "aiednn" / "export" / (
-        f"{name}_{mode}" + (f"_eager_{eager}" + (f"_{eager_mesh}" if eager_mesh != "4x4" else "") if eager else "")
+        f"{name}_{mode}" + (f"_eager_{eager}" + (f"_{eager_mesh}" if eager_mesh != "4x4" else "") if eager else "") + (f"_emit_{emit}" if emit != "app" else "")
         + ("_synth" if synth_weights else "")))
     g, ref, yf = dt.references(gm, x, mode, name, mlir=mlir)
     float_top1 = dt._top1(yf, g.top1_range)[0]
@@ -510,8 +520,13 @@ def compile_exported(ep, x, *, mode: str = "int8", name: str = "model", target: 
         ref = np.asarray(dt.run_ctypes(g, lib, x.numpy())[0], np.float32).reshape(ref.shape)
         float_top1 = -1
         print(f"synthetic weights: {len(g.synth)} int8 tensors, {moved / 1e6:.1f} MB generated on the device", flush=True)
-    app = dt.emit_app(g, out, ref, dt.TOL[mode], float_top1, prefer=prefer,
-                      custom_sources=custom_sources)
+    if emit == "model":
+        dt.emit_model(g, out, prefer=prefer, custom_sources=custom_sources)
+        app = dt.emit_model_smoke(g, out, ref, dt.TOL[mode], dt._top1(yf, g.top1_range)[0],
+                                  input_data=g.tensors[g.root(g.input)].data)
+    else:
+        app = dt.emit_app(g, out, ref, dt.TOL[mode], float_top1, prefer=prefer,
+                          custom_sources=custom_sources)
     kw = {}
     if eager:                          # every layer on a template instance, its kernel loaded right before it runs
         from . import dnn_eager
