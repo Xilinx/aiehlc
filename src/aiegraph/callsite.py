@@ -411,7 +411,7 @@ def linear_groups(cg, workdir, onnx_path, partition, model=None) -> list:
         if n is None or n.op_type not in ("MatMul", "Gemm") or L["weight"] not in n.input:
             raise AiegraphError(_STAGE, f"partition row {L.get('idx')} {L['node']}: not an ONNX "
                                 f"MatMul/Gemm with weight {L.get('weight')}")
-        b = numpy_helper.to_array(inits[L["weight"]]).astype(np.float32)
+        b = numpy_helper.to_array(inits[L["weight"]]).astype(np.float32, copy=False)  # F17: no 2nd copy
         at = {a.name: helper.get_attribute_value(a) for a in n.attribute}
         wnk = b if (n.op_type == "Gemm" and at.get("transB", 0)) else b.T
         M, K, N = L["pad"]["orig"] if "pad" in L else L["mkn"][0]
