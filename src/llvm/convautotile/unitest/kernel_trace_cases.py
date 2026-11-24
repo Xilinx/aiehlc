@@ -15,6 +15,7 @@ instantiated at its launch by kernel_template.cpp before the analysis).
 
     python3 src/llvm/convautotile/unitest/kernel_trace_cases.py [build/aiehlc-convtile]
 """
+import os
 import pathlib
 import shutil
 import subprocess
@@ -62,6 +63,12 @@ CASES = [
       ("for (int j = 0; j < 112 / ow_t; j++) {", "for (int i = 0; i < oh_core / oh_t; i++) {"),
       ("@OUTER@", "for (int j = 0; j < 112 / ow_t; j++) {")],
      "swap the two loops"),
+    # The harness runs the kernel body: an endless loop (the condition tests the
+    # wrong variable) used to hang aiehlc forever; now a bounded run reports it.
+    # run_case sets AIEHLC_TRACE_TIMEOUT=3 for cases named "endless loop...".
+    ("endless loop in the kernel body (trace time limit)",
+     [(LOAD_X, LOAD_X + "\n            for (int k = 0; i < 16; k++) { volatile int z = k; (void)z; }")],
+     "the kernel did not finish within 3 s"),
     ("schedule depends on data",
      [("            aie::release(win_a);\n", "            if (x[0] > 0) { aie::release(win_a); x = aie::load_buffer(win_a, {oh0 * S, ow0 * S, 0}, {ih_t, iw_t, C}); }\n            aie::release(win_a);\n")],
      "depends on the data"),
@@ -370,7 +377,10 @@ def run_case(cli, name, edits, expect, base=BASE):
             shutil.copy(h, tmp)
         path = pathlib.Path(tmp) / "case.cc"
         path.write_text(src)
-        p = subprocess.run([cli, "trace", str(path)], capture_output=True, text=True, timeout=600)
+        env = dict(os.environ)
+        if name.startswith("endless loop"):
+            env["AIEHLC_TRACE_TIMEOUT"] = "3"
+        p = subprocess.run([cli, "trace", str(path)], capture_output=True, text=True, timeout=600, env=env)
         out = p.stdout + p.stderr
     if expect is None:
         return p.returncode == 0, out

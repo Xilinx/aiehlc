@@ -557,7 +557,9 @@ echo ""
 # Detect the entry point from the GENERATED host.cc: `int main()` is a
 # user-written main passed through verbatim, `void main()` is the MLIR-only
 # emission that the fixups below promote to `int main()`. Neither => library.
-if grep -q 'int main()' "${WORKLOCAL_DIR}/host.cc"; then
+# Any user main counts, with or without parameters: `int main(int argc, char *argv[])`
+# used to fall through to "library" and silently produce lib<app>.a instead of an ELF.
+if grep -qE '^[[:space:]]*int[[:space:]]+main[[:space:]]*\(' "${WORKLOCAL_DIR}/host.cc"; then
     HOST_ENTRY_KIND="user-main"
 elif grep -q 'void main()' "${WORKLOCAL_DIR}/host.cc"; then
     HOST_ENTRY_KIND="mlir-main"

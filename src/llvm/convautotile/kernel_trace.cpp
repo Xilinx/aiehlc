@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sys/wait.h>
 #include <fstream>
 #include <map>
 #include <set>
@@ -222,6 +223,8 @@ std::string sourceDefines(const std::string &src) {
 // Harness: the kernel body on x86 with recording stubs
 // ---------------------------------------------------------------------------
 const char *kHarnessRuntime = R"HARNESS(
+#include <csignal>
+#include <unistd.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -376,6 +379,9 @@ std::string buildHarness(const std::string &src, const TraceKernel &k, const std
     os << "int main(int argc, char **argv) {\n"
           "    using namespace aiehlc_trace;\n"
           "    g_out = fopen(argv[1], \"w\");\n"
+          // Killed by the trace time limit (timeout -> SIGTERM): flush what was traced so
+          // the error can name the last block operation reached.
+          "    signal(SIGTERM, [](int) { fflush(aiehlc_trace::g_out); _exit(124); });\n"
           "    g_rows = atoi(argv[2]); g_cols = atoi(argv[3]); g_seed = atoi(argv[4]); g_pp = atoi(argv[5]);\n";
     for (auto &p : k.ports) {
         os << "    Port P_" << p.var << "{\"" << p.var << "\", " << p.shape.size() << ", {";
@@ -503,13 +509,40 @@ bool runHarness(const std::string &harness, const std::string &srcName, int rows
                            log.substr(0, 1500));
         return false;
     }
+    // The harness executes the user's kernel body on x86: a kernel that never ends (e.g.
+    // `for (int k = 0; i < 16; k++)`) used to hang aiehlc forever. Bound each run;
+    // AIEHLC_TRACE_TIMEOUT=<seconds> overrides (0 = no limit).
+    long limit = 120;
+    if (const char *t = std::getenv("AIEHLC_TRACE_TIMEOUT"); t && *t)
+        limit = std::strtol(t, nullptr, 10);
     std::vector<std::vector<Event>> runs;
     for (int seed : {1, 2}) {
         std::string trace = dir + "/trace" + std::to_string(seed) + ".txt";
-        std::string run = "ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 " + dir + "/h " + trace + " " +
+        std::string run = (limit > 0 ? "timeout -k 5 " + std::to_string(limit) + " " : std::string()) +
+                          "env ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 " + dir + "/h " + trace + " " +
                           std::to_string(rows) + " " + std::to_string(cols) + " " + std::to_string(seed) + " " +
                           std::to_string(pp) + " > " + dir + "/run.log 2>&1";
         int rc = std::system(run.c_str());
+        int code = WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+        if (limit > 0 && (code == 124 || code == 137)) { // timeout: TERM -> 124, KILL after -k -> 137
+            std::vector<Event> got = parseTrace(readAll(trace));
+            std::string last;
+            for (auto it = got.rbegin(); it != got.rend(); ++it)
+                if (it->line > 0) {
+                    last = "; the last block operation it reached is at " + srcName + ":" + std::to_string(it->line) +
+                           " (core " + std::to_string(it->p0) + "," + std::to_string(it->p1) + ")";
+                    break;
+                }
+            r.errors.push_back("kernel analysis: the kernel did not finish within " + std::to_string(limit) +
+                               " s when traced on x86 (" + std::to_string(rows) + "x" + std::to_string(cols) +
+                               " mesh, " + std::to_string(got.size()) + " block operation(s) traced" + last +
+                               ") -- most likely an endless loop in the kernel body, e.g. a loop whose condition "
+                               "tests the wrong variable. Set AIEHLC_TRACE_TIMEOUT=<seconds> if the kernel is "
+                               "just slow on x86");
+            if (!std::getenv("AIEHLC_TRACE_KEEP"))
+                std::system(("rm -rf " + dir).c_str());
+            return false;
+        }
         std::string asan = asanDiagnostic(readAll(dir + "/run.log"), srcName);
         if (!asan.empty() || rc != 0) {
             r.errors.push_back(
