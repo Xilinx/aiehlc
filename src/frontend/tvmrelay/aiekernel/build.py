@@ -113,6 +113,66 @@ def _wl_cache_dir():
     return Path(d).resolve() if d else None
 
 
+# F15: the three ~430 MB parts of a UNet worklocal -- build/*.a, build/kernel_*.o (44 x 10 MB) and
+# build/kpar/** (aiehlc's per-kernel scratch, 44 x 10 MB ELFs) -- are hardlinked, not copied, from the
+# wl cache into worklocal and from worklocal into the layer's aie/ (install). Audit of every writer
+# (hostcompile.sh, install): kernel_<k>.o is only replaced by `mv -f`, kpar/ is `rm -rf`ed before a
+# rebuild, install unlinks build/*.a and build/host.o before hostcompile.sh, and gcc/as/ld/ar unlink
+# or rename their outputs. Files written in place (host.cc, *.stamp, build/kernel, aiehlc_ctrlpkt via
+# cp) are NOT in the set and are still copied. Linked files are made 0444 so a future in-place writer
+# fails loudly instead of corrupting the cache. EXDEV/EPERM -> copy. AIEHLC_WL_CACHE_LINK=0 = copy all.
+_WL_LINK_ENV = "AIEHLC_WL_CACHE_LINK"
+
+
+def _wl_linkable(rel: str) -> bool:
+    """*rel*: path relative to a worklocal root, '/'-separated."""
+    if not rel.startswith("build/"):
+        return False
+    tail = rel[len("build/"):]
+    if tail.startswith("kpar/"):
+        name = tail.rsplit("/", 1)[-1]
+        return name != "aiehlc_ctrlpkt"              # cp -p'd into kpar/<k>/build/ (in place)
+    return "/" not in tail and (tail.endswith(".a") or
+                                (tail.startswith("kernel_") and tail.endswith(".o")))
+
+
+def _wl_link_on() -> bool:
+    return os.environ.get(_WL_LINK_ENV, "1").strip() != "0"
+
+
+def _wl_copytree(src: Path, dst: Path, skip=None) -> dict:
+    """copytree(symlinks=True) that hardlinks :func:`_wl_linkable` files (0444).
+    *skip(rel)* -> True drops a file. Returns ``{"linked", "copied", "skipped"}`` counts."""
+    src = Path(src)
+    n = {"linked": 0, "copied": 0, "skipped": 0}
+    link = _wl_link_on()
+
+    def _copy(s, d):
+        rel = Path(s).relative_to(src).as_posix()
+        if link and _wl_linkable(rel) and not os.path.islink(s):
+            try:
+                if os.stat(s).st_mode & 0o222:
+                    os.chmod(s, 0o444)
+                os.link(s, d)
+                n["linked"] += 1
+                return d
+            except OSError:                       # EXDEV / EPERM / exists -> copy
+                pass
+        n["copied"] += 1
+        return shutil.copy2(s, d)
+
+    def _ignore(d, names):
+        if skip is None:
+            return []
+        base = Path(d).relative_to(src)
+        out = [x for x in names if not (Path(d) / x).is_dir() and skip((base / x).as_posix())]
+        n["skipped"] += len(out)
+        return out
+
+    shutil.copytree(src, dst, symlinks=True, copy_function=_copy, ignore=_ignore)
+    return n
+
+
 def _wl_cache_get(stamp: str, dest: Path, log: Path) -> bool:
     c = _wl_cache_dir()
     e = c / stamp if c else None
@@ -121,7 +181,7 @@ def _wl_cache_get(stamp: str, dest: Path, log: Path) -> bool:
     tmp = dest.with_name(dest.name + f".get{os.getpid()}")
     try:
         shutil.rmtree(tmp, ignore_errors=True)
-        shutil.copytree(e / "worklocal", tmp, symlinks=True)
+        _wl_copytree(e / "worklocal", tmp)
         if (e / "aiehlc.log").is_file():
             shutil.copy2(e / "aiehlc.log", log)
     except (OSError, shutil.Error):                 # entry pruned under us -> miss
@@ -144,7 +204,7 @@ def _wl_cache_put(stamp: str, dest: Path, log: Path) -> None:
     tmp = c / f".tmp-{stamp}-{os.getpid()}"
     try:
         c.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(dest, tmp / "worklocal", symlinks=True)
+        _wl_copytree(dest, tmp / "worklocal")
         if log.is_file():
             shutil.copy2(log, tmp / "aiehlc.log")
         (tmp / "DONE").write_text(stamp + "\n")
@@ -482,7 +542,10 @@ def install(spec, worklocal: Path, aie_dir: Path, layer_calls, verbose: bool = T
     aie_dir = Path(aie_dir)
     if aie_dir.exists():
         shutil.rmtree(aie_dir)
-    shutil.copytree(worklocal, aie_dir, symlinks=True)
+    # build/*.a and build/host.o are deleted below before hostcompile.sh anyway: don't copy them
+    # (430 MB for UNet). Large read-only parts are hardlinked (F15, _wl_copytree).
+    _wl_copytree(worklocal, aie_dir, skip=lambda rel: rel == "build/host.o" or (
+        rel.startswith("build/") and rel.endswith(".a") and rel.count("/") == 1))
     host = aie_dir / "host.cc"
     text = host.read_text()
     cut = text.find(ADAPTER_MARK)
