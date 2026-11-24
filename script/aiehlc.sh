@@ -178,6 +178,16 @@ build_hw_lib() {
     }
 
 
+# Close an alib lock fd (GAP-ALIB-RACE below) that a shell still holds from an OLDER aiehlc.sh, which
+# took the lock in the caller's shell when sourced. The current script never does: main runs in a
+# subshell (see the end of this file), so the lock dies with it.
+aiehlc_release_alib_lock() {
+    if [[ -n "${AIEHLC_ALIB_LOCK_FD:-}" ]]; then
+        exec {AIEHLC_ALIB_LOCK_FD}>&- 2>/dev/null || true
+        unset AIEHLC_ALIB_LOCK_FD
+    fi
+}
+
 main() {
 set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -409,6 +419,8 @@ if [ -d "${AIE_DRIVER_PARENT_DIR}/aie-rt/driver/" ] && [[ "$platform" != "sim" ]
     # aie-rt objects); two aiehlc.sh runs on one tree (e.g. a full and a VERIFY UNet build in parallel)
     # deleted each other's objects ("xaie_feature_config.h: No such file", rc=2). Hold an exclusive lock
     # on the alib dir from here until this script exits, since the later host link reads alib/lib + include.
+    # main runs in a subshell, so this fd belongs to that process: the kernel releases the lock when
+    # it exits -- normally, on error, on Ctrl-C or kill -- and the caller's shell never holds it.
     if command -v flock >/dev/null 2>&1; then
         exec {AIEHLC_ALIB_LOCK_FD}>"${AIE_DRIVER_PARENT_DIR}/.aiehlc_alib.lock"
         echo "aiehlc.sh: waiting for alib lock ${AIE_DRIVER_PARENT_DIR}.aiehlc_alib.lock"
@@ -882,4 +894,12 @@ if [ -f "$host_file" ]; then
 fi
 }
 
-main "$@"
+# main runs in a SUBSHELL, whether this file is sourced or executed. Its process owns the alib lock fd
+# (released by the kernel however it ends, Ctrl-C included) and its `set -eo pipefail`, variables and
+# exports, none of which leak into a caller that sourced it. Callers only consume the return code
+# and the aout/ tree. A shell holding a lock from an older aiehlc.sh drops it first, else the
+# subshell (which inherits that fd) would wait on it forever. `|| rc=$?` keeps a failing main from
+# tripping a caller's set -e before the status is handed back.
+aiehlc_release_alib_lock
+( main "$@" ) && AIEHLC_MAIN_RC=0 || AIEHLC_MAIN_RC=$?
+return "$AIEHLC_MAIN_RC" 2>/dev/null || exit "$AIEHLC_MAIN_RC"
