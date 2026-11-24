@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Moved to src/costmodel/tools/site_feat.py -- backward-compatible shim for gates/logs that call this old path."""
 import runpy
 import sys

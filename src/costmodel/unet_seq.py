@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """UNet launch sequence and site geometry from a UNet aiegraph build directory (read only).
 
 COPIED (not rewritten) from maxwell's kswitch.py, M1.2.1 P0b

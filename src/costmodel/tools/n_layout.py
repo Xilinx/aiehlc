@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Per-site host layout features of the UNet AIE sites (costmodel M2, N segment), aligned with a board log.
 
   n_layout.py --build B [--check-log CFG=LOG ...] [--json out.json]

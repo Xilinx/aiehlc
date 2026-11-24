@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Check of the overlap-model input ovl_cyc on UNet board logs (costmodel M3.1.2.2 PX).
 
   k_ovl_check.py --build-root DIR [--off-corr PARAMS.json] CFG=L1,L2[,L3...] [CFG=...]

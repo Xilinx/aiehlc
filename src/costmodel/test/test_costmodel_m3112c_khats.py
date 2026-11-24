@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """M3.1.1.2c PK: k_diag.py --khat-static (all-static K_hat: core + dw - ovl, fitted on run a only)."""
 import csv
 import importlib.util

@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """L segment (launch overhead) cost model, M1.1 / M1.2.1.
 
 L = kload + core_reset + coreen + rt_bdcfg + rt_startio, per launch, ms.

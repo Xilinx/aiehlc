@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """kcore_net -- static per-launch core cycles (K_core) for every AIE site of a gemm_kacc net vs measured compute_cyc
 (costmodel M4.1 P5; no simulator).
 

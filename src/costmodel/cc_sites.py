@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Static per-site N (host glue) features of an aiegraph CNN build on the cnn_aie_conv (kacc_chunk) path
 (yolo26n, aiek_cnnconv; costmodel M4.2 P2). The ap_sites.py counterpart for aiek_cnnconv.cc.
 

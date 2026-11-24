@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """UNet K anchor diagnosis per site: measured core counters + static BD shape (costmodel M3.1).
 
   k_diag.py --build-root DIR CFG=LOG_A[,LOG_B] ... [--ref CFG=M2C_B_LOG ...]
@@ -927,7 +931,7 @@ def _kcyc_static(build, iss):
 
 def _meas_cyc(s):
     """one run's compute cycles of a site over all its launches (compute_cyc / perf_n * launches), nan without
-    the ovl tail -- the k_core_check.py:115-118 per-run value (never io_act - stalls)"""
+    the ovl tail -- the k_core_check.py:119-122 per-run value (never io_act - stalls)"""
     p = s.get("perf")
     if not p or not p.get("has_ovl") or p["perf_n"] <= 0:
         return float("nan")

@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
 # Proposal: tune a model build offline with the cost model
 
 Status legend: **[implemented]** = code exists and runs today (cited); **[prototype]** = `tune_loop.py` in this
@@ -22,9 +24,9 @@ candidates *before* the board, send only the best few, and feed the board result
 | # | step | status | where |
 |---|---|---|---|
 | 1 | Enumerate candidates over knobs: control-path cfg (off / aot / aot-kco) | **[implemented]** for cfg | build scripts take the cfg (`script/perf/build_net_cfg.sh`, `build_unet_cfg.sh`); `tune_loop.py` `enumerate_candidates` finds the 6 builds on disk |
-| 1b | …over tiling knobs (kacc `S`, `kch`, `nkc`, `ntile` via `aiegraph.cnn_chunk.kacc_geom`), partition (which layers/sites on the AIE), fusion | **[proposed]** | the DES already takes any kacc geometry (`des.py:70-79`), but see limit L1 |
+| 1b | …over tiling knobs (kacc `S`, `kch`, `nkc`, `ntile` via `aiegraph.cnn_chunk.kacc_geom`), partition (which layers/sites on the AIE), fusion | **[proposed]** | the DES already takes any kacc geometry (`des.py:74-83`), but see limit L1 |
 | 2 | Compile each candidate (only the build, no board) | **[implemented]** (builds) | ~1338 s for 17 kernel ELFs (M7 REPORT §4); fast-build work reduces this |
-| 3 | `estimate()` each candidate, keep `unpriced` | **[implemented]** | `estimate.py:440`; net mode needs only the build dir |
+| 3 | `estimate()` each candidate, keep `unpriced` | **[implemented]** | `estimate.py:444`; net mode needs only the build dir |
 | 4 | Rank per net; board set = top-k ∪ {within `margin` of best} | **[prototype]** | `tune_loop.py` `select`; margin should be ≥ the model's per-total error (§Limits) |
 | 5 | Board runs of the selected candidates only | **[prototype: replay]** | `tune_loop.py` reads the archived M7 logs instead of running the board; the real loop would call `script/perf/p0_one_kernel.sh` / the net run scripts |
 | 6 | Refit from the new board logs, re-freeze | **[implemented]** for K (kernel level) and L/N/site-K tools; **[prototype]** wiring | `tools/costmodel_fit.py` `calibrate`, `tools/l_fit.py`, `tools/n_fit.py`, `tools/k_net.py`; `tune_loop.py` `refit` refits K on the 17 M7 kernel logs and writes only to `--refit-out` |
@@ -70,10 +72,10 @@ Runtime ~19 s on x86.
   without compiling needs a core-cycle model for unbuilt kacc instances — **[proposed]**, not available; do not
   feed invented `core_cyc` to the DES.
 * **L2 Unpriced paths count as 0** (#3). Op/bdgraph mode lists `resident`, `aot_window` / other BD write paths,
-  locks, `glue`, `l` in `unpriced` and leaves them out of `total_ms` (`estimate.py:115-167`, `:476`). A ranking
+  locks, `glue`, `l` in `unpriced` and leaves them out of `total_ms` (`estimate.py:119-171`, `:480`). A ranking
   across candidates that differ in an unpriced term is meaningless; the loop must refuse such comparisons
   (`tune_loop.py` prints `unpriced=` per candidate; net mode returns `[]`).
-* **L3 One board** (#4). Full parameter sets exist only for palmyra213 (`estimate.py:182`, `:340`); VEK385 has a
+* **L3 One board** (#4). Full parameter sets exist only for palmyra213 (`estimate.py:186`, `:344`); VEK385 has a
   kernel-level diff only (M7.2.2). The loop as written tunes for palmyra213.
 * **L4 Resolution** (#2, #5). The candidates ranked so far differ 1.1–2×. Per-site maxrel is 0.177 (UNet) and
   per-site board jitter ~2–4 %; ranking candidates a few percent apart is unvalidated — hence the `--margin`

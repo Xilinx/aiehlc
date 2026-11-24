@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Static L-segment features per launch from a BUILD directory only (M1.2.2 P4).
 
 The six features the L model uses (launch_l.feature_row) come from the build products, never from a board counter:

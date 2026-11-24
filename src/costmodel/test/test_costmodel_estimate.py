@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """costmodel.estimate -- the public cost-layer API (cost plan P4a).
 
 Given / when / then in the test names:  an op group in Steve's schema -> per-term ms + the list of unpriced terms.

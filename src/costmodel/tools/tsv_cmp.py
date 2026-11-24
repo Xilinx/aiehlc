@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Keyed column compare of two TSV files (costmodel M3.1.2.2 PNL: reproduce lpred / npred bit-for-bit).
 
   tsv_cmp.py A B --key k1,k2.. --cols c1,c2.. [--tol X]

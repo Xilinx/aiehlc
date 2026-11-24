@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Cost-model fitting / measurement / report tools (moved here from script/perf/).
 
 Each tool is a stand-alone script (``python3 -I <tool>.py ...``, the way the board gates run them) and the tools

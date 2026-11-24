@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """M3.1.1.2c PW: k_dmafeat --dwfit static data-wait model (no logs needed)."""
 import importlib.util
 import sys

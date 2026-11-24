@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Per-site host layout features of the UNet AIE sites, from a build directory only (costmodel M2, N segment).
 
 layout_sites(build) -> [dict] in graph_run order (one per aiednn_aie_* call = one board 'PROF part=<i> op=aie_host_*'):

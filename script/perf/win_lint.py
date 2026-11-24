@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """win_lint.py <file|dir>... -- no console I/O inside a timed window.
 
 A timed window is, per C function, the span from the first to the last timing probe

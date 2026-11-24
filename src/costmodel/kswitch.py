@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """kswitch.py -- M1.2.1 P0b: static per-tile kernel-switch count for the UNet aiegraph build.
 
 (Moved into the repo in M1.2.2 P2 from maxwell tasks/2026-11-20_M1-2/kswitch.py; unet_launches() is the

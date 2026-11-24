@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """M3.1.2.2 PKF: k_diag.py --khat-static --params (frozen K_hat params, no fit): same K_hat as the fit that
 wrote the json, K_loo=nan, --params with --fit -> rc 2, audit covers khats_params_rows."""
 import contextlib

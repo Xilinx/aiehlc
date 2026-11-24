@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """costmodel M3.1.1.2c PV: k_ovl_check.py --npred / --delta-tsv (static ovl_hat vs counter ovl, kdelta_ovl)"""
 import subprocess
 import sys

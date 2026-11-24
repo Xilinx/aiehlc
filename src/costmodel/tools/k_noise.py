@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """UNet per-site K a/b noise floor on board logs (costmodel M3.1.2 P0).
 
   k_noise.py [--require-reach] [--spread-out FILE] CFG=L1,L2[,L3...] [CFG=L1,L2[,L3...] ...]

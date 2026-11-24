@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """costmodel as one package: tools/ + params/ moved from script/perf, old paths still work, CLI, examples."""
 import importlib.util
 import json

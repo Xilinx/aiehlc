@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """M3.1.2.2.3.2 PFZ: script/perf/kln_frozen.sh -- rc rules and BUILD_ROOT/kln is never written.
 
 The six steps are stubbed through KLN_PY (a fake interpreter that logs its args and exits with

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """k_net -- static K overlap model of a gemm_kacc net (resnet18, yolo26n) + frozen L + N per launch (costmodel M4.1 P6).
 
   k_net.py --net resnet18 --build-root R --lparams L.json --nparams N.json --kcyc KCYC.json --board BOARD.json

@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """M3.1.2.2 PN: src/costmodel/tools/t_noise.py -- per-site T (site_ms) a/b/c jitter; runs under python -I."""
 import subprocess
 import sys

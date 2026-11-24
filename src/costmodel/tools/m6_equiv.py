@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """M6 P1: costmodel.estimate() net mode == the frozen board-validated K+L+N golden T_hat of all 3 nets.
 
   m6_equiv.py --golden-r18 R18_KNET.out --golden-yolo YOLO_KNET.out --golden-unet GOLDEN.tsv

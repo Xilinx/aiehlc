@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """M3.1.1.2c PS: k_diag.py --kdelta core (static core from kcyc_unet x launches, per-run K delta)."""
 import importlib.util
 import math

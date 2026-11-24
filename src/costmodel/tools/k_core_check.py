@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """UNet static core-cycle estimate vs measured per-site compute_cyc (costmodel M3.1.2.3 QM probe).
 
   k_core_check.py --build-root DIR [--iss JSON] [--max-rel X] CFG=LOG_A,LOG_B[,LOG_C] ...

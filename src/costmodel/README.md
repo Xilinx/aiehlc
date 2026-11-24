@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
 # `costmodel` — the AIE local cost model
 
 A white-box model that predicts, **without a board**, how long one AIE launch (and so one site or a whole
@@ -14,29 +16,29 @@ Every launch is split into three measured segments (board-log fields parsed by `
 
 | term | meaning | board quantity | model |
 |---|---|---|---|
-| **K** | AIE side: the host time in `__Runtime_wait_io` that the host's own BD issue does not hide | `rt_wait_io` of `LAUNCH split_detail` (`des.py:3-6`) | `des.py` (kernel level), `tools/k_diag.py:1204` `khats_predict` (UNet sites), `tools/k_net.py:125` `k_predict` (ResNet18/yolo26n sites) |
-| **L** | launch overhead `kload + core_reset + coreen + rt_bdcfg + rt_startio` | `LAUNCH split` / `split_detail` (`launch_l.py:3-5`) | linear in 7 static features per control-path cfg: `launch_l.py:27-28` (`CFGS`, `FEATURES`), `predict_l` `launch_l.py:81-89` |
-| **N** | host glue (packing, scatter, flush/inval, BD-config glue) | `PROF aie_host_split` | per-class linear `N = Σ coef·f + d` from static build features: `n_feat.py`, `n_layout.py`, `ap_sites.py`, `cc_sites.py`, fitted by `tools/n_fit.py:163` `fit_kind` |
-| **overlap** | the part of N (glue) that runs while the AIE is busy | — | `N_ovl = β·ovl`; UNet: `K_hat = max(0, body − N_ovl/launches) + t0 + kfirst/launches` (`estimate.py:239`, `tools/k_diag.py:1206-1208`); CNN nets: `K = max(core + dma, N_ovl) − N_ovl + c` (`tools/k_net.py:127-130`) |
+| **K** | AIE side: the host time in `__Runtime_wait_io` that the host's own BD issue does not hide | `rt_wait_io` of `LAUNCH split_detail` (`des.py:7-10`) | `des.py` (kernel level), `tools/k_diag.py:1208` `khats_predict` (UNet sites), `tools/k_net.py:129` `k_predict` (ResNet18/yolo26n sites) |
+| **L** | launch overhead `kload + core_reset + coreen + rt_bdcfg + rt_startio` | `LAUNCH split` / `split_detail` (`launch_l.py:7-9`) | linear in 7 static features per control-path cfg: `launch_l.py:31-32` (`CFGS`, `FEATURES`), `predict_l` `launch_l.py:85-93` |
+| **N** | host glue (packing, scatter, flush/inval, BD-config glue) | `PROF aie_host_split` | per-class linear `N = Σ coef·f + d` from static build features: `n_feat.py`, `n_layout.py`, `ap_sites.py`, `cc_sites.py`, fitted by `tools/n_fit.py:167` `fit_kind` |
+| **overlap** | the part of N (glue) that runs while the AIE is busy | — | `N_ovl = β·ovl`; UNet: `K_hat = max(0, body − N_ovl/launches) + t0 + kfirst/launches` (`estimate.py:243`, `tools/k_diag.py:1210-1212`); CNN nets: `K = max(core + dma, N_ovl) − N_ovl + c` (`tools/k_net.py:131-134`) |
 
-Per site the model returns `T_hat = (K + L + N) / launches` ms per launch (`estimate.py:242-243`,
-`tools/kln_site.py:109-111`), which is the same as `L + N_pre + max(busy, N_ovl) + N_post` when the AIE
-is busier than the overlapping glue (`estimate.py:242`) — the "− overlap" in the title.
+Per site the model returns `T_hat = (K + L + N) / launches` ms per launch (`estimate.py:246-247`,
+`tools/kln_site.py:113-115`), which is the same as `L + N_pre + max(busy, N_ovl) + N_post` when the AIE
+is busier than the overlapping glue (`estimate.py:246`) — the "− overlap" in the title.
 
 ### 1.2 Roofline flag
 
-`roofline.py:13-24`: intensity = MACs / mesh-unique DDR bytes per launch; `bound = "compute"` when the core
+`roofline.py:17-28`: intensity = MACs / mesh-unique DDR bytes per launch; `bound = "compute"` when the core
 compute cycles exceed the DDR read cycles, else `"ddr"`. It is a label for reports (the K fit prints it per
 kernel, `tools/costmodel_fit.py` `[K] ... roof=`); the time itself comes from the DES.
 
 ### 1.3 Discrete-event layer (`des.py`)
 
-`des.predict_launch` (`des.py:121-184`) simulates one `gemm_kacc` launch on the 4×4 mesh: `R = ntile`
-rounds, per round 24 host BDs (`des.py:63`), `nkc` K-chunks in 2-deep ping-pong windows; chunk *j*
-arrives at `max(arrival j−1, release of chunk j−2) + dma_chunk` (`des.py:162-169`); DDR time per burst or
-bytes-only (`des.py:90-119`); the host waits `max(0, round + fixed − overlap)` per round (`des.py:170-171`).
+`des.predict_launch` (`des.py:125-188`) simulates one `gemm_kacc` launch on the 4×4 mesh: `R = ntile`
+rounds, per round 24 host BDs (`des.py:67`), `nkc` K-chunks in 2-deep ping-pong windows; chunk *j*
+arrives at `max(arrival j−1, release of chunk j−2) + dma_chunk` (`des.py:166-173`); DDR time per burst or
+bytes-only (`des.py:94-123`); the host waits `max(0, round + fixed − overlap)` per round (`des.py:174-175`).
 Returns `wait_ms` (= K) plus `compute_ms / dma_ms / lock_ms / stall_ms / ddr_ms / bound`.
-The calibrated constants and their uncalibrated defaults are `CAL_DEFAULTS` (`des.py:49-61`).
+The calibrated constants and their uncalibrated defaults are `CAL_DEFAULTS` (`des.py:53-65`).
 
 ### 1.4 Per-board calibrated, frozen parameters (`params/`)
 
@@ -50,23 +52,23 @@ The calibrated constants and their uncalibrated defaults are `CAL_DEFAULTS` (`de
 | `kcyc_*.json` | static per-launch core cycles | `tools/kcyc_unet.py`, `tools/kcore_net.py` |
 | `m41_frozen.md5`, `m42_frozen.md5` | the frozen file set of resnet18 / yolo26n, md5-pinned | hand-frozen at M4.1 / M4.2 |
 
-Which files `estimate()` loads is fixed in code: UNet `KLN_PARAMS` (`estimate.py:182-190`), CNN nets
-`NET_PARAMS` → md5 file (`estimate.py:340-344`); every file is md5-checked when loaded
-(`estimate.py:347-363`) and reported in the result's `"params"`. Only **palmyra213** has a full set;
-`board_params()` raises for any other board (`estimate.py:59-64`).
+Which files `estimate()` loads is fixed in code: UNet `KLN_PARAMS` (`estimate.py:186-194`), CNN nets
+`NET_PARAMS` → md5 file (`estimate.py:344-348`); every file is md5-checked when loaded
+(`estimate.py:351-367`) and reported in the result's `"params"`. Only **palmyra213** has a full set;
+`board_params()` raises for any other board (`estimate.py:63-68`).
 
 ## 2. Module map
 
 | module | role |
 |---|---|
-| `estimate.py` | **the public entry** `estimate()` (`estimate.py:440`): op/group mode (`estimate_op` :98, `estimate_bdgraph` :132), UNet site mode (`estimate_sites` :227), net mode (`estimate_net` :366); `board_params` :59 |
+| `estimate.py` | **the public entry** `estimate()` (`estimate.py:444`): op/group mode (`estimate_op` :102, `estimate_bdgraph` :136), UNet site mode (`estimate_sites` :231), net mode (`estimate_net` :370); `board_params` :63 |
 | `des.py` | discrete-event K model of one kacc launch (§1.3) |
 | `roofline.py` | compute- vs DDR-bound flag (§1.2) |
 | `launch_l.py`, `launch_split.py` | L model; parser of the board's `LAUNCH split*` lines |
 | `static_feat.py`, `kload_static.py`, `rst_static.py`, `kswitch.py` | static L features from a build dir (calls, words, kload words, core resets, kernel switches) |
 | `n_feat.py`, `n_layout.py`, `unet_seq.py` | static N features / site table of a UNet build |
 | `ap_sites.py`, `cc_sites.py` | static N features of resnet18 (ap_gemm) / yolo26n (kacc_chunk) builds |
-| `bdgraph.py` | build-JSON (`dfscheduleprovenancemap`) form of `estimate()`: BD counts, issue time, DDR floor (`bdgraph.py:205`, `:447`) |
+| `bdgraph.py` | build-JSON (`dfscheduleprovenancemap`) form of `estimate()`: BD counts, issue time, DDR floor (`bdgraph.py:209`, `:451`) |
 | `cli.py`, `__main__.py` | `python -m costmodel` (§3) |
 | `tools/` | fitting / measurement / report tools (moved from `script/perf/`, §5) |
 | `params/` | frozen per-board parameters (moved from `script/perf/params/`) |
@@ -86,7 +88,7 @@ cd src && $PY -m costmodel --help          # or: PYTHONPATH=src $PY -m costmodel
 |---|---|
 | `estimate --net N --build ROOT --cfg C [--sites a,b] [--params NAME] [--json]` | net / site mode, frozen params |
 | `estimate --kernel NAME [--cycles JSON] [--bd-us X] [--launches N]` | one kacc kernel (K only; L/N unpriced) |
-| `estimate --group-json FILE` | any `estimate()` input (schema `estimate.py:1-40`) |
+| `estimate --group-json FILE` | any `estimate()` input (schema `estimate.py:5-44`) |
 | `fit k\|l\|n\|mb\|scmb\|kcyc\|kcore\|knet\|kdiag ARGS` | runs the fitting tool (`python -I tools/<tool>.py ARGS`) |
 | `report scatter\|params ARGS` | `tools/report_scatter.py` / `tools/params_table.py` |
 | `tool NAME ARGS` / `tools` | any tool / list them |
@@ -125,7 +127,7 @@ ESTIMATE board=palmyra213 launches=1 total_ms=0.4716 wait=0.4716 compute=0.7128 
 unpriced (counted as 0 in total_ms): glue, host_bd_us(default 5.0), l
 ```
 
-`--kernel` reads the ISS cycles table `estimate.CYCLES` (`estimate.py:54`, a file on /scratch, not in the
+`--kernel` reads the ISS cycles table `estimate.CYCLES` (`estimate.py:58`, a file on /scratch, not in the
 repo); pass `--cycles` for another one.
 
 ## 4. Step-by-step usage
@@ -135,7 +137,7 @@ repo); pass `--cycles` for another one.
 Net/site mode reads the build directory only (host.cc, aiek sources, kernel listings), never a board log:
 `<ROOT>/<net>_<cfg>/` from `example/aiegraph/<net>/build_*.py` or `script/perf/build_net_cfg.sh`
 (UNet: `example/aiegraph/unet_bk_sdm_tiny/build_unet_cfg.sh`). Kernel mode needs the kernel's kacc
-geometry + ISS `core_cyc` (`estimate.py:98-112`).
+geometry + ISS `core_cyc` (`estimate.py:102-116`).
 
 ### Step 2 — estimate
 
@@ -146,11 +148,11 @@ r = estimate({"net": "resnet18", "build": "/scratch/staff/huaj/tmp/costmodel_m40
 r["total_ms"], r["sites"][0], r["params"], r["unpriced"]
 ```
 
-Three input forms (`estimate.py:440-480`): `{"net", "build", "cfg"}` (net mode), `{"unet_build", "cfg"}`
+Three input forms (`estimate.py:444-484`): `{"net", "build", "cfg"}` (net mode), `{"unet_build", "cfg"}`
 (UNet site mode), or a list of ops / `{"ops": [...], "launches": n}` (op mode; K from the DES, L only if the
 op carries `"l"` features, N never). **Always read `r["unpriced"]`:** op-mode `total_ms` is the sum of the
-priced terms only (`estimate.py:476`); unpriced terms (`glue`, `l`, `resident`, BD write paths other than
-the fitted one, locks …) are listed and count as 0 (`estimate.py:115-126`, `:137-167`).
+priced terms only (`estimate.py:480`); unpriced terms (`glue`, `l`, `resident`, BD write paths other than
+the fitted one, locks …) are listed and count as 0 (`estimate.py:119-130`, `:141-171`).
 
 ### Step 3 — compare with the board (optional, offline once the log exists)
 
@@ -211,7 +213,7 @@ Stayed in `script/perf/`, on purpose:
 
 Runtime profiling hooks (`src/mlir/runtime`, `src/aiednn` host timers, `src/aiegraph/aiperf.py`) are
 instrumentation and were not touched. The build-input keys (`INPUT_PATHS` of
-`example/aiegraph/unet_bk_sdm_tiny/build_unet_cfg.sh:55` and `script/perf/build_net_cfg.sh:67`) include `src/aiegraph`
+`example/aiegraph/unet_bk_sdm_tiny/build_unet_cfg.sh:55` and `script/perf/build_net_cfg.sh:71`) include `src/aiegraph`
 (where the kernel / host assembly lives since main's unet-decl refactor) but exclude `src/costmodel` and
 `src/aiegraph/test`, so cost-model edits never mark a build stale.
 
@@ -219,7 +221,7 @@ instrumentation and were not touched. The build-input keys (`INPUT_PATHS` of
 
 1. **Post-compilation only.** Inputs are a compiled build (static features) and ISS core cycles; there is no
    pre-compile estimate.
-2. **Unpriced terms count as 0** in op-mode `total_ms` (`estimate.py:476`); `resident`, the `aot_window`
+2. **Unpriced terms count as 0** in op-mode `total_ms` (`estimate.py:480`); `resident`, the `aot_window`
    BD path and locks are listed in `unpriced`, not priced.
 3. **One board calibrated.** Full parameter sets exist only for palmyra213 (`KLN_PARAMS`, `NET_PARAMS`);
    VEK385 has a kernel-level comparison only (M7.2.2).

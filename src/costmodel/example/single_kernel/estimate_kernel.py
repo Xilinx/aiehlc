@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Example A -- estimate ONE kacc GEMM kernel (segment K, the AIE-side wait) and compare with its board log.
 
     python3 -I src/costmodel/example/single_kernel/estimate_kernel.py [--log LOG]

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """kgeom_equiv -- are the M3.1.2.1 UNet build logs (built from inputs=<base>) still valid for HEAD?
 
 Proves, offline (no build, no board):

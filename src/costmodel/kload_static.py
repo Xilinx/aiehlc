@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Static per-launch kernel-load words (kload_w) and core resets (rst) from a build directory (M1.2.2 P2).
 
 Nothing here reads a board counter: the prediction is a pure function of the build products.  The board logs

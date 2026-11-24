@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Fit / check the N (host glue) segment of UNet AIE sites (costmodel M2).
 
   n_fit.py --build-root DIR --fit CFG=LOG [...] --out JSON --check CFG=LOG [...]

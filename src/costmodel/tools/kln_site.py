@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Per-launch K + L + N synthesis of UNet AIE sites (costmodel M3.1.1.2 PC; first cut of M6 estimate()).
 
   kln_site.py --selftest

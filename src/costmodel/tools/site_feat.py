@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Per-site static N-segment features of a UNet build (costmodel M2, N = sum coef x bytes/words + c*launches + d).
 
   site_feat.py --build <unet build dir> --log <board log> [--build-log <build>.build.log]

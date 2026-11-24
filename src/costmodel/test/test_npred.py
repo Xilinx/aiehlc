@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """n_fit.py --predict (costmodel M3.1.2.1 PN): N_hat / ovl_hat read only static site features (no log field)."""
 import importlib.util
 import json

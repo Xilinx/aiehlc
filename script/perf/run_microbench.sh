@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Cost-model segment K microbench, one command (costmodel K1a).
 #   run_microbench.sh --board <ip> [--name palmyra213|vek385] [--section aie|ddr|launch|all] [--rebuild] [--out <dir>]
 # section aie: builds example/perf/aie_microbench.cc (aiehlc.sh, bare-metal A78 host, AIE2PS), runs it on the board with

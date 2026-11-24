@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Example C prototype -- the offline tuning loop of PROPOSAL.md on the candidates that exist today.
 
     python3 -I src/costmodel/example/offline_tuning_proposal/tune_loop.py [--top-k 1] [--margin 0.05] [--no-refit]

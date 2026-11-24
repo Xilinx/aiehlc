@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Discrete-event model of ONE gemm_kacc launch on the 4x4 AIE mesh (AIE side, segment K of the cost layer).
 
 Predicted quantity: the host time spent in ``__Runtime_wait_io`` per launch (``rt_wait_io`` of

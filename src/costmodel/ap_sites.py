@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Static per-site N (host glue) features of an aiegraph CNN build on the ap_gemm path (resnet18; costmodel M4.1 P2).
 
   ap_sites.py --build <root>/resnet18_<cfg> [--build-log <build>.build.log] [--check-log <board log>]

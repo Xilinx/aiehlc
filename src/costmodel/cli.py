@@ -1,8 +1,12 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """``python -m costmodel <subcommand>`` -- one command line over the existing cost-model code.
 
     estimate  --net unet|resnet18|yolo26n --build ROOT --cfg CFG [--sites a,b] [--params NAME]   (net/site mode)
     estimate  --kernel NAME [--cycles JSON] [--bd-us X] [--launches N]                          (one kacc kernel)
-    estimate  --group-json FILE                                     (any estimate() input, see estimate.py:1-40)
+    estimate  --group-json FILE                                     (any estimate() input, see estimate.py:5-44)
     fit       k|l|n|mb|scmb|kcyc|kcore|knet|kdiag  [tool args ...]  (runs the fitting tool, python -I)
     report    scatter|params [tool args ...]                        (report_scatter.py / params_table.py)
     tool      NAME [args ...]                                       (any tool in costmodel/tools/)

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """params_table -- the report's parameter table straight from the frozen parameter files (costmodel M7 P5).
 
   params_table.py --md5 src/costmodel/params/m41_frozen.md5 src/costmodel/params/m42_frozen.md5 [--unet m3122] --out T.md

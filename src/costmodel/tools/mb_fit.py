@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Fit the raw "MB ..." lines of example/perf/aie_microbench.cc into src/costmodel/params/<board>.json (costmodel K1a).
 
 usage: mb_fit.py <console log> <out json> <board name> [aie|ddr]

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Board run-to-run jitter of per-site T (site_ms) across the a/b/c runs (costmodel M3.1.2.2 PN).
 
   t_noise.py SET=LPRED.tsv [SET=LPRED.tsv ...] [--site CFG:SITE ...] [--margin X]

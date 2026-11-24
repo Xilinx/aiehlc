@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # kln_frozen.sh [--net NET] BUILD_ROOT LOGDIR OUTDIR -- M3.1.2.2.3.2 PFZ: frozen K+L+N per-launch prediction, nothing refit.
 #   --net NET  unet (default, output unchanged) | resnet18 | yolo26n (M4.1): BUILD_ROOT/NET_<cfg>, LOGDIR/NET_<cfg>.<run>.log,
 #              cfgs off + C2 (unet/resnet18: aot-kco; yolo26n: aot); passed as --net to every step;

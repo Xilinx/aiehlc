@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """bdgraph input form of ``estimate()`` -- structural features of one launch read from the aiehlc build JSONs.
 
 Source: ``<worklocal>/dfscheduleprovenancemap.json`` (BD chains, start_io) + ``schedule_view.json`` (host_lines),

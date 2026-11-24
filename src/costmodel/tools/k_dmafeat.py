@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """k_dmafeat -- M3.1.2.2/M3.1.2.3: 7 static DMA physical features per UNet K site vs the dma residual.
 
 Offline only: features come from the build directories (worklocal host.cc shim BD / Create IO comments,

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """build_fresh -- is <outroot>/unet_<cfg> (main.elf) still the build of the current UNet build inputs?
 
 Content-based successor of `build_unet_cfg.sh --check-fresh` (same rule as build_unet_cfg.sh:55-87, which is

@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """``costmodel.estimate`` -- the one public entry of the AIEHLC local cost layer (plan P4a).
 
     estimate(group, board="palmyra213", params=None, cycles=None) -> dict

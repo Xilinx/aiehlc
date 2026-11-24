@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Example B -- estimate a whole network per site + total and compare with the measured board run.
 
     python3 -I src/costmodel/example/whole_model/estimate_net.py [--net resnet18|unet|yolo26n] [--rows N]

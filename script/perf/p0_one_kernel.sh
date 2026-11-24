@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # Cost-model P0 / K1a: one gemm_kacc kernel from kernels.tsv on the board, with per-launch AIE core perf counters.
 #   p0_one_kernel.sh --board <ip> [--kernel <name>] [--kernels <kernels.tsv>] [--name palmyra213] [--out <dir>]
 #                    [--reps 8] [--aie-clk-mhz 1000] [--rebuild] [--ctrlpkt off|aot|aot-kco] [--build-only]

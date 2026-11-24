@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Static ``core_reset`` count per launch (M1.2.2 P0): a pure function of a build directory.
 
 The measured side is ``LAUNCH split_detail calls ... core_reset=<n>`` divided by the launch count

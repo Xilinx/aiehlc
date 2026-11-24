@@ -1,4 +1,8 @@
 #!/bin/bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 # build_net_cfg.sh -- the ResNet18 / yolo26n board builds for the cost-model M4 three-net K+L+N check
 # (structure after example/aiegraph/unet_bk_sdm_tiny/build_unet_cfg.sh).
 #

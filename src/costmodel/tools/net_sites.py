@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """net_sites -- per-net naming for the frozen K+L+N chain (costmodel M4.1 P0) + board-log site/launch census.
 
 Shared helpers (imported by m3_site / k_diag / k_dmafeat / kln_site / n_fit via set_net):

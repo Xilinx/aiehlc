@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Tests for src/costmodel (AIEHLC local cost layer, AIE side)."""
 import sys
 from pathlib import Path

@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
 # Cost-model examples (offline, x86, no board)
 
 All commands run from the repository root with the project venv; outputs below are the real outputs of this
@@ -39,8 +41,8 @@ What it shows:
   report's prediction for this kernel; the report's measured 0.5180 is a later board run, the committed log
   gives 0.5166.
 * The host BD cost from the log (5.203 µs/BD) does not move this prediction: with this calibration
-  `overlap_bd = 0` (`des.py:150`) and the b-prefetch cap binds at `b_prefetch_b` (`des.py:142`).
-* `bound=ddr`: the 16 rounds are DMA/DDR-paced (`des.py:183`), consistent with M7 §6 ("17 kernels all ddr bound").
+  `overlap_bd = 0` (`des.py:154`) and the b-prefetch cap binds at `b_prefetch_b` (`des.py:146`).
+* `bound=ddr`: the 16 rounds are DMA/DDR-paced (`des.py:187`), consistent with M7 §6 ("17 kernels all ddr bound").
 
 ## B. `whole_model/` — a whole network, per site + total
 

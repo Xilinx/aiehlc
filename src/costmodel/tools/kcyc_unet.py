@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Per-launch AIE core cycles (core_cyc) for every UNet AIE site (costmodel M3 P1, K = DES(core_cyc)).
 
   kcyc_unet.py --build-root <unet build dir> --iss <aie2ps_kernel_cycles.json> --out <json>

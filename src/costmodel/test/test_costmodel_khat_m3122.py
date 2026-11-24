@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """M3.1.2.2 PK (M3122): k_diag --khat-static refit -- clamp row (body >= 0 on every fit site), per-class form with
 cfg-form fallback (old jsons reproduce), --khat-obj t reads only the PREDICTED L_hat / N_hat."""
 import csv

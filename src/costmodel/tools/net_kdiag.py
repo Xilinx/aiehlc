@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """net_kdiag -- costmodel M4.1 P4: per-site core- vs DMA-bound from the core counters + static DMA physical
 features, for the CNN nets (resnet18; aiek_cnn gemm_kacc instances). Diagnosis only: no fit, no parameters.
 

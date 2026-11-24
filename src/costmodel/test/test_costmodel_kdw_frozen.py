@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """M3.1.2.2 PD: frozen kdw params json -> k_dmafeat --dwpredict (no fit), predict-path audit."""
 import contextlib
 import importlib.util

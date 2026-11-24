@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Cost-model fit, stage K (AIE side): DES (src/costmodel/des.py) prediction of rt_wait_io per launch vs the
 board (palmyra213) per-kernel logs of script/perf/p0_one_kernel.sh.
 

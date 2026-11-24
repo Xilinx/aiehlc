@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Frozen L on a cnn net (resnet18, M4.1 P1): static L calls per launch from the build only, checked against the
 board's LAUNCH split_detail, and the frozen L params (no refit) against the board L per launch.
 

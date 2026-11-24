@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """M3.1.1.2c PG: kln_site --k-tsv / --kswap (external K, every *_ms per launch)."""
 import importlib.util
 from pathlib import Path

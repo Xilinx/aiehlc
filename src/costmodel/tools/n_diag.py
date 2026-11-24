@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """N-segment pair diagnosis: for site pairs with identical static features (kind, MK, MN, launches),
 find which host-split component (pack/scatter/glue/flush/inval_ms) carries the N difference, and
 check that it reproduces across two board runs (a, b) of the same config.

@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """costmodel M3.1.2.2.5 PO: n_fit --fit-ovl cls -- one overlap term per (cfg, kind), fitted on the M3121 a log only.
 ovl_hat = cls[kind].k * (glue_hat + corr_ms) + cls[kind].c; N kinds/coefficients are copied, so N_hat is unchanged."""
 import json

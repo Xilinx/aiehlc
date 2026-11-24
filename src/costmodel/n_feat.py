@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """N-segment (host glue) features per UNet AIE site from a build directory only (costmodel N fit, P2).
 
   n_feat.py --build <unet build dir> [--build-log <build>.build.log] [--check-log <board log>] [--json out.json]

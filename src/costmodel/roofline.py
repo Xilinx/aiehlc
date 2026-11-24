@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """Roofline flag of one kacc launch: compute-bound vs DDR-bound (AIE side, segment K).
 
 intensity = MACs per launch / mesh-unique DDR bytes per launch (des.geometry); ridge = peak MAC/s of the 16 cores

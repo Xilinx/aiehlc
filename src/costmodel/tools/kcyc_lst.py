@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """kcyc_lst -- static per-launch AIE core cycles of a gemm_kacc instance from its chess kernel.lst (no simulator).
 
   kcyc_lst.py LST [--func gemm_kacc] [-v]

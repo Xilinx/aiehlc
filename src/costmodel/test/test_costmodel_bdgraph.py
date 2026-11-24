@@ -1,3 +1,7 @@
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
 """costmodel.bdgraph -- the bdgraph input form of estimate() (structural counts from the build JSON).
 
 Given / when / then in the test names.  Synthetic build JSONs in tmp_path; one optional check on a real build.
