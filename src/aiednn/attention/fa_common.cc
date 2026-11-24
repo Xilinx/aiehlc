@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 
 // AIEHLC_KERNEL_PROLOGUE_BEGIN
 // GFA: flash-attention helpers (Maxwell M4 fa15 body); every symbol is static so a kernel's core program keeps

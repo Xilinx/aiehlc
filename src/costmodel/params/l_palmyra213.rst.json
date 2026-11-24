@@ -1,0 +1,51 @@
+{
+ "board": "palmyra213",
+ "cfg": {
+  "off": {
+   "coef": {
+    "bdcfg_calls": 0.001875,
+    "bdcfg_w": 0.0,
+    "const": 0.281629,
+    "cp_w": 0.0,
+    "kload_w": 0.000159,
+    "rst": 0.023508,
+    "startio_calls": 0.000938
+   },
+   "kernels": [
+    "off/u_conv_64x11520x1280",
+    "off/u_lin_1024x320x2560",
+    "off/u_lin_1024x320x320",
+    "off/u_lin_1024x320x960",
+    "off/u_lin_256x640x1920",
+    "off/u_lin_256x640x5120",
+    "off/u_lin_64x1280x3840",
+    "off/u_lin_77x768x640",
+    "off/y_conv_1600x64x64",
+    "off-reload/u_conv_64x11520x1280",
+    "off-reload/u_lin_1024x320x2560",
+    "off-reload/u_lin_1024x320x320",
+    "off-reload/u_lin_1024x320x960",
+    "off-reload/u_lin_256x640x1920",
+    "off-reload/u_lin_256x640x5120",
+    "off-reload/u_lin_64x1280x3840",
+    "off-reload/u_lin_77x768x640",
+    "off-reload/y_conv_1600x64x64",
+    "off-alt/u_lin_77x768x640+u_lin_1024x320x320"
+   ],
+   "loo_maxrel": 0.219,
+   "maxrel": 0.044,
+   "n": 19,
+   "r2": 1.0
+  }
+ },
+ "features": [
+  "const",
+  "bdcfg_calls",
+  "startio_calls",
+  "bdcfg_w",
+  "cp_w",
+  "kload_w",
+  "rst"
+ ],
+ "l_def": "kload+core_reset+coreen+rt_bdcfg+rt_startio (ms/launch)"
+}

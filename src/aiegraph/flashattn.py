@@ -34,7 +34,7 @@ from .errors import AiegraphError
 _STAGE = "flashattn"
 E_BR = 32                       # query / key block rows (Br = Bc)
 DQ_MAX = 80                     # widest head-dim block a core holds with 3 ping-pong ports
-__all__ = ["fa_classes", "fa_prologue", "fa_host", "fa_kernel_parts", "fa_group_steps", "fa_step_emit",
+__all__ = ["fa_classes", "fa_prologue", "fa_host", "fa_host_split", "FA_HS", "fa_kernel_parts", "fa_group_steps", "fa_step_emit",
            "fa_driver_glue", "FA_STEPS", "FA_STEP_ROLES", "DECL_FA", "DECL_KL"]
 
 FA_COMMON = _tpl("attention/fa_common.cc")
@@ -156,7 +156,101 @@ def fa_host(classes: list) -> str:
                          c["launches"], c["qkrow"], c["vrow"], c["orow"]) for c in classes)
     disp = "\n".join("    if (k == %d) {\n        %s<<<mesh>>>(q16, v16, o16);\n        return 0;\n    }"
                      % (c["idx"], _fa_launch(c)) for c in classes)
-    return FA_HOST.replace("@CLASSES@", rows).replace("@DISPATCH@", disp)
+    return fa_host_split(FA_HOST.replace("@CLASSES@", rows).replace("@DISPATCH@", disp))
+
+
+def fa_host_split(h: str) -> str:
+    """Insert the host-split / g_sp_* probes (:data:`FA_HS`) into the FA host text; each anchor must occur once."""
+    for a, b in FA_HS:
+        if h.count(a) != 1:
+            raise AiegraphError(_STAGE, f"fa_host_split: anchor found {h.count(a)} times, expected 1",
+                                hint=a.strip().splitlines()[0])
+        h = h.replace(a, b)
+    return h
+
+
+# M2 N segment (GAP-RT1 for FA): fa_host.cc has no host-split / g_sp_* probes; fa_host() inserts them so every FA site
+# (kind=fa) gets pack / scatter / dma / wait (XTime) and the in-launch glue / flush / inval (PMU cycles) + launches,
+# and the global g_sp_* (split_detail host_glue_bdcfg ...) now counts the FA launches too. Needs the kacc host's
+# uc_pmc / uc_rt_cyc / uc_hs_wait / g_sp_* / g_ahs (HOST_CC, defined before the FA host is inserted).
+FA_HS = (
+    ("""        XTime_GetTime(&lt0);
+        if (l == 0)
+            uc_sync_pre(QK, qkb, V, vb, O, ob);
+""", """        XTime_GetTime(&lt0);
+        const unsigned long long hw0 = uc_hs_wait(), sp0 = uc_pmc();
+        if (l == 0)
+            uc_sync_pre(QK, qkb, V, vb, O, ob);
+        const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
+"""),
+    ("""                                     O + (size_t)l * 4 * c.orow);
+        if (l == c.launches - 1)
+            uc_sync_post(O, ob);
+        XTime_GetTime(&lt1);
+        g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
+        g_aie_launches++;
+        if (lrc != 0)
+            return lrc;
+""", """                                     O + (size_t)l * 4 * c.orow);
+        const unsigned long long sp2 = uc_pmc(), rt1 = uc_rt_cyc();
+        if (l == c.launches - 1)
+            uc_sync_post(O, ob);
+        const unsigned long long sp3 = uc_pmc(), hw1 = uc_hs_wait();
+        XTime_GetTime(&lt1);
+        ahs_add_window(&g_ahs, (unsigned long long)(lt1 - lt0), hw1 - hw0);
+        g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
+        g_aie_launches++;
+        if (lrc != 0)
+            return lrc;
+        g_sp_pre += sp1 - sp0;
+        g_sp_call += sp2 - sp1;
+        g_sp_glue += (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL;
+        g_sp_post += sp3 - sp2;
+        ahs_add(&g_ahs, AHS_GLUE, (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL);
+        ahs_add(&g_ahs, AHS_FLUSH, sp1 - sp0);
+        ahs_add(&g_ahs, AHS_INVAL, sp3 - sp2);
+        ahs_launch(&g_ahs);
+        ahs_cal(&g_ahs, sp0, (unsigned long long)lt0);
+        ahs_cal(&g_ahs, sp3, (unsigned long long)lt1);
+"""),
+    ("""    /* v5 O: o row pm, block h%4 of launch l;""", """    XTime ot0, ot1;
+    XTime_GetTime(&ot0);
+    /* v5 O: o row pm, block h%4 of launch l;"""),
+    ("""    g_uc_macs += 2ULL * H * N * M * D;
+    g_fa_sites++;""", """    XTime_GetTime(&ot1);
+    ahs_add_span(&g_ahs, AHS_SCATTER, ot0, ot1);
+    g_uc_macs += 2ULL * H * N * M * D;
+    g_fa_sites++;"""),
+    ("""    fa_pack_v(c, (const float *)w->data, (size_t)D * M, 0, 1, g_fa_v[k]);
+""", """    XTime vt0, vt1;
+    XTime_GetTime(&vt0);
+    fa_pack_v(c, (const float *)w->data, (size_t)D * M, 0, 1, g_fa_v[k]);
+    XTime_GetTime(&vt1);
+    ahs_add_span(&g_ahs, AHS_PACK, vt0, vt1);
+"""),
+    ("""    g_uc_calls++;
+    const int rc = uc_fa((void *const *)args, nargs, role, cls);
+""", """    g_uc_calls++;
+    ahs_begin(&g_ahs, AHS_KIND_FA);
+    XTime pt0, pt1;
+    XTime_GetTime(&pt0);
+    const int rc = uc_fa((void *const *)args, nargs, role, cls);
+    XTime_GetTime(&pt1);
+    if (role == 0) /* QK site: packs only */
+        ahs_add_span(&g_ahs, AHS_PACK, pt0, pt1);
+"""),
+    ("""        g_uc_calls++; /* one count per original QK / PV site */
+    const int rc = uc_fa_kl(role, cls, a, lda, b, ldb, s);
+""", """        g_uc_calls++; /* one count per original QK / PV site */
+    ahs_begin(&g_ahs, AHS_KIND_FA);
+    XTime pt0, pt1;
+    XTime_GetTime(&pt0);
+    const int rc = uc_fa_kl(role, cls, a, lda, b, ldb, s);
+    XTime_GetTime(&pt1);
+    if (role != 6) /* pack Q / K / V steps */
+        ahs_add_span(&g_ahs, AHS_PACK, pt0, pt1);
+"""),
+)
 
 
 def fa_kernel_parts(classes: list) -> dict:

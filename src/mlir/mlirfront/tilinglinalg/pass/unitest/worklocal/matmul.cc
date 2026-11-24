@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // User-provided compute kernel (extracted from __global__ function)
 // User macro definitions from source file
 #define DEBUG_OUTPUT_ORDER 1

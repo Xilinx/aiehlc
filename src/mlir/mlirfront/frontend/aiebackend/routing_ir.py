@@ -102,8 +102,14 @@ class RoutingIR:
 
     # -- edits -------------------------------------------------------------
     def edit(self, *edits):
-        """Apply raw edit dicts (see routing_ir_api.cpp) and return self."""
-        self.text = _backend().routing_ir_edit(self.text, list(edits))
+        """Apply raw edit dicts (see routing_ir_api.cpp) and return self.
+
+        The edit re-prints the module, which drops comments; a leading ``//`` comment block (e.g. a
+        license header) is carried over so an edit still changes only the edited lines."""
+        lines = self.text.splitlines(True)
+        n = next((i for i, l in enumerate(lines) if not l.lstrip().startswith("//")), len(lines))
+        out = _backend().routing_ir_edit(self.text, list(edits))
+        self.text = "".join(lines[:n]) + out if n and not out.startswith(lines[0]) else out
         self.history.extend(edits)
         self._view = None
         return self

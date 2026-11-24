@@ -134,7 +134,9 @@ def main():
     print(f"[kacc_bench] data={data} tag={tag} kernel={name} launches_per_pass={S}")
 
 
-HOST = _bench("kacc_bench_gemm_host.cc")
+# KACC_HOST_FILE=<path>: an alternative bench host (same @NAME@/@ARGS@ fields), e.g. script/perf/p0_kacc_host.cc
+HOST = (Path(_os.environ["KACC_HOST_FILE"]).read_text() if _os.environ.get("KACC_HOST_FILE")
+        else _bench("kacc_bench_gemm_host.cc"))
 
 def main_bmm(g, out):
     """PBK: attention bmm (a.npy [1,H,M,K], b.npy [1,H,K,N]) -- B and A packed by the HOST at run time

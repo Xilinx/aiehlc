@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* copy one 32-row Q block (half h of a split block) into Qt */
 __attribute__((noinline)) static void setq(const void *qv, int h) {
   const bfloat16 *q = (const bfloat16 *)qv;

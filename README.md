@@ -196,6 +196,24 @@ a conv2d configured over the control-packet plane runs one launch in 185 us
 ([conv2dstem](doc/performance/conv2dstem_perf_review.md)). More numbers:
 [doc/reference/performance.md](doc/reference/performance.md).
 
+## Cost model
+
+[`src/costmodel`](src/costmodel/README.md) predicts, without a board, how long one AIE launch, one
+site or a whole network takes on a calibrated board, split into AIE time (K), launch overhead (L) and
+host glue (N): `T = K + L + N - overlap`. It reads a finished build (it does not change the compiler),
+and its per-board parameters are frozen in `src/costmodel/params/` (calibrated on palmyra213).
+
+```bash
+cd src
+python3 -m costmodel selftest                                      # offline check of the tools and frozen params
+python3 -m costmodel estimate --kernel u_lin_1024x320x320           # one kernel (K only)
+python3 -m costmodel estimate --net resnet18 --build <ROOT> --cfg off   # a whole network from its build dir
+```
+
+Step-by-step usage and runnable examples (single kernel, whole model, offline tuning proposal):
+[src/costmodel/README.md](src/costmodel/README.md),
+[src/costmodel/example](src/costmodel/example/README.md).
+
 ## Reference
 
 | Topic | |

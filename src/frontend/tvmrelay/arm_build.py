@@ -273,7 +273,9 @@ def write_aligned_blob(params_path: Path, offsets: dict, out_path: Path,
     data = params_path.read_bytes()
     new, pos = {}, 0
     with open(out_path, "wb") as f:
-        for name, (off, nbytes) in sorted(offsets.items(), key=lambda kv: kv[1][0]):
+        # name order, not params.bin order: TVM's save_param_dict (a Map) orders the params
+        # differently run to run, which made weights.bin / graph_driver.c / main.elf irreproducible.
+        for name, (off, nbytes) in sorted(offsets.items(), key=lambda kv: kv[0]):
             pad = (-pos) % align
             f.write(b"\0" * pad)
             pos += pad
@@ -2175,9 +2177,39 @@ def _aie_link_vars(repo_root: Path, kernel_src: Path, build: Path,
     staged = build / "aielib"
     staged.mkdir(parents=True, exist_ok=True)
     copied = 0
-    for lib in sorted(alib.glob("*.a")):
-        shutil.copy2(lib, staged / lib.name)
-        copied += 1
+    # GAP-ALIB-RACE (staging side): aiehlc.sh holds an exclusive flock on
+    # thirdparty/alib/.aiehlc_alib.lock while it wipes and rebuilds alib/lib.
+    # Copying without that lock let a parallel build (another net/cfg on the
+    # same tree) catch lib/ mid-wipe -> no libxaienginea78.a -> link fails.
+    # This side only READS alib/lib, so a shared lock is enough (it still waits
+    # out a writer's exclusive lock) and does not block on AIEHLC_LIBCACHE
+    # builds that hold the alib lock shared.
+    lock_fh = None
+    try:
+        import fcntl
+        lock_fh = open(alib.parent / ".aiehlc_alib.lock", "a")
+        import time
+        deadline = time.monotonic() + 1800
+        while True:
+            try:
+                fcntl.flock(lock_fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise OSError("alib lock busy for 1800 s")
+                time.sleep(2)
+    except (ImportError, OSError) as exc:
+        print(f"  [arm] warning: no alib lock ({exc}); staging unlocked")
+        if lock_fh is not None:
+            lock_fh.close()
+        lock_fh = None
+    try:
+        for lib in sorted(alib.glob("*.a")):
+            shutil.copy2(lib, staged / lib.name)
+            copied += 1
+    finally:
+        if lock_fh is not None:
+            lock_fh.close()
     if not (staged / "libxaienginea78.a").is_file():
         print(f"  [arm] warning: libxaienginea78.a not found in {alib} "
               f"(it is wiped between runs) -- {hint}, then re-run this build "

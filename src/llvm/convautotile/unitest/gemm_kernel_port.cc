@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 #include "simpleconv2d_new_load.h"
 // Kernel-only GEMM fixture for kernel_trace_cases.py (trace -> routing, no conv).
 // GEMM C[64,64] = A[64,256] x B^T[64,256] on the 4x4 mesh: M over rows, N over cols, K in 4 chunks.

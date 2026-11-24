@@ -1,0 +1,3 @@
+# excerpt of /scratch/staff/huaj/tmp/costmodel_m1/k_off/u_lin_1024x320x320/build.log (lines 8204, 8220 cut after the -D switches); test fixture for l_static / static_feat
+[hostcompile] profiling runtime layer ENABLED (-DAIEHLC_PROFILING=1)
++ aarch64-none-elf-g++ -Os -std=c++20 -DAIE_GEN=5 -DAIEHLC_ZFILL_WIDE=1 -DAIEHLC_PMLOAD_WIDE=1 -DAIEHLC_PM_WARM_SKIP=1 -DAIEHLC_SKIP_BSS_DEFAULT=1 -DAIEHLC_SKIP_BSS_DEFAULT=1 -DAIEHLC_PROFILING=1

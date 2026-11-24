@@ -1,0 +1,116 @@
+{
+ "aot-kco": {
+  "attn_host_ms": 14.798,
+  "kinds": {
+   "conv": {
+    "coef": {
+     "MK": 7.90386648e-07,
+     "MN": 1.38159346e-06,
+     "bdcfg_w": 3.85695877e-05,
+     "in_pack_bytes": 4.49216345e-07,
+     "out_scatter_bytes": 1.96792031e-07,
+     "relayout": 0.550322152,
+     "wbytes": 1.20123203e-07
+    },
+    "d": 0.0,
+    "feats": [
+     "MK",
+     "MN",
+     "wbytes",
+     "bdcfg_w",
+     "in_pack_bytes",
+     "out_scatter_bytes",
+     "relayout"
+    ],
+    "n": 48
+   },
+   "fa": {
+    "coef": {
+     "MN": 1.11939375e-07,
+     "bdcfg_w": 0.000148998221
+    },
+    "d": 0.301473036,
+    "feats": [
+     "MN",
+     "bdcfg_w"
+    ],
+    "n": 18
+   },
+   "linear": {
+    "coef": {
+     "MK": 3.48875149e-07,
+     "out_scatter_bytes": 9.92565162e-07,
+     "pack_slow_elems": 4.90428902e-06,
+     "rr": 0.00269673142,
+     "wbytes": 1.47383215e-07
+    },
+    "d": 0.017523936,
+    "feats": [
+     "MK",
+     "wbytes",
+     "rr",
+     "out_scatter_bytes",
+     "pack_slow_elems"
+    ],
+    "n": 72
+   }
+  },
+  "model": "N=sum(coef[f]*f)+d (ms), nnls on relative error, <={\"conv\": 7, \"fa\": 5, \"linear\": 5} features per kind"
+ },
+ "off": {
+  "attn_host_ms": 14.58,
+  "kinds": {
+   "conv": {
+    "coef": {
+     "MK": 7.96853439e-07,
+     "MN": 1.41129882e-06,
+     "bdcfg_w": 0.000400689329,
+     "in_pack_bytes": 4.11409774e-07,
+     "out_scatter_bytes": 2.49243512e-07,
+     "relayout": 0.533783548,
+     "wbytes": 1.19297761e-07
+    },
+    "d": 0.0,
+    "feats": [
+     "MK",
+     "MN",
+     "wbytes",
+     "bdcfg_w",
+     "in_pack_bytes",
+     "out_scatter_bytes",
+     "relayout"
+    ],
+    "n": 48
+   },
+   "fa": {
+    "coef": {
+     "launches": 0.368142611
+    },
+    "d": 0.297447924,
+    "feats": [
+     "launches"
+    ],
+    "n": 18
+   },
+   "linear": {
+    "coef": {
+     "MK": 5.10699524e-07,
+     "bdcfg_w": 0.000375458842,
+     "out_scatter_bytes": 8.96420599e-07,
+     "pack_slow_elems": 3.26712808e-06,
+     "wbytes": 9.90725371e-08
+    },
+    "d": 0.226621501,
+    "feats": [
+     "MK",
+     "wbytes",
+     "bdcfg_w",
+     "out_scatter_bytes",
+     "pack_slow_elems"
+    ],
+    "n": 72
+   }
+  },
+  "model": "N=sum(coef[f]*f)+d (ms), nnls on relative error, <={\"conv\": 7, \"fa\": 5, \"linear\": 5} features per kind"
+ }
+}

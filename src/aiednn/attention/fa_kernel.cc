@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // fa_kernel: GFA flash attention (fused QK^T -> online softmax -> PV), one C++ template global kernel, instantiated by
 // aiehlc per launch fa_kernel<NS, HEADS, NQ, MK, DH, SPLIT, E, NKV, QKROW, VROW, OROW> (fa_attn.fa_launch):
 //   NS              the class's helper namespace (fa_attn.fa_prologue: setq / reset / qkb / softb / pvb / fin; aiehlc

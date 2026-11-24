@@ -16,8 +16,10 @@ Templates are plain source files, one directory per operator category:
 Board-side runtime helpers that are not kernels (compare tool, profiling glue) live in
 ``src/aiegraph/runtime/`` and are read with :func:`runtime_source`.
 
-A template is returned VERBATIM (bytes as on disk, no newline translation). Parameters are spelled
-``@NAME@`` inside the text; :func:`params` lists them and :func:`render` fills them.
+A template is returned VERBATIM (bytes as on disk, no newline translation) minus its leading AMD
+license header block (:func:`strip_license`): the header documents the file in the repo and must not
+ride along into every generated source. Parameters are spelled ``@NAME@`` inside the text;
+:func:`params` lists them and :func:`render` fills them.
 """
 from __future__ import annotations
 
@@ -31,16 +33,28 @@ SUFFIXES = (".cc", ".c", ".h")
 _PARAM = re.compile(r"@([A-Z][A-Z0-9_]*)@")
 
 __all__ = ["ROOT", "RUNTIME", "CATEGORIES", "TemplateError", "path", "template", "params", "render", "runtime_path",
-           "runtime_source", "templates", "GEMM_KACC_TPARAMS", "gemm_kacc_targs", "gemm_kacc_launch"]
+           "runtime_source", "templates", "strip_license", "GEMM_KACC_TPARAMS", "gemm_kacc_targs",
+           "gemm_kacc_launch"]
+
+# The AMD Apache-2.0 header a template / runtime source carries on its first lines (C block comment).
+_LICENSE = re.compile(r"\A/\*{20,}\r?\n"
+                      r" \* Copyright \(C\) \d{4}(?:-\d{4})? Advanced Micro Devices, Inc\. All Rights Reserved\.\r?\n"
+                      r" \* SPDX-License-Identifier: [A-Za-z0-9.\-+]+\r?\n"
+                      r" \*{20,}/\r?\n")
 
 
 class TemplateError(LookupError):
     pass
 
 
+def strip_license(text: str) -> str:
+    """*text* without its leading license header block (unchanged when it has none)."""
+    return _LICENSE.sub("", text, count=1)
+
+
 def _read(p: Path) -> str:
     with open(p, encoding="utf-8", newline="") as f:
-        return f.read()
+        return strip_license(f.read())
 
 
 def path(name: str) -> Path:
@@ -61,7 +75,7 @@ def path(name: str) -> Path:
 
 
 def template(name: str) -> str:
-    """The template text, verbatim."""
+    """The template text, verbatim after the license header."""
     return _read(path(name))
 
 

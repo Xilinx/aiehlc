@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* cmp_cos.c — aiegraph board-side compare tool (was example/aiegraph/unet_bk_sdm_tiny/p1_cos.c, Shuhua zoo/p1_apu).
  * Prints exactly one "CMP <model> board=... cos=... PASS|FAIL" line: <model> is the tag the caller passes (the
  * model's name, e.g. "unet-kincore"); the board checkers (check_smoke.py) parse that line.

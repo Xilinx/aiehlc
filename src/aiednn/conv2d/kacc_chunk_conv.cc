@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* aiednn/conv2d/kacc_chunk_conv.cc -- any NCHWc conv2d (stride / pad / KxK / depthwise) as bf16 GEMMs on ONE
  * gemm_kacc instance per (Np, Kk, MC): the output pixels are cut into chunks of MC (one launch each), the
  * output channels padded to Np, K = C*KH*KW padded to Kp (zero rows / columns). fp32 accumulation in the
@@ -12,7 +16,7 @@
  * Ports (gemm_kacc, non-transposed walk, see aiegraph.cnn_chunk.kacc_geom): W [Np][Kp] bf16 and X [MC][Kp] bf16,
  * each 16-row block pre-tiled per K chunk of kch bf16; Y [Np][MC] fp32 in [s][mi][ni][8x8] core tiles.
  * Needs (before this text): uc_f2bf, uc_dlt, uc_numel, uc_kalloc + g_kw / g_kx / g_ky (UC_K*_ELEMS) and
- * uc_launch(N, K, M, first) -- the board or x86 glue. */
+ * uc_launch(N, K, M, first) and uc_hs_mark(phase) / AHS_SCATTER (per-site host split) -- the board glue. */
 typedef struct {
     const float *p;
     int full; /* 0: per output channel, 1: the output's shape */
@@ -171,6 +175,7 @@ static int uc_chunk_conv(void *const *argv, int nargs, int sh, int sw, int ph, i
                 on[oi] = v;
             }
         }
+        uc_hs_mark(AHS_SCATTER); /* this chunk's scatter + epilogue (after the launch window) */
     }
     if (bad) {
         printf("[aie_conv] %d nonfinite AIE outputs\n", bad);

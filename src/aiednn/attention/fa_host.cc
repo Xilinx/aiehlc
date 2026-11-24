@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 
 /* GFA (--attn-fa): fused flash-attention sites. aiednn_aie_attn(cid, args, nargs, role, cls): role 0 = the QK^T
  * bmm site (packs Q x log2e and the centred K into the class qk buffer, no launch), role 1 = the PV bmm site

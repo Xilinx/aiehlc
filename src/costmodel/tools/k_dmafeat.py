@@ -1,0 +1,936 @@
+#!/usr/bin/env python3
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
+"""k_dmafeat -- M3.1.2.2/M3.1.2.3: 7 static DMA physical features per UNet K site vs the dma residual.
+
+Offline only: features come from the build directories (worklocal host.cc shim BD / Create IO comments,
+same site table as k_diag KDMAP = m3_site.site_rows + site_feat.bd_shape_rows); the residual comes from the
+KSITE lines of a k_diag run (--resid, e.g. arthur's pr_real.out). No board timing is read for the features.
+
+Features per site (launches>0 sites, all launches of the site):
+  run_b     min contiguous shim MM2S run (bytes)                     site_feat.bd_shape_rows
+  num_dims  max MM2S BD dims                                         site_feat.bd_shape_rows
+  burst_b   bytes of one AXI burst per BD = min(run_b, BURST_MAX_B)  site_feat.bd_shape_rows
+  shim_ch   concurrently active shim MM2S/S2MM channels, byte-weighted: sum(ch bytes)/max(ch bytes) over the
+            row-0 (col, dir, channel_id) Create IO of the site's kernels (shim_ch_n = raw active count; it is 12
+            for every UNet kernel, so the raw count carries no information)
+  rw_ratio  rd_b / (rd_b + wr_b)  (ddr_in_b / (ddr_in_b + ddr_out_b))
+  bd_n      shim BDs per launch = sum over the site's launches of kernel bd_n / launches   site_feat.bd_shape_rows
+  ddr_b     DDR bytes per launch = (ddr_in_b + ddr_out_b) / launches                      site_feat.bd_shape_rows
+Bandwidth references (notes only, not parameters): R+W 7.4 GB/s and read-only 9.9 GB/s are ASSUMED (not re-measured
+here; no file:line source found in this repo -- `git grep '7.4 GB|9.9 GB'` only hits this docstring).
+Public API: site_dma_feats(cfg, log, build_root) -> {part: {feat: value}} (build dir + the log's site table only,
+no board timing; used by k_diag --dmafeat).
+Residual: dma_resid_ms = mean over the KSITE runs of the site of (K_hat - K_meas); dma_ms (model dma term) is
+printed alongside.
+
+Output:
+  KDMAF cfg=<c> part=<p> kind=<k> site=<s> run_b= num_dims= burst_b= shim_ch= rw_ratio= dma_resid_ms= dma_ms= runs=
+  KDMAF CORR cfg=<c> feat=<f> spearman=<x> n=<n>          (per cfg x 7 feats)
+  KDMAF CORRCLS cfg=<c> cls=<kind> feat=<f> n=<n> spearman=<x>   (per cfg x class with n>=3 x 7 feats; within-class
+            rank correlation: a feature whose CORR sign is only a class proxy shows ~0 / flipped / nan (constant) here)
+  KDMAF ALL sites=<n> feats=7 PASS|FAIL                   (last line; rc=1 on FAIL)
+PASS iff every site has bd ok, a residual from >=1 KSITE run, and every (pooled) spearman is finite.
+CORRCLS nan (feature constant inside a class) is reported, not a failure.
+
+--perch (M3.1.2.3 RA): per-channel static features vs the logged per-launch data wait, no --resid needed:
+  target dwait = (lock_stall_cyc + stream_stall_cyc) / launches of the log's 'PROF aie_site_perf' line (k_diag._PERF)
+  FEATS_CH (per launch, shim row-0 Create IO channels (col, dir, channel_id) of the site's launch sequence):
+    dom_run_b / dom_bytes / dom_bd_n  min run, bytes, BDs of the dominant channel = the MM2S channel with the most bytes
+    maxch_t   max over channels of bytes / BW(run_b) (us); BW_RUN 16/32/64/128 B -> 1.9/5.3/9.8/10.8 GB/s
+              (GAP-k_dmafeat-014082; step table, run <= 16 -> 1.9, > 64 -> 10.8)
+    + run_b, shim_ch, rw_ratio, bd_n, ddr_b as above (num_dims, burst_b, shim_ch_n dropped)
+  Per cfg x class (n >= 3): features constant inside the class are dropped (const=k), the rest ranked by |spearman|.
+  KDMAF SRC cfg=<c> log=<l> board=<b> launches=<CMP aie_launches> run_rc=<r> sites=<n> perf_sites=<n>
+  KDMAF CH  cfg part kind site <FEATS_CH> dwait_cyc
+  KDMAF CORRCH cfg=<c> cls=<k> feat=<f> n=<n> spearman=<x>     (varying features only)
+  KDMAF TGT cfg=<c> cls=<k> n=<n> const=<k> best=<f> spearman=<x> nan=<varying feats with nan> PASS|FAIL
+            (PASS iff nan=0 and |spearman(best)| >= TGT_MIN)
+  KDMAF ALL sites=<n> feats=dmach PASS|FAIL   (last; FAIL rc=1 if a site lacks bd/perf, a conv TGT fails or any
+            varying feature gives nan)
+
+--perch --ddrt [--tsv FILE] (M3.1.2.3 PA): physical per-channel DMA time per launch
+    ddr_t = sum over the site's shim row-0 channels of bytes_ch / BW(run_b_ch)  (ms/launch, BW_RUN table;
+            a run_b outside the table range (<= 0) raises ValueError -- no silent default)
+  target dwait_ms = KSITE lock + stream (k_diag.split_site on the log's PROF aie_site_perf, ms) / launches
+  KDMAF DDRT cfg=<c> site=<s> part=<p> ddr_t_ms=<x> dwait_ms=<y> ratio=<x/y>     (every site)
+  KDMAF TGT cfg=<c> cls=<k> n=<n> feat=ddr_t spearman=<x> nan=<0|1> PASS|FAIL     (PASS iff |rho| >= TGT_MIN, finite)
+  KDMAF TGTBEST cfg=<c> cls=<k> n=<n> const=<k> best=<f> spearman=<x> nan=<n> PASS|FAIL   (the RA best= ranking)
+  KDMAF ALL sites=<n> feats=dmach+ddrt PASS|FAIL  (also FAIL if any ddr_t is not finite or the conv ddr_t TGT fails)
+  --tsv: cfg part site cls launches ddr_b dom_bytes maxch_t ddr_t_ms rw_ratio bd_n, one row per site (parent mkdir -p)
+
+--perch --ddrt --dwfit --fit-run a --dw-tsv F --delta-tsv G  cfg=<log_a>,<log_b>,<log_c> (M3.1.1.2c PW):
+  static data-wait model dw_hat (ms per launch) = max(0, sum_f w_f x_f + b) per (cfg, cls in conv/linear/fa),
+  w >= 0, b signed, <= DW_MAXF=2 features of DW_FEATS (ddr_t_ms, maxch_ms, dom_mb, shim_ch, rw_ratio, bd_k; build
+  dir only) -> <= 3 params per class. Target dw = KSITE (lock + stream) / launches; fit = weighted LS
+  (wt = launches / site_ms, residual = T share) on the fit run only; subset = min LOO share_max on the fit run.
+  The R+W 7.4 / RO 9.9 GB/s numbers are ASSUMED and not used.
+  KDWSRC cfg log board launches run_rc sites perf_sites            (one per log)
+  KDW cfg cls fit=a sites feats params w b r2_a maxrel_a loo_maxrel loo_share
+  KDWCHK cfg run=b|c fit=0 sites r2 sum_rel share_max static_same PASS|FAIL  (r2 >= 0.9, share_max <= 0.20;
+         share_max = max |dw_hat - dw_meas| * launches / site_ms, site_ms = K + L + N of m3_site.site_rows)
+  KDW121 cfg run lock_ms stream_ms dw_hat_ms ddr_t_ms rel           (conv121, every run)
+  KDW AUDIT meas_at_predict=0|1  (1 if a measured field reaches dw_predict / poisoning them changes dw_hat)
+  KDELTA term=dw rows tsv;  KDW ALL dwrows deltarows PASS|FAIL (rc 0 PASS, 1 fit/check miss; TSVs always written)
+  TSVs: DW_TSV cfg part site cls launches ddr_t_ms dw_hat_ms (fit-run table, 1 row per cfg x site);
+        DELTA_TSV cfg run part site delta_ms (= dw_hat - dw_meas per launch, every run)
+
+usage: k_dmafeat.py --build-root DIR --resid KSITE.out off=<log> aot-kco=<log>
+       k_dmafeat.py --perch --build-root DIR off=<log> aot-kco=<log>
+       k_dmafeat.py --perch --ddrt [--tsv FILE] --build-root DIR off=<log> aot-kco=<log>
+       k_dmafeat.py --perch --ddrt --dwfit ... --out-params J   (also write the fitted params json)
+       k_dmafeat.py --perch --ddrt --dwpredict --dw-params J --dw-tsv F --build-root DIR off=<log> aot-kco=<log>
+             (M3.1.2.2 PD: dw_hat = max(0, sum w*f + b) from the frozen json, static features only, no fit;
+              KDWP cfg=<c> sites=<n> params=<md5 of J>; KDWP ALL rows tsv PASS|FAIL; DW_TSV like --dwfit)
+       k_dmafeat.py --dwpredict-audit   (AST: no DW_MEAS name / fit fn in the predict path; last line
+             KDWP AUDIT meas_at_predict=<n>)
+       k_dmafeat.py --selftest      (last line: KDMAF SELFTEST PASS (k/n))
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import re
+import sys
+from pathlib import Path
+
+NET = "unet"   # --net (net_sites.set_net)
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parents[1]))
+
+FEATS = ("run_b", "num_dims", "burst_b", "shim_ch", "rw_ratio", "bd_n", "ddr_b")
+FEATS_CH = ("run_b", "shim_ch", "rw_ratio", "bd_n", "ddr_b", "dom_run_b", "dom_bytes", "dom_bd_n", "maxch_t")
+BW_RUN = ((16, 1.9), (32, 5.3), (64, 9.8), (128, 10.8))   # run_b (B) -> GB/s, GAP-k_dmafeat-014082
+TGT_MIN = 0.5
+TGT_CLS = "conv"
+TSV_COLS = ("cfg", "part", "site", "cls", "launches", "ddr_b", "dom_bytes", "maxch_t", "ddr_t_ms", "rw_ratio", "bd_n")
+CLS_MIN_N = 3
+_KSITE = re.compile(r"^KSITE cfg=(\S+) run=(\S+) (\S+) part=(\d+) .*?K_meas=([-\d.]+) .*?dma=([-\d.]+) .*?"
+                    r"K_hat=([-\d.naif]+) ", re.M)
+
+
+def kernel_shim_ch(build):
+    """{kernel: {(col, dir, channel_id): bytes per launch}} of the shim (row 0) Create IO of
+    host_canonicalized_<kernel>; bytes = sum(len * mult) of the BD comments preceding each Create IO
+    (same pairing rule as static_feat.shim_bd_shapes)"""
+    from costmodel.static_feat import UNET_WL, _BDC, _CIO, _walk
+    host = os.path.join(build, UNET_WL, "host.cc")
+    txt = open(host).read()
+    out = {}
+    for k in sorted(set(re.findall(r"^void host_canonicalized_(\w+)\(", txt, re.M))):
+        by, pend = {}, []
+        for line, _c, mult, _l in _walk(host, "host_canonicalized_" + k, txt):
+            b = _BDC.search(line)
+            if b:
+                d = dict(kv.partition("=")[::2] for kv in b.group(1).split(", "))
+                pend.append(int(d["len"]) * mult)
+                continue
+            m = _CIO.search(line)
+            if m:
+                if int(m.group(4)) == 0:
+                    key = (int(m.group(3)), m.group(5), int(m.group(1)))
+                    by[key] = by.get(key, 0) + sum(pend)
+                pend = []
+        out[k] = by
+    return out
+
+
+def kernel_shim_chx(build):
+    """{kernel: {(col, dir, channel_id): dict(bytes, bd_n, run_b)}} per launch of the shim (row 0) Create IO of
+    host_canonicalized_<kernel>: the BD comments preceding each Create IO (kernel_shim_ch pairing), bytes =
+    sum(len * mult), bd_n = sum(mult), run_b = min static_feat.bd_run_b"""
+    from costmodel.static_feat import UNET_WL, _BDC, _CIO, _walk, bd_run_b
+    host = os.path.join(build, UNET_WL, "host.cc")
+    txt = open(host).read()
+    out = {}
+    for k in sorted(set(re.findall(r"^void host_canonicalized_(\w+)\(", txt, re.M))):
+        by, pend = {}, []
+        for line, _c, mult, _l in _walk(host, "host_canonicalized_" + k, txt):
+            b = _BDC.search(line)
+            if b:
+                d = {}
+                for kv in b.group(1).split(", "):
+                    kk, _, v = kv.partition("=")
+                    d[kk] = v if v in ("true", "false") else int(v)
+                d["mult"] = mult
+                pend.append(d)
+                continue
+            m = _CIO.search(line)
+            if m:
+                if int(m.group(4)) == 0:
+                    add_ch(by, (int(m.group(3)), m.group(5), int(m.group(1))),
+                           sum(d["len"] * d["mult"] for d in pend), sum(d["mult"] for d in pend),
+                           min([bd_run_b(d) for d in pend] or [0]))
+                pend = []
+        out[k] = by
+    return out
+
+
+def add_ch(by, key, nbytes, bd_n, run_b, w=1.0):
+    """accumulate one channel entry: bytes/bd_n summed (x w), run_b = min over non-empty contributions"""
+    c = by.setdefault(key, dict(bytes=0.0, bd_n=0.0, run_b=0))
+    c["bytes"] += nbytes * w
+    c["bd_n"] += bd_n * w
+    if bd_n > 0:
+        c["run_b"] = run_b if c["run_b"] <= 0 else min(c["run_b"], run_b)
+
+
+def site_launch_ch(kchx, lk):
+    """per-launch channel table of a site from its launch sequence lk (kernel per launch)"""
+    by = {}
+    for k in lk:
+        for key, c in kchx.get(k, {}).items():
+            add_ch(by, key, c["bytes"], c["bd_n"], c["run_b"], 1.0 / len(lk))
+    return by
+
+
+def bw_run(run_b):
+    """GB/s of a contiguous run of run_b bytes (BW_RUN step table); ValueError if run_b <= 0 (not in the table)"""
+    if not run_b > 0:
+        raise ValueError("run_b=%r outside the BW_RUN table (need > 0)" % (run_b,))
+    return _bw_step(run_b)
+
+
+def _bw_step(run_b):
+    """BW_RUN step lookup without the range check (RA maxch_t behaviour kept: run_b <= 16 -> 1.9)"""
+    for edge, bw in BW_RUN:
+        if run_b <= edge:
+            return bw
+    return BW_RUN[-1][1]
+
+
+def dom_channel(ch):
+    """the MM2S channel with the most bytes (ties -> smallest key), None if no MM2S bytes"""
+    mm = [(-c["bytes"], key) for key, c in ch.items() if key[1] == "MM2S" and c["bytes"] > 0]
+    return min(mm)[1] if mm else None
+
+
+def maxch_t(ch):
+    """max over channels of bytes / BW(run_b), in us (GB/s = 1e3 B/us)"""
+    return max([c["bytes"] / (_bw_step(c["run_b"]) * 1e3) for c in ch.values() if c["bytes"] > 0] or [0.0])
+
+
+def ddr_t(ch):
+    """sum over channels with bytes of bytes / BW(run_b), in ms (GB/s = 1e6 B/ms); ValueError if a channel's
+    run_b is outside the BW_RUN table"""
+    return sum(c["bytes"] / (bw_run(c["run_b"]) * 1e6) for c in ch.values() if c["bytes"] > 0)
+
+
+def ch_feats(ch):
+    """dom_run_b, dom_bytes, dom_bd_n, maxch_t of one per-launch channel table"""
+    d = dom_channel(ch)
+    c = ch[d] if d else dict(bytes=0.0, bd_n=0.0, run_b=0)
+    try:
+        dt = ddr_t(ch)
+    except ValueError:
+        dt = float("nan")
+    return dict(dom_run_b=c["run_b"], dom_bytes=c["bytes"], dom_bd_n=c["bd_n"], maxch_t=maxch_t(ch), ddr_t=dt,
+                dom_ok=d is not None)
+
+
+def site_launch_kernels(build, build_log):
+    """{(kind, cid): [kernel per launch]} -- same launch walk as site_feat.bd_shape_rows"""
+    from site_feat import n_sites, unet_site_feat
+    seq = unet_site_feat(build)
+    out, i = {}, 0
+    for s in n_sites(build, build_log):
+        out[(s["kind"], s["cid"])] = [d["kernel"] for d in seq[i:i + s["launches"]]]
+        i += s["launches"]
+    return out
+
+
+def shim_ch_eff(chs):
+    """concurrently active shim channels of a site, byte-weighted: sum(bytes) / max(channel bytes)
+    (= raw count when balanced; a channel that finishes early counts by its share), and raw active count"""
+    act = [v for v in chs.values() if v > 0]
+    return (sum(act) / max(act) if act else 0.0), len(act)
+
+
+def site_table(cfg, log, build_root):
+    from m3_site import site_rows
+    build = str(Path(build_root) / ("%s_%s" % (NET, cfg)))
+    rows, _ = site_rows(build, log)
+    return site_table_rows(cfg, rows, build_root)
+
+
+def site_table_rows(cfg, rows, build_root):
+    """site_table on given site rows (kind, cid, part, launches, kernels): the log's m3_site.site_rows, or the
+    static launches>0 rows of n_feat.sites (part = lpart) for estimate() site mode"""
+    from site_feat import bd_shape_rows
+    build = str(Path(build_root) / ("%s_%s" % (NET, cfg)))
+    bds, _ = bd_shape_rows(build, rows, build + ".build.log")
+    bd = {(f["kind"], f["cid"]): f for f in bds}
+    kch = kernel_shim_ch(build)
+    kchx = kernel_shim_chx(build)
+    lks = site_launch_kernels(build, build + ".build.log")
+    out = []
+    for r in rows:
+        f = bd.get((r["kind"], r["cid"]))
+        ks = r.get("kernels") or []
+        tot = (f["ddr_in_b"] + f["ddr_out_b"]) if f else 0
+        nl = int(r.get("launches") or 0)
+        out.append(dict(cfg=cfg, site="%s%d" % (r["kind"], r["cid"]), part=r["part"], kind=r["kind"],
+                        ok=bool(f and f["ok"]) and all(k in kch for k in ks) and tot > 0,
+                        run_b=f["run_b"] if f else 0, num_dims=f["num_dims"] if f else 0,
+                        burst_b=f["burst_b"] if f else 0,
+                        shim_ch_b=_site_ch(kch, r, ks),
+                        rw_ratio=f["ddr_in_b"] / tot if tot else float("nan"),
+                        bd_n=per_launch(f["bd_n"] if f else 0, nl), ddr_b=per_launch(tot, nl)))
+        out[-1]["ok"] &= nl > 0
+        out[-1]["launches"] = nl
+        out[-1]["shim_ch"], out[-1]["shim_ch_n"] = shim_ch_eff(out[-1]["shim_ch_b"])
+        cf = ch_feats(site_launch_ch(kchx, lks.get((r["kind"], r["cid"])) or []))
+        out[-1]["ok_ch"] = out[-1]["ok"] and cf.pop("dom_ok")
+        out[-1].update(cf)
+    return out
+
+
+def per_launch(total, launches):
+    """site total over its launches -> per launch (nan if no launch)"""
+    return total / launches if launches > 0 else float("nan")
+
+
+def site_dma_feats(cfg, log, build_root):
+    """{part: {feat: value}} of the 7 FEATS + the per-channel FEATS_CH (+ ok, ok_ch) for the launches>0 sites of
+    build_root/unet_<cfg>; reads the build dir (and the log's site/launch table) only, never board timing"""
+    return {s["part"]: dict({f: s[f] for f in FEATS + FEATS_CH}, ddr_t=s["ddr_t"], ok=s["ok"], ok_ch=s["ok_ch"],
+                            kind=s["kind"],
+                            site=s["site"])
+            for s in site_table(cfg, log, build_root)}
+
+
+def corr_by_cls(used, feats=FEATS, min_n=CLS_MIN_N):
+    """[(cls, feat, n, spearman)] within each kind with n >= min_n"""
+    by = {}
+    for s in used:
+        by.setdefault(s["kind"], []).append(s)
+    out = []
+    for c in sorted(by):
+        ss = by[c]
+        if len(ss) < min_n:
+            continue
+        for f in feats:
+            out.append((c, f, len(ss), spearman([float(s[f]) for s in ss], [s["resid"] for s in ss])))
+    return out
+
+
+def drop_const(ss, feats):
+    """(varying, constant) features over the sites ss (constant = one distinct value)"""
+    var = [f for f in feats if len({float(s[f]) for s in ss}) > 1]
+    return var, [f for f in feats if f not in var]
+
+
+def rank_feats(ss, feats, key="dwait"):
+    """constant features dropped, the rest ranked by |spearman| vs ss[key]:
+    (best, rho_best, [(feat, rho)], const_n, nan_n); best None if no varying feature has a finite rho"""
+    var, const = drop_const(ss, feats)
+    y = [s[key] for s in ss]
+    cr = [(f, spearman([float(s[f]) for s in ss], y)) for f in var]
+    fin = [(abs(r), -i, f, r) for i, (f, r) in enumerate(cr) if math.isfinite(r)]
+    best = max(fin) if fin else None
+    return (best[2] if best else None, best[3] if best else float("nan"), cr, len(const),
+            sum(not math.isfinite(r) for _f, r in cr))
+
+
+def tgt_pass(rho, nan_n, tmin=TGT_MIN):
+    return nan_n == 0 and math.isfinite(rho) and abs(rho) >= tmin
+
+
+def load_dwait(txt):
+    """{part: (dwait_cyc per launch, launches, perf_n)} from the log's PROF aie_site_perf lines (k_diag._PERF):
+    dwait = (lock_stall_cyc + stream_stall_cyc) / launches"""
+    from k_diag import _PERF
+    out = {}
+    for p, _k, n, pn, _ia, ls, ss, *_rest in _PERF.findall(txt):
+        n = int(n)
+        out[int(p)] = ((int(ls) + int(ss)) / n if n > 0 else float("nan"), n, int(pn))
+    return out
+
+
+def load_dwait_ms(txt):
+    """{part: dwait_ms per launch} = (KSITE lock + stream) / launches; lock/stream (ms) from k_diag.split_site on the
+    log's PROF aie_site_perf line (the KSITE values, not re-derived here)"""
+    from k_diag import parse_perf, split_site
+    out = {}
+    for p, pf in parse_perf(txt).items():
+        d = split_site(0.0, 0.0, pf)
+        out[p] = (d["lock"] + d["stream"]) / pf["launches"] if pf["launches"] > 0 else float("nan")
+    return out
+
+
+def ddrt_ratio(t, w):
+    return t / w if w > 0 and math.isfinite(t) else float("nan")
+
+
+def write_tsv(path, rows):
+    """TSV_COLS, one row per site; mkdir -p the parent"""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        f.write("\t".join(TSV_COLS) + "\n")
+        for s in rows:
+            f.write("\t".join(str(s["cfg"]) if c == "cfg" else str(s["part"]) if c == "part" else
+                               s["site"] if c == "site" else s["kind"] if c == "cls" else
+                               str(s["launches"]) if c == "launches" else
+                               "%.6g" % s["ddr_t"] if c == "ddr_t_ms" else "%.6g" % float(s[c]) for c in TSV_COLS) + "\n")
+
+
+def main_perch(a):
+    from k_diag import _CMP
+    ok = True
+    tot = 0
+    tsv = []
+    ddrt = getattr(a, "ddrt", False)
+    for spec in a.runs:
+        cfg, log = spec.split("=", 1)
+        txt = open(log).read()
+        dw = load_dwait(txt)
+        dms = load_dwait_ms(txt) if ddrt else {}
+        m = _CMP.findall(txt)
+        board, nl, rc = m[-1] if m else ("-", "-1", "-1")
+        sites = site_table(cfg, log, a.build_root)
+        print("KDMAF SRC cfg=%s log=%s board=%s launches=%s run_rc=%s sites=%d perf_sites=%d"
+              % (cfg, log, board, nl, rc, len(sites), sum(s["part"] in dw for s in sites)))
+        ok &= bool(m) and rc == "0"
+        used = []
+        for s in sites:
+            d = dw.get(s["part"])
+            s["dwait"] = d[0] if d else float("nan")
+            good = s["ok_ch"] and d is not None and math.isfinite(s["dwait"])
+            ok &= bool(good)
+            if good:
+                used.append(s)
+            print("KDMAF CH cfg=%s part=%d kind=%s site=%s %s dwait_cyc=%.1f%s"
+                  % (cfg, s["part"], s["kind"], s["site"], " ".join("%s=%.6g" % (f, s[f]) for f in FEATS_CH),
+                     s["dwait"], "" if good else " MISSING"))
+            if ddrt:
+                s["dwait_ms"] = dms.get(s["part"], float("nan"))
+                ok &= math.isfinite(s["ddr_t"]) and math.isfinite(s["dwait_ms"])
+                print("KDMAF DDRT cfg=%s site=%s part=%d ddr_t_ms=%.4f dwait_ms=%.4f ratio=%.4f"
+                      % (cfg, s["site"], s["part"], s["ddr_t"], s["dwait_ms"], ddrt_ratio(s["ddr_t"], s["dwait_ms"])))
+                tsv.append(s)
+        tot += len(sites)
+        by = {}
+        for s in used:
+            by.setdefault(s["kind"], []).append(s)
+        for c in sorted(by):
+            ss = by[c]
+            if len(ss) < CLS_MIN_N:
+                continue
+            best, rho, cr, nc, nn = rank_feats(ss, FEATS_CH)
+            for f, r in cr:
+                print("KDMAF CORRCH cfg=%s cls=%s feat=%s n=%d spearman=%.4f" % (cfg, c, f, len(ss), r))
+            tp = tgt_pass(rho, nn)
+            ok &= nn == 0 and (tp or c != TGT_CLS)
+            print("KDMAF %s cfg=%s cls=%s n=%d const=%d best=%s spearman=%.4f nan=%d %s"
+                  % ("TGTBEST" if ddrt else "TGT", cfg, c, len(ss), nc, best or "-", rho, nn, "PASS" if tp else "FAIL"))
+            if ddrt:
+                r = spearman([s["ddr_t"] for s in ss], [s["dwait_ms"] for s in ss])
+                nan = int(not math.isfinite(r))
+                tp = tgt_pass(r, nan)
+                ok &= tp or c != TGT_CLS
+                print("KDMAF TGT cfg=%s cls=%s n=%d feat=ddr_t spearman=%.4f nan=%d %s"
+                      % (cfg, c, len(ss), r, nan, "PASS" if tp else "FAIL"))
+        if TGT_CLS not in by:
+            ok = False
+    if ddrt and a.tsv:
+        write_tsv(a.tsv, tsv)
+    print("KDMAF ALL sites=%d feats=%s %s" % (tot, "dmach+ddrt" if ddrt else "dmach", "PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
+# ------------------------------------------------------------------ --dwfit (M3.1.1.2c PW): static data-wait model
+DW_FEATS = ("ddr_t_ms", "maxch_ms", "dom_mb", "shim_ch", "rw_ratio", "bd_k")
+DW_MEAS = ("dwait", "dwait_ms", "lock", "stream", "site_ms", "K", "L", "N", "perf", "resid", "dma")
+DW_MAXF = 2            # features per class; + the signed offset b -> <= 3 params per class
+DW_CLS = ("conv", "linear", "fa")
+DW_R2_MIN = 0.9        # KDWCHK per (cfg, run b|c) over all 138 sites, per-launch dw
+DW_SHARE_MAX = 0.20    # KDWCHK share_max = max |dw_hat - dw_meas| * launches / site_ms
+DW_TSV = ("cfg", "part", "site", "cls", "launches", "ddr_t_ms", "dw_hat_ms")
+DELTA_TSV = ("cfg", "run", "part", "site", "delta_ms")
+_RUN = re.compile(r"\.([A-Za-z0-9]+)\.log$")
+
+
+def dw_static(s):
+    """the static per-launch DW_FEATS of one site_table row (build dir only): ddr_t ms, maxch_t ms, dom_bytes MB,
+    shim_ch, rw_ratio, bd_n / 1e3"""
+    return dict(ddr_t_ms=float(s["ddr_t"]), maxch_ms=float(s["maxch_t"]) / 1e3, dom_mb=float(s["dom_bytes"]) / 1e6,
+                shim_ch=float(s["shim_ch"]), rw_ratio=float(s["rw_ratio"]), bd_k=float(s["bd_n"]) / 1e3)
+
+
+def dw_predict(p, x):
+    """dw_hat (ms per launch) = max(0, sum_f w_f * x_f + b); x = static features only (KeyError on anything else
+    is impossible: only p['feats'] are read)"""
+    return max(0.0, sum(w * x[f] for f, w in zip(p["feats"], p["w"])) + p["b"])
+
+
+def dw_fit_lin(pts, feats):
+    """non-negative w (signed offset b) by weighted LS on pts = [(x, y, wt)] (wt = launches / site_ms, so the
+    residual is the site's T share); returns dict(feats, w, b)"""
+    import numpy as np
+    from scipy.optimize import nnls
+    A = np.array([[x[f] for f in feats] + [1.0, -1.0] for x, _y, _w in pts])
+    y = np.array([y for _x, y, _w in pts])
+    wt = np.array([w for _x, _y, w in pts])
+    sol, _ = nnls(A * wt[:, None], y * wt)
+    return dict(feats=tuple(feats), w=[float(v) for v in sol[:-2]], b=float(sol[-2] - sol[-1]))
+
+
+def dw_errs(p, pts):
+    """(max |err| * wt, max |err| / y) over pts"""
+    sh, mr = 0.0, 0.0
+    for x, y, w in pts:
+        e = abs(dw_predict(p, x) - y)
+        sh, mr = max(sh, e * w), max(mr, e / y if y > 0 else (0.0 if e == 0 else float("inf")))
+    return sh, mr
+
+
+def dw_loo(pts, feats):
+    """leave-one-out (share_max, maxrel) of dw_fit_lin(feats) on pts"""
+    sh, mr = 0.0, 0.0
+    for i in range(len(pts)):
+        p = dw_fit_lin(pts[:i] + pts[i + 1:], feats)
+        s, m = dw_errs(p, [pts[i]])
+        sh, mr = max(sh, s), max(mr, m)
+    return sh, mr
+
+
+def dw_select(pts, feats_all=DW_FEATS, maxf=DW_MAXF):
+    """the feature subset (1..maxf of feats_all, fewer if n is small) with the smallest LOO share_max on pts (fit run
+    only), refitted on all pts; ties -> fewer features, then feats_all order. Adds loo_share, loo_maxrel."""
+    import itertools
+    best = None
+    for k in range(1, maxf + 1):
+        if len(pts) < k + 3:
+            break
+        for fs in itertools.combinations(feats_all, k):
+            sh, mr = dw_loo(pts, fs)
+            if best is None or sh < best[0] - 1e-12:
+                best = (sh, mr, fs)
+    if best is None:
+        p = dw_fit_lin(pts, ()) if pts else dict(feats=(), w=[], b=0.0)
+        return dict(p, loo_share=float("nan"), loo_maxrel=float("nan"))
+    return dict(dw_fit_lin(pts, best[2]), loo_share=best[0], loo_maxrel=best[1])
+
+
+def r2_score(y, p):
+    my = sum(y) / len(y) if y else float("nan")
+    sst = sum((v - my) ** 2 for v in y)
+    return 1.0 - sum((a - b) ** 2 for a, b in zip(y, p)) / sst if sst > 0 else float("nan")
+
+
+def run_name(log, i):
+    """run name from unet_<cfg>.<run>.log, else a, b, c by position"""
+    m = _RUN.search(os.path.basename(log))
+    return m.group(1) if m else "abcdefghij"[i]
+
+
+def dw_audit(p, s):
+    """dw_hat from the static features of s, and 1 if poisoning every measured field of s changes it
+    (or the static dict carries a measured key), else 0"""
+    x = dw_static(s)
+    bad = int(any(k in x for k in DW_MEAS))
+    poison = dict(s, **{k: float("nan") for k in DW_MEAS})
+    return dw_predict(p, x), bad | int(dw_predict(p, dw_static(poison)) != dw_predict(p, x))
+
+
+def write_rows(path, cols, rows):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        f.write("\t".join(cols) + "\n")
+        for r in rows:
+            f.write("\t".join(r) + "\n")
+
+
+def main_dwfit(a):
+    """--perch --ddrt --dwfit: per (cfg, cls) dw_hat on the fit run, KDWCHK on the others, dwhat/kdelta TSVs"""
+    from k_diag import _CMP, parse_perf, split_site
+    from m3_site import site_rows
+    ok = True
+    audit = 0
+    dwrows, delta = [], []
+    allp = {}
+    for spec in a.runs:
+        cfg, logs = spec.split("=", 1)
+        runs = []
+        for i, log in enumerate(logs.split(",")):
+            txt = open(log).read()
+            m = _CMP.findall(txt)
+            board, nl, rc = m[-1] if m else ("-", "-1", "-1")
+            sites = site_table(cfg, log, a.build_root)
+            pf = parse_perf(txt)
+            rows, _ = site_rows(str(Path(a.build_root) / ("%s_%s" % (NET, cfg))), log)
+            sms = {r["part"]: r["K"] + r["L"] + r["N"] for r in rows}
+            for s in sites:
+                d = split_site(0.0, 0.0, pf[s["part"]]) if s["part"] in pf else dict(lock=float("nan"),
+                                                                                      stream=float("nan"))
+                s.update(lock=d["lock"], stream=d["stream"], site_ms=sms.get(s["part"], float("nan")),
+                         dwait_ms=(d["lock"] + d["stream"]) / s["launches"])
+            print("KDWSRC cfg=%s log=%s board=%s launches=%s run_rc=%s sites=%d perf_sites=%d"
+                  % (cfg, log, board, nl, rc, len(sites), sum(s["part"] in pf for s in sites)))
+            ok &= bool(m) and rc == "0"
+            runs.append((run_name(log, i), log, sites))
+        fit = [r for r in runs if r[0] == a.fit_run]
+        if len(fit) != 1:
+            raise ValueError("cfg %s: fit run %r not exactly once in %s" % (cfg, a.fit_run, [r[0] for r in runs]))
+        fsites = fit[0][2]
+        params = {}
+        for c in DW_CLS:
+            ss = [s for s in fsites if s["kind"] == c]
+            pts = [(dw_static(s), s["dwait_ms"], s["launches"] / s["site_ms"]) for s in ss]
+            p = params[c] = dw_select(pts)
+            ya = [y for _x, y, _w in pts]
+            pa = [dw_predict(p, x) for x, _y, _w in pts]
+            _sh, mr = dw_errs(p, pts)
+            print("KDW cfg=%s cls=%s fit=%s sites=%d feats=%s params=%d w=%s b=%.4f r2_a=%.4f maxrel_a=%.4f "
+                  "loo_maxrel=%.4f loo_share=%.4f"
+                  % (cfg, c, a.fit_run, len(ss), ",".join(p["feats"]) or "-", len(p["feats"]) + 1,
+                     ",".join("%.6g" % w for w in p["w"]) or "-", p["b"], r2_score(ya, pa) if pts else float("nan"),
+                     mr, p["loo_maxrel"], p["loo_share"]))
+        allp[cfg] = {c: dict(feats=list(params[c]["feats"]), w=list(params[c]["w"]), b=params[c]["b"],
+                             fit_runs=[a.fit_run]) for c in DW_CLS}
+        hat = {}
+        for s in fsites:
+            h, bad = dw_audit(params[s["kind"]], s)
+            audit |= bad
+            hat[s["part"]] = h
+            dwrows.append((cfg, str(s["part"]), s["site"], s["kind"], str(s["launches"]), "%.6g" % s["ddr_t"],
+                           "%.6g" % h))
+        for run, _log, sites in runs:
+            same = all(s["part"] in hat and dw_audit(params[s["kind"]], s)[0] == hat[s["part"]] for s in sites)
+            ok &= same and len(sites) == len(fsites)
+            y = [s["dwait_ms"] for s in sites]
+            p = [hat[s["part"]] for s in sites]
+            for s, ph in zip(sites, p):
+                delta.append((cfg, run, str(s["part"]), s["site"], "%.6g" % (ph - s["dwait_ms"])))
+                if s["site"] == "conv121":
+                    print("KDW121 cfg=%s run=%s lock_ms=%.4f stream_ms=%.4f dw_hat_ms=%.4f ddr_t_ms=%.4f rel=%.4f"
+                          % (cfg, run, s["lock"] / s["launches"], s["stream"] / s["launches"], ph, s["ddr_t"],
+                             (ph - s["dwait_ms"]) / s["dwait_ms"] if s["dwait_ms"] > 0 else float("nan")))
+            if run == a.fit_run:
+                continue
+            r2 = r2_score(y, p)
+            tm = sum(v * s["launches"] for v, s in zip(y, sites))
+            sr = (sum(v * s["launches"] for v, s in zip(p, sites)) - tm) / tm if tm > 0 else float("nan")
+            sh = max(abs(ph - v) * s["launches"] / s["site_ms"] for ph, v, s in zip(p, y, sites))
+            good = same and r2 >= DW_R2_MIN and sh <= DW_SHARE_MAX
+            ok &= good
+            print("KDWCHK cfg=%s run=%s fit=0 sites=%d r2=%.4f sum_rel=%.4f share_max=%.4f static_same=%d %s"
+                  % (cfg, run, len(sites), r2, sr, sh, int(same), "PASS" if good else "FAIL"))
+    write_rows(a.dw_tsv, DW_TSV, dwrows)
+    write_rows(a.delta_tsv, DELTA_TSV, delta)
+    if getattr(a, "out_params", None):
+        write_dw_params(a.out_params, allp, [a.fit_run])
+        print("KDWPARAMS out=%s md5=%s" % (a.out_params, file_md5(a.out_params)))
+    print("KDW AUDIT meas_at_predict=%d" % audit)
+    print("KDELTA term=dw rows=%d tsv=%s" % (len(delta), a.delta_tsv))
+    ok &= audit == 0
+    print("KDW ALL dwrows=%d deltarows=%d %s" % (len(dwrows), len(delta), "PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
+# ------------------------------------------------------------------ frozen dw params: --out-params / --dwpredict
+DW_FIT_FNS = ("dw_fit_lin", "dw_select", "dw_loo", "dw_errs", "nnls", "main_dwfit", "lstsq")
+
+
+def file_md5(path):
+    import hashlib
+    return hashlib.md5(open(path, "rb").read()).hexdigest()
+
+
+def write_dw_params(path, allp, fit_runs):
+    """kdw json: {model, board, fit_runs, feats_all, params: {cfg: {cls: {feats, w, b, fit_runs}}}}; floats are
+    written with repr (json) so --dwpredict reproduces dw_hat bit for bit"""
+    import json
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    doc = dict(model="k_dmafeat dw_hat = max(0, sum_f w_f x_f + b) per (cfg, cls); M3.1.1.2c PW (5f0117f5)",
+               board="palmyra213", fit_runs=list(fit_runs), feats_all=list(DW_FEATS), params=allp)
+    with open(path, "w") as f:
+        json.dump(doc, f, indent=1, sort_keys=True)
+        f.write("\n")
+
+
+def dw_load_params(path):
+    """{cfg: {cls: dict(feats, w, b)}} from a kdw json (static parameters only)"""
+    import json
+    doc = json.load(open(path))
+    return {cfg: {c: dict(feats=tuple(q["feats"]), w=[float(v) for v in q["w"]], b=float(q["b"]))
+                  for c, q in by.items()} for cfg, by in doc["params"].items()}
+
+
+def dwp_rows(cfg, sites, pc):
+    """DW_TSV rows of one cfg: dw_hat from the static features (dw_static) and the frozen params only"""
+    rows = []
+    for s in sites:
+        x = dw_static(s)
+        h = dw_predict(pc[s["kind"]], x)
+        rows.append((cfg, str(s["part"]), s["site"], s["kind"], str(s["launches"]), "%.6g" % s["ddr_t"],
+                     "%.6g" % h))
+    return rows
+
+
+def main_dwpredict(a):
+    """--dwpredict --dw-params J: dw_hat per site from the frozen json, no fit; build dir + the log's site table"""
+    pp = dw_load_params(a.dw_params)
+    md5 = file_md5(a.dw_params)
+    ok = True
+    out = []
+    for spec in a.runs:
+        cfg, logs = spec.split("=", 1)
+        log = logs.split(",")[0]
+        sites = site_table(cfg, log, a.build_root)
+        good = cfg in pp and all(s["kind"] in pp[cfg] for s in sites)
+        rows = dwp_rows(cfg, sites, pp[cfg]) if good else []
+        ok &= good and len(rows) == len(sites) > 0
+        out += rows
+        print("KDWP cfg=%s sites=%d params=%s" % (cfg, len(rows), md5))
+    write_rows(a.dw_tsv, DW_TSV, out)
+    print("KDWP ALL rows=%d tsv=%s %s" % (len(out), a.dw_tsv, "PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
+def dwpredict_audit():
+    """AST check of the --dwpredict path: no measured name (DW_MEAS, exact) and no fit function (DW_FIT_FNS) may
+    appear in DWP_FNS. Last line: KDWP AUDIT meas_at_predict=<n>"""
+    import ast
+    import inspect
+    bad = 0
+    for fn in DWP_FNS:
+        names = set()
+        for n in ast.walk(ast.parse(inspect.getsource(fn))):
+            if isinstance(n, ast.Name):
+                names.add(n.id)
+            elif isinstance(n, ast.Attribute):
+                names.add(n.attr)
+            elif isinstance(n, ast.arg):
+                names.add(n.arg)
+            elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+                names.add(n.value)
+        meas = sorted(names & set(DW_MEAS))
+        fit = sorted(names & set(DW_FIT_FNS))
+        bad += len(meas) + len(fit)
+        print("KDWP AUDIT fn=%s meas=%s fit=%s" % (fn.__name__, ",".join(meas) or "-", ",".join(fit) or "-"))
+    print("KDWP AUDIT meas_at_predict=%d" % bad)
+    return bad
+
+
+DWP_FNS = (dw_static, dw_predict, dw_load_params, dwp_rows, main_dwpredict)
+
+
+def _site_ch(kch, r, ks):
+    """{channel: bytes per launch} summed over the site's distinct kernels (one launch shape each)"""
+    tot = {}
+    for k in ks:
+        for c, v in kch.get(k, {}).items():
+            tot[c] = tot.get(c, 0) + v
+    return tot
+
+
+def load_resid(path):
+    """{(cfg, site, part): [(K_hat - K_meas, dma)] over runs}"""
+    out = {}
+    for cfg, _run, site, part, km, dma, kh in _KSITE.findall(open(path).read()):
+        out.setdefault((cfg, site, int(part)), []).append((float(kh) - float(km), float(dma)))
+    return out
+
+
+def ranks(v):
+    o = sorted(range(len(v)), key=lambda i: v[i])
+    r = [0.0] * len(v)
+    i = 0
+    while i < len(o):
+        j = i
+        while j + 1 < len(o) and v[o[j + 1]] == v[o[i]]:
+            j += 1
+        for t in range(i, j + 1):
+            r[o[t]] = (i + j) / 2.0 + 1
+        i = j + 1
+    return r
+
+
+def spearman(x, y):
+    """Spearman rho with average ranks for ties; nan if either side is constant or n<3"""
+    if len(x) < 3:
+        return float("nan")
+    rx, ry = ranks(x), ranks(y)
+    n = len(x)
+    mx, my = sum(rx) / n, sum(ry) / n
+    sxy = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    sxx = sum((a - mx) ** 2 for a in rx)
+    syy = sum((b - my) ** 2 for b in ry)
+    return sxy / math.sqrt(sxx * syy) if sxx > 0 and syy > 0 else float("nan")
+
+
+def selftest():
+    cases = []
+
+    def chk(name, cond):
+        cases.append(bool(cond))
+        print("KDMAF SELFTEST %s %s" % (name, "ok" if cond else "FAIL"))
+
+    chk("ranks_ties", ranks([3, 1, 3, 2]) == [3.5, 1.0, 3.5, 2.0])
+    chk("spearman_mono", abs(spearman([1, 2, 3, 4], [10, 20, 25, 99]) - 1.0) < 1e-12)
+    chk("spearman_anti", abs(spearman([1, 2, 3, 4], [4, 3, 2, 1]) + 1.0) < 1e-12)
+    chk("spearman_const_nan", math.isnan(spearman([1, 1, 1], [1, 2, 3])))
+    chk("spearman_short_nan", math.isnan(spearman([1, 2], [1, 2])))
+    chk("shim_ch_eff", shim_ch_eff({"a": 100, "b": 50, "c": 0}) == (1.5, 2))
+    chk("per_launch", per_launch(120, 4) == 30 and math.isnan(per_launch(5, 0)))
+    # class proxy: pooled rho = +1 but inside each class the feature runs against the residual
+    used = [dict(kind="a", x=x, resid=r) for x, r in ((1, 3), (2, 2), (3, 1))] + \
+           [dict(kind="b", x=x, resid=r) for x, r in ((10, 13), (11, 12), (12, 11))] + \
+           [dict(kind="c", x=0, resid=0), dict(kind="c", x=1, resid=1)]
+    pooled = spearman([s["x"] for s in used], [s["resid"] for s in used])
+    cc = corr_by_cls(used, feats=("x",))
+    chk("corrcls_proxy", pooled > 0.5 and [(c, n) for c, _f, n, _r in cc] == [("a", 3), ("b", 3)]
+        and all(abs(r + 1.0) < 1e-12 for _c, _f, _n, r in cc))
+    chk("feats7", len(FEATS) == 7 and FEATS[-2:] == ("bd_n", "ddr_b"))
+    # per-channel: dominant = MM2S with most bytes (an S2MM with more bytes is not picked), maxch_t by BW(run)
+    ch = {(1, "MM2S", 0): dict(bytes=1000.0, bd_n=2.0, run_b=64), (1, "MM2S", 1): dict(bytes=3000.0, bd_n=4.0, run_b=16),
+          (2, "S2MM", 0): dict(bytes=9000.0, bd_n=1.0, run_b=128)}
+    cf = ch_feats(ch)
+    chk("dom_channel", dom_channel(ch) == (1, "MM2S", 1) and cf["dom_bytes"] == 3000.0 and cf["dom_run_b"] == 16
+        and cf["dom_bd_n"] == 4.0 and dom_channel({(1, "S2MM", 0): dict(bytes=5.0, bd_n=1, run_b=4)}) is None)
+    chk("maxch_t_bw", [bw_run(r) for r in (4, 16, 32, 64, 128, 4096)] == [1.9, 1.9, 5.3, 9.8, 10.8, 10.8]
+        and abs(cf["maxch_t"] - max(3000 / 1900.0, 9000 / 10800.0)) < 1e-12)
+    lc = site_launch_ch({"k": {(0, "MM2S", 0): dict(bytes=100.0, bd_n=1.0, run_b=32)},
+                         "j": {(0, "MM2S", 0): dict(bytes=300.0, bd_n=3.0, run_b=16)}}, ["k", "j"])
+    chk("launch_ch_mean", lc[(0, "MM2S", 0)] == dict(bytes=200.0, bd_n=2.0, run_b=16))
+    # constant feature dropped before ranking (would be spearman nan), varying feature ranked
+    ss = [dict(a=1, b=7, c=x, dwait=y) for x, y in ((1, 10), (2, 30), (3, 20), (4, 40))]
+    best, rho, cr, nc, nn = rank_feats(ss, ("a", "b", "c"))
+    chk("const_drop", nc == 2 and [f for f, _r in cr] == ["c"] and best == "c" and nn == 0 and abs(rho - 0.8) < 1e-12)
+    # a varying feature with nan rho (constant target) is counted and rejects the TGT
+    ss = [dict(c=x, dwait=5.0) for x in (1, 2, 3)]
+    best, rho, cr, nc, nn = rank_feats(ss, ("c",))
+    chk("nan_reject", nn == 1 and best is None and not tgt_pass(rho, nn) and not tgt_pass(0.9, 1)
+        and tgt_pass(-0.5, 0) and not tgt_pass(0.49, 0))
+    chk("dwait_parse", load_dwait("PROF aie_site_perf part=3 kind=conv launches=2 perf_n=2 io_act_cyc=9 "
+                                  "lock_stall_cyc=10 stream_stall_cyc=4\n") == {3: (7.0, 2, 2)})
+    chk("feats_ch", "num_dims" not in FEATS_CH and "burst_b" not in FEATS_CH and "shim_ch_n" not in FEATS_CH
+        and {"dom_run_b", "dom_bytes", "dom_bd_n", "maxch_t", "rw_ratio", "bd_n", "ddr_b"} <= set(FEATS_CH))
+    # ddr_t = sum over channels of bytes / BW(run_b) in ms (S2MM counts, empty channels skipped)
+    chk("ddrt_sum", abs(ddr_t(ch) - (1000 / 9.8e6 + 3000 / 1.9e6 + 9000 / 10.8e6)) < 1e-15
+        and ddr_t({(0, "MM2S", 0): dict(bytes=0.0, bd_n=0.0, run_b=0)}) == 0.0
+        and abs(ddr_t({(0, "MM2S", 0): dict(bytes=1.32383e8, bd_n=1.0, run_b=16)}) - 69.675263) < 1e-5)
+    try:
+        bw_run(0)
+        bad = False
+    except ValueError:
+        bad = True
+    chk("ddrt_runb_reject", bad and math.isnan(ch_feats({(0, "MM2S", 0): dict(bytes=5.0, bd_n=1.0, run_b=0)})["ddr_t"]))
+    chk("dwait_ms_ksite", abs(load_dwait_ms("PROF aie_site_perf part=3 kind=conv launches=2 perf_n=2 io_act_cyc=9 "
+                                            "lock_stall_cyc=2000000 stream_stall_cyc=1000000\n")[3] - 1.5) < 1e-12)
+    chk("ddrt_ratio", ddrt_ratio(2.0, 4.0) == 0.5 and math.isnan(ddrt_ratio(1.0, 0.0)))
+    # --dwfit: exact non-negative recovery, clip at 0, LOO selection, run names, predict ignores measured fields
+    xs = [dict(zip(DW_FEATS, (v, 2.0 * v % 3, 1.0, 4.0, 0.5, 0.1 * v))) for v in range(1, 9)]
+    pts = [(x, max(0.0, 0.8 * x["ddr_t_ms"] - 1.0), 1.0) for x in xs]
+    p = dw_fit_lin(pts[1:], ("ddr_t_ms",))
+    chk("dw_fit_recover", abs(p["w"][0] - 0.8) < 1e-9 and abs(p["b"] + 1.0) < 1e-9 and dw_errs(p, pts)[0] < 1e-9)
+    chk("dw_clip_nonneg", dw_predict(dict(feats=("a",), w=[1.0], b=-5.0), dict(a=2.0)) == 0.0
+        and min(dw_fit_lin([(dict(a=1.0), 3.0, 1.0), (dict(a=2.0), 1.0, 1.0)], ("a",))["w"]) >= 0.0)
+    sel = dw_select([(x, 0.3 * x["bd_k"] * 10 + 0.2, 1.0) for x in xs], ("shim_ch", "bd_k", "dom_mb"), 2)
+    chk("dw_select_loo", sel["feats"] == ("bd_k",) and sel["loo_share"] < 1e-9)
+    chk("dw_run_name", run_name("/x/unet_aot-kco.b.log", 0) == "b" and run_name("/x/foo.log", 2) == "c")
+    s = dict(ddr_t=2.0, maxch_t=500.0, dom_bytes=1e6, shim_ch=3.0, rw_ratio=0.5, bd_n=100.0, lock=9.0,
+             stream=1.0, dwait_ms=10.0, site_ms=20.0)
+    h, bad = dw_audit(dict(feats=("ddr_t_ms", "maxch_ms"), w=[1.0, 2.0], b=0.5), s)
+    chk("dw_audit_static", bad == 0 and abs(h - 3.5) < 1e-12 and r2_score([1, 2, 3], [1, 2, 3]) == 1.0)
+    # frozen params: json round trip reproduces dw_hat exactly; the predict path audit is clean
+    import io
+    import contextlib
+    import tempfile
+    pf = dict(feats=("ddr_t_ms", "bd_k"), w=[0.1 + 0.2, 1.0 / 3.0], b=-0.07)
+    with tempfile.TemporaryDirectory() as td:
+        jp = os.path.join(td, "kdw.json")
+        write_dw_params(jp, {"off": {c: dict(feats=list(pf["feats"]), w=pf["w"], b=pf["b"], fit_runs=["a"])
+                                     for c in DW_CLS}}, ["a"])
+        lp = dw_load_params(jp)
+        rr = dwp_rows("off", [dict(s, part=3, site="conv3", kind="conv", launches=2)], lp["off"])
+    chk("dwp_roundtrip", lp["off"]["fa"]["w"] == pf["w"] and rr[0][-1] == "%.6g" % dw_predict(pf, dw_static(s)))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        na = dwpredict_audit()
+    chk("dwp_audit_clean", na == 0 and buf.getvalue().splitlines()[-1] == "KDWP AUDIT meas_at_predict=0")
+    k = sum(cases)
+    print("KDMAF SELFTEST %s (%d/%d)" % ("PASS" if k == len(cases) else "FAIL", k, len(cases)))
+    return 0 if k == len(cases) else 1
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--build-root")
+    ap.add_argument("--resid", help="k_diag output with KSITE lines")
+    ap.add_argument("--perch", action="store_true", help="per-channel features vs the logged data wait (no --resid)")
+    ap.add_argument("--ddrt", action="store_true", help="with --perch: ddr_t = sum_ch bytes/BW(run_b) vs KSITE dwait")
+    ap.add_argument("--tsv", help="with --perch --ddrt: per-site TSV (TSV_COLS)")
+    ap.add_argument("--dwfit", action="store_true", help="with --perch --ddrt: static data-wait model per class")
+    ap.add_argument("--fit-run", default="a", help="with --dwfit: the run the dw params are fitted on")
+    ap.add_argument("--dw-tsv", help="with --dwfit: per-site dw_hat TSV (DW_TSV)")
+    ap.add_argument("--delta-tsv", help="with --dwfit: per run/site dw_hat - dw_meas TSV (DELTA_TSV)")
+    ap.add_argument("--out-params", help="with --dwfit: write the fitted per (cfg, cls) params json (kdw)")
+    ap.add_argument("--dwpredict", action="store_true", help="with --perch --ddrt: dw_hat from --dw-params, no fit")
+    ap.add_argument("--dw-params", help="with --dwpredict: frozen kdw params json")
+    ap.add_argument("--dwpredict-audit", action="store_true", help="AST audit of the --dwpredict path")
+    ap.add_argument("runs", nargs="*", help="cfg=log (with --dwfit: cfg=log_a,log_b,log_c)")
+    ap.add_argument("--net", default="unet", choices=("unet", "resnet18", "yolo26n"), help="net: builds BUILD_ROOT/<net>_<cfg>, logs <net>_<cfg>.<run>.log, CMP <net> (default unet)")
+    a = ap.parse_args(argv)
+    import net_sites
+    import n_fit as _nf
+    import k_diag
+    net_sites.set_net(a.net, net_sites.this_mod(globals()), _nf, k_diag)
+    if a.selftest:
+        return selftest()
+    if a.dwpredict_audit:
+        return 0 if dwpredict_audit() == 0 else 1
+    if a.perch:
+        if not (a.build_root and a.runs):
+            ap.error("--perch needs --build-root and cfg=log runs")
+        if a.dwpredict:
+            if not (a.ddrt and a.dw_params and a.dw_tsv):
+                ap.error("--dwpredict needs --ddrt, --dw-params and --dw-tsv")
+            return main_dwpredict(a)
+        if a.dwfit:
+            if not (a.ddrt and a.dw_tsv and a.delta_tsv):
+                ap.error("--dwfit needs --ddrt, --dw-tsv and --delta-tsv")
+            return main_dwfit(a)
+        return main_perch(a)
+    if not (a.build_root and a.resid and a.runs):
+        ap.error("--build-root, --resid and cfg=log runs are required")
+    res = load_resid(a.resid)
+    ok = True
+    tot = 0
+    for spec in a.runs:
+        cfg, log = spec.split("=", 1)
+        sites = site_table(cfg, log, a.build_root)
+        used = []
+        for s in sites:
+            rr = res.get((cfg, s["site"], s["part"]), [])
+            s["runs"] = len(rr)
+            s["resid"] = sum(x for x, _ in rr) / len(rr) if rr else float("nan")
+            s["dma"] = sum(d for _, d in rr) / len(rr) if rr else float("nan")
+            good = s["ok"] and rr and math.isfinite(s["resid"])
+            ok &= bool(good)
+            if good:
+                used.append(s)
+            print("KDMAF cfg=%s part=%d kind=%s site=%s run_b=%d num_dims=%d burst_b=%d shim_ch=%.3f shim_ch_n=%d rw_ratio=%.4f "
+                  "bd_n=%.3f ddr_b=%.1f dma_resid_ms=%.4f dma_ms=%.4f runs=%d%s"
+                  % (cfg, s["part"], s["kind"], s["site"], s["run_b"], s["num_dims"], s["burst_b"], s["shim_ch"],
+                     s["shim_ch_n"], s["rw_ratio"], s["bd_n"], s["ddr_b"], s["resid"], s["dma"], s["runs"],
+                     "" if good else " MISSING"))
+        tot += len(sites)
+        for f in FEATS:
+            rho = spearman([float(s[f]) for s in used], [s["resid"] for s in used])
+            ok &= math.isfinite(rho)
+            print("KDMAF CORR cfg=%s feat=%s spearman=%.4f n=%d" % (cfg, f, rho, len(used)))
+        for c, f, n, rho in corr_by_cls(used):
+            print("KDMAF CORRCLS cfg=%s cls=%s feat=%s n=%d spearman=%.4f" % (cfg, c, f, n, rho))
+    print("KDMAF ALL sites=%d feats=%d %s" % (tot, len(FEATS), "PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

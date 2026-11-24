@@ -1,4 +1,14 @@
-#ifdef @MU@_LAUNCH_WARM
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
+/* M1.2.1 T-J2: the split / split_detail / split_words lines print for every AIE build (cold included);
+ * only the summary line differs: literal "LAUNCH warm" under the boardmain header define
+ * @MU@_LAUNCH_WARM, else literal "LAUNCH cold" with the same fields (l_fit _WARM regex keys on them).
+ * No AIEHLC_PROFILING #if here: main.c is not compiled with the runtime EXTRA_DEFS. */
+#ifndef @MU@_CTRLPKT
+#define @MU@_CTRLPKT "na"
+#endif
     {
         double aie_ms = 0.0;
         int kloads = 0;
@@ -6,10 +16,17 @@
         int wl = 0;
         aiednn_aie_stats(&wl, 0, 0, 0);
         aiednn_aie_launch_stats(&aie_ms, &kloads, &cold_tiles);
+#ifdef @MU@_LAUNCH_WARM
         printf("LAUNCH warm ms_per_launch=%.3f launches=%d aie_wall_ms=%.3f kloads=%d opts=%s,cold_tile_loads=%u"
                " ctrlpkt=%s aot_fallbacks=%llu\n",
                wl ? aie_ms / wl : 0.0, wl, aie_ms, kloads, @MU@_LAUNCH_OPTS, cold_tiles, @MU@_CTRLPKT,
                __Runtime_ctrl_aot_fallbacks());
+#else
+        printf("LAUNCH cold ms_per_launch=%.3f launches=%d aie_wall_ms=%.3f kloads=%d opts=%s,cold_tile_loads=%u"
+               " ctrlpkt=%s aot_fallbacks=%llu\n",
+               wl ? aie_ms / wl : 0.0, wl, aie_ms, kloads, "cold", cold_tiles, @MU@_CTRLPKT,
+               __Runtime_ctrl_aot_fallbacks());
+#endif
         /* P1: per-launch split of aie_wall_ms by runtime phase (A78 pmccntr, AIEHLC_PROFILING=1 runtime).
          * PH_COREEN is the A78 cost of the core-enable writes, not AIE compute: the AIE compute is
          * inside wait_io (completion = output-DMA drain). core_reset is part of kload. */
@@ -45,6 +62,13 @@
                ph[1] * cms / nl, ph[3] * cms / nl, wio * cms / nl, sp_glue * cms / nl, sp_pre * cms / nl,
                sp_post * cms / nl, sp_call * cms / nl, rt_ms, sum_ms, aie_ms, (aie_ms - sum_ms) / nl, pmc1 - pmc0,
                g_s);
+        /* M1.1 launch words per launch since boot (aie_runtime.c __Runtime_launch_words: always defined, zeros
+         * without AIEHLC_PROFILING). No #if here: main.c is not compiled with the runtime EXTRA_DEFS. */
+        unsigned long long wm = 0, wc = 0, wp[4] = {0, 0, 0, 0}, wx = 0;
+        unsigned int wbd = 0, wrs = 0;
+        __Runtime_launch_words(&wm, &wc, wp, &wbd, &wrs, &wx);
+        printf("LAUNCH split_words mmio_w=%.1f cp_w=%.1f bd_n=%.1f rst_n=%.1f kload_w=%.1f bdcfg_w=%.1f startio_w=%.1f coreen_w=%.1f\n",
+               (double)wm / nl, (double)wc / nl, (double)wbd / nl, (double)wrs / nl, (double)wp[0] / nl,
+               (double)wp[1] / nl, (double)wp[3] / nl, (double)wp[2] / nl);
         fflush(stdout);
     }
-#endif

@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 
 /* PDN (--aie conv,linear): one TVM nn_contrib_dense_pack call site on the AIE. Y[M][N] = X[M][K] . W[N][K]^T
  * (+ bias [1,N] / residual [M,N] epilogue) as S launches of ONE gemm_kacc instance (N, K, px=Mp/S), split
@@ -29,6 +33,8 @@ static unsigned long long g_uc_whook_tiles = 0, g_uc_whook_all = 0; /* m-tiles d
 #endif
 static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
     XTime ut0;
+    printf("[UCS] l=%d lin S=%d\n", g_aie_launches, S); /* names a hanging launch (l..l+S-1); outside the timed window */
+    fflush(stdout);
     XTime_GetTime(&ut0);
     ahs_begin(&g_ahs, AHS_KIND_LINEAR);
     int wzc_ = 0;
@@ -214,8 +220,6 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
         if (s == 0) /* GHL: host->DMA sync in the first launch's window, as uc_conv */
             uc_sync_pre(g_kw, wbytes, g_kx, xbytes, g_ky, ybytes);
         const unsigned long long rt0 = uc_rt_cyc(), sp1 = uc_pmc();
-        printf("[UCS] l=%d lin M=%d N=%d K=%d px=%d s=%d/%d tkw=%d\n", g_aie_launches, M, N, K, P, s, S, tkw);
-        fflush(stdout);
 #if UC_NEON && UC_WHOOK
         if (s > 0 && (g_uc_var & 1) == 0 && (s - 1) * P < M) { /* block s-1 scattered while launch s computes */
             wh.Ys = Y + (size_t)(s - 1) * N * P;
@@ -279,6 +283,13 @@ static int uc_linear(void *const *argv, int nargs, const uint16_t *wbf, int S) {
         g_sp_glue += (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL;
         g_sp_post += sp3 - sp2;
         g_sp_pre += sp1 - sp0;
+        /* M2 N segment: the same in-launch host glue per site (PMU cycles; ahs_cal pairs them with XTime) */
+        ahs_add(&g_ahs, AHS_GLUE, (sp2 - sp1) > (rt1 - rt0) ? (sp2 - sp1) - (rt1 - rt0) : 0ULL);
+        ahs_add(&g_ahs, AHS_FLUSH, sp1 - sp0);
+        ahs_add(&g_ahs, AHS_INVAL, sp3 - sp2);
+        ahs_launch(&g_ahs);
+        ahs_cal(&g_ahs, sp0, (unsigned long long)lt0);
+        ahs_cal(&g_ahs, sp3, (unsigned long long)lt1);
         g_uc_aie_ticks += (unsigned long long)(lt1 - lt0);
         g_aie_launches++;
     }

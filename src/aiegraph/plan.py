@@ -116,7 +116,7 @@ def kincore_geom(ch: int, k: int, px: int) -> dict:
     if tkw < 4 or (k // 2) % tkw:
         why.append(f"tkw{tkw}")
         return dict(legal=False, why=why, launches=None)
-    kp = k + 2 * tkw if ch == k // 2 else k
+    kp = k + 2 * tkw if ch == k // 2 or (tr and px == k // 2) else k   # tr: a = X [px][k/2] square too
     rows, cols = (px, ch) if tr else (ch, px)
     l1 = 2 * (16 * tkw * 4 + (cols // 4) * tkw * 4 + 16 * (cols // 4) * 4)
     if l1 > PORT_BUFFER_BYTES:

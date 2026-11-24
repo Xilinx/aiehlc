@@ -623,48 +623,99 @@ std::string commentOut(const std::string &text) {
     return r;
 }
 
-// `<obj>.partition({...}, ROWS, COLS)` -> mesh shape. 0x0 if absent or
-// unevaluable, with `why` naming the cause: "no partition call" and "ROWS is a
-// macro from a header we did not read" must not look the same to the user.
+// Top-level comma split of a call's argument text (nested (), {}, [] kept whole), trimmed.
+std::vector<std::string> splitTopArgs(const std::string &args) {
+    std::vector<std::string> out;
+    std::string cur;
+    int depth = 0;
+    auto push = [&]() {
+        size_t a = cur.find_first_not_of(" \t\r\n");
+        out.push_back(a == std::string::npos ? "" : cur.substr(a, cur.find_last_not_of(" \t\r\n") - a + 1));
+        cur.clear();
+    };
+    for (char c : args) {
+        if (c == '(' || c == '{' || c == '[')
+            depth++;
+        else if (c == ')' || c == '}' || c == ']')
+            depth--;
+        if (c == ',' && depth == 0)
+            push();
+        else
+            cur += c;
+    }
+    push();
+    return out;
+}
+
+// The launch mesh shape, from either declaration form:
+//   `<obj>.partition({...}, ROWS, COLS)` / `<obj>.partition(ROWS, COLS)`
+//   `aieArray <name>(ROWS, COLS)`  (= partition(ROWS, COLS); launched as `k<<<name>>>`)
+//   `aieDim <name>(ROWS, COLS [, {...}])`
+// A partition call wins when both appear. 0x0 if absent or unevaluable, with
+// `why` naming the cause: "no partition call" and "ROWS is a macro from a header
+// we did not read" must not look the same to the user.
 MeshShape findMeshShape(const std::string &blank, const std::map<std::string, std::string> &macros) {
     MeshShape ms;
-    size_t p = blank.find(".partition(");
-    if (p == std::string::npos) {
-        ms.why = "no device.partition({...}, ROWS, COLS) call was found in the source";
-        return ms;
-    }
-    size_t open = p + 10, close = matchClose(blank, open, '(', ')');
-    if (close == std::string::npos) {
-        ms.why = "the device.partition( call has no closing ')'";
-        return ms;
-    }
-    std::string args = blank.substr(open + 1, close - open - 1);
-    size_t brace = args.find('{');
-    size_t afterBrace = brace == std::string::npos ? 0 : matchClose(args, brace, '{', '}') + 1;
-    std::vector<std::string> parts;
-    std::string cur;
-    for (size_t i = afterBrace; i < args.size(); i++) {
-        if (args[i] == ',') {
-            parts.push_back(cur);
-            cur.clear();
-        } else
-            cur += args[i];
-    }
-    parts.push_back(cur);
-    std::vector<std::string> exprs;
-    for (auto &t : parts) {
-        size_t a = t.find_first_not_of(" \t\r\n");
-        if (a != std::string::npos)
-            exprs.push_back(t.substr(a, t.find_last_not_of(" \t\r\n") - a + 1));
-    }
-    const std::string call = "device.partition(" + args + ")";
-    if (exprs.size() < 2) {
-        ms.why = call + " has no ROWS, COLS arguments after the {...} partition";
-        return ms;
+    std::string call;              // the call as the user wrote it, for messages
+    std::vector<std::string> dims; // ROWS, COLS expressions
+    if (size_t p = blank.find(".partition("); p != std::string::npos) {
+        size_t open = p + 10, close = matchClose(blank, open, '(', ')');
+        if (close == std::string::npos) {
+            ms.why = "the device.partition( call has no closing ')'";
+            return ms;
+        }
+        std::string args = blank.substr(open + 1, close - open - 1);
+        call = "device.partition(" + args + ")";
+        auto parts = splitTopArgs(args);
+        if (!parts.empty() && !parts[0].empty() && parts[0][0] == '{')
+            parts.erase(parts.begin()); // the {...} partition
+        if (parts.size() < 2 || parts[0].empty() || parts[1].empty()) {
+            ms.why = call + " has no ROWS, COLS arguments after the {...} partition";
+            return ms;
+        }
+        dims = {parts[parts.size() - 2], parts[parts.size() - 1]};
+    } else {
+        // `aieArray device(R, C)` / `aieDim mesh(R, C [, {...}])`: type, name, '('
+        for (const char *type : {"aieArray", "aieDim"}) {
+            for (size_t t = findToken(blank, type, 0); t != std::string::npos && dims.empty();
+                 t = findToken(blank, type, t + 1)) {
+                size_t i = t + std::string(type).size();
+                while (i < blank.size() && std::isspace((unsigned char)blank[i]))
+                    i++;
+                size_t n0 = i;
+                while (i < blank.size() && isIdent(blank[i]))
+                    i++;
+                if (i == n0)
+                    continue; // `aieArray;`, `aieArray &x`, a cast ...
+                std::string name = blank.substr(n0, i - n0);
+                while (i < blank.size() && std::isspace((unsigned char)blank[i]))
+                    i++;
+                if (i >= blank.size() || blank[i] != '(')
+                    continue; // `aieArray device;` -- no shape here
+                size_t close = matchClose(blank, i, '(', ')');
+                if (close == std::string::npos)
+                    continue;
+                std::string args = blank.substr(i + 1, close - i - 1);
+                call = std::string(type) + " " + name + "(" + args + ")";
+                auto parts = splitTopArgs(args);
+                if (parts.size() < 2 || parts[0].empty() || parts[1].empty()) {
+                    ms.why = call + " needs (ROWS, COLS)";
+                    return ms;
+                }
+                dims = {parts[0], parts[1]};
+            }
+            if (!dims.empty())
+                break;
+        }
+        if (dims.empty()) {
+            ms.why = "no device.partition({...}, ROWS, COLS) call or aieArray device(ROWS, COLS) declaration "
+                     "was found in the source";
+            return ms;
+        }
     }
     long v[2];
     for (int i = 0; i < 2; i++) {
-        const std::string &e = exprs[exprs.size() - 2 + i];
+        const std::string &e = dims[i];
         Parser ps(e, macros);
         if (ps.parseExprOnly(v[i]))
             continue;

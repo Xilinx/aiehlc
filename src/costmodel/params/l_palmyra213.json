@@ -1,0 +1,128 @@
+{
+ "board": "palmyra213",
+ "cfg": {
+  "aot": {
+   "coef": {
+    "bdcfg_calls": 0.001879,
+    "bdcfg_w": 0.000516,
+    "const": 4e-06,
+    "cp_w": -0.001594,
+    "kload_w": 0.0,
+    "rst": 0.0,
+    "startio_calls": 0.000936
+   },
+   "kernels": [
+    "aot/u_conv_64x11520x1280",
+    "aot/u_lin_1024x320x2560",
+    "aot/u_lin_1024x320x320",
+    "aot/u_lin_1024x320x960",
+    "aot/u_lin_256x640x1920",
+    "aot/u_lin_256x640x5120",
+    "aot/u_lin_64x1280x3840",
+    "aot/u_lin_77x768x640",
+    "aot/y_conv_1600x64x64"
+   ],
+   "loo_maxrel": 0.039,
+   "maxrel": 0.015,
+   "n": 9,
+   "r2": 1.0
+  },
+  "aot-kco": {
+   "coef": {
+    "bdcfg_calls": 0.000737,
+    "bdcfg_w": 0.000737,
+    "const": 0.038129,
+    "cp_w": -0.000737,
+    "kload_w": 0.0,
+    "rst": 0.0,
+    "startio_calls": 0.0
+   },
+   "kernels": [
+    "aot-kco/u_conv_64x11520x1280",
+    "aot-kco/u_lin_1024x320x2560",
+    "aot-kco/u_lin_1024x320x320",
+    "aot-kco/u_lin_1024x320x960",
+    "aot-kco/u_lin_256x640x1920",
+    "aot-kco/u_lin_256x640x5120",
+    "aot-kco/u_lin_64x1280x3840",
+    "aot-kco/u_lin_77x768x640",
+    "aot-kco/y_conv_1600x64x64"
+   ],
+   "loo_maxrel": 0.036,
+   "maxrel": 0.026,
+   "n": 9,
+   "r2": 0.999
+  },
+  "off": {
+   "coef": {
+    "bdcfg_calls": 0.001878,
+    "bdcfg_w": 0.0,
+    "const": 0.273034,
+    "cp_w": 0.0,
+    "kload_w": 0.000161,
+    "rst": 0.020983,
+    "startio_calls": 0.000939
+   },
+   "kernels": [
+    "off/u_conv_64x11520x1280",
+    "off/u_lin_1024x320x2560",
+    "off/u_lin_1024x320x320",
+    "off/u_lin_1024x320x960",
+    "off/u_lin_256x640x1920",
+    "off/u_lin_256x640x5120",
+    "off/u_lin_64x1280x3840",
+    "off/u_lin_77x768x640",
+    "off/y_conv_1600x64x64",
+    "off-reload/u_conv_64x11520x1280",
+    "off-reload/u_lin_1024x320x2560",
+    "off-reload/u_lin_1024x320x320",
+    "off-reload/u_lin_1024x320x960",
+    "off-reload/u_lin_256x640x1920",
+    "off-reload/u_lin_256x640x5120",
+    "off-reload/u_lin_64x1280x3840",
+    "off-reload/u_lin_77x768x640",
+    "off-reload/y_conv_1600x64x64",
+    "off-alt/u_lin_77x768x640+u_lin_1024x320x320",
+    "off-alt/u_lin_256x640x1920+u_lin_1024x320x960",
+    "off-alt/u_lin_256x640x5120+u_lin_77x768x640",
+    "off-alt/u_lin_64x1280x3840+u_lin_1024x320x320"
+   ],
+   "loo_maxrel": 0.064,
+   "maxrel": 0.048,
+   "n": 22,
+   "r2": 0.999
+  },
+  "off-cold": {
+   "coef": {
+    "bdcfg_calls": 0.001878,
+    "bdcfg_w": 0.0,
+    "const": -0.347213,
+    "cp_w": 0.0,
+    "kload_w": 0.000679,
+    "rst": 0.020983,
+    "startio_calls": 0.000939
+   },
+   "kernels": [
+    "off-cold/u_conv_64x11520x1280",
+    "off-cold/u_lin_1024x320x320",
+    "off-cold/u_lin_256x640x5120",
+    "off-cold/u_lin_77x768x640",
+    "off-cold/y_conv_1600x64x64"
+   ],
+   "loo_maxrel": 0.007,
+   "maxrel": 0.002,
+   "n": 5,
+   "r2": 1.0
+  }
+ },
+ "features": [
+  "const",
+  "bdcfg_calls",
+  "startio_calls",
+  "bdcfg_w",
+  "cp_w",
+  "kload_w",
+  "rst"
+ ],
+ "l_def": "kload+core_reset+coreen+rt_bdcfg+rt_startio (ms/launch)"
+}

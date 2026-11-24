@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // @E@_ref.c -- x86 model of the carrier step for aiegraph's group-level check (offload check="group"):
 // conv2d_NCHWc on TVM's layouts with the AIE numerics (activation and weight rounded to bf16, fp32
 // accumulation), then the fused adds. aiegraph compares it with TVM's own C on x86: cos >= 0.999, no nonfinite.

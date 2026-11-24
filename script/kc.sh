@@ -240,6 +240,17 @@ strip_kernel_debug_loc() {
         if command -v "$cand" >/dev/null 2>&1; then objcopy="$cand"; break; fi
     done
     if [ -z "$objcopy" ]; then
+        # Not on PATH on the build hosts: use the llvm-objcopy shipped with aietools (next to xchessmk).
+        local chess vroot c
+        chess=$(command -v xchessmk 2>/dev/null)
+        for vroot in ${XILINX_VITIS:-} ${chess:+$(dirname "$(dirname "$(dirname "$(dirname "$chess")")")")} \
+                /proj/xbuilds/SWIP/9999.0_0331_2018/installs/lin64/2026.1/Vitis; do
+            for c in "$vroot"/aietools/tps/lnx64/clangd-*/bin/llvm-objcopy; do
+                if [ -x "$c" ]; then objcopy="$c"; break 2; fi
+            done
+        done
+    fi
+    if [ -z "$objcopy" ]; then
         echo "Warning: no llvm-objcopy found; keeping full DWARF in $elf"
         return 0
     fi
@@ -501,9 +512,18 @@ fi
 #                                 (channel) and "STOF"/"STVL" (start reg + value).
 #
 # Off by default: klog costs cycles and trace-buffer space in a normal run.
-if [ -f "${AIEHLC_ROOT_DIR}/aout/kernel_build_flags.sh" ]; then
-    . "${AIEHLC_ROOT_DIR}/aout/kernel_build_flags.sh"
+#
+# aiehlc writes the file to ./aout/ of the directory it RUNS in (AOUT in
+# gcommon.h), and aiehlc.sh sets KERNEL_DIR=$(pwd)/aout/ and wipes it at the
+# start of every run. Read it from there, not from <repo>/aout: an
+# out-of-tree build would otherwise lose the pragma, or pick up a stale file
+# that an earlier in-tree run left behind in <repo>/aout.
+_kc_flags="${KERNEL_DIR:-$(pwd)/aout/}"
+_kc_flags="${_kc_flags%/}/kernel_build_flags.sh"
+if [ -f "$_kc_flags" ]; then
+    . "$_kc_flags"
 fi
+unset _kc_flags
 if [ "${AIEHLC_KERNEL_LOG:-0}" != "0" ]; then
     for _d in -DKERNEL_LOG_ENABLED -DKERNELCONFIGOFFLOAD_TRACE; do
         compiler_flags_chess+=" $_d"

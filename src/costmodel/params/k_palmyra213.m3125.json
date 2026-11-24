@@ -1,0 +1,89 @@
+{
+ "board": "palmyra213",
+ "cfg": {
+  "aot-kco": {
+   "classes": {
+    "conv": {
+     "alpha": 0.23071594374749413,
+     "beta": 0.0,
+     "form": "sum",
+     "gamma": 1.1183990441799239,
+     "kfirst": 0.0,
+     "t0": 0.004830597089304496
+    },
+    "fa16": {
+     "alpha": 1.0851991802216119,
+     "beta": 0.7999623364004737,
+     "form": "sum",
+     "gamma": 1.158400881609373,
+     "kfirst": 0.025178347193541284,
+     "t0": 0.0
+    },
+    "fa_d160": {
+     "alpha": 4.876264463224147,
+     "beta": 0.0,
+     "form": "sum",
+     "gamma": 0.17613685082263786,
+     "kfirst": 0.0,
+     "t0": 0.0
+    },
+    "linear": {
+     "alpha": 0.513957327699419,
+     "beta": 0.0,
+     "form": "sum",
+     "gamma": 1.006221471825063,
+     "kfirst": 0.0033553050390582964,
+     "t0": 0.0
+    }
+   },
+   "form": "sum"
+  },
+  "off": {
+   "classes": {
+    "conv": {
+     "alpha": 0.0,
+     "beta": 1.1897640479893725,
+     "form": "sum",
+     "gamma": 1.3622271792925136,
+     "kfirst": 0.0,
+     "t0": 0.03225768951605761
+    },
+    "fa16": {
+     "alpha": 1.3925179322296852,
+     "beta": 0.014370464368703451,
+     "form": "sum",
+     "gamma": 0.0,
+     "kfirst": 0.0,
+     "t0": 0.0
+    },
+    "fa_d160": {
+     "alpha": 1.041415085075016,
+     "beta": 0.0,
+     "form": "sum",
+     "gamma": 0.0,
+     "kfirst": 0.0,
+     "t0": 0.0
+    },
+    "linear": {
+     "alpha": 0.7148005198087571,
+     "beta": 0.0,
+     "form": "sum",
+     "gamma": 0.18602874655399815,
+     "kfirst": 0.0,
+     "t0": 0.0
+    }
+   },
+   "form": "sum"
+  }
+ },
+ "fit_runs": [
+  "a"
+ ],
+ "inputs": {
+  "core": "/scratch/staff/huaj/tmp/costmodel_m3121/kln/kcore_static.tsv",
+  "dw": "/scratch/staff/huaj/tmp/costmodel_m3121/kln/dwhat.tsv",
+  "ovl": "/scratch/staff/huaj/tmp/costmodel_m3125/npred_m3121.tsv"
+ },
+ "model": "K_hat static (M3.1.1.2c PK): per launch max(0, alpha core_hat/L + gamma dw_hat - beta ovl_hat/L) [sum] or max(0, max(alpha core, gamma dw) - beta ovl) [max] + t0 + kfirst/L",
+ "objective": "minimax |K_hat - (site_ms - L_hat - N_hat)/L| x launches / site_ms, body >= 0, form per cls by run-a LOO"
+}

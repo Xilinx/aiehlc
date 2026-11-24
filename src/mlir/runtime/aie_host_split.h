@@ -7,6 +7,13 @@
  *   scatter - host output un-tiling / epilogue after the launches (uc_scatter16, akp_unpad, ...)
  *   dma     - launch windows minus the runtime's wait_io (cache sync, BD config, start, core enable)
  *   wait    - the runtime's __Runtime_wait_io poll inside the launch windows
+ * and (M2 N-segment cost model) the in-launch host glue of the same launches, in A78 PMU cycles (pmccntr), the
+ * per-site share of the global g_sp_* split (split_detail host_glue_bdcfg / host_flush_startio / host_inval_wait_io):
+ *   glue    - (sp2-sp1)-(rt1-rt0): the launch call minus the runtime phases + wait_io (lock init, createio, commit)
+ *   flush   - sp1-sp0: host->DMA cache flush before the launch
+ *   inval   - sp3-sp2: DMA->host invalidate (+ pm stats) after the launch
+ *   launches- AIE launches of the site (ahs_launch)
+ * The cycle rate for *_ms comes from ahs_cal (cycle/tick pairs taken at the launch windows), else cyc_hz, else tick_hz.
  * Header-only (C and C++, no xaiengine dependency): x86 unit test src/mlir/runtime/test/test_host_split.py.
  * Ticks are whatever clock the caller uses (XTime on the A78); conversion to ms takes its rate.
  * The table is zero-initialisable (a static ahs_table needs no init call). */
@@ -20,19 +27,44 @@
 #define AHS_MAX_SITES 1024
 #endif
 
-enum { AHS_PACK = 0, AHS_SCATTER = 1, AHS_DMA = 2, AHS_WAIT = 3, AHS_NPH = 4 };
-enum { AHS_KIND_NONE = 0, AHS_KIND_CONV = 1, AHS_KIND_LINEAR = 2, AHS_KIND_ATTN = 3 };
+enum { AHS_PACK = 0, AHS_SCATTER = 1, AHS_DMA = 2, AHS_WAIT = 3, AHS_NTK = 4 }; /* XTime ticks */
+enum { AHS_GLUE = 4, AHS_FLUSH = 5, AHS_INVAL = 6, AHS_NPH = 7 };              /* PMU cycles */
+enum { AHS_KIND_NONE = 0, AHS_KIND_CONV = 1, AHS_KIND_LINEAR = 2, AHS_KIND_ATTN = 3, AHS_KIND_FA = 4 };
 
 typedef struct {
-    unsigned long long t[AHS_NPH]; /* ticks per phase */
+    unsigned long long t[AHS_NPH]; /* ticks (AHS_PACK..AHS_WAIT) / PMU cycles (AHS_GLUE..AHS_INVAL) per phase */
     unsigned calls;                /* site entries (graph_run calls) */
+    unsigned launches;             /* AIE launches inside the site */
     int kind;                      /* AHS_KIND_* of the last entry */
+    unsigned perf_n;               /* M3.1 site-perf: launches with a core counter reading */
+    unsigned long long io_act, lock_stall, stream_stall; /* slowest-core counter sums (core cycles) */
+    unsigned long long pre_io_act, snap_gap; /* M3.1.1: ACTIVE outside the wait windows; snapshot->__wio_t0 gap */
+    unsigned long long compute, ovl, dact; /* M3.1.2: same tile/window as io_act (overlap model) */
 } ahs_site;
 
 typedef struct {
     ahs_site s[AHS_MAX_SITES];
     int cur1; /* current site + 1; 0 = no site (adds are dropped) */
+    double cyc_hz; /* PMU cycle rate override for the cycle phases (0 = from ahs_cal, else tick_hz) */
+    unsigned long long cal_c0, cal_t0, cal_c1, cal_t1; /* first / last (cycles, ticks) pair of ahs_cal */
+    unsigned cal_n;
 } ahs_table;
+
+/* M3.1 site-perf (-DAIEHLC_SITE_PERF=1): the runtime's slowest-core counter reading of the last launch
+ * (aie_runtime.c; the x86 test links a stub). Returns 1 for a fresh reading, 0 for none.
+ * M3.1.1: io_act/lock/stream are summed over the launch's wait windows only (snapshot after rt_sb_ack_wait,
+ * read after wait_io), pre_io_act = ACTIVE outside them, snap_gap = summed snapshot -> __wio_t0 (core cycles). */
+#if defined(AIEHLC_SITE_PERF) && AIEHLC_SITE_PERF
+int __Runtime_core_perf_last_launch_win(unsigned long long *io_act_cyc, unsigned long long *lock_stall_cyc,
+                                        unsigned long long *stream_stall_cyc, unsigned long long *pre_io_act_cyc,
+                                        unsigned long long *snap_gap_cyc);
+int __Runtime_core_perf_last_launch_ovl(unsigned long long *compute_cyc, unsigned long long *ovl_cyc,
+                                        unsigned long long *dact_cyc);
+#endif
+
+/* aiednn_aie_host_split_line(AHS_PERF_LINE + part, ...) asks for the PROF aie_site_perf line of part
+ * (same exported entry point; archives built without AIEHLC_SITE_PERF return 0 for it) */
+#define AHS_PERF_LINE 0x10000
 
 /* free-running tick counter of the runtime side (A78 generic timer = XTime's counter); 0 where there is none */
 static inline unsigned long long ahs_now(void) {
@@ -66,6 +98,33 @@ static inline void ahs_add(ahs_table *a, int ph, unsigned long long ticks) {
         s->t[ph] += ticks;
 }
 
+/* one AIE launch of the current site */
+static inline void ahs_launch(ahs_table *a) {
+    ahs_site *s = ahs_cur(a);
+    if (s)
+        s->launches++;
+}
+
+/* a (PMU cycles, ticks) pair read back to back (any site, also outside one): the cycle rate of the cycle phases */
+static inline void ahs_cal(ahs_table *a, unsigned long long cyc, unsigned long long ticks) {
+    if (!a->cal_n) {
+        a->cal_c0 = cyc;
+        a->cal_t0 = ticks;
+    }
+    a->cal_c1 = cyc;
+    a->cal_t1 = ticks;
+    a->cal_n++;
+}
+
+/* PMU cycles per second for ticks at tick_hz: cyc_hz, else the ahs_cal span, else tick_hz (same clock) */
+static inline double ahs_cyc_hz(const ahs_table *a, double tick_hz) {
+    if (a->cyc_hz > 0.0)
+        return a->cyc_hz;
+    if (a->cal_n > 1 && a->cal_t1 > a->cal_t0 && a->cal_c1 > a->cal_c0)
+        return (double)(a->cal_c1 - a->cal_c0) * tick_hz / (double)(a->cal_t1 - a->cal_t0);
+    return tick_hz;
+}
+
 /* [t0, t1) -> phase ph (a backwards pair adds 0) */
 static inline void ahs_add_span(ahs_table *a, int ph, unsigned long long t0, unsigned long long t1) {
     ahs_add(a, ph, t1 > t0 ? t1 - t0 : 0ULL);
@@ -78,10 +137,34 @@ static inline void ahs_add_window(ahs_table *a, unsigned long long win, unsigned
         wait = win;
     ahs_add(a, AHS_WAIT, wait);
     ahs_add(a, AHS_DMA, win - wait);
+#if defined(AIEHLC_SITE_PERF) && AIEHLC_SITE_PERF
+    {
+        unsigned long long ia = 0ULL, ls = 0ULL, ss = 0ULL, pre = 0ULL, gap = 0ULL;
+        ahs_site *s = ahs_cur(a);
+        if (__Runtime_core_perf_last_launch_win(&ia, &ls, &ss, &pre, &gap) && s) {
+            s->perf_n++;
+            s->io_act += ia;
+            s->lock_stall += ls;
+            s->stream_stall += ss;
+            s->pre_io_act += pre;
+            s->snap_gap += gap;
+            unsigned long long cc = 0ULL, ov = 0ULL, da = 0ULL; /* same tile _win chose */
+            if (__Runtime_core_perf_last_launch_ovl(&cc, &ov, &da)) {
+                s->compute += cc;
+                s->ovl += ov;
+                s->dact += da;
+            }
+        }
+    }
+#endif
 }
 
 static inline const char *ahs_kind_name(int k) {
-    return k == AHS_KIND_CONV ? "conv" : k == AHS_KIND_LINEAR ? "linear" : k == AHS_KIND_ATTN ? "attn" : "none";
+    return k == AHS_KIND_CONV     ? "conv"
+           : k == AHS_KIND_LINEAR ? "linear"
+           : k == AHS_KIND_ATTN   ? "attn"
+           : k == AHS_KIND_FA     ? "fa"
+                                  : "none";
 }
 
 /* sites that were entered at least once (host_split_n) */
@@ -92,42 +175,83 @@ static inline int ahs_count(const ahs_table *a) {
     return n;
 }
 
-/* ms[AHS_NPH] of one site (site < 0: sum of all sites); returns the number of sites summed (0 = no data) */
-static inline int ahs_ms(const ahs_table *a, int site, double tick_hz, double *ms) {
-    unsigned long long t[AHS_NPH] = {0, 0, 0, 0};
+/* ms[AHS_NPH] of one site (site < 0: sum of all sites); returns the number of sites summed (0 = no data);
+ * *nl (if non-null) = launches summed */
+static inline int ahs_ms_n(const ahs_table *a, int site, double tick_hz, double *ms, unsigned *nl) {
+    unsigned long long t[AHS_NPH] = {0, 0, 0, 0, 0, 0, 0};
+    unsigned l = 0;
     int n = 0;
     for (int i = site < 0 ? 0 : site; i < (site < 0 ? AHS_MAX_SITES : site + 1) && i < AHS_MAX_SITES; i++) {
         if (!a->s[i].calls)
             continue;
         for (int p = 0; p < AHS_NPH; p++)
             t[p] += a->s[i].t[p];
+        l += a->s[i].launches;
         n++;
     }
-    for (int p = 0; p < AHS_NPH; p++)
-        ms[p] = tick_hz > 0.0 ? 1000.0 * (double)t[p] / tick_hz : 0.0;
+    const double chz = ahs_cyc_hz(a, tick_hz);
+    for (int p = 0; p < AHS_NPH; p++) {
+        const double hz = p < AHS_NTK ? tick_hz : chz;
+        ms[p] = hz > 0.0 ? 1000.0 * (double)t[p] / hz : 0.0;
+    }
+    if (nl)
+        *nl = l;
     return n;
 }
 
-/* the PROF line of one site (no newline):
- *   PROF aie_host_split part=<n> kind=<attn|conv|linear> pack_ms= scatter_ms= dma_ms= wait_ms=
- * site < 0: PROF aie_host_split_total host_split_n=<sites> pack_ms= scatter_ms= dma_ms= wait_ms=
+static inline int ahs_ms(const ahs_table *a, int site, double tick_hz, double *ms) {
+    return ahs_ms_n(a, site, tick_hz, ms, (unsigned *)0);
+}
+
+/* the PROF line of one site (no newline, <= 191 chars for site_prof.c's hs_[192]):
+ *   PROF aie_host_split part=<n> kind=<attn|conv|linear|fa> pack_ms= scatter_ms= dma_ms= wait_ms= glue_ms= flush_ms=
+ *        inval_ms= launches=
+ * site < 0: PROF aie_host_split_total host_split_n=<sites> pack_ms= scatter_ms= dma_ms= wait_ms= glue_ms= ...
  * returns snprintf's length, 0 when the site has no data (nothing written but "") */
+/* M3.1: the counter line of one part, only for parts with launches > 0 (else 0, ""):
+ *   PROF aie_site_perf part=<n> kind=<k> launches=<n> perf_n=<n> io_act_cyc=<sum> lock_stall_cyc=<sum>
+ *        stream_stall_cyc=<sum> pre_io_act_cyc=<sum> snap_gap_cyc=<sum>   (M3.1.1: the last two appended)
+ *        compute_cyc=<sum> ovl_cyc=<sum> dact_cyc=<sum>   (M3.1.2: overlap model, perf_n launches, _win's tile)
+ * A separate line: the aie_host_split line must keep ending in launches=<n> (n_fit.py / m3_site.py regexes). */
+static inline int ahs_format_perf(const ahs_table *a, int site, char *buf, size_t n) {
+    if (n)
+        buf[0] = 0;
+    if (site < 0 || site >= AHS_MAX_SITES || !a->s[site].calls || !a->s[site].launches)
+        return 0;
+    const ahs_site *s = &a->s[site];
+    return snprintf(buf, n,
+                    "PROF aie_site_perf part=%d kind=%s launches=%u perf_n=%u io_act_cyc=%llu lock_stall_cyc=%llu "
+                    "stream_stall_cyc=%llu pre_io_act_cyc=%llu snap_gap_cyc=%llu"
+                    " compute_cyc=%llu ovl_cyc=%llu dact_cyc=%llu",
+                    site, ahs_kind_name(s->kind), s->launches, s->perf_n, s->io_act, s->lock_stall, s->stream_stall,
+                    s->pre_io_act, s->snap_gap, s->compute, s->ovl, s->dact);
+}
+
 static inline int ahs_format(const ahs_table *a, int site, double tick_hz, char *buf, size_t n) {
     double ms[AHS_NPH];
+#if defined(AIEHLC_SITE_PERF) && AIEHLC_SITE_PERF
+    if (site >= AHS_PERF_LINE) /* only site-perf builds print the counter line (else: "" below) */
+        return ahs_format_perf(a, site - AHS_PERF_LINE, buf, n);
+#endif
     if (n)
         buf[0] = 0;
     if (site >= AHS_MAX_SITES)
         return 0;
-    const int ns = ahs_ms(a, site, tick_hz, ms);
+    unsigned nl = 0;
+    const int ns = ahs_ms_n(a, site, tick_hz, ms, &nl);
     if (!ns)
         return 0;
     if (site < 0)
         return snprintf(buf, n,
                         "PROF aie_host_split_total host_split_n=%d pack_ms=%.3f scatter_ms=%.3f dma_ms=%.3f "
-                        "wait_ms=%.3f",
-                        ns, ms[AHS_PACK], ms[AHS_SCATTER], ms[AHS_DMA], ms[AHS_WAIT]);
-    return snprintf(buf, n, "PROF aie_host_split part=%d kind=%s pack_ms=%.3f scatter_ms=%.3f dma_ms=%.3f wait_ms=%.3f",
-                    site, ahs_kind_name(a->s[site].kind), ms[AHS_PACK], ms[AHS_SCATTER], ms[AHS_DMA], ms[AHS_WAIT]);
+                        "wait_ms=%.3f glue_ms=%.3f flush_ms=%.3f inval_ms=%.3f launches=%d",
+                        ns, ms[AHS_PACK], ms[AHS_SCATTER], ms[AHS_DMA], ms[AHS_WAIT], ms[AHS_GLUE], ms[AHS_FLUSH],
+                        ms[AHS_INVAL], (int)nl);
+    return snprintf(buf, n,
+                    "PROF aie_host_split part=%d kind=%s pack_ms=%.3f scatter_ms=%.3f dma_ms=%.3f wait_ms=%.3f "
+                    "glue_ms=%.3f flush_ms=%.3f inval_ms=%.3f launches=%d",
+                    site, ahs_kind_name(a->s[site].kind), ms[AHS_PACK], ms[AHS_SCATTER], ms[AHS_DMA], ms[AHS_WAIT],
+                    ms[AHS_GLUE], ms[AHS_FLUSH], ms[AHS_INVAL], (int)nl);
 }
 
 #endif /* AIE_HOST_SPLIT_H */

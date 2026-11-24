@@ -109,6 +109,8 @@ class _Func:
     close: int      # offset of the matching '}'
 
 
+# `aieArray device(ROWS, COLS);` declares the launch mesh as well as device.partition(...)
+_ARRAY_CTOR = re.compile(r"\baieArray\s+\w+\s*\(\s*[^)\s]")
 _TRANSPARENT = re.compile(r'(extern\s*"\s*"|namespace(\s+\w+)?)\s*$')
 
 
@@ -213,10 +215,12 @@ def _rule_launch_structure(src, clean, funcs, kernels, rep: LintReport):
                     "launch outside any function")
             continue
         reaching.add(fn.name)
-        if ".partition(" not in clean[fn.open:fn.close]:
+        body = clean[fn.open:fn.close]
+        if ".partition(" not in body and not _ARRAY_CTOR.search(body):
             rep.add("error", "L015", src.where(m.start()),
                     f"{fn.name}() launches {m.group(1)} but has no "
-                    f"`device.partition(...)` of its own: aiehlc recovers the "
+                    f"`device.partition(...)` / `aieArray device(ROWS, COLS)` "
+                    f"of its own: aiehlc recovers the "
                     f"mesh from that function-local VarDecl, in the SAME "
                     f"function as the launch")
     # Callers of a launching function reach the launch too (one level is what

@@ -302,6 +302,40 @@ static void testRejects() {
     CHECK(!p3.ok);
 }
 
+// The launch mesh, from each declaration form kernel analysis accepts:
+// device.partition({..}, R, C) / partition(R, C) / aieArray device(R, C) / aieDim mesh(R, C).
+static void testLaunchMeshForms() {
+    struct Case {
+        const char *src;
+        int rows, cols;
+        const char *why; // substring of the reason when 0x0
+    };
+    const Case cases[] = {
+        {"#define R 4\nint main(){ aieArray device; aieMesh mesh = device.partition({3, 6, 0, 6}, R, 2); }", 4, 2, ""},
+        {"int main(){ aieArray device; aieMesh mesh = device.partition(2, 3); }", 2, 3, ""},
+        {"#define HW_ROWS 4\n#define HW_COLS 4\nint main(){ aieArray device(HW_ROWS, HW_COLS); k<<<device>>>(a); }", 4,
+         4, ""},
+        {"int main(){ aieArray device(4, 4); aieMesh mesh = device; k<<<mesh>>>(a); }", 4, 4, ""},
+        {"int main(){ aieArray dev ( 2*2 , 3 ); }", 4, 3, ""},
+        {"int main(){ aieDim mesh(2, 2, {0, 1, 0, 1}); }", 2, 2, ""},
+        // a partition call wins over a constructor
+        {"int main(){ aieArray a(1, 1); aieMesh m = a.partition({0, 3, 0, 3}, 4, 4); }", 4, 4, ""},
+        // no shape anywhere: `aieArray device;` alone, a comment does not count
+        {"int main(){ aieArray device; /* aieArray x(4, 4) */ k<<<device>>>(a); }", 0, 0,
+         "no device.partition({...}, ROWS, COLS) call or aieArray device(ROWS, COLS) declaration"},
+        {"int main(){ aieArray device(GP_ROWS, 4); }", 0, 0, "aieArray device(GP_ROWS, 4): ROWS `GP_ROWS`"},
+        {"int main(){ aieArray device(4); }", 0, 0, "aieArray device(4) needs (ROWS, COLS)"},
+    };
+    for (const Case &c : cases) {
+        std::string why;
+        auto m = sourceLaunchMesh(c.src, "/nonexistent", &why);
+        bool ok = m.first == c.rows && m.second == c.cols && why.find(c.why) != std::string::npos;
+        if (!ok)
+            std::printf("  mesh case: %s\n    -> %dx%d why='%s'\n", c.src, m.first, m.second, why.c_str());
+        CHECK(ok);
+    }
+}
+
 // End to end: trace the kernel-only conv example on x86 and route its fits.
 static void testTraceExample(const std::string &repo) {
     const std::string dir = repo + "/example/tileprogram/ccode";
@@ -488,6 +522,7 @@ int main(int argc, char **argv) {
     testEltwise();
     testRejects();
     testTraceExample(repo);
+    testLaunchMeshForms();
     testSpaceParse();
     testSpaceDiff();
     testSpaceKernel(repo);

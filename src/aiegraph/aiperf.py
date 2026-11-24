@@ -84,9 +84,13 @@ def elf_segments(path) -> dict:
 def _source_facts(src: Path) -> dict:
     text = src.read_text(errors="replace") if src.is_file() else ""
     m = re.search(r"\.partition\(\s*\{([^}]*)\}\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", text)
+    # aieArray device(R, C) = partition(R, C): columns 0..C-1
+    c = None if m else re.search(r"\baieArray\s+\w+\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", text)
     return {"pragmas": [l.strip() for l in text.splitlines() if l.strip().startswith("#pragma")],
-            "partition": m.group(1).replace(" ", "") if m else None,
-            "mesh": [int(m.group(2)), int(m.group(3))] if m else None,
+            "partition": (m.group(1).replace(" ", "") if m else
+                          f"0,{int(c.group(2)) - 1},0,{int(c.group(1)) - 1}" if c else None),
+            "mesh": ([int(m.group(2)), int(m.group(3))] if m else
+                     [int(c.group(1)), int(c.group(2))] if c else None),
             "todo": len(re.findall(r"TODO\(", text)),
             "backbone": "TODO(compute)" in text,
             "ctrl_init": "ctrl_high_throughput_enable" in text or "control_plane_init" in text}
@@ -205,7 +209,11 @@ def cost_model(f: dict) -> dict:
     cfg_ms = cfg_words * (CTRL_NS if host["ctrl_calls"] else WRITE_NS) / 1e6
     known = elf_ms + cfg_ms
     measured = f["run"]["measured_ms"]
-    return {"cores": cores, "elf_load_ms": round(elf_ms, 3), "elf_words_per_core": int(words),
+    est = None
+    if f.get("group"):  # forward to the cost layer (costmodel.estimate) when the facts carry a group
+        from costmodel import estimate
+        est = estimate(f["group"], board=f.get("board", "palmyra213"))
+    return {"cores": cores, "estimate": est, "elf_load_ms": round(elf_ms, 3), "elf_words_per_core": int(words),
             "config_ms": round(cfg_ms, 3), "config_words": int(cfg_words),
             "teardown": host["teardown"], "computing": not f["src"]["backbone"],
             "known_ms": round(known, 3), "measured_ms": measured,

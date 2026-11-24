@@ -21,6 +21,7 @@ from aiegraph import boardmain as bm, flashattn as fa  # noqa: E402
 from aiegraph.errors import AiegraphError  # noqa: E402
 
 FA_LAST = "d5e9f15"   # last commit with the example's fa_attn.py
+FA_CM = "a6c59eea"    # costmodel branch tip: the same fa_attn.py + the FA_HS host-split probes in fa_host (M2 P0)
 
 
 def _row(group, role, H, N, M, D, **kw):
@@ -48,15 +49,28 @@ def old_fa():
     return m
 
 
-def test_same_as_example_copy(old_fa):
+@pytest.fixture(scope="module")
+def cm_fa():
+    src = subprocess.run(["git", "-C", str(ROOT), "show", f"{FA_CM}:example/aiegraph/unet_bk_sdm_tiny/fa_attn.py"],
+                         capture_output=True, text=True).stdout
+    if not src:
+        pytest.skip(f"git show {FA_CM}:fa_attn.py unavailable")
+    m = types.ModuleType("cm_fa_attn")
+    m.__file__ = str(ROOT / "example/aiegraph/unet_bk_sdm_tiny/fa_attn.py")
+    exec(compile(src, m.__file__, "exec"), m.__dict__)
+    return m
+
+
+def test_same_as_example_copy(old_fa, cm_fa):
     a, b = _att(), _att()
     new, old = fa.fa_classes(a), old_fa.fa_classes(b)
     assert new == old and [c["fa"] for c in a] == [c["fa"] for c in b] == [0, 0, 1, 1, 2, 2, 3, 3, 0, 0]
     assert fa.fa_prologue(new) == old_fa.fa_prologue(old)
-    assert fa.fa_host(new) == old_fa.fa_host(old)
+    # fa_host = the d5e9f15 text + the costmodel host-split probes, byte-identical to the costmodel copy
+    assert fa.fa_host(new) == cm_fa.fa_host(cm_fa.fa_classes(_att())) == fa.fa_host_split(old_fa.fa_host(old))
     kw = fa.fa_kernel_parts(new)
     assert kw["kernels"] == "\n\n" + old_fa.FA_KERNEL and kw["prologue"] == old_fa.fa_prologue(old) + "\n"
-    assert kw["host_entries"] == old_fa.fa_host(old).lstrip("\n")
+    assert kw["host_entries"] == fa.fa_host_split(old_fa.fa_host(old)).lstrip("\n")
     assert kw["exports"] == ("aiednn_aie_attn", "aiednn_aie_attn_kl")
     assert fa.FA_STEPS == old_fa.fa_steps() and fa.FA_STEP_ROLES == old_fa.FA_STEP_ROLES
     assert fa.DECL_FA == old_fa.DECL_FA and fa.DECL_KL == old_fa.DECL_KL
@@ -130,3 +144,13 @@ def test_fa_driver_glue_rejects_unplaced_rows():
         fa.fa_driver_glue([dict(fa=0)])
     with pytest.raises(AiegraphError, match="not FA group steps"):
         fa.fa_driver_glue([dict(fa=None, fa_steps=True, onnx="/attn/MatMul")])
+
+
+def test_fa_host_split_rejects_missing_or_repeated_anchor():
+    h = fa.fa_host(fa.fa_classes(_att()))
+    with pytest.raises(AiegraphError, match="anchor found 0 times"):
+        fa.fa_host_split("int main() { return 0; }")
+    a0 = fa.FA_HS[0][0]
+    raw = h.replace(fa.FA_HS[0][1], a0)   # undo probe 0, then duplicate its anchor
+    with pytest.raises(AiegraphError, match="anchor found 2 times"):
+        fa.fa_host_split(raw + a0)

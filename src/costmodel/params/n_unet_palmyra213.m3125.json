@@ -1,0 +1,288 @@
+{
+ "aot-kco": {
+  "attn_host_ms": 14.499,
+  "kinds": {
+   "conv": {
+    "coef": {
+     "MK": 7.55906588e-07,
+     "MN": 3.0775297e-06,
+     "cp_w": 4.57249932e-05,
+     "in_pack_bytes": 4.06638562e-07,
+     "out_scatter_bytes": 1.06217676e-07,
+     "relayout": 0.470693189,
+     "wbytes": 1.25762403e-07
+    },
+    "d": 0.0521579471,
+    "feats": [
+     "MK",
+     "MN",
+     "wbytes",
+     "cp_w",
+     "in_pack_bytes",
+     "out_scatter_bytes",
+     "relayout"
+    ],
+    "loo_a": 0.124127978,
+    "method": "minimax",
+    "n": 48
+   },
+   "fa": {
+    "coef": {
+     "MK": 1.26516632e-06,
+     "MN": 1.26468444e-07,
+     "cp_w": 0.000866730658
+    },
+    "d": 0.192724255,
+    "feats": [
+     "MK",
+     "MN",
+     "cp_w"
+    ],
+    "loo_a": 0.026753962,
+    "method": "minimax",
+    "n": 18
+   },
+   "linear": {
+    "coef": {
+     "MK": 2.47174546e-07,
+     "out_scatter_bytes": 1.07359131e-06,
+     "pack_slow_elems": 4.56656629e-06,
+     "rr": 0.00204347588,
+     "wbytes": 1.39984817e-07
+    },
+    "d": 0.210943016,
+    "feats": [
+     "MK",
+     "wbytes",
+     "rr",
+     "out_scatter_bytes",
+     "pack_slow_elems"
+    ],
+    "loo_a": 0.0972545589,
+    "method": "minimax",
+    "n": 72
+   }
+  },
+  "model": "N=sum(coef[f]*f)+d (ms), nnls on relative error, <={\"conv\": 7, \"fa\": 5, \"linear\": 5} features per kind",
+  "ovl": {
+   "cls": {
+    "conv": {
+     "c": 0.0111289175,
+     "k": 0.528216442,
+     "n": 48
+    },
+    "fa": {
+     "c": -0.0188708551,
+     "k": 0.220789048,
+     "n": 18
+    },
+    "linear": {
+     "c": -0.139404858,
+     "k": 0.824269174,
+     "n": 72
+    }
+   },
+   "fit_runs": [
+    "a"
+   ],
+   "form": "cls",
+   "kinds": {
+    "conv": {
+     "coef": {
+      "MK": 1.76195861e-07,
+      "bdcfg_w": 2.14943496e-05,
+      "in_pack_bytes": 9.23910418e-09,
+      "relayout": 0.0128807701,
+      "rr": 0.0021172666,
+      "rr_pair": 0.00667826183,
+      "wbytes": 7.75207625e-08
+     },
+     "d": 0.227066,
+     "feats": [
+      "MK",
+      "wbytes",
+      "bdcfg_w",
+      "rr",
+      "rr_pair",
+      "in_pack_bytes",
+      "relayout"
+     ],
+     "n": 48
+    },
+    "fa": {
+     "coef": {
+      "MK": 4.3153587e-07,
+      "MN": 1.0265934e-07,
+      "launches": 0.219743643
+     },
+     "d": 0.168555582,
+     "feats": [
+      "MK",
+      "MN",
+      "launches"
+     ],
+     "n": 18
+    },
+    "linear": {
+     "coef": {
+      "bdcfg_w": 1.59942145e-05,
+      "launches": 0.131334951,
+      "out_scatter_bytes": 9.94798076e-08,
+      "rr": 0.0022152081,
+      "wbytes": 8.20486298e-08
+     },
+     "d": 0.0842299273,
+     "feats": [
+      "launches",
+      "wbytes",
+      "bdcfg_w",
+      "rr",
+      "out_scatter_bytes"
+     ],
+     "n": 72
+    }
+   },
+   "model": "ovl_hat = cls[kind].k * (glue_hat + corr_ms) + cls[kind].c; glue_hat = sum(coef[f]*f)+d (kinds, frozen); (k, c) relative LSQ on ovl_meas of the a log (n_fit --fit-ovl cls)"
+  },
+  "refit": {
+   "from": "script/perf/params/n_unet_palmyra213.json",
+   "log": "/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks/2026-11-20_M3121/unet_aot-kco.a.log",
+   "nrefit": 1,
+   "run": "a"
+  }
+ },
+ "off": {
+  "attn_host_ms": 14.462,
+  "kinds": {
+   "conv": {
+    "coef": {
+     "MK": 7.11252383e-07,
+     "MN": 3.1219113e-06,
+     "bdcfg_w": 0.000375462957,
+     "in_pack_bytes": 4.26207162e-07,
+     "out_scatter_bytes": 1.68001419e-07,
+     "relayout": 0.526551191,
+     "wbytes": 1.36544329e-07
+    },
+    "d": 0.0296983734,
+    "feats": [
+     "MK",
+     "MN",
+     "wbytes",
+     "bdcfg_w",
+     "in_pack_bytes",
+     "out_scatter_bytes",
+     "relayout"
+    ],
+    "loo_a": 0.150493488,
+    "method": "minimax",
+    "n": 48
+   },
+   "fa": {
+    "coef": {
+     "launches": 0.611477512
+    },
+    "d": 0.22976166,
+    "feats": [
+     "launches"
+    ],
+    "loo_a": 0.0767898022,
+    "method": "minimax",
+    "n": 18
+   },
+   "linear": {
+    "coef": {
+     "MK": 1.4915277e-06,
+     "MN": 3.73186307e-06,
+     "bdcfg_w": 0.000333063252,
+     "pack_slow_elems": 5.46064589e-06,
+     "wbytes": 1.1243413e-07
+    },
+    "d": 0.358329385,
+    "feats": [
+     "MK",
+     "MN",
+     "wbytes",
+     "bdcfg_w",
+     "pack_slow_elems"
+    ],
+    "loo_a": 0.108370747,
+    "method": "minimax",
+    "n": 72
+   }
+  },
+  "model": "N=sum(coef[f]*f)+d (ms), nnls on relative error, <={\"conv\": 7, \"fa\": 5, \"linear\": 5} features per kind",
+  "ovl": {
+   "cls": {
+    "conv": {
+     "c": 0.188702289,
+     "k": 0.719580419,
+     "n": 48
+    },
+    "fa": {
+     "c": -0.078836481,
+     "k": 0.672125043,
+     "n": 18
+    },
+    "linear": {
+     "c": -0.363726081,
+     "k": 0.946487504,
+     "n": 72
+    }
+   },
+   "fit_runs": [
+    "a"
+   ],
+   "form": "cls",
+   "kinds": {
+    "conv": {
+     "coef": {
+      "MK": 1.6460679e-07,
+      "bdcfg_w": 0.000380190784,
+      "relayout": 0.0306751988,
+      "wbytes": 7.48604652e-08
+     },
+     "d": 0.346911277,
+     "feats": [
+      "MK",
+      "wbytes",
+      "bdcfg_w",
+      "relayout"
+     ],
+     "n": 48
+    },
+    "fa": {
+     "coef": {
+      "launches": 0.554013326
+     },
+     "d": 0.161923621,
+     "feats": [
+      "launches"
+     ],
+     "n": 18
+    },
+    "linear": {
+     "coef": {
+      "MK": 1.55454589e-07,
+      "bdcfg_w": 0.000384405745,
+      "wbytes": 5.81870032e-08
+     },
+     "d": 0.394309035,
+     "feats": [
+      "MK",
+      "wbytes",
+      "bdcfg_w"
+     ],
+     "n": 72
+    }
+   },
+   "model": "ovl_hat = cls[kind].k * (glue_hat + corr_ms) + cls[kind].c; glue_hat = sum(coef[f]*f)+d (kinds, frozen); (k, c) relative LSQ on ovl_meas of the a log (n_fit --fit-ovl cls)"
+  },
+  "refit": {
+   "from": "script/perf/params/n_unet_palmyra213.json",
+   "log": "/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks/2026-11-20_M3121/unet_off.a.log",
+   "nrefit": 1,
+   "run": "a"
+  }
+ }
+}

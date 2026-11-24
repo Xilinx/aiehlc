@@ -1,0 +1,66 @@
+{
+ "cfgs": {
+  "aot": {
+   "fit_log": "/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks/2026-11-22_M40/yolo26n_aot.a.log",
+   "fit_maxrel": 0.102858,
+   "loo_maxrel": 0.130087,
+   "sites": 102,
+   "theta": {
+    "c": 0.0675100334,
+    "o0": 1.05245596,
+    "o1": 1.97001346e-05,
+    "s_rd": 2.56936022,
+    "s_wr": 6.16825638
+   }
+  },
+  "off": {
+   "fit_log": "/scratch/staff/huaj/aiengineers/shuhua/clones/cost/tasks/2026-11-22_M40/yolo26n_off.a.log",
+   "fit_maxrel": 0.089285,
+   "loo_maxrel": 0.108802,
+   "sites": 102,
+   "theta": {
+    "c": 0.0339005473,
+    "o0": 0.431810839,
+    "o1": 0.00318394509,
+    "s_rd": 1.35357392,
+    "s_wr": 16.8192669
+   }
+  }
+ },
+ "fit_run": "a",
+ "inputs": {
+  "board": [
+   "script/perf/params/palmyra213.json",
+   "f6aaefd85fa962d0cb9f6abf32b8c84d"
+  ],
+  "kcyc": [
+   "script/perf/params/kcyc_yolo26n.json",
+   "7baa423a952098246f47a72f08245159"
+  ],
+  "lparams": [
+   "script/perf/params/l_palmyra213.m3121.json",
+   "ade402695101ca3816935dd78c9800e9"
+  ],
+  "nparams": [
+   "script/perf/params/n_yolo26n_palmyra213.m42.json",
+   "5ae5cb73be90f635f795ed55bebc39ad"
+  ]
+ },
+ "model": [
+  "  k_net.py --net resnet18 --build-root R --lparams L.json --nparams N.json --kcyc KCYC.json --board BOARD.json",
+  "           [--out K.json | --params K.json] [--spread CFG=X,CFG=X] [--gate 0.20] [--r2 0.90] CFG=A.log,B.log,C.log ...",
+  "",
+  "Per launch (ms), every input static (build dir + frozen params), the board log is only the truth T:",
+  "  T_hat = L_hat + N_hat + K_hat",
+  "  K_hat = max(core + dma, N_ovl) - N_ovl + c      ( = the brief's  L + N_pre + max(core + dma, N_ovl) + N_post + c",
+  "                                                    with N_hat = N_pre + N_ovl + N_post already holding N_ovl )",
+  "  core  = pred_cyc / f                            pred_cyc = kcore_net (P5, KCYC json sites), f = BOARD aie_clk_mhz",
+  "  dma   = s_rd * rd_b / bw_rd + s_wr * wr_b / bw_wr + bd_n * bd_switch_cyc / f / shim_ch_n",
+  "          rd_b = ddr_b * rw_ratio, wr_b = ddr_b - rd_b, bd_n, shim_ch_n: net_kdiag (P4) static shim BD walk;",
+  "          bw_rd / bw_wr = BOARD ddr_rd_gbps / ddr_wr_gbps (palmyra213 microbench, 4 shim cols)",
+  "  N_ovl = o0 + o1 * glue_bd / launches            host glue (BD patch) running while the array runs; glue_bd static",
+  "                                                  (ap_sites, P2)",
+  "  L_hat = l_net (P1, frozen l_palmyra213.m3121), N_hat = n_fit --ap predict (P2, frozen n_resnet18 m4)"
+ ],
+ "net": "yolo26n"
+}

@@ -20,13 +20,16 @@ run_cmd() {
 }
 
 usage() {
-    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss]"
+    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss] [-serialize]"
     echo "  --platform    baremetal (default) | sim | linux | baremetal_debug"
     echo "                'baremetal_debug' builds a baremetal ELF and writes sim_config.sh so the debug"
     echo "                UI can run either a hardware test or a simulator run from one build."
     echo "  --profiling   build the host with the PMU profiling layer (-DAIEHLC_PROFILING=1)"
-    echo "  --skip-bss    skip ALL .bss zero-init on kernel load (-DAIEHLC_SKIP_BSS_DEFAULT=1; unsafe if the kernel reads zeroed statics)"
+    echo "  --skip-bss    skip .bss zero-init on kernel load except segments <=64 B (-DAIEHLC_SKIP_BSS_DEFAULT=1; unsafe if the kernel reads a bigger zeroed array)"
     echo "  --skip-port-bss  skip zero-init only for DMA port-buffer .bss (buf_in_*/buf_out_*), keep it for the rest (-DAIEHLC_SKIP_BSS_DEFAULT=2)"
+    echo "  -serialize    take an exclusive lock on thirdparty/alib for the whole run, so parallel aiehlc.sh runs"
+    echo "                on this tree wait for each other (also AIEHLC_SERIALIZE=1). Default: no lock -- two runs"
+    echo "                at once on one tree can wipe each other's alib; use separate worktrees or -serialize."
     return 1
 }
 
@@ -177,6 +180,123 @@ build_hw_lib() {
         fi
     }
 
+# ---- AIEHLC_LIBCACHE=<dir>: content cache for the build_hw_lib output (alib include/ + lib/) ----------
+# Unset -> nothing below runs and aiehlc.sh behaves as before (alib lock only with -serialize).
+# Set (baremetal/baremetal_debug only) -> key = sha256(aie-rt tree + BSP headers/libs/ld + toolchain -v +
+# compiler flags + AIELIB_APU_NAME + AIE_GEN + platform); <dir>/<key>/{include,lib} is written atomically
+# (tmp dir + mv) after a build_hw_lib under the exclusive lock. A build whose key is already in the cache
+# stages it (exclusive lock only for the copy) or, when alib already holds it (.aiehlc_libcache_key marker
+# + lib cmp), just takes a SHARED lock for the rest of the script, so parallel builds no longer serialize.
+# AIEHLC_LIBCACHE_DRYRUN=1 prints "LIBCACHE DRYRUN key=<k> verdict=hit|miss" and returns before any lock.
+# AIEHLC_TS <stage> <epoch> lines (only with AIEHLC_LIBCACHE set) let callers cut the build into stages.
+aiehlc_ts() {
+    if [[ -n "${AIEHLC_LIBCACHE:-}" ]]; then echo "AIEHLC_TS $1 $(date +%s.%N | cut -c1-14)"; fi
+    return 0
+}
+
+aiehlc_libcache_inputs() {
+    # same positional args as build_hw_lib; prints the key material
+    local header_dir="$1" compiler="$2" assembler="$3" archiver="$4" compiler_flags="$5" extra_flags="$6"
+    local output_lib="$7" lib_dir="$8" ld_dir="$9" lplatform="${10}"
+    local rt="${AIE_DRIVER_PARENT_DIR}/aie-rt"
+    {
+        echo "aiehlc-libcache v1"
+        echo "platform=$lplatform aie_gen=$AIE_GEN apu=$output_lib"
+        echo "cc=$compiler as=$assembler ar=$archiver"
+        echo "cflags=$compiler_flags -DAIE_GEN=$AIE_GEN"
+        echo "extra=$extra_flags"
+        # `gcc -v` (the task's toolchain identity); temp-file names it prints are masked
+        "$compiler" -v 2>&1 | sed -E 's#/tmp/[A-Za-z0-9._-]+#/tmp/X#g'
+        "$archiver" --version 2>&1 | head -1
+        git -C "$rt" ls-files -s
+        git -C "$rt" diff HEAD --binary
+        (cd "$rt" && git ls-files -o --exclude-standard -z | xargs -0 -r sha256sum)
+        (cd "$header_dir" && sha256sum ./*.h)
+        (cd "$lib_dir" && sha256sum ./*.a)
+        sha256sum < "$ld_dir"
+    }
+}
+
+aiehlc_libcache_key() {
+    aiehlc_libcache_inputs "$@" | sha256sum | cut -c1-24
+}
+
+aiehlc_libcache_lib() {
+    local key
+    key=$(aiehlc_libcache_key "$@") || return 1
+    [ -n "$key" ] || return 1
+    local cdir="${AIEHLC_LIBCACHE%/}/$key"
+    local alib="${AIE_DRIVER_PARENT_DIR%/}"
+    local marker="$alib/.aiehlc_libcache_key"
+    local apu="$7"
+    if [[ "${AIEHLC_LIBCACHE_DRYRUN:-0}" == 1 ]]; then
+        local v=miss
+        [ -f "$cdir/lib/$apu" ] && v=hit
+        [[ -z "${AIEHLC_LIBCACHE_DUMP:-}" ]] || aiehlc_libcache_inputs "$@" > "$AIEHLC_LIBCACHE_DUMP"
+        echo "LIBCACHE DRYRUN key=$key verdict=$v dir=$cdir inputs=$(aiehlc_libcache_inputs "$@" | wc -l) cc=$("$2" -dumpversion 2>&1)"
+        return 0
+    fi
+    mkdir -p "${AIEHLC_LIBCACHE%/}"
+    exec {AIEHLC_ALIB_LOCK_FD}>"$alib/.aiehlc_alib.lock"
+    echo "aiehlc.sh: libcache key=$key dir=$cdir"
+    aiehlc_ts lock_wait_begin
+    local mode=hit
+    while :; do
+        flock -s "${AIEHLC_ALIB_LOCK_FD}"
+        if [ -f "$cdir/lib/$apu" ] && [ "$(cat "$marker" 2>/dev/null)" = "$key" ] \
+            && cmp -s "$cdir/lib/$apu" "$alib/lib/$apu"; then
+            break
+        fi
+        flock -u "${AIEHLC_ALIB_LOCK_FD}"
+        if flock -x -n "${AIEHLC_ALIB_LOCK_FD}"; then
+            aiehlc_ts lock_acquired
+            rm -f "$marker"
+            if [ -f "$cdir/lib/$apu" ]; then
+                [ "$mode" = miss ] || mode=staged
+                aiehlc_ts stage_lib_begin
+                rm -rf "$alib/include/"*.h "$alib/lib/"*.a "$alib/include/xaiengine"
+                mkdir -p "$alib/include" "$alib/lib"
+                cp -a "$cdir/include/." "$alib/include/"
+                cp -a "$cdir/lib/." "$alib/lib/"
+                aiehlc_ts stage_lib_end
+            else
+                mode=miss
+                aiehlc_ts build_hw_lib_begin
+                build_hw_lib "$@"
+                aiehlc_ts build_hw_lib_end
+                aiehlc_ts stage_lib_begin
+                local tmp
+                tmp=$(mktemp -d "${AIEHLC_LIBCACHE%/}/.tmp.$key.XXXXXX")
+                cp -a "$alib/include" "$tmp/include"
+                cp -a "$alib/lib" "$tmp/lib"
+                { echo "key=$key"; echo "host=$(hostname) date=$(date -Is)"; aiehlc_libcache_inputs "$@"; } > "$tmp/KEY"
+                if ! mv -T "$tmp" "$cdir" 2>/dev/null; then
+                    rm -rf "$tmp"   # another builder stored the same key first
+                fi
+                aiehlc_ts stage_lib_end
+            fi
+            echo "$key" > "$marker"
+            # release and loop: re-take SHARED and re-verify (a writer may slip in between)
+            flock -u "${AIEHLC_ALIB_LOCK_FD}"
+            continue
+        fi
+        sleep 1
+    done
+    aiehlc_ts lock_acquired_shared
+    echo "aiehlc.sh: libcache $mode key=$key (alib shared lock held)"
+    return 0
+}
+
+
+# Close an alib lock fd (GAP-ALIB-RACE below) that a shell still holds from an OLDER aiehlc.sh, which
+# took the lock in the caller's shell when sourced. The current script never does: main runs in a
+# subshell (see the end of this file), so the lock dies with it.
+aiehlc_release_alib_lock() {
+    if [[ -n "${AIEHLC_ALIB_LOCK_FD:-}" ]]; then
+        exec {AIEHLC_ALIB_LOCK_FD}>&- 2>/dev/null || true
+        unset AIEHLC_ALIB_LOCK_FD
+    fi
+}
 
 main() {
 set -eo pipefail
@@ -195,6 +315,7 @@ DEBUG_OUTPUT=0
 DEBUG_SYMS=0
 platform="baremetal"
 COMPILE_AIELIB_ONLY=0
+SERIALIZE="${AIEHLC_SERIALIZE:-0}" # -serialize: take the alib lock (GAP-ALIB-RACE)
 USE_LOCAL_AIERT_BSP=0
 PRETTY_DEBUG=0
 SIM_TILES=""
@@ -241,6 +362,10 @@ while [[ $# -gt 0 ]]; do
             DEBUG_SYMS=1
             shift
             ;;
+        -serialize|--serialize)
+            SERIALIZE=1
+            shift
+            ;;
         --aielib-only)
             COMPILE_AIELIB_ONLY=1
             shift
@@ -272,6 +397,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+aiehlc_ts aiehlc_start
+# shellcheck source=profiling_env_check.sh
+source "${SCRIPT_DIR}/profiling_env_check.sh"
+aiehlc_profiling_env_check "${PROFILING}"
 
 # Parameter validation
 if [ "$COMPILE_AIELIB_ONLY" -eq 0 ] && [ -z "$runtime_source_file" ]; then
@@ -409,7 +539,21 @@ if [ -d "${AIE_DRIVER_PARENT_DIR}/aie-rt/driver/" ] && [[ "$platform" != "sim" ]
     # aie-rt objects); two aiehlc.sh runs on one tree (e.g. a full and a VERIFY UNet build in parallel)
     # deleted each other's objects ("xaie_feature_config.h: No such file", rc=2). Hold an exclusive lock
     # on the alib dir from here until this script exits, since the later host link reads alib/lib + include.
-    if command -v flock >/dev/null 2>&1; then
+    # AIEHLC_HW_LIB_FLAG_EXTRA: optional extra aie-rt compile flags (unset -> the flags are unchanged).
+    hw_lib_cflags="-g -Wall -Wextra -Dversal ${hw_lib_flag} -fno-tree-loop-distribute-patterns${AIEHLC_HW_LIB_FLAG_EXTRA:+ ${AIEHLC_HW_LIB_FLAG_EXTRA}}"
+    if [[ -n "${AIEHLC_LIBCACHE:-}" ]] && [[ "$platform" == baremetal* ]] && command -v flock >/dev/null 2>&1; then
+        aiehlc_libcache_lib \
+            "${ARCH_APU_AINC}" ${TOOL_PREFIX}gcc ${TOOL_PREFIX}as ${TOOL_PREFIX}ar "-O2 -c" "$hw_lib_cflags" \
+            "$AIELIB_APU_NAME" "$ARCH_APU_ALIB" "$ARCH_APU_LD" "$platform" || return 1
+        if [[ "${AIEHLC_LIBCACHE_DRYRUN:-0}" == 1 ]]; then
+            return 0
+        fi
+    else
+    # main runs in a subshell, so this fd belongs to that process: the kernel releases the lock when
+    # it exits -- normally, on error, on Ctrl-C or kill -- and the caller's shell never holds it.
+    # Opt-in (-serialize / AIEHLC_SERIALIZE=1): by default no lock is taken, so a run never waits on
+    # another; concurrent runs on one tree then need separate worktrees.
+    if [ "$SERIALIZE" = "1" ] && command -v flock >/dev/null 2>&1; then
         exec {AIEHLC_ALIB_LOCK_FD}>"${AIE_DRIVER_PARENT_DIR}/.aiehlc_alib.lock"
         echo "aiehlc.sh: waiting for alib lock ${AIE_DRIVER_PARENT_DIR}.aiehlc_alib.lock"
         flock "${AIEHLC_ALIB_LOCK_FD}"
@@ -421,11 +565,12 @@ if [ -d "${AIE_DRIVER_PARENT_DIR}/aie-rt/driver/" ] && [[ "$platform" != "sim" ]
         ${TOOL_PREFIX}as \
         ${TOOL_PREFIX}ar \
         "-O2 -c" \
-        "-g -Wall -Wextra -Dversal ${hw_lib_flag} -fno-tree-loop-distribute-patterns" \
+        "$hw_lib_cflags" \
         "$AIELIB_APU_NAME" \
         "$ARCH_APU_ALIB" \
         "$ARCH_APU_LD" \
                 "$platform"
+    fi
 
     if [[ $aie_version == "1" || $aie_version == "2" ]]; then
         EXTRA_LIBS=""
@@ -590,7 +735,10 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
     if [ "${SKIP_BSS}" -ne 0 ]; then
         hc_extra_defs="${hc_extra_defs} -DAIEHLC_SKIP_BSS_DEFAULT=${SKIP_BSS}"
     fi
-    WORKLOCAL_DIR="${WORKLOCAL_DIR}" AIE_VERSION="${aie_version}" PLATFORM="${platform}" \
+    aiehlc_ts host_link_begin
+    # KERNEL_DIR: hostcompile.sh cd's into WORKLOCAL_DIR before it sources kc.sh,
+    # so kc.sh must be told where aiehlc wrote kernel_build_flags.sh.
+    KERNEL_DIR="${KERNEL_DIR}" WORKLOCAL_DIR="${WORKLOCAL_DIR}" AIE_VERSION="${aie_version}" PLATFORM="${platform}" \
         SIM_TILES="${SIM_TILES:-}" DEBUG_SYMS="${DEBUG_SYMS}" \
         AIEHLC_PROFILING="${PROFILING}" EXTRA_DEFS="${hc_extra_defs}" \
         USE_LLVM_AIE="${use_llvm_aie}" LLVM_AIE_PATH="${LLVM_AIE_PATH:-}" \
@@ -600,11 +748,18 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
         echo "Error: tiling mode compilation failed."
         return $TILING_RC
     fi
+    aiehlc_ts host_link_end
 
     # Copy the built ELF to the standard output location
     TILING_BUILD_DIR="${WORKLOCAL_DIR}/build"
     if [ -f "${TILING_BUILD_DIR}/host" ]; then
-        cp -f "${TILING_BUILD_DIR}/host" "${HOST_BUILD_DIR}/main.elf"
+        # hostcompile.sh already published main.elf (stripped unless
+        # DEBUG_SYMS=1) + main.debug.elf. Copying the unstripped host over it
+        # here undid the strip. Only copy if nothing newer was published.
+        if [ ! -f "${HOST_BUILD_DIR}/main.elf" ] || \
+           [ "${TILING_BUILD_DIR}/host" -nt "${HOST_BUILD_DIR}/main.elf" ]; then
+            cp -f "${TILING_BUILD_DIR}/host" "${HOST_BUILD_DIR}/main.elf"
+        fi
         echo "Build complete (tiling mode)."
         echo "    ${HOST_BUILD_DIR}/main.elf"
     else
@@ -670,6 +825,7 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
             echo "    warning: --prettydebug requested but host_schedule.html missing; skipping server."
         fi
     fi
+    aiehlc_ts aiehlc_end
     return 0
 fi
 
@@ -837,6 +993,7 @@ if [[ "$platform" == "sim" ]]; then
         "$aie_version" "$platform"
     return 0
 elif [[ "$platform" == "baremetal" || "$platform" == "baremetal_debug" ]]; then
+    aiehlc_ts host_link_begin
     dbg_echo ${TOOL_PREFIX}g++ $opt_flags ${RUNTIME_LINK_FLAGS} -L$XILINX_VITIS/aietools/lib/lnx64.o/ -L$AIENGINE_LIB_DIR -DAIE_GEN=${aie_version} ${compiler_cpu_flag} -Wl,-T -Wl,${ARCH_APU_LD} -I${AIETOOLS_INCLUDE_BASE} -I$AIE_DRIVER_PARENT_DIR/include/ -I$ARCH_APU_AINC -I$SECONDARY_ARCH_APU_AINC -I${SOURCE_DIR} -I${AIEHLC_DIR}/src/mlir/runtime -I${AIEHLC_DIR}/include -L$ARCH_APU_ALIB -L$AIE_DRIVER_PARENT_DIR/lib/ -o $HOST_BUILD_DIR/main.elf $host_file "${RUNTIME_SRCS[@]}" ${temp_obj_files[@]} -Wl,--gc-sections -Wl,--start-group,-lm,-l${BAREMETAL_AIENGINE_LIB},-lxil,-lgcc,-lc,-lstdc++,${EXTRA_LIBS}--end-group
     ${TOOL_PREFIX}g++ $opt_flags ${RUNTIME_LINK_FLAGS} -L$XILINX_VITIS/aietools/lib/lnx64.o/ -L$AIENGINE_LIB_DIR -DAIE_GEN=${aie_version} ${compiler_cpu_flag} -Wl,-T -Wl,${ARCH_APU_LD} -I${AIETOOLS_INCLUDE_BASE} -I$AIE_DRIVER_PARENT_DIR/include/ -I$ARCH_APU_AINC -I$SECONDARY_ARCH_APU_AINC -I${SOURCE_DIR} -I${AIEHLC_DIR}/src/mlir/runtime -I${AIEHLC_DIR}/include -L$ARCH_APU_ALIB -L$AIE_DRIVER_PARENT_DIR/lib/ -o $HOST_BUILD_DIR/main.elf $host_file "${RUNTIME_SRCS[@]}" ${temp_obj_files[@]} -Wl,--gc-sections -Wl,--start-group,-lm,-l${BAREMETAL_AIENGINE_LIB},-lxil,-lgcc,-lc,-lstdc++,${EXTRA_LIBS}--end-group
     GPP_RC=$?
@@ -861,9 +1018,17 @@ if [ ${GPP_RC:-1} -ne 0 ]; then
     return ${GPP_RC}
 fi
 if [ "${DEBUG_SYMS}" -eq 0 ]; then
-    echo "Stripping extra ELF symbols..."
+    # Keep the full ELF next to the stripped one (same contract as
+    # hostcompile.sh): rt_result/heap-hook checks and addr2line on a board
+    # fault need the symbols of the exact binary that ran.
+    cp -f $HOST_BUILD_DIR/main.elf $HOST_BUILD_DIR/main.debug.elf
+    echo "Stripping extra ELF symbols (full symbols kept in main.debug.elf)..."
     ${TOOL_PREFIX}strip $HOST_BUILD_DIR/main.elf
+else
+    # main.elf already has symbols; drop a stale debug copy from an earlier build.
+    rm -f $HOST_BUILD_DIR/main.debug.elf
 fi
+aiehlc_ts host_link_end
 
 echo "Build complete."
 echo "    $HOST_BUILD_DIR/main.elf"
@@ -880,6 +1045,15 @@ if [ -f "$host_file" ]; then
         "$host_file" "${HOST_BUILD_DIR}/worklocal" "$runtime_source_file" \
         "$aie_version" "baremetal" "${HOST_BUILD_DIR}/main.elf"
 fi
+aiehlc_ts aiehlc_end
 }
 
-main "$@"
+# main runs in a SUBSHELL, whether this file is sourced or executed. Its process owns the alib lock fd
+# (released by the kernel however it ends, Ctrl-C included) and its `set -eo pipefail`, variables and
+# exports, none of which leak into a caller that sourced it. Callers only consume the return code
+# and the aout/ tree. A shell holding a lock from an older aiehlc.sh drops it first, else the
+# subshell (which inherits that fd) would wait on it forever. `|| rc=$?` keeps a failing main from
+# tripping a caller's set -e before the status is handed back.
+aiehlc_release_alib_lock
+( main "$@" ) && AIEHLC_MAIN_RC=0 || AIEHLC_MAIN_RC=$?
+return "$AIEHLC_MAIN_RC" 2>/dev/null || exit "$AIEHLC_MAIN_RC"

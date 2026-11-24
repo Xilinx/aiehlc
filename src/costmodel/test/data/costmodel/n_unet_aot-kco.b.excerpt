@@ -1,0 +1,780 @@
+LAUNCH warm ms_per_launch=2.163 launches=258 aie_wall_ms=558.153 kloads=0 opts=skip-bss+ZFILL_WIDE+PMLOAD_WIDE+PM_WARM_SKIP,core_reset_unreset_per_launch,bd_warm_skip=off,cold_tile_loads=0 ctrlpkt=aot aot_fallbacks=0
+[UCL] l=0 M=1024 N=320 K=2880 pre_us=1906 aie_us=9047 post_us=1436 fast=3
+[UCL] l=1 M=1024 N=320 K=2880 pre_us=1677 aie_us=8570 post_us=942 fast=3
+[UCL] l=2 M=1024 N=320 K=320 pre_us=537 aie_us=1389 post_us=713 fast=3
+[UCL] l=3 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=4 M=1024 N=960 K=320 pre_us=463 aie_us=3484 post_us=2640 fast=6
+[UCL] l=5 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=6 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=7 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=8 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=9 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=10 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=11 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=12 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=13 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=14 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=15 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=16 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=17 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=18 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=19 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=20 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=21 M=1024 N=320 K=320 pre_us=429 aie_us=1363 post_us=728 fast=6
+[UCL] l=22 M=1024 N=320 K=320 pre_us=433 aie_us=1214 post_us=717 fast=6
+[UCL] l=23 M=77 N=320 K=768 pre_us=196 aie_us=597 post_us=48 fast=6
+[UCL] l=24 M=77 N=320 K=768 pre_us=170 aie_us=416 post_us=42 fast=6
+[UCL] l=25 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=26 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=27 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=28 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=29 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=30 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=31 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=32 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=33 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=34 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=35 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=36 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=37 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=38 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=39 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=40 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=41 M=1024 N=320 K=320 pre_us=426 aie_us=1355 post_us=716 fast=6
+[UCL] l=42 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=43 M=1024 N=2560 K=320 pre_us=516 aie_us=8716 post_us=7597 fast=6
+[UCL] l=44 M=1024 N=320 K=1280 pre_us=1630 aie_us=3432 post_us=1099 fast=6
+[UCL] l=45 M=1024 N=320 K=320 pre_us=782 aie_us=1373 post_us=1120 fast=3
+[UCL] l=46 M=256 N=320 K=2880 pre_us=829 aie_us=1782 post_us=151 fast=3
+[UCL] l=47 M=256 N=640 K=2880 pre_us=393 aie_us=3055 post_us=581 fast=3
+[UCL] l=48 M=256 N=640 K=5760 pre_us=784 aie_us=5744 post_us=284 fast=3
+[UCL] l=49 M=256 N=640 K=320 pre_us=132 aie_us=755 post_us=304 fast=3
+[UCL] l=50 M=256 N=640 K=640 pre_us=270 aie_us=1155 post_us=273 fast=3
+[UCL] l=51 M=256 N=1920 K=640 pre_us=247 aie_us=2812 post_us=1306 fast=6
+[UCL] l=52 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=53 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=54 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=55 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=56 M=256 N=640 K=640 pre_us=183 aie_us=1118 post_us=329 fast=6
+[UCL] l=57 M=256 N=640 K=640 pre_us=171 aie_us=977 post_us=274 fast=6
+[UCL] l=58 M=77 N=640 K=768 pre_us=179 aie_us=907 post_us=97 fast=6
+[UCL] l=59 M=77 N=640 K=768 pre_us=179 aie_us=748 post_us=94 fast=6
+[UCL] l=60 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=61 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=62 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=63 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=64 M=256 N=640 K=640 pre_us=165 aie_us=1116 post_us=271 fast=6
+[UCL] l=65 M=256 N=5120 K=640 pre_us=475 aie_us=7674 post_us=3695 fast=6
+[UCL] l=66 M=256 N=640 K=2560 pre_us=597 aie_us=3014 post_us=419 fast=6
+[UCL] l=67 M=256 N=640 K=640 pre_us=395 aie_us=1123 post_us=333 fast=3
+[UCL] l=68 M=64 N=640 K=5760 pre_us=463 aie_us=2781 post_us=79 fast=3
+[UCL] l=69 M=64 N=1280 K=5760 pre_us=295 aie_us=5295 post_us=321 fast=3
+[UCL] l=70 M=64 N=1280 K=11520 pre_us=570 aie_us=9963 post_us=170 fast=3
+[UCL] l=71 M=64 N=1280 K=640 pre_us=91 aie_us=1147 post_us=184 fast=3
+[UCL] l=72 M=64 N=1280 K=1280 pre_us=171 aie_us=1644 post_us=179 fast=3
+[UCL] l=73 M=64 N=3840 K=1280 pre_us=118 aie_us=4478 post_us=705 fast=6
+[UCL] l=74 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=75 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=76 M=64 N=1280 K=1280 pre_us=84 aie_us=1640 post_us=205 fast=6
+[UCL] l=77 M=64 N=1280 K=1280 pre_us=80 aie_us=1493 post_us=185 fast=6
+[UCL] l=78 M=77 N=1280 K=768 pre_us=216 aie_us=1558 post_us=207 fast=6
+[UCL] l=79 M=77 N=1280 K=768 pre_us=181 aie_us=1403 post_us=197 fast=6
+[UCL] l=80 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=81 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=82 M=64 N=1280 K=1280 pre_us=80 aie_us=1632 post_us=172 fast=6
+[UCL] l=83 M=64 N=10240 K=1280 pre_us=215 aie_us=11635 post_us=2272 fast=6
+[UCL] l=84 M=64 N=1280 K=5120 pre_us=283 aie_us=4648 post_us=225 fast=6
+[UCL] l=85 M=64 N=1280 K=1280 pre_us=220 aie_us=1653 post_us=211 fast=3
+[UCL] l=86 M=64 N=1280 K=23040 pre_us=1419 aie_us=18528 post_us=301 fast=3
+[UCL] l=87 M=64 N=1280 K=11520 pre_us=530 aie_us=9657 post_us=163 fast=3
+[UCL] l=88 M=64 N=1280 K=2560 pre_us=3360 aie_us=2824 post_us=189 fast=1
+[UCL] l=89 M=64 N=1280 K=1280 pre_us=176 aie_us=1648 post_us=190 fast=3
+[UCL] l=90 M=64 N=3840 K=1280 pre_us=119 aie_us=4464 post_us=577 fast=6
+[UCL] l=91 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=92 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=93 M=64 N=1280 K=1280 pre_us=80 aie_us=1643 post_us=185 fast=6
+[UCL] l=94 M=64 N=1280 K=1280 pre_us=76 aie_us=1486 post_us=169 fast=6
+[UCL] l=95 M=77 N=1280 K=768 pre_us=194 aie_us=1523 post_us=194 fast=6
+[UCL] l=96 M=77 N=1280 K=768 pre_us=181 aie_us=1393 post_us=199 fast=6
+[UCL] l=97 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=98 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=99 M=64 N=1280 K=1280 pre_us=80 aie_us=1643 post_us=176 fast=6
+[UCL] l=100 M=64 N=10240 K=1280 pre_us=212 aie_us=11595 post_us=2339 fast=6
+[UCL] l=101 M=64 N=1280 K=5120 pre_us=287 aie_us=4670 post_us=218 fast=6
+[UCL] l=102 M=64 N=1280 K=1280 pre_us=218 aie_us=1654 post_us=176 fast=3
+[UCL] l=103 M=64 N=1280 K=17280 pre_us=938 aie_us=14114 post_us=302 fast=3
+[UCL] l=104 M=64 N=1280 K=11520 pre_us=534 aie_us=9620 post_us=177 fast=3
+[UCL] l=105 M=64 N=1280 K=1920 pre_us=263 aie_us=2149 post_us=192 fast=3
+[UCL] l=106 M=64 N=1280 K=1280 pre_us=167 aie_us=1631 post_us=185 fast=3
+[UCL] l=107 M=64 N=3840 K=1280 pre_us=118 aie_us=4451 post_us=743 fast=6
+[UCL] l=108 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=109 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=110 M=64 N=1280 K=1280 pre_us=85 aie_us=1640 post_us=189 fast=6
+[UCL] l=111 M=64 N=1280 K=1280 pre_us=79 aie_us=1486 post_us=174 fast=6
+[UCL] l=112 M=77 N=1280 K=768 pre_us=207 aie_us=1556 post_us=198 fast=6
+[UCL] l=113 M=77 N=1280 K=768 pre_us=178 aie_us=1387 post_us=190 fast=6
+[UCL] l=114 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=115 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+[UCL] l=116 M=64 N=1280 K=1280 pre_us=80 aie_us=1644 post_us=177 fast=6
+[UCL] l=117 M=64 N=10240 K=1280 pre_us=218 aie_us=11562 post_us=2303 fast=6
+[UCL] l=118 M=64 N=1280 K=5120 pre_us=286 aie_us=4647 post_us=214 fast=6
+[UCL] l=119 M=64 N=1280 K=1280 pre_us=216 aie_us=1652 post_us=210 fast=3
+[UCL] l=120 M=256 N=1280 K=11520 pre_us=2105 aie_us=21795 post_us=578 fast=3
+[UCL] l=121 M=256 N=640 K=17280 pre_us=4035 aie_us=15476 post_us=674 fast=3
+[UCL] l=122 M=256 N=640 K=5760 pre_us=649 aie_us=6064 post_us=282 fast=3
+[UCL] l=123 M=256 N=640 K=1920 pre_us=878 aie_us=2290 post_us=301 fast=3
+[UCL] l=124 M=256 N=640 K=640 pre_us=268 aie_us=1166 post_us=267 fast=3
+[UCL] l=125 M=256 N=1920 K=640 pre_us=253 aie_us=2864 post_us=1257 fast=6
+LAUNCH split kload=0.040 bdcfg=0.560 startio=0.155 coreen=0.011 wait_io=1.396 core_reset=0.000 ms_per_launch=2.163 pmu_hz=1316653677 sum_vs_aie_wall=0.999
+LAUNCH split_detail calls kload=258 bdcfg=11853 startio=1584 coreen=258 wait_io=34212 core_reset=0 kload_elf_ms=0.039 plan_ms=0.046 sync_ms=0.176 rt_bdcfg=0.0904 rt_startio=0.0005 rt_wait_io=1.3719 host_glue_bdcfg=0.4692 host_flush_startio=0.1549 host_inval_wait_io=0.0246 gemm_call=1.9823 rt_phase_sum_ms=390.384 phase_sum_ms=557.715 aie_wall_ms=558.153 unattributed_ms_per_launch=0.0017 pmc_delta=1439017977 xtime_s=1.093
+LAUNCH split_words mmio_w=167.7 cp_w=4546.0 bd_n=273.4 rst_n=0.0 kload_w=11.0 bdcfg_w=4614.3 startio_w=0.0 coreen_w=5.0
+PROF part=0 op=layout_transform ms=0.003 bf16_expand_ms=0.000
+PROF part=1 op=nn_contrib_conv2d_NCHWc_add ms=8.110 bf16_expand_ms=0.018
+PROF part=2 op=layout_transform_reshape ms=0.553 bf16_expand_ms=0.000
+PROF part=3 op=mean ms=0.181 bf16_expand_ms=0.000
+PROF part=4 op=variance ms=0.144 bf16_expand_ms=0.000
+PROF part=5 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=6.136 bf16_expand_ms=0.002
+PROF part=6 op=cast_expand_dims_cast_multiply_sin_cos_concatenate_strided_slice_str ms=0.008 bf16_expand_ms=0.001
+PROF part=7 op=nn_contrib_dense_pack_add ms=0.787 bf16_expand_ms=0.567
+PROF part=8 op=silu_scale_x ms=2.043 bf16_expand_ms=0.000
+PROF part=9 op=nn_contrib_dense_pack_add_1 ms=3.697 bf16_expand_ms=2.032
+PROF part=10 op=sigmoid_squeeze ms=0.012 bf16_expand_ms=0.000
+PROF part=11 op=silu_scale_x ms=0.311 bf16_expand_ms=0.000
+PROF part=12 op=nn_contrib_dense_pack_add_2 ms=0.573 bf16_expand_ms=0.309
+PROF part=13 op=expand_dims_expand_dims_layout_transform ms=0.000 bf16_expand_ms=0.000
+PROF part=14 op=aie_host_conv0 ms=3.364 bf16_expand_ms=0.000 site_ms=12.410 aie_ms=9.047
+PROF aie_host_split part=14 kind=conv pack_ms=1.906 scatter_ms=1.436 dma_ms=2.052 wait_ms=6.995 glue_ms=1.339 flush_ms=0.459 inval_ms=0.054 launches=1
+PROF part=16 op=mean ms=0.124 bf16_expand_ms=0.000
+PROF part=17 op=variance ms=0.125 bf16_expand_ms=0.000
+PROF part=18 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=6.138 bf16_expand_ms=0.002
+PROF part=19 op=aie_host_conv1 ms=2.642 bf16_expand_ms=0.001 site_ms=11.210 aie_ms=8.570
+PROF aie_host_split part=19 kind=conv pack_ms=1.677 scatter_ms=0.942 dma_ms=1.562 wait_ms=7.007 glue_ms=0.858 flush_ms=0.484 inval_ms=0.053 launches=1
+PROF part=20 op=layout_transform_reshape ms=0.448 bf16_expand_ms=0.000
+PROF part=21 op=mean ms=0.126 bf16_expand_ms=0.000
+PROF part=22 op=variance ms=0.126 bf16_expand_ms=0.000
+PROF part=23 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=1.367 bf16_expand_ms=0.001
+PROF part=24 op=aie_host_conv2 ms=1.269 bf16_expand_ms=0.002 site_ms=2.655 aie_ms=1.389
+PROF aie_host_split part=24 kind=conv pack_ms=0.537 scatter_ms=0.713 dma_ms=0.768 wait_ms=0.621 glue_ms=0.414 flush_ms=0.107 inval_ms=0.053 launches=1
+PROF part=26 op=mean_1 ms=0.477 bf16_expand_ms=0.000
+PROF part=27 op=variance_1 ms=0.559 bf16_expand_ms=0.000
+PROF part=28 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.197 bf16_expand_ms=0.002
+PROF part=29 op=aie_host_linear3 ms=3.128 bf16_expand_ms=0.000 site_ms=6.612 aie_ms=3.483
+PROF aie_host_split part=29 kind=linear pack_ms=0.463 scatter_ms=2.640 dma_ms=1.392 wait_ms=2.092 glue_ms=0.811 flush_ms=0.091 inval_ms=0.161 launches=2
+PROF part=30 op=reshape_split ms=1.894 bf16_expand_ms=0.000
+PROF part=31 op=aie_host_attn4 ms=0.434 bf16_expand_ms=0.000 site_ms=0.434 aie_ms=0.000
+PROF aie_host_split part=31 kind=fa pack_ms=0.431 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=32 op=aie_host_attn4 ms=1.396 bf16_expand_ms=0.000 site_ms=1.396 aie_ms=0.000
+PROF aie_host_split part=32 kind=fa pack_ms=1.396 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=35 op=aie_host_attn5 ms=0.553 bf16_expand_ms=0.000 site_ms=0.553 aie_ms=0.000
+PROF aie_host_split part=35 kind=fa pack_ms=0.553 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=36 op=aie_host_attn5 ms=0.308 bf16_expand_ms=0.000 site_ms=4.858 aie_ms=4.549
+PROF aie_host_split part=36 kind=fa pack_ms=0.000 scatter_ms=0.306 dma_ms=2.931 wait_ms=1.618 glue_ms=1.661 flush_ms=0.127 inval_ms=0.028 launches=16
+PROF part=38 op=aie_host_linear6 ms=1.181 bf16_expand_ms=0.001 site_ms=2.542 aie_ms=1.362
+PROF aie_host_split part=38 kind=linear pack_ms=0.429 scatter_ms=0.728 dma_ms=0.742 wait_ms=0.621 glue_ms=0.411 flush_ms=0.086 inval_ms=0.054 launches=1
+PROF part=39 op=reshape_add ms=0.875 bf16_expand_ms=0.000
+PROF part=40 op=mean_1 ms=0.480 bf16_expand_ms=0.000
+PROF part=41 op=variance_1 ms=0.560 bf16_expand_ms=0.000
+PROF part=42 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.199 bf16_expand_ms=0.001
+PROF part=43 op=aie_host_linear7 ms=1.173 bf16_expand_ms=0.000 site_ms=2.386 aie_ms=1.214
+PROF aie_host_split part=43 kind=linear pack_ms=0.433 scatter_ms=0.717 dma_ms=0.582 wait_ms=0.633 glue_ms=0.294 flush_ms=0.080 inval_ms=0.054 launches=1
+PROF part=44 op=aie_host_attn10 ms=0.338 bf16_expand_ms=0.000 site_ms=0.338 aie_ms=0.000
+PROF aie_host_split part=44 kind=fa pack_ms=0.337 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=45 op=aie_host_linear8 ms=0.268 bf16_expand_ms=0.000 site_ms=0.863 aie_ms=0.595
+PROF aie_host_split part=45 kind=linear pack_ms=0.196 scatter_ms=0.048 dma_ms=0.424 wait_ms=0.172 glue_ms=0.243 flush_ms=0.067 inval_ms=0.007 launches=1
+PROF part=46 op=aie_host_attn10 ms=0.048 bf16_expand_ms=0.000 site_ms=0.048 aie_ms=0.000
+PROF aie_host_split part=46 kind=fa pack_ms=0.047 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=49 op=aie_host_linear9 ms=0.234 bf16_expand_ms=0.000 site_ms=0.650 aie_ms=0.416
+PROF aie_host_split part=49 kind=linear pack_ms=0.170 scatter_ms=0.042 dma_ms=0.246 wait_ms=0.170 glue_ms=0.111 flush_ms=0.053 inval_ms=0.007 launches=1
+PROF part=50 op=aie_host_attn11 ms=0.042 bf16_expand_ms=0.000 site_ms=0.042 aie_ms=0.000
+PROF aie_host_split part=50 kind=fa pack_ms=0.041 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=51 op=aie_host_attn11 ms=0.353 bf16_expand_ms=0.000 site_ms=2.730 aie_ms=2.377
+PROF aie_host_split part=51 kind=fa pack_ms=0.000 scatter_ms=0.352 dma_ms=2.098 wait_ms=0.279 glue_ms=0.935 flush_ms=0.075 inval_ms=0.028 launches=16
+PROF part=53 op=aie_host_linear12 ms=1.166 bf16_expand_ms=0.001 site_ms=2.519 aie_ms=1.354
+PROF aie_host_split part=53 kind=linear pack_ms=0.426 scatter_ms=0.716 dma_ms=0.734 wait_ms=0.621 glue_ms=0.411 flush_ms=0.079 inval_ms=0.054 launches=1
+PROF part=54 op=reshape_add ms=0.652 bf16_expand_ms=0.000
+PROF part=55 op=mean_1 ms=0.484 bf16_expand_ms=0.000
+PROF part=56 op=variance_1 ms=0.562 bf16_expand_ms=0.000
+PROF part=57 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.188 bf16_expand_ms=0.002
+PROF part=58 op=aie_host_linear13 ms=8.139 bf16_expand_ms=0.003 site_ms=16.851 aie_ms=8.716
+PROF aie_host_split part=58 kind=linear pack_ms=0.516 scatter_ms=7.597 dma_ms=3.099 wait_ms=5.617 glue_ms=1.844 flush_ms=0.135 inval_ms=0.426 launches=2
+PROF part=59 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=24.078 bf16_expand_ms=0.000
+PROF part=60 op=aie_host_linear14 ms=2.759 bf16_expand_ms=0.001 site_ms=6.188 aie_ms=3.430
+PROF aie_host_split part=60 kind=linear pack_ms=1.630 scatter_ms=1.099 dma_ms=1.108 wait_ms=2.324 glue_ms=0.630 flush_ms=0.223 inval_ms=0.054 launches=1
+PROF part=62 op=aie_host_conv15 ms=1.920 bf16_expand_ms=0.001 site_ms=3.293 aie_ms=1.373
+PROF aie_host_split part=62 kind=conv pack_ms=0.782 scatter_ms=1.120 dma_ms=0.759 wait_ms=0.614 glue_ms=0.416 flush_ms=0.100 inval_ms=0.053 launches=1
+PROF part=63 op=aie_host_conv16 ms=0.998 bf16_expand_ms=0.001 site_ms=2.779 aie_ms=1.782
+PROF aie_host_split part=63 kind=conv pack_ms=0.829 scatter_ms=0.151 dma_ms=0.848 wait_ms=0.934 glue_ms=0.460 flush_ms=0.256 inval_ms=0.014 launches=1
+PROF part=64 op=layout_transform_reshape_1 ms=0.110 bf16_expand_ms=0.000
+PROF part=65 op=mean_2 ms=0.030 bf16_expand_ms=0.000
+PROF part=66 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+PROF part=67 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=1.547 bf16_expand_ms=0.002
+PROF part=68 op=silu_scale_x ms=1.014 bf16_expand_ms=0.000
+PROF part=69 op=nn_contrib_dense_pack_add_6 ms=1.626 bf16_expand_ms=1.009
+PROF part=70 op=expand_dims_expand_dims_layout_transform_1 ms=0.001 bf16_expand_ms=0.000
+PROF part=71 op=aie_host_conv17 ms=0.999 bf16_expand_ms=0.002 site_ms=4.052 aie_ms=3.055
+PROF aie_host_split part=71 kind=conv pack_ms=0.393 scatter_ms=0.581 dma_ms=1.187 wait_ms=1.868 glue_ms=0.682 flush_ms=0.328 inval_ms=0.027 launches=1
+PROF part=73 op=mean_3 ms=0.063 bf16_expand_ms=0.000
+PROF part=74 op=variance_3 ms=0.062 bf16_expand_ms=0.000
+PROF part=75 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=3.091 bf16_expand_ms=0.004
+PROF part=76 op=aie_host_conv18 ms=1.088 bf16_expand_ms=0.001 site_ms=6.830 aie_ms=5.744
+PROF aie_host_split part=76 kind=conv pack_ms=0.784 scatter_ms=0.284 dma_ms=1.817 wait_ms=3.927 glue_ms=1.096 flush_ms=0.540 inval_ms=0.027 launches=1
+PROF part=77 op=aie_host_conv19 ms=0.456 bf16_expand_ms=0.002 site_ms=1.208 aie_ms=0.755
+PROF aie_host_split part=77 kind=conv pack_ms=0.132 scatter_ms=0.304 dma_ms=0.509 wait_ms=0.245 glue_ms=0.299 flush_ms=0.034 inval_ms=0.027 launches=1
+PROF part=78 op=layout_transform_reshape_2 ms=0.214 bf16_expand_ms=0.000
+PROF part=79 op=mean_3 ms=0.062 bf16_expand_ms=0.000
+PROF part=80 op=variance_3 ms=0.062 bf16_expand_ms=0.000
+PROF part=81 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=0.704 bf16_expand_ms=0.001
+PROF part=82 op=aie_host_conv20 ms=0.562 bf16_expand_ms=0.002 site_ms=1.715 aie_ms=1.155
+PROF aie_host_split part=82 kind=conv pack_ms=0.270 scatter_ms=0.273 dma_ms=0.597 wait_ms=0.558 glue_ms=0.338 flush_ms=0.081 inval_ms=0.027 launches=1
+PROF part=84 op=mean_4 ms=0.244 bf16_expand_ms=0.000
+PROF part=85 op=variance_4 ms=0.284 bf16_expand_ms=0.000
+PROF part=86 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.593 bf16_expand_ms=0.003
+PROF part=87 op=aie_host_linear21 ms=1.576 bf16_expand_ms=0.000 site_ms=4.386 aie_ms=2.809
+PROF aie_host_split part=87 kind=linear pack_ms=0.247 scatter_ms=1.306 dma_ms=1.249 wait_ms=1.562 glue_ms=0.714 flush_ms=0.147 inval_ms=0.080 launches=1
+PROF part=88 op=reshape_split_1 ms=0.637 bf16_expand_ms=0.000
+PROF part=89 op=aie_host_attn22 ms=0.200 bf16_expand_ms=0.000 site_ms=0.200 aie_ms=0.000
+PROF aie_host_split part=89 kind=fa pack_ms=0.198 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=90 op=aie_host_attn22 ms=0.472 bf16_expand_ms=0.000 site_ms=0.472 aie_ms=0.000
+PROF aie_host_split part=90 kind=fa pack_ms=0.472 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=93 op=aie_host_attn23 ms=0.206 bf16_expand_ms=0.000 site_ms=0.206 aie_ms=0.000
+PROF aie_host_split part=93 kind=fa pack_ms=0.206 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=94 op=aie_host_attn23 ms=0.116 bf16_expand_ms=0.000 site_ms=1.212 aie_ms=1.096
+PROF aie_host_split part=94 kind=fa pack_ms=0.000 scatter_ms=0.115 dma_ms=0.908 wait_ms=0.188 glue_ms=0.438 flush_ms=0.104 inval_ms=0.014 launches=4
+PROF part=96 op=aie_host_linear24 ms=0.537 bf16_expand_ms=0.002 site_ms=1.652 aie_ms=1.117
+PROF aie_host_split part=96 kind=linear pack_ms=0.183 scatter_ms=0.329 dma_ms=0.598 wait_ms=0.520 glue_ms=0.350 flush_ms=0.079 inval_ms=0.027 launches=1
+PROF part=97 op=reshape_add_1 ms=0.251 bf16_expand_ms=0.000
+PROF part=98 op=mean_4 ms=0.246 bf16_expand_ms=0.000
+PROF part=99 op=variance_4 ms=0.285 bf16_expand_ms=0.000
+PROF part=100 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.594 bf16_expand_ms=0.003
+PROF part=101 op=aie_host_linear25 ms=0.468 bf16_expand_ms=0.000 site_ms=1.444 aie_ms=0.976
+PROF aie_host_split part=101 kind=linear pack_ms=0.171 scatter_ms=0.274 dma_ms=0.453 wait_ms=0.524 glue_ms=0.226 flush_ms=0.085 inval_ms=0.027 launches=1
+PROF part=102 op=aie_host_attn28 ms=0.155 bf16_expand_ms=0.000 site_ms=0.155 aie_ms=0.000
+PROF aie_host_split part=102 kind=fa pack_ms=0.154 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=103 op=aie_host_linear26 ms=0.300 bf16_expand_ms=0.000 site_ms=1.207 aie_ms=0.906
+PROF aie_host_split part=103 kind=linear pack_ms=0.179 scatter_ms=0.097 dma_ms=0.567 wait_ms=0.339 glue_ms=0.329 flush_ms=0.085 inval_ms=0.014 launches=1
+PROF part=104 op=aie_host_attn28 ms=0.095 bf16_expand_ms=0.000 site_ms=0.095 aie_ms=0.000
+PROF aie_host_split part=104 kind=fa pack_ms=0.095 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=107 op=aie_host_linear27 ms=0.294 bf16_expand_ms=0.000 site_ms=1.041 aie_ms=0.747
+PROF aie_host_split part=107 kind=linear pack_ms=0.179 scatter_ms=0.094 dma_ms=0.395 wait_ms=0.352 glue_ms=0.197 flush_ms=0.075 inval_ms=0.014 launches=1
+PROF part=108 op=aie_host_attn29 ms=0.078 bf16_expand_ms=0.000 site_ms=0.078 aie_ms=0.000
+PROF aie_host_split part=108 kind=fa pack_ms=0.078 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=109 op=aie_host_attn29 ms=0.121 bf16_expand_ms=0.000 site_ms=1.044 aie_ms=0.923
+PROF aie_host_split part=109 kind=fa pack_ms=0.000 scatter_ms=0.120 dma_ms=0.795 wait_ms=0.128 glue_ms=0.365 flush_ms=0.059 inval_ms=0.014 launches=4
+PROF part=111 op=aie_host_linear30 ms=0.459 bf16_expand_ms=0.002 site_ms=1.572 aie_ms=1.114
+PROF aie_host_split part=111 kind=linear pack_ms=0.165 scatter_ms=0.271 dma_ms=0.587 wait_ms=0.528 glue_ms=0.330 flush_ms=0.082 inval_ms=0.027 launches=1
+PROF part=112 op=reshape_add_1 ms=0.182 bf16_expand_ms=0.000
+PROF part=113 op=mean_4 ms=0.244 bf16_expand_ms=0.000
+PROF part=114 op=variance_4 ms=0.283 bf16_expand_ms=0.000
+PROF part=115 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.591 bf16_expand_ms=0.002
+PROF part=116 op=aie_host_linear31 ms=4.198 bf16_expand_ms=0.004 site_ms=11.866 aie_ms=7.672
+PROF aie_host_split part=116 kind=linear pack_ms=0.475 scatter_ms=3.695 dma_ms=2.833 wait_ms=4.842 glue_ms=1.638 flush_ms=0.318 inval_ms=0.213 launches=1
+PROF part=117 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=11.095 bf16_expand_ms=0.000
+PROF part=118 op=aie_host_linear32 ms=1.042 bf16_expand_ms=0.002 site_ms=4.052 aie_ms=3.012
+PROF aie_host_split part=118 kind=linear pack_ms=0.597 scatter_ms=0.419 dma_ms=1.069 wait_ms=1.945 glue_ms=0.632 flush_ms=0.254 inval_ms=0.028 launches=1
+PROF part=120 op=aie_host_conv33 ms=0.748 bf16_expand_ms=0.002 site_ms=1.869 aie_ms=1.123
+PROF aie_host_split part=120 kind=conv pack_ms=0.395 scatter_ms=0.333 dma_ms=0.600 wait_ms=0.523 glue_ms=0.337 flush_ms=0.083 inval_ms=0.027 launches=1
+PROF part=121 op=aie_host_conv34 ms=0.564 bf16_expand_ms=0.002 site_ms=3.344 aie_ms=2.781
+PROF aie_host_split part=121 kind=conv pack_ms=0.463 scatter_ms=0.079 dma_ms=1.410 wait_ms=1.371 glue_ms=0.878 flush_ms=0.383 inval_ms=0.007 launches=1
+PROF part=122 op=layout_transform_reshape_3 ms=0.053 bf16_expand_ms=0.000
+PROF part=123 op=mean_5 ms=0.015 bf16_expand_ms=0.000
+PROF part=124 op=variance_5 ms=0.015 bf16_expand_ms=0.000
+PROF part=125 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=0.845 bf16_expand_ms=0.003
+PROF part=126 op=silu_scale_x ms=1.697 bf16_expand_ms=0.000
+PROF part=127 op=nn_contrib_dense_pack_add_1 ms=2.816 bf16_expand_ms=1.694
+PROF part=128 op=expand_dims_expand_dims_layout_transform_2 ms=0.002 bf16_expand_ms=0.000
+PROF part=129 op=aie_host_conv35 ms=0.636 bf16_expand_ms=0.001 site_ms=5.930 aie_ms=5.295
+PROF aie_host_split part=129 kind=conv pack_ms=0.295 scatter_ms=0.321 dma_ms=2.525 wait_ms=2.770 glue_ms=1.567 flush_ms=0.714 inval_ms=0.014 launches=1
+PROF part=131 op=mean_2 ms=0.031 bf16_expand_ms=0.000
+PROF part=132 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+PROF part=133 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=1.698 bf16_expand_ms=0.003
+PROF part=134 op=aie_host_conv36 ms=0.761 bf16_expand_ms=0.002 site_ms=10.721 aie_ms=9.963
+PROF aie_host_split part=134 kind=conv pack_ms=0.570 scatter_ms=0.170 dma_ms=4.404 wait_ms=5.559 glue_ms=2.817 flush_ms=1.349 inval_ms=0.014 launches=1
+PROF part=135 op=aie_host_conv37 ms=0.295 bf16_expand_ms=0.002 site_ms=1.440 aie_ms=1.147
+PROF aie_host_split part=135 kind=conv pack_ms=0.091 scatter_ms=0.184 dma_ms=0.751 wait_ms=0.395 glue_ms=0.437 flush_ms=0.076 inval_ms=0.014 launches=1
+PROF part=136 op=layout_transform_reshape_4 ms=0.106 bf16_expand_ms=0.000
+PROF part=137 op=mean_2 ms=0.030 bf16_expand_ms=0.000
+PROF part=138 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+PROF part=139 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=0.340 bf16_expand_ms=0.002
+PROF part=140 op=aie_host_conv38 ms=0.370 bf16_expand_ms=0.002 site_ms=2.012 aie_ms=1.644
+PROF aie_host_split part=140 kind=conv pack_ms=0.171 scatter_ms=0.179 dma_ms=0.967 wait_ms=0.676 glue_ms=0.583 flush_ms=0.157 inval_ms=0.014 launches=1
+PROF part=142 op=mean_6 ms=0.028 bf16_expand_ms=0.000
+PROF part=143 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+PROF part=144 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.301 bf16_expand_ms=0.003
+PROF part=145 op=aie_host_linear39 ms=0.847 bf16_expand_ms=0.000 site_ms=5.323 aie_ms=4.476
+PROF aie_host_split part=145 kind=linear pack_ms=0.118 scatter_ms=0.705 dma_ms=2.432 wait_ms=2.046 glue_ms=1.450 flush_ms=0.424 inval_ms=0.040 launches=1
+PROF part=146 op=reshape_split_2 ms=0.228 bf16_expand_ms=0.000
+PROF part=147 op=aie_host_attn40 ms=0.157 bf16_expand_ms=0.000 site_ms=0.157 aie_ms=0.000
+PROF aie_host_split part=147 kind=fa pack_ms=0.156 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=148 op=aie_host_attn40 ms=0.189 bf16_expand_ms=0.000 site_ms=0.189 aie_ms=0.000
+PROF aie_host_split part=148 kind=fa pack_ms=0.188 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=151 op=aie_host_attn41 ms=0.099 bf16_expand_ms=0.000 site_ms=0.099 aie_ms=0.000
+PROF aie_host_split part=151 kind=fa pack_ms=0.099 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=152 op=aie_host_attn41 ms=0.060 bf16_expand_ms=0.000 site_ms=0.726 aie_ms=0.666
+PROF aie_host_split part=152 kind=fa pack_ms=0.000 scatter_ms=0.058 dma_ms=0.586 wait_ms=0.080 glue_ms=0.266 flush_ms=0.079 inval_ms=0.007 launches=2
+PROF part=154 op=aie_host_linear42 ms=0.313 bf16_expand_ms=0.001 site_ms=1.950 aie_ms=1.639
+PROF aie_host_split part=154 kind=linear pack_ms=0.084 scatter_ms=0.205 dma_ms=0.962 wait_ms=0.678 glue_ms=0.575 flush_ms=0.155 inval_ms=0.014 launches=1
+PROF part=155 op=reshape_add_2 ms=0.094 bf16_expand_ms=0.000
+PROF part=156 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+PROF part=157 op=variance_6 ms=0.031 bf16_expand_ms=0.000
+PROF part=158 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.300 bf16_expand_ms=0.002
+PROF part=159 op=aie_host_linear43 ms=0.291 bf16_expand_ms=0.000 site_ms=1.782 aie_ms=1.491
+PROF aie_host_split part=159 kind=linear pack_ms=0.080 scatter_ms=0.185 dma_ms=0.822 wait_ms=0.671 glue_ms=0.462 flush_ms=0.161 inval_ms=0.014 launches=1
+PROF part=160 op=aie_host_attn46 ms=0.147 bf16_expand_ms=0.000 site_ms=0.147 aie_ms=0.000
+PROF aie_host_split part=160 kind=fa pack_ms=0.146 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=161 op=aie_host_linear44 ms=0.443 bf16_expand_ms=0.000 site_ms=2.002 aie_ms=1.558
+PROF aie_host_split part=161 kind=linear pack_ms=0.216 scatter_ms=0.207 dma_ms=0.859 wait_ms=0.699 glue_ms=0.495 flush_ms=0.129 inval_ms=0.027 launches=1
+PROF part=162 op=aie_host_attn46 ms=0.190 bf16_expand_ms=0.000 site_ms=0.190 aie_ms=0.000
+PROF aie_host_split part=162 kind=fa pack_ms=0.190 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=165 op=aie_host_linear45 ms=0.403 bf16_expand_ms=0.000 site_ms=1.806 aie_ms=1.402
+PROF aie_host_split part=165 kind=linear pack_ms=0.181 scatter_ms=0.197 dma_ms=0.707 wait_ms=0.696 glue_ms=0.372 flush_ms=0.123 inval_ms=0.027 launches=1
+PROF part=166 op=aie_host_attn47 ms=0.153 bf16_expand_ms=0.000 site_ms=0.153 aie_ms=0.000
+PROF aie_host_split part=166 kind=fa pack_ms=0.153 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=167 op=aie_host_attn47 ms=0.060 bf16_expand_ms=0.000 site_ms=0.763 aie_ms=0.703
+PROF aie_host_split part=167 kind=fa pack_ms=0.000 scatter_ms=0.058 dma_ms=0.596 wait_ms=0.107 glue_ms=0.285 flush_ms=0.079 inval_ms=0.007 launches=2
+PROF part=169 op=aie_host_linear48 ms=0.274 bf16_expand_ms=0.001 site_ms=1.905 aie_ms=1.632
+PROF aie_host_split part=169 kind=linear pack_ms=0.080 scatter_ms=0.172 dma_ms=0.962 wait_ms=0.670 glue_ms=0.581 flush_ms=0.157 inval_ms=0.014 launches=1
+PROF part=170 op=reshape_add_2 ms=0.083 bf16_expand_ms=0.000
+PROF part=171 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+PROF part=172 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+PROF part=173 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.301 bf16_expand_ms=0.003
+PROF part=174 op=aie_host_linear49 ms=2.517 bf16_expand_ms=0.007 site_ms=14.143 aie_ms=11.633
+PROF aie_host_split part=174 kind=linear pack_ms=0.215 scatter_ms=2.272 dma_ms=6.099 wait_ms=5.536 glue_ms=3.659 flush_ms=1.093 inval_ms=0.107 launches=1
+PROF part=175 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=5.837 bf16_expand_ms=0.000
+PROF part=176 op=aie_host_linear50 ms=0.537 bf16_expand_ms=0.002 site_ms=5.181 aie_ms=4.646
+PROF aie_host_split part=176 kind=linear pack_ms=0.283 scatter_ms=0.225 dma_ms=2.284 wait_ms=2.364 glue_ms=1.420 flush_ms=0.622 inval_ms=0.014 launches=1
+PROF part=178 op=aie_host_conv51 ms=0.452 bf16_expand_ms=0.002 site_ms=2.104 aie_ms=1.653
+PROF aie_host_split part=178 kind=conv pack_ms=0.220 scatter_ms=0.211 dma_ms=0.982 wait_ms=0.672 glue_ms=0.583 flush_ms=0.164 inval_ms=0.014 launches=1
+PROF part=179 op=concatenate ms=0.088 bf16_expand_ms=0.000
+PROF part=180 op=layout_transform_reshape_5 ms=0.219 bf16_expand_ms=0.000
+PROF part=181 op=mean_3 ms=0.086 bf16_expand_ms=0.000
+PROF part=182 op=variance_3 ms=0.063 bf16_expand_ms=0.000
+PROF part=183 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=3.392 bf16_expand_ms=0.005
+PROF part=184 op=silu_scale_x ms=1.863 bf16_expand_ms=0.000
+PROF part=185 op=nn_contrib_dense_pack_add_1 ms=3.075 bf16_expand_ms=1.859
+PROF part=186 op=expand_dims_expand_dims_layout_transform_2 ms=0.001 bf16_expand_ms=0.000
+PROF part=187 op=aie_host_conv52 ms=1.741 bf16_expand_ms=0.002 site_ms=20.267 aie_ms=18.528
+PROF aie_host_split part=187 kind=conv pack_ms=1.419 scatter_ms=0.301 dma_ms=8.215 wait_ms=10.312 glue_ms=5.348 flush_ms=2.634 inval_ms=0.014 launches=1
+PROF part=189 op=mean_2 ms=0.031 bf16_expand_ms=0.000
+PROF part=190 op=variance_2 ms=0.032 bf16_expand_ms=0.000
+PROF part=191 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=1.671 bf16_expand_ms=0.002
+PROF part=192 op=aie_host_conv53 ms=0.717 bf16_expand_ms=0.002 site_ms=10.372 aie_ms=9.657
+PROF aie_host_split part=192 kind=conv pack_ms=0.530 scatter_ms=0.163 dma_ms=4.446 wait_ms=5.211 glue_ms=2.817 flush_ms=1.385 inval_ms=0.014 launches=1
+PROF part=193 op=aie_host_conv54 ms=3.572 bf16_expand_ms=0.002 site_ms=6.395 aie_ms=2.824
+PROF aie_host_split part=193 kind=conv pack_ms=3.360 scatter_ms=0.189 dma_ms=1.559 wait_ms=1.266 glue_ms=0.877 flush_ms=0.440 inval_ms=0.014 launches=1
+PROF part=194 op=layout_transform_reshape_4 ms=0.106 bf16_expand_ms=0.000
+PROF part=195 op=mean_2 ms=0.031 bf16_expand_ms=0.000
+PROF part=196 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+PROF part=197 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=0.341 bf16_expand_ms=0.002
+PROF part=198 op=aie_host_conv55 ms=0.386 bf16_expand_ms=0.001 site_ms=2.032 aie_ms=1.648
+PROF aie_host_split part=198 kind=conv pack_ms=0.176 scatter_ms=0.190 dma_ms=0.968 wait_ms=0.680 glue_ms=0.579 flush_ms=0.151 inval_ms=0.013 launches=1
+PROF part=200 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+PROF part=201 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+PROF part=202 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.301 bf16_expand_ms=0.003
+PROF part=203 op=aie_host_linear56 ms=0.721 bf16_expand_ms=0.000 site_ms=5.183 aie_ms=4.462
+PROF aie_host_split part=203 kind=linear pack_ms=0.119 scatter_ms=0.577 dma_ms=2.441 wait_ms=2.023 glue_ms=1.463 flush_ms=0.420 inval_ms=0.041 launches=1
+PROF part=204 op=reshape_split_2 ms=0.181 bf16_expand_ms=0.000
+PROF part=205 op=aie_host_attn57 ms=0.149 bf16_expand_ms=0.000 site_ms=0.149 aie_ms=0.000
+PROF aie_host_split part=205 kind=fa pack_ms=0.148 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=206 op=aie_host_attn57 ms=0.157 bf16_expand_ms=0.000 site_ms=0.157 aie_ms=0.000
+PROF aie_host_split part=206 kind=fa pack_ms=0.157 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=209 op=aie_host_attn58 ms=0.092 bf16_expand_ms=0.000 site_ms=0.092 aie_ms=0.000
+PROF aie_host_split part=209 kind=fa pack_ms=0.092 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=210 op=aie_host_attn58 ms=0.059 bf16_expand_ms=0.000 site_ms=0.729 aie_ms=0.670
+PROF aie_host_split part=210 kind=fa pack_ms=0.000 scatter_ms=0.057 dma_ms=0.590 wait_ms=0.080 glue_ms=0.270 flush_ms=0.081 inval_ms=0.007 launches=2
+PROF part=212 op=aie_host_linear59 ms=0.288 bf16_expand_ms=0.001 site_ms=1.929 aie_ms=1.642
+PROF aie_host_split part=212 kind=linear pack_ms=0.080 scatter_ms=0.185 dma_ms=0.969 wait_ms=0.674 glue_ms=0.579 flush_ms=0.151 inval_ms=0.014 launches=1
+PROF part=213 op=reshape_add_2 ms=0.078 bf16_expand_ms=0.000
+PROF part=214 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+PROF part=215 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+PROF part=216 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.300 bf16_expand_ms=0.002
+PROF part=217 op=aie_host_linear60 ms=0.269 bf16_expand_ms=0.000 site_ms=1.755 aie_ms=1.486
+PROF aie_host_split part=217 kind=linear pack_ms=0.076 scatter_ms=0.169 dma_ms=0.811 wait_ms=0.675 glue_ms=0.458 flush_ms=0.153 inval_ms=0.014 launches=1
+PROF part=218 op=aie_host_attn63 ms=0.147 bf16_expand_ms=0.000 site_ms=0.147 aie_ms=0.000
+PROF aie_host_split part=218 kind=fa pack_ms=0.147 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=219 op=aie_host_linear61 ms=0.409 bf16_expand_ms=0.000 site_ms=1.931 aie_ms=1.522
+PROF aie_host_split part=219 kind=linear pack_ms=0.194 scatter_ms=0.194 dma_ms=0.856 wait_ms=0.667 glue_ms=0.497 flush_ms=0.111 inval_ms=0.027 launches=1
+PROF part=220 op=aie_host_attn63 ms=0.190 bf16_expand_ms=0.000 site_ms=0.190 aie_ms=0.000
+PROF aie_host_split part=220 kind=fa pack_ms=0.190 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=223 op=aie_host_linear62 ms=0.401 bf16_expand_ms=0.000 site_ms=1.793 aie_ms=1.393
+PROF aie_host_split part=223 kind=linear pack_ms=0.181 scatter_ms=0.199 dma_ms=0.697 wait_ms=0.697 glue_ms=0.371 flush_ms=0.115 inval_ms=0.027 launches=1
+PROF part=224 op=aie_host_attn64 ms=0.154 bf16_expand_ms=0.000 site_ms=0.154 aie_ms=0.000
+PROF aie_host_split part=224 kind=fa pack_ms=0.153 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=225 op=aie_host_attn64 ms=0.059 bf16_expand_ms=0.000 site_ms=0.749 aie_ms=0.690
+PROF aie_host_split part=225 kind=fa pack_ms=0.000 scatter_ms=0.059 dma_ms=0.581 wait_ms=0.109 glue_ms=0.275 flush_ms=0.076 inval_ms=0.007 launches=2
+PROF part=227 op=aie_host_linear65 ms=0.279 bf16_expand_ms=0.002 site_ms=1.920 aie_ms=1.643
+PROF aie_host_split part=227 kind=linear pack_ms=0.080 scatter_ms=0.176 dma_ms=0.965 wait_ms=0.678 glue_ms=0.582 flush_ms=0.154 inval_ms=0.014 launches=1
+PROF part=228 op=reshape_add_2 ms=0.082 bf16_expand_ms=0.000
+PROF part=229 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+PROF part=230 op=variance_6 ms=0.031 bf16_expand_ms=0.000
+PROF part=231 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.301 bf16_expand_ms=0.003
+PROF part=232 op=aie_host_linear66 ms=2.582 bf16_expand_ms=0.006 site_ms=14.169 aie_ms=11.593
+PROF aie_host_split part=232 kind=linear pack_ms=0.212 scatter_ms=2.339 dma_ms=6.100 wait_ms=5.495 glue_ms=3.656 flush_ms=1.090 inval_ms=0.107 launches=1
+PROF part=233 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=7.784 bf16_expand_ms=0.000
+PROF part=234 op=aie_host_linear67 ms=0.533 bf16_expand_ms=0.002 site_ms=5.198 aie_ms=4.668
+PROF aie_host_split part=234 kind=linear pack_ms=0.287 scatter_ms=0.218 dma_ms=2.286 wait_ms=2.384 glue_ms=1.420 flush_ms=0.622 inval_ms=0.014 launches=1
+PROF part=236 op=aie_host_conv68 ms=0.415 bf16_expand_ms=0.002 site_ms=2.067 aie_ms=1.654
+PROF aie_host_split part=236 kind=conv pack_ms=0.218 scatter_ms=0.176 dma_ms=0.978 wait_ms=0.676 glue_ms=0.581 flush_ms=0.166 inval_ms=0.013 launches=1
+PROF part=237 op=concatenate_1 ms=0.098 bf16_expand_ms=0.000
+PROF part=238 op=layout_transform_reshape_6 ms=0.161 bf16_expand_ms=0.000
+PROF part=239 op=mean_7 ms=0.050 bf16_expand_ms=0.000
+PROF part=240 op=variance_7 ms=0.047 bf16_expand_ms=0.000
+PROF part=241 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=2.547 bf16_expand_ms=0.005
+PROF part=242 op=silu_scale_x ms=1.821 bf16_expand_ms=0.000
+PROF part=243 op=nn_contrib_dense_pack_add_1 ms=3.024 bf16_expand_ms=1.818
+PROF part=244 op=expand_dims_expand_dims_layout_transform_2 ms=0.001 bf16_expand_ms=0.000
+PROF part=245 op=aie_host_conv69 ms=1.262 bf16_expand_ms=0.002 site_ms=15.374 aie_ms=14.114
+PROF aie_host_split part=245 kind=conv pack_ms=0.938 scatter_ms=0.302 dma_ms=6.337 wait_ms=7.778 glue_ms=4.089 flush_ms=2.009 inval_ms=0.014 launches=1
+PROF part=247 op=mean_2 ms=0.030 bf16_expand_ms=0.000
+PROF part=248 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+PROF part=249 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=1.687 bf16_expand_ms=0.004
+PROF part=250 op=aie_host_conv70 ms=0.732 bf16_expand_ms=0.001 site_ms=10.351 aie_ms=9.620
+PROF aie_host_split part=250 kind=conv pack_ms=0.534 scatter_ms=0.177 dma_ms=4.413 wait_ms=5.206 glue_ms=2.819 flush_ms=1.356 inval_ms=0.013 launches=1
+PROF part=251 op=aie_host_conv71 ms=0.475 bf16_expand_ms=0.002 site_ms=2.622 aie_ms=2.149
+PROF aie_host_split part=251 kind=conv pack_ms=0.263 scatter_ms=0.192 dma_ms=1.185 wait_ms=0.964 glue_ms=0.717 flush_ms=0.233 inval_ms=0.013 launches=1
+PROF part=252 op=layout_transform_reshape_4 ms=0.106 bf16_expand_ms=0.000
+PROF part=253 op=mean_2 ms=0.030 bf16_expand_ms=0.000
+PROF part=254 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+PROF part=255 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=0.340 bf16_expand_ms=0.002
+PROF part=256 op=aie_host_conv72 ms=0.372 bf16_expand_ms=0.002 site_ms=2.002 aie_ms=1.631
+PROF aie_host_split part=256 kind=conv pack_ms=0.167 scatter_ms=0.185 dma_ms=0.967 wait_ms=0.664 glue_ms=0.580 flush_ms=0.152 inval_ms=0.014 launches=1
+PROF part=258 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+PROF part=259 op=variance_6 ms=0.031 bf16_expand_ms=0.000
+PROF part=260 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.307 bf16_expand_ms=0.002
+PROF part=261 op=aie_host_linear73 ms=0.885 bf16_expand_ms=0.000 site_ms=5.334 aie_ms=4.448
+PROF aie_host_split part=261 kind=linear pack_ms=0.118 scatter_ms=0.743 dma_ms=2.439 wait_ms=2.011 glue_ms=1.460 flush_ms=0.421 inval_ms=0.041 launches=1
+PROF part=262 op=reshape_split_2 ms=0.215 bf16_expand_ms=0.000
+PROF part=263 op=aie_host_attn74 ms=0.151 bf16_expand_ms=0.000 site_ms=0.151 aie_ms=0.000
+PROF aie_host_split part=263 kind=fa pack_ms=0.150 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=264 op=aie_host_attn74 ms=0.180 bf16_expand_ms=0.000 site_ms=0.180 aie_ms=0.000
+PROF aie_host_split part=264 kind=fa pack_ms=0.179 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=267 op=aie_host_attn75 ms=0.097 bf16_expand_ms=0.000 site_ms=0.097 aie_ms=0.000
+PROF aie_host_split part=267 kind=fa pack_ms=0.097 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=268 op=aie_host_attn75 ms=0.062 bf16_expand_ms=0.000 site_ms=0.731 aie_ms=0.669
+PROF aie_host_split part=268 kind=fa pack_ms=0.000 scatter_ms=0.061 dma_ms=0.591 wait_ms=0.078 glue_ms=0.279 flush_ms=0.090 inval_ms=0.007 launches=2
+PROF part=270 op=aie_host_linear76 ms=0.299 bf16_expand_ms=0.001 site_ms=1.937 aie_ms=1.639
+PROF aie_host_split part=270 kind=linear pack_ms=0.085 scatter_ms=0.189 dma_ms=0.967 wait_ms=0.673 glue_ms=0.576 flush_ms=0.154 inval_ms=0.014 launches=1
+PROF part=271 op=reshape_add_2 ms=0.081 bf16_expand_ms=0.000
+PROF part=272 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+PROF part=273 op=variance_6 ms=0.031 bf16_expand_ms=0.000
+PROF part=274 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.301 bf16_expand_ms=0.003
+PROF part=275 op=aie_host_linear77 ms=0.275 bf16_expand_ms=0.000 site_ms=1.761 aie_ms=1.486
+PROF aie_host_split part=275 kind=linear pack_ms=0.079 scatter_ms=0.174 dma_ms=0.810 wait_ms=0.676 glue_ms=0.458 flush_ms=0.158 inval_ms=0.014 launches=1
+PROF part=276 op=aie_host_attn80 ms=0.146 bf16_expand_ms=0.000 site_ms=0.146 aie_ms=0.000
+PROF aie_host_split part=276 kind=fa pack_ms=0.145 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=277 op=aie_host_linear78 ms=0.428 bf16_expand_ms=0.000 site_ms=1.982 aie_ms=1.555
+PROF aie_host_split part=277 kind=linear pack_ms=0.207 scatter_ms=0.198 dma_ms=0.865 wait_ms=0.691 glue_ms=0.492 flush_ms=0.124 inval_ms=0.027 launches=1
+PROF part=278 op=aie_host_attn80 ms=0.188 bf16_expand_ms=0.000 site_ms=0.188 aie_ms=0.000
+PROF aie_host_split part=278 kind=fa pack_ms=0.188 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=281 op=aie_host_linear79 ms=0.393 bf16_expand_ms=0.000 site_ms=1.779 aie_ms=1.386
+PROF aie_host_split part=281 kind=linear pack_ms=0.178 scatter_ms=0.190 dma_ms=0.714 wait_ms=0.673 glue_ms=0.384 flush_ms=0.119 inval_ms=0.027 launches=1
+PROF part=282 op=aie_host_attn81 ms=0.156 bf16_expand_ms=0.000 site_ms=0.156 aie_ms=0.000
+PROF aie_host_split part=282 kind=fa pack_ms=0.156 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=283 op=aie_host_attn81 ms=0.055 bf16_expand_ms=0.000 site_ms=0.752 aie_ms=0.697
+PROF aie_host_split part=283 kind=fa pack_ms=0.000 scatter_ms=0.054 dma_ms=0.589 wait_ms=0.108 glue_ms=0.289 flush_ms=0.085 inval_ms=0.007 launches=2
+PROF part=285 op=aie_host_linear82 ms=0.281 bf16_expand_ms=0.001 site_ms=1.923 aie_ms=1.643
+PROF aie_host_split part=285 kind=linear pack_ms=0.080 scatter_ms=0.177 dma_ms=0.962 wait_ms=0.682 glue_ms=0.582 flush_ms=0.153 inval_ms=0.014 launches=1
+PROF part=286 op=reshape_add_2 ms=0.081 bf16_expand_ms=0.000
+PROF part=287 op=mean_6 ms=0.030 bf16_expand_ms=0.000
+PROF part=288 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+PROF part=289 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.300 bf16_expand_ms=0.002
+PROF part=290 op=aie_host_linear83 ms=2.552 bf16_expand_ms=0.007 site_ms=14.105 aie_ms=11.560
+PROF aie_host_split part=290 kind=linear pack_ms=0.218 scatter_ms=2.303 dma_ms=6.100 wait_ms=5.462 glue_ms=3.654 flush_ms=1.094 inval_ms=0.107 launches=1
+PROF part=291 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=6.263 bf16_expand_ms=0.000
+PROF part=292 op=aie_host_linear84 ms=0.528 bf16_expand_ms=0.003 site_ms=5.171 aie_ms=4.645
+PROF aie_host_split part=292 kind=linear pack_ms=0.286 scatter_ms=0.214 dma_ms=2.270 wait_ms=2.378 glue_ms=1.421 flush_ms=0.607 inval_ms=0.014 launches=1
+PROF part=294 op=aie_host_conv85 ms=0.447 bf16_expand_ms=0.002 site_ms=2.097 aie_ms=1.652
+PROF aie_host_split part=294 kind=conv pack_ms=0.216 scatter_ms=0.210 dma_ms=0.980 wait_ms=0.672 glue_ms=0.582 flush_ms=0.167 inval_ms=0.014 launches=1
+PROF part=295 op=layout_transform_image_resize2d_layout_transform ms=0.205 bf16_expand_ms=0.000
+PROF part=296 op=aie_host_conv86 ms=2.709 bf16_expand_ms=0.003 site_ms=24.501 aie_ms=21.795
+PROF aie_host_split part=296 kind=conv pack_ms=2.105 scatter_ms=0.578 dma_ms=5.118 wait_ms=16.677 glue_ms=3.253 flush_ms=1.586 inval_ms=0.054 launches=1
+PROF part=297 op=concatenate_2 ms=0.483 bf16_expand_ms=0.000
+PROF part=298 op=layout_transform_reshape_7 ms=0.646 bf16_expand_ms=0.000
+PROF part=299 op=mean_8 ms=0.226 bf16_expand_ms=0.000
+PROF part=300 op=variance_8 ms=0.216 bf16_expand_ms=0.000
+PROF part=301 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=9.253 bf16_expand_ms=0.005
+PROF part=302 op=silu_scale_x ms=1.187 bf16_expand_ms=0.000
+PROF part=303 op=nn_contrib_dense_pack_add_6 ms=1.718 bf16_expand_ms=1.181
+PROF part=304 op=expand_dims_expand_dims_layout_transform_1 ms=0.001 bf16_expand_ms=0.000
+PROF part=305 op=aie_host_conv87 ms=4.732 bf16_expand_ms=0.002 site_ms=20.206 aie_ms=15.476
+PROF aie_host_split part=305 kind=conv pack_ms=4.035 scatter_ms=0.674 dma_ms=4.324 wait_ms=11.152 glue_ms=2.768 flush_ms=1.386 inval_ms=0.027 launches=1
+PROF part=307 op=mean_3 ms=0.062 bf16_expand_ms=0.000
+PROF part=308 op=variance_3 ms=0.062 bf16_expand_ms=0.000
+PROF part=309 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=3.090 bf16_expand_ms=0.003
+PROF part=310 op=aie_host_conv88 ms=0.956 bf16_expand_ms=0.001 site_ms=7.019 aie_ms=6.064
+PROF aie_host_split part=310 kind=conv pack_ms=0.649 scatter_ms=0.282 dma_ms=1.847 wait_ms=4.217 glue_ms=1.090 flush_ms=0.581 inval_ms=0.027 launches=1
+PROF part=311 op=aie_host_conv89 ms=1.199 bf16_expand_ms=0.002 site_ms=3.487 aie_ms=2.290
+PROF aie_host_split part=311 kind=conv pack_ms=0.878 scatter_ms=0.301 dma_ms=0.924 wait_ms=1.366 glue_ms=0.524 flush_ms=0.222 inval_ms=0.027 launches=1
+PROF part=312 op=layout_transform_reshape_2 ms=0.221 bf16_expand_ms=0.000
+PROF part=313 op=mean_3 ms=0.063 bf16_expand_ms=0.000
+PROF part=314 op=variance_3 ms=0.062 bf16_expand_ms=0.000
+PROF part=315 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=0.705 bf16_expand_ms=0.001
+PROF part=316 op=aie_host_conv90 ms=0.555 bf16_expand_ms=0.002 site_ms=1.719 aie_ms=1.166
+PROF aie_host_split part=316 kind=conv pack_ms=0.268 scatter_ms=0.267 dma_ms=0.595 wait_ms=0.571 glue_ms=0.334 flush_ms=0.088 inval_ms=0.027 launches=1
+PROF part=318 op=mean_4 ms=0.245 bf16_expand_ms=0.000
+PROF part=319 op=variance_4 ms=0.284 bf16_expand_ms=0.000
+PROF part=320 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.593 bf16_expand_ms=0.002
+PROF part=321 op=aie_host_linear91 ms=1.534 bf16_expand_ms=0.000 site_ms=4.396 aie_ms=2.862
+PROF aie_host_split part=321 kind=linear pack_ms=0.253 scatter_ms=1.257 dma_ms=1.246 wait_ms=1.618 glue_ms=0.726 flush_ms=0.146 inval_ms=0.080 launches=1
+PROF part=322 op=reshape_split_1 ms=0.604 bf16_expand_ms=0.000
+PROF part=323 op=aie_host_attn92 ms=0.184 bf16_expand_ms=0.000 site_ms=0.184 aie_ms=0.000
+PROF aie_host_split part=323 kind=fa pack_ms=0.182 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=324 op=aie_host_attn92 ms=0.527 bf16_expand_ms=0.000 site_ms=0.526 aie_ms=0.000
+PROF aie_host_split part=324 kind=fa pack_ms=0.526 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=327 op=aie_host_attn93 ms=0.207 bf16_expand_ms=0.000 site_ms=0.207 aie_ms=0.000
+PROF aie_host_split part=327 kind=fa pack_ms=0.207 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=328 op=aie_host_attn93 ms=0.119 bf16_expand_ms=0.000 site_ms=1.218 aie_ms=1.099
+PROF aie_host_split part=328 kind=fa pack_ms=0.000 scatter_ms=0.117 dma_ms=0.913 wait_ms=0.186 glue_ms=0.453 flush_ms=0.104 inval_ms=0.014 launches=4
+PROF part=330 op=aie_host_linear94 ms=0.497 bf16_expand_ms=0.001 site_ms=1.616 aie_ms=1.121
+PROF aie_host_split part=330 kind=linear pack_ms=0.189 scatter_ms=0.281 dma_ms=0.597 wait_ms=0.526 glue_ms=0.344 flush_ms=0.081 inval_ms=0.027 launches=1
+PROF part=331 op=reshape_add_1 ms=0.219 bf16_expand_ms=0.000
+PROF part=332 op=mean_4 ms=0.247 bf16_expand_ms=0.000
+PROF part=333 op=variance_4 ms=0.285 bf16_expand_ms=0.000
+PROF part=334 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.594 bf16_expand_ms=0.003
+PROF part=335 op=aie_host_linear95 ms=0.448 bf16_expand_ms=0.000 site_ms=1.416 aie_ms=0.968
+PROF aie_host_split part=335 kind=linear pack_ms=0.168 scatter_ms=0.257 dma_ms=0.444 wait_ms=0.524 glue_ms=0.222 flush_ms=0.084 inval_ms=0.027 launches=1
+PROF part=336 op=aie_host_attn98 ms=0.153 bf16_expand_ms=0.000 site_ms=0.153 aie_ms=0.000
+PROF aie_host_split part=336 kind=fa pack_ms=0.152 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=337 op=aie_host_linear96 ms=0.312 bf16_expand_ms=0.000 site_ms=1.230 aie_ms=0.919
+PROF aie_host_split part=337 kind=linear pack_ms=0.187 scatter_ms=0.102 dma_ms=0.565 wait_ms=0.354 glue_ms=0.325 flush_ms=0.085 inval_ms=0.014 launches=1
+PROF part=338 op=aie_host_attn98 ms=0.097 bf16_expand_ms=0.000 site_ms=0.096 aie_ms=0.000
+PROF aie_host_split part=338 kind=fa pack_ms=0.096 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=341 op=aie_host_linear97 ms=0.298 bf16_expand_ms=0.000 site_ms=1.039 aie_ms=0.741
+PROF aie_host_split part=341 kind=linear pack_ms=0.172 scatter_ms=0.098 dma_ms=0.400 wait_ms=0.342 glue_ms=0.202 flush_ms=0.076 inval_ms=0.013 launches=1
+PROF part=342 op=aie_host_attn99 ms=0.083 bf16_expand_ms=0.000 site_ms=0.083 aie_ms=0.000
+PROF aie_host_split part=342 kind=fa pack_ms=0.082 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=343 op=aie_host_attn99 ms=0.124 bf16_expand_ms=0.000 site_ms=1.038 aie_ms=0.914
+PROF aie_host_split part=343 kind=fa pack_ms=0.000 scatter_ms=0.123 dma_ms=0.790 wait_ms=0.124 glue_ms=0.375 flush_ms=0.063 inval_ms=0.014 launches=4
+PROF part=345 op=aie_host_linear100 ms=0.473 bf16_expand_ms=0.001 site_ms=1.649 aie_ms=1.177
+PROF aie_host_split part=345 kind=linear pack_ms=0.171 scatter_ms=0.277 dma_ms=0.601 wait_ms=0.578 glue_ms=0.336 flush_ms=0.089 inval_ms=0.027 launches=1
+PROF part=346 op=reshape_add_1 ms=0.167 bf16_expand_ms=0.000
+PROF part=347 op=mean_4 ms=0.245 bf16_expand_ms=0.000
+PROF part=348 op=variance_4 ms=0.284 bf16_expand_ms=0.000
+PROF part=349 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.592 bf16_expand_ms=0.003
+PROF part=350 op=aie_host_linear101 ms=4.319 bf16_expand_ms=0.005 site_ms=11.706 aie_ms=7.392
+PROF aie_host_split part=350 kind=linear pack_ms=0.476 scatter_ms=3.814 dma_ms=2.802 wait_ms=4.592 glue_ms=1.606 flush_ms=0.320 inval_ms=0.214 launches=1
+PROF part=351 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=14.099 bf16_expand_ms=0.000
+PROF part=352 op=aie_host_linear102 ms=1.049 bf16_expand_ms=0.002 site_ms=3.893 aie_ms=2.845
+PROF aie_host_split part=352 kind=linear pack_ms=0.594 scatter_ms=0.428 dma_ms=1.052 wait_ms=1.796 glue_ms=0.627 flush_ms=0.246 inval_ms=0.027 launches=1
+PROF part=354 op=aie_host_conv103 ms=0.772 bf16_expand_ms=0.001 site_ms=1.909 aie_ms=1.138
+PROF aie_host_split part=354 kind=conv pack_ms=0.405 scatter_ms=0.346 dma_ms=0.605 wait_ms=0.533 glue_ms=0.342 flush_ms=0.087 inval_ms=0.027 launches=1
+PROF part=355 op=concatenate_3 ms=0.289 bf16_expand_ms=0.000
+PROF part=356 op=layout_transform_reshape_8 ms=0.323 bf16_expand_ms=0.000
+PROF part=357 op=mean_9 ms=0.104 bf16_expand_ms=0.000
+PROF part=358 op=variance_9 ms=0.094 bf16_expand_ms=0.000
+PROF part=359 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=4.636 bf16_expand_ms=0.003
+PROF part=360 op=silu_scale_x ms=1.107 bf16_expand_ms=0.000
+PROF part=361 op=nn_contrib_dense_pack_add_6 ms=1.616 bf16_expand_ms=1.101
+PROF part=362 op=expand_dims_expand_dims_layout_transform_1 ms=0.001 bf16_expand_ms=0.000
+PROF part=363 op=aie_host_conv104 ms=2.300 bf16_expand_ms=0.002 site_ms=10.264 aie_ms=7.966
+PROF aie_host_split part=363 kind=conv pack_ms=1.626 scatter_ms=0.651 dma_ms=2.477 wait_ms=5.488 glue_ms=1.516 flush_ms=0.792 inval_ms=0.027 launches=1
+PROF part=365 op=mean_3 ms=0.061 bf16_expand_ms=0.000
+PROF part=366 op=variance_3 ms=0.062 bf16_expand_ms=0.000
+PROF part=367 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=3.092 bf16_expand_ms=0.003
+PROF part=368 op=aie_host_conv105 ms=0.958 bf16_expand_ms=0.001 site_ms=6.726 aie_ms=5.770
+PROF aie_host_split part=368 kind=conv pack_ms=0.655 scatter_ms=0.281 dma_ms=1.844 wait_ms=3.926 glue_ms=1.098 flush_ms=0.569 inval_ms=0.027 launches=1
+PROF part=369 op=aie_host_conv106 ms=0.711 bf16_expand_ms=0.002 site_ms=2.054 aie_ms=1.345
+PROF aie_host_split part=369 kind=conv pack_ms=0.390 scatter_ms=0.299 dma_ms=0.685 wait_ms=0.660 glue_ms=0.387 flush_ms=0.124 inval_ms=0.027 launches=1
+PROF part=370 op=layout_transform_reshape_2 ms=0.218 bf16_expand_ms=0.000
+PROF part=371 op=mean_3 ms=0.062 bf16_expand_ms=0.000
+PROF part=372 op=variance_3 ms=0.062 bf16_expand_ms=0.000
+PROF part=373 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=0.703 bf16_expand_ms=0.001
+PROF part=374 op=aie_host_conv107 ms=0.549 bf16_expand_ms=0.002 site_ms=1.673 aie_ms=1.125
+PROF aie_host_split part=374 kind=conv pack_ms=0.263 scatter_ms=0.266 dma_ms=0.589 wait_ms=0.536 glue_ms=0.337 flush_ms=0.080 inval_ms=0.027 launches=1
+PROF part=376 op=mean_4 ms=0.244 bf16_expand_ms=0.000
+PROF part=377 op=variance_4 ms=0.285 bf16_expand_ms=0.000
+PROF part=378 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.594 bf16_expand_ms=0.002
+PROF part=379 op=aie_host_linear108 ms=1.571 bf16_expand_ms=0.000 site_ms=4.511 aie_ms=2.939
+PROF aie_host_split part=379 kind=linear pack_ms=0.247 scatter_ms=1.299 dma_ms=1.244 wait_ms=1.697 glue_ms=0.717 flush_ms=0.146 inval_ms=0.080 launches=1
+PROF part=380 op=reshape_split_1 ms=0.589 bf16_expand_ms=0.000
+PROF part=381 op=aie_host_attn109 ms=0.178 bf16_expand_ms=0.000 site_ms=0.178 aie_ms=0.000
+PROF aie_host_split part=381 kind=fa pack_ms=0.176 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=382 op=aie_host_attn109 ms=0.453 bf16_expand_ms=0.000 site_ms=0.453 aie_ms=0.000
+PROF aie_host_split part=382 kind=fa pack_ms=0.453 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=385 op=aie_host_attn110 ms=0.206 bf16_expand_ms=0.000 site_ms=0.206 aie_ms=0.000
+PROF aie_host_split part=385 kind=fa pack_ms=0.206 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=386 op=aie_host_attn110 ms=0.113 bf16_expand_ms=0.000 site_ms=1.206 aie_ms=1.093
+PROF aie_host_split part=386 kind=fa pack_ms=0.000 scatter_ms=0.112 dma_ms=0.906 wait_ms=0.187 glue_ms=0.432 flush_ms=0.098 inval_ms=0.014 launches=4
+PROF part=388 op=aie_host_linear111 ms=0.498 bf16_expand_ms=0.002 site_ms=1.663 aie_ms=1.167
+PROF aie_host_split part=388 kind=linear pack_ms=0.181 scatter_ms=0.289 dma_ms=0.600 wait_ms=0.568 glue_ms=0.348 flush_ms=0.080 inval_ms=0.027 launches=1
+PROF part=389 op=reshape_add_1 ms=0.218 bf16_expand_ms=0.000
+PROF part=390 op=mean_4 ms=0.248 bf16_expand_ms=0.000
+PROF part=391 op=variance_4 ms=0.285 bf16_expand_ms=0.000
+PROF part=392 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.593 bf16_expand_ms=0.002
+PROF part=393 op=aie_host_linear112 ms=0.449 bf16_expand_ms=0.000 site_ms=1.470 aie_ms=1.020
+PROF aie_host_split part=393 kind=linear pack_ms=0.167 scatter_ms=0.260 dma_ms=0.438 wait_ms=0.582 glue_ms=0.221 flush_ms=0.082 inval_ms=0.027 launches=1
+PROF part=394 op=aie_host_attn115 ms=0.151 bf16_expand_ms=0.000 site_ms=0.151 aie_ms=0.000
+PROF aie_host_split part=394 kind=fa pack_ms=0.150 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=395 op=aie_host_linear113 ms=0.319 bf16_expand_ms=0.000 site_ms=1.241 aie_ms=0.923
+PROF aie_host_split part=395 kind=linear pack_ms=0.191 scatter_ms=0.105 dma_ms=0.575 wait_ms=0.349 glue_ms=0.326 flush_ms=0.089 inval_ms=0.014 launches=1
+PROF part=396 op=aie_host_attn115 ms=0.096 bf16_expand_ms=0.000 site_ms=0.096 aie_ms=0.000
+PROF aie_host_split part=396 kind=fa pack_ms=0.095 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=399 op=aie_host_linear114 ms=0.297 bf16_expand_ms=0.000 site_ms=1.053 aie_ms=0.756
+PROF aie_host_split part=399 kind=linear pack_ms=0.176 scatter_ms=0.100 dma_ms=0.406 wait_ms=0.351 glue_ms=0.198 flush_ms=0.084 inval_ms=0.014 launches=1
+PROF part=400 op=aie_host_attn116 ms=0.080 bf16_expand_ms=0.000 site_ms=0.080 aie_ms=0.000
+PROF aie_host_split part=400 kind=fa pack_ms=0.080 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=401 op=aie_host_attn116 ms=0.131 bf16_expand_ms=0.000 site_ms=1.046 aie_ms=0.915
+PROF aie_host_split part=401 kind=fa pack_ms=0.000 scatter_ms=0.130 dma_ms=0.789 wait_ms=0.126 glue_ms=0.369 flush_ms=0.063 inval_ms=0.014 launches=4
+PROF part=403 op=aie_host_linear117 ms=0.487 bf16_expand_ms=0.001 site_ms=1.648 aie_ms=1.163
+PROF aie_host_split part=403 kind=linear pack_ms=0.176 scatter_ms=0.287 dma_ms=0.598 wait_ms=0.566 glue_ms=0.341 flush_ms=0.089 inval_ms=0.027 launches=1
+PROF part=404 op=reshape_add_1 ms=0.165 bf16_expand_ms=0.000
+PROF part=405 op=mean_4 ms=0.246 bf16_expand_ms=0.000
+PROF part=406 op=variance_4 ms=0.285 bf16_expand_ms=0.000
+PROF part=407 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.592 bf16_expand_ms=0.002
+PROF part=408 op=aie_host_linear118 ms=4.296 bf16_expand_ms=0.004 site_ms=11.713 aie_ms=7.421
+PROF aie_host_split part=408 kind=linear pack_ms=0.471 scatter_ms=3.793 dma_ms=2.825 wait_ms=4.598 glue_ms=1.623 flush_ms=0.320 inval_ms=0.213 launches=1
+PROF part=409 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=11.345 bf16_expand_ms=0.000
+PROF part=410 op=aie_host_linear119 ms=1.023 bf16_expand_ms=0.002 site_ms=4.049 aie_ms=3.027
+PROF aie_host_split part=410 kind=linear pack_ms=0.591 scatter_ms=0.404 dma_ms=1.068 wait_ms=1.961 glue_ms=0.627 flush_ms=0.256 inval_ms=0.027 launches=1
+PROF part=412 op=aie_host_conv120 ms=0.765 bf16_expand_ms=0.002 site_ms=1.946 aie_ms=1.182
+PROF aie_host_split part=412 kind=conv pack_ms=0.402 scatter_ms=0.340 dma_ms=0.608 wait_ms=0.574 glue_ms=0.345 flush_ms=0.090 inval_ms=0.027 launches=1
+PROF part=413 op=layout_transform_image_resize2d_layout_transform_1 ms=0.440 bf16_expand_ms=0.000
+PROF part=414 op=aie_host_conv121 ms=6.227 bf16_expand_ms=0.004 site_ms=76.880 aie_ms=70.658
+PROF aie_host_split part=414 kind=conv pack_ms=4.794 scatter_ms=1.404 dma_ms=3.238 wait_ms=67.420 glue_ms=2.013 flush_ms=0.919 inval_ms=0.107 launches=1
+PROF part=415 op=concatenate_4 ms=1.068 bf16_expand_ms=0.000
+PROF part=416 op=layout_transform_reshape_9 ms=1.944 bf16_expand_ms=0.000
+PROF part=417 op=mean_10 ms=0.787 bf16_expand_ms=0.000
+PROF part=418 op=variance_10 ms=0.412 bf16_expand_ms=0.000
+PROF part=419 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=18.373 bf16_expand_ms=0.004
+PROF part=420 op=silu_scale_x ms=0.510 bf16_expand_ms=0.000
+PROF part=421 op=nn_contrib_dense_pack_add_2 ms=0.720 bf16_expand_ms=0.504
+PROF part=422 op=expand_dims_expand_dims_layout_transform ms=0.001 bf16_expand_ms=0.000
+PROF part=423 op=aie_host_conv122 ms=8.500 bf16_expand_ms=0.001 site_ms=32.634 aie_ms=24.135
+PROF aie_host_split part=423 kind=conv pack_ms=7.007 scatter_ms=1.471 dma_ms=3.541 wait_ms=20.594 glue_ms=2.236 flush_ms=1.061 inval_ms=0.054 launches=1
+PROF part=425 op=mean ms=0.124 bf16_expand_ms=0.000
+PROF part=426 op=variance ms=0.126 bf16_expand_ms=0.000
+PROF part=427 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=6.137 bf16_expand_ms=0.002
+PROF part=428 op=aie_host_conv123 ms=2.279 bf16_expand_ms=0.001 site_ms=10.957 aie_ms=8.678
+PROF aie_host_split part=428 kind=conv pack_ms=1.609 scatter_ms=0.649 dma_ms=1.674 wait_ms=7.005 glue_ms=0.972 flush_ms=0.451 inval_ms=0.054 launches=1
+PROF part=429 op=aie_host_conv124 ms=2.982 bf16_expand_ms=0.001 site_ms=6.292 aie_ms=3.311
+PROF aie_host_split part=429 kind=conv pack_ms=1.965 scatter_ms=0.992 dma_ms=0.994 wait_ms=2.317 glue_ms=0.556 flush_ms=0.196 inval_ms=0.054 launches=1
+PROF part=430 op=layout_transform_reshape ms=0.482 bf16_expand_ms=0.000
+PROF part=431 op=mean ms=0.146 bf16_expand_ms=0.000
+PROF part=432 op=variance ms=0.141 bf16_expand_ms=0.000
+PROF part=433 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=1.368 bf16_expand_ms=0.001
+PROF part=434 op=aie_host_conv125 ms=1.309 bf16_expand_ms=0.001 site_ms=2.679 aie_ms=1.371
+PROF aie_host_split part=434 kind=conv pack_ms=0.576 scatter_ms=0.708 dma_ms=0.752 wait_ms=0.619 glue_ms=0.412 flush_ms=0.097 inval_ms=0.054 launches=1
+PROF part=436 op=mean_1 ms=0.477 bf16_expand_ms=0.000
+PROF part=437 op=variance_1 ms=0.559 bf16_expand_ms=0.000
+PROF part=438 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.182 bf16_expand_ms=0.002
+PROF part=439 op=aie_host_linear126 ms=3.198 bf16_expand_ms=0.000 site_ms=6.684 aie_ms=3.485
+PROF aie_host_split part=439 kind=linear pack_ms=0.454 scatter_ms=2.721 dma_ms=1.395 wait_ms=2.091 glue_ms=0.816 flush_ms=0.097 inval_ms=0.160 launches=2
+PROF part=440 op=reshape_split ms=1.902 bf16_expand_ms=0.000
+PROF part=441 op=aie_host_attn127 ms=0.424 bf16_expand_ms=0.000 site_ms=0.424 aie_ms=0.000
+PROF aie_host_split part=441 kind=fa pack_ms=0.423 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=442 op=aie_host_attn127 ms=1.397 bf16_expand_ms=0.000 site_ms=1.397 aie_ms=0.000
+PROF aie_host_split part=442 kind=fa pack_ms=1.395 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=445 op=aie_host_attn128 ms=0.548 bf16_expand_ms=0.000 site_ms=0.548 aie_ms=0.000
+PROF aie_host_split part=445 kind=fa pack_ms=0.548 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=446 op=aie_host_attn128 ms=0.503 bf16_expand_ms=0.000 site_ms=5.053 aie_ms=4.550
+PROF aie_host_split part=446 kind=fa pack_ms=0.000 scatter_ms=0.501 dma_ms=2.940 wait_ms=1.610 glue_ms=1.691 flush_ms=0.134 inval_ms=0.028 launches=16
+PROF part=448 op=aie_host_linear129 ms=1.209 bf16_expand_ms=0.001 site_ms=2.559 aie_ms=1.351
+PROF aie_host_split part=448 kind=linear pack_ms=0.433 scatter_ms=0.750 dma_ms=0.739 wait_ms=0.613 glue_ms=0.418 flush_ms=0.080 inval_ms=0.053 launches=1
+PROF part=449 op=reshape_add ms=0.519 bf16_expand_ms=0.000
+PROF part=450 op=mean_1 ms=0.482 bf16_expand_ms=0.000
+PROF part=451 op=variance_1 ms=0.560 bf16_expand_ms=0.000
+PROF part=452 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.180 bf16_expand_ms=0.001
+PROF part=453 op=aie_host_linear130 ms=1.145 bf16_expand_ms=0.000 site_ms=2.357 aie_ms=1.212
+PROF aie_host_split part=453 kind=linear pack_ms=0.427 scatter_ms=0.696 dma_ms=0.577 wait_ms=0.635 glue_ms=0.293 flush_ms=0.074 inval_ms=0.053 launches=1
+PROF part=454 op=aie_host_attn133 ms=0.337 bf16_expand_ms=0.000 site_ms=0.337 aie_ms=0.000
+PROF aie_host_split part=454 kind=fa pack_ms=0.336 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=455 op=aie_host_linear131 ms=0.270 bf16_expand_ms=0.000 site_ms=0.864 aie_ms=0.595
+PROF aie_host_split part=455 kind=linear pack_ms=0.194 scatter_ms=0.052 dma_ms=0.421 wait_ms=0.175 glue_ms=0.238 flush_ms=0.067 inval_ms=0.007 launches=1
+PROF part=456 op=aie_host_attn133 ms=0.048 bf16_expand_ms=0.000 site_ms=0.048 aie_ms=0.000
+PROF aie_host_split part=456 kind=fa pack_ms=0.048 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=459 op=aie_host_linear132 ms=0.244 bf16_expand_ms=0.000 site_ms=0.669 aie_ms=0.425
+PROF aie_host_split part=459 kind=linear pack_ms=0.178 scatter_ms=0.044 dma_ms=0.254 wait_ms=0.172 glue_ms=0.110 flush_ms=0.061 inval_ms=0.007 launches=1
+PROF part=460 op=aie_host_attn134 ms=0.040 bf16_expand_ms=0.000 site_ms=0.040 aie_ms=0.000
+PROF aie_host_split part=460 kind=fa pack_ms=0.039 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=461 op=aie_host_attn134 ms=0.359 bf16_expand_ms=0.000 site_ms=2.730 aie_ms=2.371
+PROF aie_host_split part=461 kind=fa pack_ms=0.000 scatter_ms=0.357 dma_ms=2.090 wait_ms=0.281 glue_ms=0.918 flush_ms=0.074 inval_ms=0.028 launches=16
+PROF part=463 op=aie_host_linear135 ms=1.141 bf16_expand_ms=0.001 site_ms=2.492 aie_ms=1.353
+PROF aie_host_split part=463 kind=linear pack_ms=0.428 scatter_ms=0.688 dma_ms=0.735 wait_ms=0.618 glue_ms=0.409 flush_ms=0.083 inval_ms=0.053 launches=1
+PROF part=464 op=reshape_add ms=0.395 bf16_expand_ms=0.000
+PROF part=465 op=mean_1 ms=0.481 bf16_expand_ms=0.000
+PROF part=466 op=variance_1 ms=0.561 bf16_expand_ms=0.000
+PROF part=467 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.182 bf16_expand_ms=0.002
+PROF part=468 op=aie_host_linear136 ms=8.080 bf16_expand_ms=0.003 site_ms=16.812 aie_ms=8.734
+PROF aie_host_split part=468 kind=linear pack_ms=0.504 scatter_ms=7.550 dma_ms=3.114 wait_ms=5.621 glue_ms=1.859 flush_ms=0.136 inval_ms=0.426 launches=2
+PROF part=469 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=27.016 bf16_expand_ms=0.000
+PROF part=470 op=aie_host_linear137 ms=2.755 bf16_expand_ms=0.001 site_ms=6.182 aie_ms=3.428
+PROF aie_host_split part=470 kind=linear pack_ms=1.621 scatter_ms=1.106 dma_ms=1.091 wait_ms=2.339 glue_ms=0.637 flush_ms=0.207 inval_ms=0.054 launches=1
+PROF part=472 op=aie_host_conv138 ms=1.897 bf16_expand_ms=0.001 site_ms=3.276 aie_ms=1.380
+PROF aie_host_split part=472 kind=conv pack_ms=0.845 scatter_ms=1.032 dma_ms=0.759 wait_ms=0.621 glue_ms=0.419 flush_ms=0.102 inval_ms=0.053 launches=1
+PROF part=473 op=concatenate_5 ms=0.804 bf16_expand_ms=0.000
+PROF part=474 op=layout_transform_reshape_10 ms=1.221 bf16_expand_ms=0.000
+PROF part=475 op=mean_11 ms=0.415 bf16_expand_ms=0.000
+PROF part=476 op=variance_11 ms=0.262 bf16_expand_ms=0.000
+PROF part=477 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=12.249 bf16_expand_ms=0.002
+PROF part=478 op=silu_scale_x ms=0.565 bf16_expand_ms=0.000
+PROF part=479 op=nn_contrib_dense_pack_add_2 ms=0.786 bf16_expand_ms=0.557
+PROF part=480 op=expand_dims_expand_dims_layout_transform ms=0.000 bf16_expand_ms=0.000
+PROF part=481 op=aie_host_conv139 ms=5.997 bf16_expand_ms=0.001 site_ms=23.173 aie_ms=17.177
+PROF aie_host_split part=481 kind=conv pack_ms=4.510 scatter_ms=1.465 dma_ms=2.628 wait_ms=14.549 glue_ms=1.612 flush_ms=0.775 inval_ms=0.054 launches=1
+PROF part=483 op=mean ms=0.124 bf16_expand_ms=0.000
+PROF part=484 op=variance ms=0.126 bf16_expand_ms=0.000
+PROF part=485 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=6.144 bf16_expand_ms=0.002
+PROF part=486 op=aie_host_conv140 ms=2.375 bf16_expand_ms=0.001 site_ms=11.038 aie_ms=8.663
+PROF aie_host_split part=486 kind=conv pack_ms=1.714 scatter_ms=0.641 dma_ms=1.664 wait_ms=6.999 glue_ms=0.974 flush_ms=0.439 inval_ms=0.054 launches=1
+PROF part=487 op=aie_host_conv141 ms=2.274 bf16_expand_ms=0.001 site_ms=4.241 aie_ms=1.968
+PROF aie_host_split part=487 kind=conv pack_ms=1.256 scatter_ms=0.994 dma_ms=0.891 wait_ms=1.077 glue_ms=0.484 flush_ms=0.160 inval_ms=0.054 launches=1
+PROF part=488 op=layout_transform_reshape ms=0.524 bf16_expand_ms=0.000
+PROF part=489 op=mean ms=0.153 bf16_expand_ms=0.000
+PROF part=490 op=variance ms=0.141 bf16_expand_ms=0.000
+PROF part=491 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=1.371 bf16_expand_ms=0.000
+PROF part=492 op=aie_host_conv142 ms=1.383 bf16_expand_ms=0.001 site_ms=2.762 aie_ms=1.380
+PROF aie_host_split part=492 kind=conv pack_ms=0.615 scatter_ms=0.746 dma_ms=0.760 wait_ms=0.620 glue_ms=0.411 flush_ms=0.104 inval_ms=0.053 launches=1
+PROF part=494 op=mean_1 ms=0.479 bf16_expand_ms=0.000
+PROF part=495 op=variance_1 ms=0.560 bf16_expand_ms=0.000
+PROF part=496 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.182 bf16_expand_ms=0.001
+PROF part=497 op=aie_host_linear143 ms=3.267 bf16_expand_ms=0.000 site_ms=6.749 aie_ms=3.482
+PROF aie_host_split part=497 kind=linear pack_ms=0.469 scatter_ms=2.774 dma_ms=1.391 wait_ms=2.092 glue_ms=0.810 flush_ms=0.091 inval_ms=0.161 launches=2
+PROF part=498 op=reshape_split ms=1.950 bf16_expand_ms=0.000
+PROF part=499 op=aie_host_attn144 ms=0.417 bf16_expand_ms=0.000 site_ms=0.417 aie_ms=0.000
+PROF aie_host_split part=499 kind=fa pack_ms=0.415 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=500 op=aie_host_attn144 ms=1.392 bf16_expand_ms=0.000 site_ms=1.392 aie_ms=0.000
+PROF aie_host_split part=500 kind=fa pack_ms=1.392 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=503 op=aie_host_attn145 ms=0.564 bf16_expand_ms=0.000 site_ms=0.564 aie_ms=0.000
+PROF aie_host_split part=503 kind=fa pack_ms=0.564 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=504 op=aie_host_attn145 ms=0.327 bf16_expand_ms=0.000 site_ms=4.886 aie_ms=4.559
+PROF aie_host_split part=504 kind=fa pack_ms=0.000 scatter_ms=0.325 dma_ms=2.931 wait_ms=1.628 glue_ms=1.681 flush_ms=0.127 inval_ms=0.028 launches=16
+PROF part=506 op=aie_host_linear146 ms=1.173 bf16_expand_ms=0.001 site_ms=2.531 aie_ms=1.359
+PROF aie_host_split part=506 kind=linear pack_ms=0.432 scatter_ms=0.715 dma_ms=0.740 wait_ms=0.619 glue_ms=0.410 flush_ms=0.088 inval_ms=0.054 launches=1
+PROF part=507 op=reshape_add ms=0.828 bf16_expand_ms=0.000
+PROF part=508 op=mean_1 ms=0.485 bf16_expand_ms=0.000
+PROF part=509 op=variance_1 ms=0.560 bf16_expand_ms=0.000
+PROF part=510 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.192 bf16_expand_ms=0.001
+PROF part=511 op=aie_host_linear147 ms=1.154 bf16_expand_ms=0.000 site_ms=2.375 aie_ms=1.221
+PROF aie_host_split part=511 kind=linear pack_ms=0.437 scatter_ms=0.694 dma_ms=0.587 wait_ms=0.635 glue_ms=0.294 flush_ms=0.083 inval_ms=0.053 launches=1
+PROF part=512 op=aie_host_attn150 ms=0.327 bf16_expand_ms=0.000 site_ms=0.327 aie_ms=0.000
+PROF aie_host_split part=512 kind=fa pack_ms=0.326 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=513 op=aie_host_linear148 ms=0.270 bf16_expand_ms=0.000 site_ms=0.857 aie_ms=0.587
+PROF aie_host_split part=513 kind=linear pack_ms=0.195 scatter_ms=0.051 dma_ms=0.417 wait_ms=0.171 glue_ms=0.233 flush_ms=0.064 inval_ms=0.007 launches=1
+PROF part=514 op=aie_host_attn150 ms=0.048 bf16_expand_ms=0.000 site_ms=0.048 aie_ms=0.000
+PROF aie_host_split part=514 kind=fa pack_ms=0.047 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=517 op=aie_host_linear149 ms=0.240 bf16_expand_ms=0.000 site_ms=0.668 aie_ms=0.427
+PROF aie_host_split part=517 kind=linear pack_ms=0.170 scatter_ms=0.043 dma_ms=0.254 wait_ms=0.174 glue_ms=0.112 flush_ms=0.058 inval_ms=0.007 launches=1
+PROF part=518 op=aie_host_attn151 ms=0.040 bf16_expand_ms=0.000 site_ms=0.040 aie_ms=0.000
+PROF aie_host_split part=518 kind=fa pack_ms=0.040 scatter_ms=0.000 dma_ms=0.000 wait_ms=0.000 glue_ms=0.000 flush_ms=0.000 inval_ms=0.000 launches=0
+PROF part=519 op=aie_host_attn151 ms=0.313 bf16_expand_ms=0.000 site_ms=2.690 aie_ms=2.376
+PROF aie_host_split part=519 kind=fa pack_ms=0.000 scatter_ms=0.312 dma_ms=2.094 wait_ms=0.282 glue_ms=0.929 flush_ms=0.080 inval_ms=0.028 launches=16
+PROF part=521 op=aie_host_linear152 ms=1.162 bf16_expand_ms=0.001 site_ms=2.516 aie_ms=1.355
+PROF aie_host_split part=521 kind=linear pack_ms=0.433 scatter_ms=0.703 dma_ms=0.734 wait_ms=0.622 glue_ms=0.407 flush_ms=0.085 inval_ms=0.053 launches=1
+PROF part=522 op=reshape_add ms=0.504 bf16_expand_ms=0.000
+PROF part=523 op=mean_1 ms=0.485 bf16_expand_ms=0.000
+PROF part=524 op=variance_1 ms=0.562 bf16_expand_ms=0.000
+PROF part=525 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.181 bf16_expand_ms=0.002
+PROF part=526 op=aie_host_linear153 ms=8.237 bf16_expand_ms=0.004 site_ms=16.966 aie_ms=8.733
+PROF aie_host_split part=526 kind=linear pack_ms=0.512 scatter_ms=7.697 dma_ms=3.107 wait_ms=5.627 glue_ms=1.850 flush_ms=0.140 inval_ms=0.426 launches=2
+PROF part=527 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=23.410 bf16_expand_ms=0.000
+PROF part=528 op=aie_host_linear154 ms=2.803 bf16_expand_ms=0.002 site_ms=6.302 aie_ms=3.500
+PROF aie_host_split part=528 kind=linear pack_ms=1.666 scatter_ms=1.105 dma_ms=1.077 wait_ms=2.425 glue_ms=0.623 flush_ms=0.199 inval_ms=0.054 launches=1
+PROF part=530 op=aie_host_conv155 ms=2.847 bf16_expand_ms=0.001 site_ms=4.232 aie_ms=1.385
+PROF aie_host_split part=530 kind=conv pack_ms=0.820 scatter_ms=2.005 dma_ms=0.767 wait_ms=0.618 glue_ms=0.412 flush_ms=0.104 inval_ms=0.053 launches=1
+PROF part=532 op=mean ms=0.137 bf16_expand_ms=0.000
+PROF part=533 op=variance ms=0.127 bf16_expand_ms=0.000
+PROF part=534 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=6.136 bf16_expand_ms=0.002
+PROF part=535 op=nn_contrib_conv2d_NCHWc_add_11 ms=8.239 bf16_expand_ms=0.012
+PROF part=536 op=layout_transform_1 ms=0.004 bf16_expand_ms=0.000
+PROF total_nonaie_ms=546.728 vs_graph_minus_aie=1.0223 graph_run_ms=1092.936 aie_wall_ms=558.153 sites=455 cpu_ms=336.527 aie_host_ms=197.252 bf16_expand_ms=12.949 (calls=331 tail=0.000) aie_ms_in_sites=558.153
+PROF aie_host_split_total host_split_n=192 pack_ms=92.600 scatter_ms=101.900 dma_ms=206.342 wait_ms=351.901 glue_ms=121.043 flush_ms=39.955 inval_ms=6.334 launches=258
+CMP unet board=palmyra213 data=p00/step0/cond in_crc32=a5b911e2 cos=1.000000 maxabs=0.00324592 dtype=bf16 aie_launches=258 coreen_calls=258 run_rc=0 aie_flop_frac=1.000 PASS

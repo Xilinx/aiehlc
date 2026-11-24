@@ -151,3 +151,17 @@ def test_driver_glue_identical(old):
     att = [dict(fa=0, fa_steps=True)]
     assert bm.driver_glue(flashattn.DECL_FA + flashattn.DECL_KL, attn=True) == ua.driver_template(att)
     assert flashattn.fa_driver_glue(att) == ua.driver_template(att)
+
+
+def test_launch_split_not_warm_only():
+    """M1.2.1 T-J2: split / split_detail / split_words print in cold builds too; the summary line is the
+    literal 'LAUNCH warm' under <MODEL>_LAUNCH_WARM, else the literal 'LAUNCH cold' with the same fields."""
+    c = bm.main_c("net", ("a", "b"), aie=True, runtime_io=True)
+    w, k = c.index('printf("LAUNCH warm '), c.index('printf("LAUNCH cold ')
+    i_w, i_e, i_end = c.index("#ifdef NET_LAUNCH_WARM"), c.index("#else", w), c.index("#endif", k)
+    assert i_w < w < i_e < k < i_end
+    for tag in ("split ", "split_detail ", "split_words "):
+        assert c.count(f'printf("LAUNCH {tag}') == 1 and c.index(f'printf("LAUNCH {tag}') > i_end
+    fw = c[w:c.index("\\n", w)].replace("LAUNCH warm ", "", 1)
+    fk = c[k:c.index("\\n", k)].replace("LAUNCH cold ", "", 1)
+    assert fw == fk

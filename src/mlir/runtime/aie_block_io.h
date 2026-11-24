@@ -59,8 +59,8 @@ struct aiehlc_blk_desc {
 struct aiehlc_kernel_view_t {
     int oh, ow, oh_per_core, oc_per_core, oh_t, ow_t, ih_t, iw_t, c_align;
 };
-// Blocks handed out so far on one port (persists across kernel calls; the
-// round index wraps per launch).
+// Round index of the next block on one port, kept in [0, rounds_i*rounds_j)
+// (persists across kernel calls and wraps per launch).
 struct aiehlc_blk_cursor {
     int n;
 };
@@ -73,10 +73,16 @@ struct aiehlc_blk {
 static inline int aiehlc_blk_check(const aiehlc_blk_desc &d, aiehlc_blk_cursor &cur, int p0, int p1,
                                    const aiehlc_blk &off, const aiehlc_blk &shape) {
     const int per = d.rounds_i * d.rounds_j;
-    const int round = per > 0 ? cur.n % per : 0;
+    // Keep n in [0, per): a resident run(-1) graph would otherwise overflow the
+    // int after 2^31 blocks and report false BLKE from then on. Also avoids a
+    // per-call '%' (no hardware divide on the AIE scalar unit).
+    if (per <= 0 || cur.n < 0 || cur.n >= per)
+        cur.n = 0;
+    const int round = cur.n;
     const int i = d.rounds_j > 0 ? round / d.rounds_j : 0;
     const int j = d.rounds_j > 0 ? round % d.rounds_j : 0;
-    cur.n++;
+    if (per > 0 && ++cur.n == per)
+        cur.n = 0;
     int ok = 1;
     for (int k = 0; k < d.rank; ++k) {
         const int want = d.base_p0[k] * p0 + d.base_p1[k] * p1 + d.step_i[k] * i + d.step_j[k] * j;

@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // Auto-generated compute kernel: computekernel
 // 2 input(s) + 1 output(s)
 void computekernel(input_window_int8 *window_in_0, input_window_int8 *window_in_1, output_window_int8 *window_out_0) {

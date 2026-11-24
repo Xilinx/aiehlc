@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* What the Vitis BSP generator would emit for this board (SDT form): one GEM,
  * terminated by a zero base address. */
 #include "netif/xtopology.h"

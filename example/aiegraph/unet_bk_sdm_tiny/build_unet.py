@@ -24,6 +24,7 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parents[2] / "src"), str(HERE)]   # this checkout's aiegraph (gate: plain $PY)
+SITE_PERF_DEF = "-DAIEHLC_SITE_PERF=1"   # M3.1 site-perf (aie_runtime.c / aie_host_split.h / site_prof.c)
 
 
 def main(argv=None) -> int:
@@ -44,6 +45,9 @@ def main(argv=None) -> int:
     ap.add_argument("--arm-layer-cflags-file", type=Path, default=None, help="extra CFLAGS of the TVM layer objects")
     ap.add_argument("--runtime-io", action="store_true", help="inputs in the .aiehlc_io ELF section")
     ap.add_argument("--dump-out", action="store_true", help="--runtime-io: dump the output (AIO_*) on the board")
+    ap.add_argument("--site-perf", action="store_true",
+                    help="M3.1 diagnostic: -DAIEHLC_SITE_PERF=1, one PROF aie_site_perf core-counter line per "
+                         "launches>0 part (counter setup adds MMIO per launch: not for L)")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
     log = lambda msg: print(f"[build_unet] {msg}", flush=True)
@@ -59,7 +63,8 @@ def main(argv=None) -> int:
         (a.kincore_layers != "all" and not a.kincore, "--kincore-layers needs --kincore"),
         (a.kincore and a.aie == "none", "--kincore needs --aie conv"),
         (a.ctrlpkt == "aot" and a.aie == "none", "--ctrlpkt aot needs --aie conv"),
-        (a.launch_opt == "warm" and a.aie == "none", "--launch-opt warm needs --aie conv")) if bad]
+        (a.launch_opt == "warm" and a.aie == "none", "--launch-opt warm needs --aie conv"),
+        (a.site_perf and a.aie == "none", "--site-perf needs --aie conv")) if bad]
     try:
         layer_cflags = bm.read_cflags_file(a.arm_layer_cflags_file) if a.arm_layer_cflags_file else ""
     except ValueError as e:
@@ -72,6 +77,8 @@ def main(argv=None) -> int:
     if a.aie != "none":
         bm.profiling_env()
         opts = bm.launch_env(a.launch_opt)
+        if a.site_perf:  # runtime + kernel host archives (EXTRA_DEFS); graph_driver.c gets it via extra_cflags
+            os.environ["EXTRA_DEFS"] = (os.environ.get("EXTRA_DEFS", "") + " " + SITE_PERF_DEF).strip()
         log(f"launch_opt={a.launch_opt} ({opts}) defs={os.environ['EXTRA_DEFS']} "
             f"aiehlc.sh={os.environ.get('AIEHLC_SH_ARGS', '')}")
     out, real_io = a.out.resolve(), a.real_io.resolve()
@@ -114,7 +121,8 @@ def main(argv=None) -> int:
     rio = [(Path(f).stem, real_io / f) for _, _, f, _ in ins] if a.runtime_io else None
     rep = emod.build(target="a78", verbose=a.verbose, main_c=main_c,
                      extra_sources=[bm.cmp_source(), real_io / "p1_ref.h", hdr],
-                     extra_cflags=f"{bm.CMP_CFLAGS} {bm.HEAP_LDFLAG}", layer_cflags=layer_cflags,
+                     extra_cflags=f"{bm.CMP_CFLAGS} {bm.HEAP_LDFLAG}" + (f" {SITE_PERF_DEF}" if a.site_perf else ""),
+                     layer_cflags=layer_cflags,
                      runtime_io=rio, dump_out=a.dump_out, launch=a.launch_opt)
     if not rep.ok:
         log(f"build FAILED: {rep.reason}")

@@ -1,0 +1,2243 @@
+[devlock] acquired 10.23.224.213 (/scratch/staff/huaj/tmp/board_locks/10.23.224.213_3121.lock)
+[hws] preflight (palmyra, netload) on 10.23.224.213
+[hws] netload: hw_server is checked only if the supervisor needs JTAG
+Using: /scratch/staff/huaj/tmp/unet_tutorial/img/calls_s2/call_16/main.elf
+
+============================================================
+Palboard ELF Test Script
+Board: palmyra, console com0
+Host: huaj@10.23.224.213
+ELF File: /scratch/staff/huaj/tmp/unet_tutorial/img/calls_s2/call_16/main.elf
+============================================================
+[netload] staged on 10.23.224.213: nothing (up to date)
+[netload] asking the supervisor at 10.10.70.50 to run main.elf (waits up to 120 s if the board is busy)
+[netload] load rc=0 state=running runs=735 | 657.58 MB sent via huaj@10.23.224.213 in 11.160 s (58.9 MB/s), board rx 11000 ms, place 63 ms, entry 0x0
+[netload] board: placed 655298632 bytes, zeroed 222488935 bss bytes, entry 0x0, _exit -> park
+[netload] streamed /scratch/staff/huaj/tmp/unet_tutorial/img/calls_s2/call_16/main.elf through the proxy on 10.23.224.213 in 12.31s (no scp)
+
+>>> Waiting for console output (max 600s, no-output timeout 300s)...
+[netboot] LOAD_RUN 657579872 B received and placed in 11000 ms (stream=1, staging copy none), sha256 ok
+
+[netboot] run 735: placed 655298632 bytes, zeroed 222488935 bss bytes, entry 0x0, _exit -> park, start app core at 0x0 (watchdog 300000 ms) stream=1 elf_size=657579872
+
+[netboot] app core was parked: released to 0x0 (no PLM call)
+
+unet-conv,linear,attn: init (aiegraph C on A78 + conv on AIE gemm_bf16, weights=bf16, aie=conv,linear,attn)
+
+INPUT unet sample bytes=16384 (runtime-io sample)
+
+INPUT unet timestep bytes=4 (runtime-io timestep_i32)
+
+INPUT unet encoder_hidden_states bytes=236544 (runtime-io ehs)
+
+INPUT unet sample+timestep_i32+ehs in_crc32_board=7c8a3ad8 expect=7c8a3ad8 MATCH (timestep=679) runtime_io=1 build_crc32=a5b911e2
+
+[UCS] l=0 M=1024 N=320 K=2880 tkw=8
+
+[UCS] l=1 M=1024 N=320 K=2880 tkw=8
+
+[UCS] l=2 M=1024 N=320 K=320 tkw=8
+
+[UCS] l=3 lin M=1024 N=960 K=320 px=512 s=0/2 tkw=8
+
+[UCS] l=4 lin M=1024 N=960 K=320 px=512 s=1/2 tkw=8
+
+[UCS] l=21 lin M=1024 N=320 K=320 px=1024 s=0/1 tkw=8
+
+[UCS] l=22 lin M=1024 N=320 K=320 px=1024 s=0/1 tkw=8
+
+[UCS] l=23 lin M=77 N=320 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=24 lin M=77 N=320 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=41 lin M=1024 N=320 K=320 px=1024 s=0/1 tkw=8
+
+[UCS] l=42 lin M=1024 N=2560 K=320 px=512 s=0/2 tkw=8
+
+[UCS] l=43 lin M=1024 N=2560 K=320 px=512 s=1/2 tkw=8
+
+[UCS] l=44 lin M=1024 N=320 K=1280 px=1024 s=0/1 tkw=8
+
+[UCS] l=45 M=1024 N=320 K=320 tkw=8
+
+[UCS] l=46 M=256 N=320 K=2880 tkw=16
+
+[UCS] l=47 M=256 N=640 K=2880 tkw=16
+
+[UCS] l=48 M=256 N=640 K=5760 tkw=16
+
+[UCS] l=49 M=256 N=640 K=320 tkw=16
+
+[UCS] l=50 M=256 N=640 K=640 tkw=16
+
+[UCS] l=51 lin M=256 N=1920 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=56 lin M=256 N=640 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=57 lin M=256 N=640 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=58 lin M=77 N=640 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=59 lin M=77 N=640 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=64 lin M=256 N=640 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=65 lin M=256 N=5120 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=66 lin M=256 N=640 K=2560 px=256 s=0/1 tkw=16
+
+[UCS] l=67 M=256 N=640 K=640 tkw=16
+
+[UCS] l=68 M=64 N=640 K=5760 tkw=32
+
+[UCS] l=69 M=64 N=1280 K=5760 tkw=32
+
+[UCS] l=70 M=64 N=1280 K=11520 tkw=32
+
+[UCS] l=71 M=64 N=1280 K=640 tkw=32
+
+[UCS] l=72 M=64 N=1280 K=1280 tkw=32
+
+[UCS] l=73 lin M=64 N=3840 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=76 lin M=64 N=1280 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=77 lin M=64 N=1280 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=78 lin M=77 N=1280 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=79 lin M=77 N=1280 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=82 lin M=64 N=1280 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=83 lin M=64 N=10240 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=84 lin M=64 N=1280 K=5120 px=64 s=0/1 tkw=32
+
+[UCS] l=85 M=64 N=1280 K=1280 tkw=32
+
+[UCS] l=86 M=64 N=1280 K=23040 tkw=32
+
+[UCS] l=87 M=64 N=1280 K=11520 tkw=32
+
+[UCS] l=88 M=64 N=1280 K=2560 tkw=32
+
+[UCS] l=89 M=64 N=1280 K=1280 tkw=32
+
+[UCS] l=90 lin M=64 N=3840 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=93 lin M=64 N=1280 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=94 lin M=64 N=1280 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=95 lin M=77 N=1280 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=96 lin M=77 N=1280 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=99 lin M=64 N=1280 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=100 lin M=64 N=10240 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=101 lin M=64 N=1280 K=5120 px=64 s=0/1 tkw=32
+
+[UCS] l=102 M=64 N=1280 K=1280 tkw=32
+
+[UCS] l=103 M=64 N=1280 K=17280 tkw=32
+
+[UCS] l=104 M=64 N=1280 K=11520 tkw=32
+
+[UCS] l=105 M=64 N=1280 K=1920 tkw=32
+
+[UCS] l=106 M=64 N=1280 K=1280 tkw=32
+
+[UCS] l=107 lin M=64 N=3840 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=110 lin M=64 N=1280 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=111 lin M=64 N=1280 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=112 lin M=77 N=1280 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=113 lin M=77 N=1280 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=116 lin M=64 N=1280 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=117 lin M=64 N=10240 K=1280 px=64 s=0/1 tkw=32
+
+[UCS] l=118 lin M=64 N=1280 K=5120 px=64 s=0/1 tkw=32
+
+[UCS] l=119 M=64 N=1280 K=1280 tkw=32
+
+[UCS] l=120 M=256 N=1280 K=11520 tkw=16
+
+[UCS] l=121 M=256 N=640 K=17280 tkw=16
+
+[UCS] l=122 M=256 N=640 K=5760 tkw=16
+
+[UCS] l=123 M=256 N=640 K=1920 tkw=16
+
+[UCS] l=124 M=256 N=640 K=640 tkw=16
+
+[UCS] l=125 lin M=256 N=1920 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=130 lin M=256 N=640 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=131 lin M=256 N=640 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=132 lin M=77 N=640 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=133 lin M=77 N=640 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=138 lin M=256 N=640 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=139 lin M=256 N=5120 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=140 lin M=256 N=640 K=2560 px=256 s=0/1 tkw=16
+
+[UCS] l=141 M=256 N=640 K=640 tkw=16
+
+[UCS] l=142 M=256 N=640 K=8640 tkw=16
+
+[UCS] l=143 M=256 N=640 K=5760 tkw=16
+
+[UCS] l=144 M=256 N=640 K=960 tkw=16
+
+[UCS] l=145 M=256 N=640 K=640 tkw=16
+
+[UCS] l=146 lin M=256 N=1920 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=151 lin M=256 N=640 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=152 lin M=256 N=640 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=153 lin M=77 N=640 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=154 lin M=77 N=640 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=159 lin M=256 N=640 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=160 lin M=256 N=5120 K=640 px=256 s=0/1 tkw=16
+
+[UCS] l=161 lin M=256 N=640 K=2560 px=256 s=0/1 tkw=16
+
+[UCS] l=162 M=256 N=640 K=640 tkw=16
+
+[UCS] l=163 M=1024 N=640 K=5760 tkw=4
+
+[UCS] l=164 M=1024 N=320 K=8640 tkw=8
+
+[UCS] l=165 M=1024 N=320 K=2880 tkw=8
+
+[UCS] l=166 M=1024 N=320 K=960 tkw=8
+
+[UCS] l=167 M=1024 N=320 K=320 tkw=8
+
+[UCS] l=168 lin M=1024 N=960 K=320 px=512 s=0/2 tkw=8
+
+[UCS] l=169 lin M=1024 N=960 K=320 px=512 s=1/2 tkw=8
+
+[UCS] l=186 lin M=1024 N=320 K=320 px=1024 s=0/1 tkw=8
+
+[UCS] l=187 lin M=1024 N=320 K=320 px=1024 s=0/1 tkw=8
+
+[UCS] l=188 lin M=77 N=320 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=189 lin M=77 N=320 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=206 lin M=1024 N=320 K=320 px=1024 s=0/1 tkw=8
+
+[UCS] l=207 lin M=1024 N=2560 K=320 px=512 s=0/2 tkw=8
+
+[UCS] l=208 lin M=1024 N=2560 K=320 px=512 s=1/2 tkw=8
+
+[UCS] l=209 lin M=1024 N=320 K=1280 px=1024 s=0/1 tkw=8
+
+[UCS] l=210 M=1024 N=320 K=320 tkw=8
+
+[UCS] l=211 M=1024 N=320 K=5760 tkw=8
+
+[UCS] l=212 M=1024 N=320 K=2880 tkw=8
+
+[UCS] l=213 M=1024 N=320 K=640 tkw=8
+
+[UCS] l=214 M=1024 N=320 K=320 tkw=8
+
+[UCS] l=215 lin M=1024 N=960 K=320 px=512 s=0/2 tkw=8
+
+[UCS] l=216 lin M=1024 N=960 K=320 px=512 s=1/2 tkw=8
+
+[UCS] l=233 lin M=1024 N=320 K=320 px=1024 s=0/1 tkw=8
+
+[UCS] l=234 lin M=1024 N=320 K=320 px=1024 s=0/1 tkw=8
+
+[UCS] l=235 lin M=77 N=320 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=236 lin M=77 N=320 K=768 px=128 s=0/1 tkw=32
+
+[UCS] l=253 lin M=1024 N=320 K=320 px=1024 s=0/1 tkw=8
+
+[UCS] l=254 lin M=1024 N=2560 K=320 px=512 s=0/2 tkw=8
+
+[UCS] l=255 lin M=1024 N=2560 K=320 px=512 s=1/2 tkw=8
+
+[UCS] l=256 lin M=1024 N=320 K=1280 px=1024 s=0/1 tkw=8
+
+[UCS] l=257 M=1024 N=320 K=320 tkw=8
+
+unet: graph_run 1305.815 ms, output elems=4096 (ref 4096)
+
+LAUNCH warm ms_per_launch=2.938 launches=258 aie_wall_ms=758.053 kloads=0 opts=skip-bss+ZFILL_WIDE+PMLOAD_WIDE+PM_WARM_SKIP,core_reset_unreset_per_launch,bd_warm_skip=off,cold_tile_loads=0 ctrlpkt=aot aot_fallbacks=0
+
+[UCL] l=0 M=1024 N=320 K=2880 pre_us=2033 aie_us=9402 post_us=1351 fast=3
+
+[UCL] l=1 M=1024 N=320 K=2880 pre_us=1680 aie_us=8915 post_us=979 fast=3
+
+[UCL] l=2 M=1024 N=320 K=320 pre_us=556 aie_us=1631 post_us=731 fast=3
+
+[UCL] l=3 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=4 M=1024 N=960 K=320 pre_us=463 aie_us=8145 post_us=3104 fast=6
+
+[UCL] l=5 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=6 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=7 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=8 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=9 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=10 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=11 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=12 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=13 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=14 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=15 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=16 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=17 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=18 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=19 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=20 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=21 M=1024 N=320 K=320 pre_us=425 aie_us=3266 post_us=749 fast=6
+
+[UCL] l=22 M=1024 N=320 K=320 pre_us=434 aie_us=3123 post_us=739 fast=6
+
+[UCL] l=23 M=77 N=320 K=768 pre_us=177 aie_us=2721 post_us=49 fast=6
+
+[UCL] l=24 M=77 N=320 K=768 pre_us=139 aie_us=4207 post_us=46 fast=6
+
+[UCL] l=25 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=26 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=27 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=28 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=29 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=30 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=31 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=32 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=33 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=34 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=35 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=36 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=37 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=38 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=39 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=40 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=41 M=1024 N=320 K=320 pre_us=432 aie_us=3266 post_us=715 fast=6
+
+[UCL] l=42 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=43 M=1024 N=2560 K=320 pre_us=513 aie_us=12504 post_us=8757 fast=6
+
+[UCL] l=44 M=1024 N=320 K=1280 pre_us=1641 aie_us=5401 post_us=1099 fast=6
+
+[UCL] l=45 M=1024 N=320 K=320 pre_us=826 aie_us=1718 post_us=1119 fast=3
+
+[UCL] l=46 M=256 N=320 K=2880 pre_us=830 aie_us=2199 post_us=157 fast=3
+
+[UCL] l=47 M=256 N=640 K=2880 pre_us=403 aie_us=3465 post_us=647 fast=3
+
+[UCL] l=48 M=256 N=640 K=5760 pre_us=836 aie_us=6437 post_us=309 fast=3
+
+[UCL] l=49 M=256 N=640 K=320 pre_us=130 aie_us=1099 post_us=353 fast=3
+
+[UCL] l=50 M=256 N=640 K=640 pre_us=258 aie_us=1868 post_us=298 fast=3
+
+[UCL] l=51 M=256 N=1920 K=640 pre_us=245 aie_us=4866 post_us=1407 fast=6
+
+[UCL] l=52 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=53 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=54 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=55 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=56 M=256 N=640 K=640 pre_us=183 aie_us=2987 post_us=346 fast=6
+
+[UCL] l=57 M=256 N=640 K=640 pre_us=169 aie_us=2822 post_us=288 fast=6
+
+[UCL] l=58 M=77 N=640 K=768 pre_us=163 aie_us=3867 post_us=101 fast=6
+
+[UCL] l=59 M=77 N=640 K=768 pre_us=150 aie_us=4097 post_us=102 fast=6
+
+[UCL] l=60 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=61 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=62 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=63 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=64 M=256 N=640 K=640 pre_us=163 aie_us=3691 post_us=300 fast=6
+
+[UCL] l=65 M=256 N=5120 K=640 pre_us=466 aie_us=9931 post_us=3943 fast=6
+
+[UCL] l=66 M=256 N=640 K=2560 pre_us=593 aie_us=4756 post_us=426 fast=6
+
+[UCL] l=67 M=256 N=640 K=640 pre_us=391 aie_us=1484 post_us=392 fast=3
+
+[UCL] l=68 M=64 N=640 K=5760 pre_us=450 aie_us=3821 post_us=88 fast=3
+
+[UCL] l=69 M=64 N=1280 K=5760 pre_us=309 aie_us=5903 post_us=316 fast=3
+
+[UCL] l=70 M=64 N=1280 K=11520 pre_us=567 aie_us=10794 post_us=173 fast=3
+
+[UCL] l=71 M=64 N=1280 K=640 pre_us=90 aie_us=1475 post_us=184 fast=3
+
+[UCL] l=72 M=64 N=1280 K=1280 pre_us=173 aie_us=2857 post_us=198 fast=3
+
+[UCL] l=73 M=64 N=3840 K=1280 pre_us=114 aie_us=6542 post_us=597 fast=6
+
+[UCL] l=74 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=75 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=76 M=64 N=1280 K=1280 pre_us=81 aie_us=3512 post_us=209 fast=6
+
+[UCL] l=77 M=64 N=1280 K=1280 pre_us=77 aie_us=3738 post_us=184 fast=6
+
+[UCL] l=78 M=77 N=1280 K=768 pre_us=178 aie_us=4229 post_us=230 fast=6
+
+[UCL] l=79 M=77 N=1280 K=768 pre_us=154 aie_us=3950 post_us=220 fast=6
+
+[UCL] l=80 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=81 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=82 M=64 N=1280 K=1280 pre_us=76 aie_us=3716 post_us=199 fast=6
+
+[UCL] l=83 M=64 N=10240 K=1280 pre_us=210 aie_us=13351 post_us=2212 fast=6
+
+[UCL] l=84 M=64 N=1280 K=5120 pre_us=281 aie_us=6455 post_us=229 fast=6
+
+[UCL] l=85 M=64 N=1280 K=1280 pre_us=214 aie_us=2129 post_us=198 fast=3
+
+[UCL] l=86 M=64 N=1280 K=23040 pre_us=1413 aie_us=19714 post_us=294 fast=3
+
+[UCL] l=87 M=64 N=1280 K=11520 pre_us=533 aie_us=10283 post_us=185 fast=3
+
+[UCL] l=88 M=64 N=1280 K=2560 pre_us=3167 aie_us=3242 post_us=187 fast=1
+
+[UCL] l=89 M=64 N=1280 K=1280 pre_us=174 aie_us=2121 post_us=187 fast=3
+
+[UCL] l=90 M=64 N=3840 K=1280 pre_us=115 aie_us=6673 post_us=596 fast=6
+
+[UCL] l=91 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=92 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=93 M=64 N=1280 K=1280 pre_us=78 aie_us=3505 post_us=196 fast=6
+
+[UCL] l=94 M=64 N=1280 K=1280 pre_us=76 aie_us=3823 post_us=186 fast=6
+
+[UCL] l=95 M=77 N=1280 K=768 pre_us=168 aie_us=4183 post_us=226 fast=6
+
+[UCL] l=96 M=77 N=1280 K=768 pre_us=152 aie_us=3969 post_us=216 fast=6
+
+[UCL] l=97 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=98 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=99 M=64 N=1280 K=1280 pre_us=76 aie_us=3773 post_us=185 fast=6
+
+[UCL] l=100 M=64 N=10240 K=1280 pre_us=209 aie_us=13921 post_us=2152 fast=6
+
+[UCL] l=101 M=64 N=1280 K=5120 pre_us=282 aie_us=6544 post_us=238 fast=6
+
+[UCL] l=102 M=64 N=1280 K=1280 pre_us=216 aie_us=2208 post_us=194 fast=3
+
+[UCL] l=103 M=64 N=1280 K=17280 pre_us=939 aie_us=15183 post_us=290 fast=3
+
+[UCL] l=104 M=64 N=1280 K=11520 pre_us=537 aie_us=10367 post_us=186 fast=3
+
+[UCL] l=105 M=64 N=1280 K=1920 pre_us=256 aie_us=2643 post_us=183 fast=3
+
+[UCL] l=106 M=64 N=1280 K=1280 pre_us=168 aie_us=2152 post_us=179 fast=3
+
+[UCL] l=107 M=64 N=3840 K=1280 pre_us=116 aie_us=6643 post_us=668 fast=6
+
+[UCL] l=108 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=109 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=110 M=64 N=1280 K=1280 pre_us=84 aie_us=3597 post_us=195 fast=6
+
+[UCL] l=111 M=64 N=1280 K=1280 pre_us=77 aie_us=3910 post_us=190 fast=6
+
+[UCL] l=112 M=77 N=1280 K=768 pre_us=180 aie_us=4242 post_us=212 fast=6
+
+[UCL] l=113 M=77 N=1280 K=768 pre_us=154 aie_us=4065 post_us=205 fast=6
+
+[UCL] l=114 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=115 M=0 N=0 K=0 pre_us=0 aie_us=0 post_us=0 fast=0
+
+[UCL] l=116 M=64 N=1280 K=1280 pre_us=76 aie_us=3818 post_us=186 fast=6
+
+[UCL] l=117 M=64 N=10240 K=1280 pre_us=213 aie_us=13909 post_us=2173 fast=6
+
+[UCL] l=118 M=64 N=1280 K=5120 pre_us=286 aie_us=6539 post_us=236 fast=6
+
+[UCL] l=119 M=64 N=1280 K=1280 pre_us=215 aie_us=2155 post_us=192 fast=3
+
+[UCL] l=120 M=256 N=1280 K=11520 pre_us=2148 aie_us=20974 post_us=645 fast=3
+
+[UCL] l=121 M=256 N=640 K=17280 pre_us=3990 aie_us=16218 post_us=701 fast=3
+
+[UCL] l=122 M=256 N=640 K=5760 pre_us=650 aie_us=6238 post_us=289 fast=3
+
+[UCL] l=123 M=256 N=640 K=1920 pre_us=844 aie_us=2756 post_us=347 fast=3
+
+[UCL] l=124 M=256 N=640 K=640 pre_us=258 aie_us=1593 post_us=286 fast=3
+
+[UCL] l=125 M=256 N=1920 K=640 pre_us=251 aie_us=4781 post_us=1332 fast=6
+
+LAUNCH split kload=0.040 bdcfg=1.294 startio=0.147 coreen=0.011 wait_io=1.392 core_reset=0.000 ms_per_launch=2.938 pmu_hz=1316653928 sum_vs_aie_wall=0.981
+
+LAUNCH split_detail calls kload=258 bdcfg=11853 startio=1584 coreen=258 wait_io=34212 core_reset=0 kload_elf_ms=0.039 plan_ms=0.046 sync_ms=0.176 rt_bdcfg=0.0960 rt_startio=0.0006 rt_wait_io=1.3683 host_glue_bdcfg=1.1981 host_flush_startio=0.1468 host_inval_wait_io=0.0234 gemm_call=2.6463 rt_phase_sum_ms=390.928 phase_sum_ms=743.960 aie_wall_ms=758.053 unattributed_ms_per_launch=0.0546 pmc_delta=1719306034 xtime_s=1.306
+
+PROF part=0 op=layout_transform ms=0.002 bf16_expand_ms=0.000
+
+PROF part=1 op=nn_contrib_conv2d_NCHWc_add ms=8.123 bf16_expand_ms=0.021
+
+PROF part=2 op=layout_transform_reshape ms=0.550 bf16_expand_ms=0.000
+
+PROF part=3 op=mean ms=0.166 bf16_expand_ms=0.000
+
+PROF part=4 op=variance ms=0.138 bf16_expand_ms=0.000
+
+PROF part=5 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=6.140 bf16_expand_ms=0.003
+
+PROF part=6 op=cast_expand_dims_cast_multiply_sin_cos_concatenate_strided_slice_str ms=0.009 bf16_expand_ms=0.001
+
+PROF part=7 op=nn_contrib_dense_pack_add ms=0.756 bf16_expand_ms=0.545
+
+PROF part=8 op=kl_temb_x_wexpand ms=1.916 bf16_expand_ms=0.000
+
+PROF part=9 op=nn_contrib_dense_pack_add_1 ms=3.301 bf16_expand_ms=1.904
+
+PROF part=10 op=sigmoid_squeeze ms=0.012 bf16_expand_ms=0.000
+
+PROF part=11 op=kl_temb_x_wexpand ms=0.248 bf16_expand_ms=0.000
+
+PROF part=12 op=nn_contrib_dense_pack_add_2 ms=0.491 bf16_expand_ms=0.247
+
+PROF part=13 op=expand_dims_expand_dims_layout_transform ms=0.001 bf16_expand_ms=0.000
+
+PROF part=14 op=aie_host_conv0 ms=3.385 bf16_expand_ms=0.001 site_ms=12.787 aie_ms=9.402
+
+PROF aie_host_split part=14 kind=conv pack_ms=2.033 scatter_ms=1.351 dma_ms=2.392 wait_ms=7.010
+
+PROF part=16 op=mean ms=0.124 bf16_expand_ms=0.000
+
+PROF part=17 op=variance ms=0.126 bf16_expand_ms=0.000
+
+PROF part=18 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=6.141 bf16_expand_ms=0.002
+
+PROF part=19 op=aie_host_conv1 ms=2.660 bf16_expand_ms=0.001 site_ms=11.575 aie_ms=8.915
+
+PROF aie_host_split part=19 kind=conv pack_ms=1.680 scatter_ms=0.979 dma_ms=1.888 wait_ms=7.027
+
+PROF part=20 op=layout_transform_reshape ms=0.446 bf16_expand_ms=0.000
+
+PROF part=21 op=mean ms=0.127 bf16_expand_ms=0.000
+
+PROF part=22 op=variance ms=0.126 bf16_expand_ms=0.000
+
+PROF part=23 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=1.365 bf16_expand_ms=0.001
+
+PROF part=24 op=aie_host_conv2 ms=1.289 bf16_expand_ms=0.001 site_ms=2.919 aie_ms=1.631
+
+PROF aie_host_split part=24 kind=conv pack_ms=0.556 scatter_ms=0.731 dma_ms=1.002 wait_ms=0.629
+
+PROF part=26 op=mean_1 ms=0.477 bf16_expand_ms=0.000
+
+PROF part=27 op=variance_1 ms=0.558 bf16_expand_ms=0.000
+
+PROF part=28 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.301 bf16_expand_ms=0.002
+
+PROF part=29 op=aie_host_linear3 ms=3.569 bf16_expand_ms=0.000 site_ms=11.714 aie_ms=8.144
+
+PROF aie_host_split part=29 kind=linear pack_ms=0.463 scatter_ms=3.104 dma_ms=6.035 wait_ms=2.109
+
+PROF part=30 op=reshape_split ms=1.845 bf16_expand_ms=0.000
+
+PROF part=31 op=aie_host_attn4 ms=0.426 bf16_expand_ms=0.000 site_ms=0.426 aie_ms=0.000
+
+PROF part=32 op=aie_host_attn4 ms=1.249 bf16_expand_ms=0.000 site_ms=1.249 aie_ms=0.000
+
+PROF part=35 op=aie_host_attn5 ms=0.517 bf16_expand_ms=0.000 site_ms=0.517 aie_ms=0.000
+
+PROF part=36 op=aie_host_attn5 ms=0.289 bf16_expand_ms=0.000 site_ms=4.832 aie_ms=4.543
+
+PROF part=38 op=aie_host_linear6 ms=1.176 bf16_expand_ms=0.001 site_ms=4.441 aie_ms=3.266
+
+PROF aie_host_split part=38 kind=linear pack_ms=0.425 scatter_ms=0.749 dma_ms=2.633 wait_ms=0.633
+
+PROF part=39 op=reshape_add ms=0.855 bf16_expand_ms=0.000
+
+PROF part=40 op=mean_1 ms=0.484 bf16_expand_ms=0.000
+
+PROF part=41 op=variance_1 ms=0.562 bf16_expand_ms=0.000
+
+PROF part=42 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.298 bf16_expand_ms=0.002
+
+PROF part=43 op=aie_host_linear7 ms=1.174 bf16_expand_ms=0.000 site_ms=4.296 aie_ms=3.122
+
+PROF aie_host_split part=43 kind=linear pack_ms=0.434 scatter_ms=0.739 dma_ms=2.472 wait_ms=0.650
+
+PROF part=44 op=aie_host_attn10 ms=0.330 bf16_expand_ms=0.000 site_ms=0.330 aie_ms=0.000
+
+PROF part=45 op=aie_host_linear8 ms=0.228 bf16_expand_ms=0.000 site_ms=2.948 aie_ms=2.720
+
+PROF aie_host_split part=45 kind=linear pack_ms=0.177 scatter_ms=0.049 dma_ms=2.562 wait_ms=0.159
+
+PROF part=46 op=aie_host_attn10 ms=0.048 bf16_expand_ms=0.000 site_ms=0.048 aie_ms=0.000
+
+PROF part=49 op=aie_host_linear9 ms=0.186 bf16_expand_ms=0.000 site_ms=4.393 aie_ms=4.207
+
+PROF aie_host_split part=49 kind=linear pack_ms=0.139 scatter_ms=0.046 dma_ms=4.046 wait_ms=0.162
+
+PROF part=50 op=aie_host_attn11 ms=0.043 bf16_expand_ms=0.000 site_ms=0.043 aie_ms=0.000
+
+PROF part=51 op=aie_host_attn11 ms=0.334 bf16_expand_ms=0.000 site_ms=2.692 aie_ms=2.359
+
+PROF part=53 op=aie_host_linear12 ms=1.149 bf16_expand_ms=0.001 site_ms=4.413 aie_ms=3.265
+
+PROF aie_host_split part=53 kind=linear pack_ms=0.432 scatter_ms=0.715 dma_ms=2.626 wait_ms=0.640
+
+PROF part=54 op=reshape_add ms=0.607 bf16_expand_ms=0.000
+
+PROF part=55 op=mean_1 ms=0.486 bf16_expand_ms=0.000
+
+PROF part=56 op=variance_1 ms=0.560 bf16_expand_ms=0.000
+
+PROF part=57 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.299 bf16_expand_ms=0.002
+
+PROF part=58 op=aie_host_linear13 ms=9.276 bf16_expand_ms=0.003 site_ms=21.776 aie_ms=12.503
+
+PROF aie_host_split part=58 kind=linear pack_ms=0.513 scatter_ms=8.757 dma_ms=6.837 wait_ms=5.667
+
+PROF part=59 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=24.604 bf16_expand_ms=0.000
+
+PROF part=60 op=aie_host_linear14 ms=2.744 bf16_expand_ms=0.001 site_ms=8.143 aie_ms=5.399
+
+PROF aie_host_split part=60 kind=linear pack_ms=1.641 scatter_ms=1.099 dma_ms=3.064 wait_ms=2.337
+
+PROF part=62 op=aie_host_conv15 ms=1.947 bf16_expand_ms=0.001 site_ms=3.664 aie_ms=1.718
+
+PROF aie_host_split part=62 kind=conv pack_ms=0.826 scatter_ms=1.119 dma_ms=1.089 wait_ms=0.629
+
+PROF part=63 op=aie_host_conv16 ms=0.989 bf16_expand_ms=0.001 site_ms=3.187 aie_ms=2.199
+
+PROF aie_host_split part=63 kind=conv pack_ms=0.830 scatter_ms=0.157 dma_ms=1.260 wait_ms=0.938
+
+PROF part=64 op=layout_transform_reshape_1 ms=0.110 bf16_expand_ms=0.000
+
+PROF part=65 op=mean_2 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=66 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+
+PROF part=67 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=1.546 bf16_expand_ms=0.002
+
+PROF part=68 op=kl_temb_x_wexpand ms=1.042 bf16_expand_ms=0.000
+
+PROF part=69 op=nn_contrib_dense_pack_add_6 ms=1.563 bf16_expand_ms=1.035
+
+PROF part=70 op=expand_dims_expand_dims_layout_transform_1 ms=0.001 bf16_expand_ms=0.000
+
+PROF part=71 op=aie_host_conv17 ms=1.052 bf16_expand_ms=0.002 site_ms=4.515 aie_ms=3.465
+
+PROF aie_host_split part=71 kind=conv pack_ms=0.403 scatter_ms=0.647 dma_ms=1.595 wait_ms=1.870
+
+PROF part=73 op=mean_3 ms=0.064 bf16_expand_ms=0.000
+
+PROF part=74 op=variance_3 ms=0.063 bf16_expand_ms=0.000
+
+PROF part=75 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=3.092 bf16_expand_ms=0.003
+
+PROF part=76 op=aie_host_conv18 ms=1.147 bf16_expand_ms=0.002 site_ms=7.582 aie_ms=6.437
+
+PROF aie_host_split part=76 kind=conv pack_ms=0.836 scatter_ms=0.309 dma_ms=2.246 wait_ms=4.191
+
+PROF part=77 op=aie_host_conv19 ms=0.485 bf16_expand_ms=0.001 site_ms=1.583 aie_ms=1.099
+
+PROF aie_host_split part=77 kind=conv pack_ms=0.130 scatter_ms=0.353 dma_ms=0.842 wait_ms=0.258
+
+PROF part=78 op=layout_transform_reshape_2 ms=0.212 bf16_expand_ms=0.000
+
+PROF part=79 op=mean_3 ms=0.061 bf16_expand_ms=0.000
+
+PROF part=80 op=variance_3 ms=0.063 bf16_expand_ms=0.000
+
+PROF part=81 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=0.705 bf16_expand_ms=0.002
+
+PROF part=82 op=aie_host_conv20 ms=0.559 bf16_expand_ms=0.002 site_ms=2.425 aie_ms=1.868
+
+PROF aie_host_split part=82 kind=conv pack_ms=0.258 scatter_ms=0.298 dma_ms=1.342 wait_ms=0.526
+
+PROF part=84 op=mean_4 ms=0.244 bf16_expand_ms=0.000
+
+PROF part=85 op=variance_4 ms=0.287 bf16_expand_ms=0.000
+
+PROF part=86 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.594 bf16_expand_ms=0.003
+
+PROF part=87 op=aie_host_linear21 ms=1.655 bf16_expand_ms=0.000 site_ms=6.519 aie_ms=4.864
+
+PROF aie_host_split part=87 kind=linear pack_ms=0.245 scatter_ms=1.407 dma_ms=3.139 wait_ms=1.727
+
+PROF part=88 op=reshape_split_1 ms=0.631 bf16_expand_ms=0.000
+
+PROF part=89 op=aie_host_attn22 ms=0.180 bf16_expand_ms=0.000 site_ms=0.180 aie_ms=0.000
+
+PROF part=90 op=aie_host_attn22 ms=0.477 bf16_expand_ms=0.000 site_ms=0.477 aie_ms=0.000
+
+PROF part=93 op=aie_host_attn23 ms=0.204 bf16_expand_ms=0.000 site_ms=0.204 aie_ms=0.000
+
+PROF part=94 op=aie_host_attn23 ms=0.121 bf16_expand_ms=0.000 site_ms=1.222 aie_ms=1.101
+
+PROF part=96 op=aie_host_linear24 ms=0.533 bf16_expand_ms=0.001 site_ms=3.517 aie_ms=2.986
+
+PROF aie_host_split part=96 kind=linear pack_ms=0.183 scatter_ms=0.346 dma_ms=2.416 wait_ms=0.571
+
+PROF part=97 op=reshape_add_1 ms=0.247 bf16_expand_ms=0.000
+
+PROF part=98 op=mean_4 ms=0.246 bf16_expand_ms=0.000
+
+PROF part=99 op=variance_4 ms=0.285 bf16_expand_ms=0.000
+
+PROF part=100 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.592 bf16_expand_ms=0.003
+
+PROF part=101 op=aie_host_linear25 ms=0.459 bf16_expand_ms=0.000 site_ms=3.280 aie_ms=2.821
+
+PROF aie_host_split part=101 kind=linear pack_ms=0.169 scatter_ms=0.288 dma_ms=2.261 wait_ms=0.561
+
+PROF part=102 op=aie_host_attn28 ms=0.156 bf16_expand_ms=0.000 site_ms=0.155 aie_ms=0.000
+
+PROF part=103 op=aie_host_linear26 ms=0.266 bf16_expand_ms=0.000 site_ms=4.132 aie_ms=3.866
+
+PROF aie_host_split part=103 kind=linear pack_ms=0.163 scatter_ms=0.101 dma_ms=3.550 wait_ms=0.317
+
+PROF part=104 op=aie_host_attn28 ms=0.094 bf16_expand_ms=0.000 site_ms=0.094 aie_ms=0.000
+
+PROF part=107 op=aie_host_linear27 ms=0.254 bf16_expand_ms=0.000 site_ms=4.349 aie_ms=4.096
+
+PROF aie_host_split part=107 kind=linear pack_ms=0.150 scatter_ms=0.102 dma_ms=3.780 wait_ms=0.316
+
+PROF part=108 op=aie_host_attn29 ms=0.079 bf16_expand_ms=0.000 site_ms=0.079 aie_ms=0.000
+
+PROF part=109 op=aie_host_attn29 ms=0.118 bf16_expand_ms=0.000 site_ms=1.048 aie_ms=0.930
+
+PROF part=111 op=aie_host_linear30 ms=0.466 bf16_expand_ms=0.002 site_ms=4.154 aie_ms=3.690
+
+PROF aie_host_split part=111 kind=linear pack_ms=0.163 scatter_ms=0.300 dma_ms=3.161 wait_ms=0.530
+
+PROF part=112 op=reshape_add_1 ms=0.180 bf16_expand_ms=0.000
+
+PROF part=113 op=mean_4 ms=0.246 bf16_expand_ms=0.000
+
+PROF part=114 op=variance_4 ms=0.285 bf16_expand_ms=0.000
+
+PROF part=115 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.593 bf16_expand_ms=0.003
+
+PROF part=116 op=aie_host_linear31 ms=4.416 bf16_expand_ms=0.004 site_ms=14.341 aie_ms=9.929
+
+PROF aie_host_split part=116 kind=linear pack_ms=0.466 scatter_ms=3.943 dma_ms=4.676 wait_ms=5.255
+
+PROF part=117 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=11.123 bf16_expand_ms=0.000
+
+PROF part=118 op=aie_host_linear32 ms=1.024 bf16_expand_ms=0.002 site_ms=5.776 aie_ms=4.754
+
+PROF aie_host_split part=118 kind=linear pack_ms=0.593 scatter_ms=0.426 dma_ms=2.950 wait_ms=1.806
+
+PROF part=120 op=aie_host_conv33 ms=0.785 bf16_expand_ms=0.001 site_ms=2.268 aie_ms=1.484
+
+PROF aie_host_split part=120 kind=conv pack_ms=0.391 scatter_ms=0.392 dma_ms=0.931 wait_ms=0.553
+
+PROF part=121 op=aie_host_conv34 ms=0.541 bf16_expand_ms=0.002 site_ms=4.359 aie_ms=3.821
+
+PROF aie_host_split part=121 kind=conv pack_ms=0.450 scatter_ms=0.088 dma_ms=2.326 wait_ms=1.495
+
+PROF part=122 op=layout_transform_reshape_3 ms=0.054 bf16_expand_ms=0.000
+
+PROF part=123 op=mean_5 ms=0.014 bf16_expand_ms=0.000
+
+PROF part=124 op=variance_5 ms=0.015 bf16_expand_ms=0.000
+
+PROF part=125 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=0.852 bf16_expand_ms=0.003
+
+PROF part=126 op=kl_temb_x_wexpand ms=1.795 bf16_expand_ms=0.000
+
+PROF part=127 op=nn_contrib_dense_pack_add_1 ms=3.418 bf16_expand_ms=1.791
+
+PROF part=128 op=expand_dims_expand_dims_layout_transform_2 ms=0.002 bf16_expand_ms=0.000
+
+PROF part=129 op=aie_host_conv35 ms=0.628 bf16_expand_ms=0.002 site_ms=6.529 aie_ms=5.903
+
+PROF aie_host_split part=129 kind=conv pack_ms=0.309 scatter_ms=0.316 dma_ms=2.912 wait_ms=2.990
+
+PROF part=131 op=mean_2 ms=0.031 bf16_expand_ms=0.000
+
+PROF part=132 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+
+PROF part=133 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=1.682 bf16_expand_ms=0.004
+
+PROF part=134 op=aie_host_conv36 ms=0.743 bf16_expand_ms=0.002 site_ms=11.534 aie_ms=10.794
+
+PROF aie_host_split part=134 kind=conv pack_ms=0.567 scatter_ms=0.173 dma_ms=4.906 wait_ms=5.888
+
+PROF part=135 op=aie_host_conv37 ms=0.276 bf16_expand_ms=0.001 site_ms=1.749 aie_ms=1.475
+
+PROF aie_host_split part=135 kind=conv pack_ms=0.090 scatter_ms=0.184 dma_ms=1.075 wait_ms=0.400
+
+PROF part=136 op=layout_transform_reshape_4 ms=0.106 bf16_expand_ms=0.000
+
+PROF part=137 op=mean_2 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=138 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+
+PROF part=139 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=0.340 bf16_expand_ms=0.001
+
+PROF part=140 op=aie_host_conv38 ms=0.373 bf16_expand_ms=0.002 site_ms=3.229 aie_ms=2.857
+
+PROF aie_host_split part=140 kind=conv pack_ms=0.173 scatter_ms=0.198 dma_ms=2.169 wait_ms=0.688
+
+PROF part=142 op=mean_6 ms=0.028 bf16_expand_ms=0.000
+
+PROF part=143 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=144 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.297 bf16_expand_ms=0.002
+
+PROF part=145 op=aie_host_linear39 ms=0.714 bf16_expand_ms=0.000 site_ms=7.255 aie_ms=6.541
+
+PROF aie_host_split part=145 kind=linear pack_ms=0.114 scatter_ms=0.597 dma_ms=4.503 wait_ms=2.039
+
+PROF part=146 op=reshape_split_2 ms=0.204 bf16_expand_ms=0.000
+
+PROF part=147 op=aie_host_attn40 ms=0.154 bf16_expand_ms=0.000 site_ms=0.153 aie_ms=0.000
+
+PROF part=148 op=aie_host_attn40 ms=0.193 bf16_expand_ms=0.000 site_ms=0.193 aie_ms=0.000
+
+PROF part=151 op=aie_host_attn41 ms=0.099 bf16_expand_ms=0.000 site_ms=0.099 aie_ms=0.000
+
+PROF part=152 op=aie_host_attn41 ms=0.057 bf16_expand_ms=0.000 site_ms=0.707 aie_ms=0.650
+
+PROF part=154 op=aie_host_linear42 ms=0.293 bf16_expand_ms=0.001 site_ms=3.802 aie_ms=3.511
+
+PROF aie_host_split part=154 kind=linear pack_ms=0.081 scatter_ms=0.209 dma_ms=2.769 wait_ms=0.744
+
+PROF part=155 op=reshape_add_2 ms=0.090 bf16_expand_ms=0.000
+
+PROF part=156 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+
+PROF part=157 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=158 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.301 bf16_expand_ms=0.003
+
+PROF part=159 op=aie_host_linear43 ms=0.262 bf16_expand_ms=0.000 site_ms=3.999 aie_ms=3.737
+
+PROF aie_host_split part=159 kind=linear pack_ms=0.077 scatter_ms=0.184 dma_ms=3.051 wait_ms=0.687
+
+PROF part=160 op=aie_host_attn46 ms=0.147 bf16_expand_ms=0.000 site_ms=0.147 aie_ms=0.000
+
+PROF part=161 op=aie_host_linear44 ms=0.410 bf16_expand_ms=0.000 site_ms=4.637 aie_ms=4.228
+
+PROF aie_host_split part=161 kind=linear pack_ms=0.178 scatter_ms=0.230 dma_ms=3.587 wait_ms=0.642
+
+PROF part=162 op=aie_host_attn46 ms=0.196 bf16_expand_ms=0.000 site_ms=0.196 aie_ms=0.000
+
+PROF part=165 op=aie_host_linear45 ms=0.374 bf16_expand_ms=0.000 site_ms=4.325 aie_ms=3.950
+
+PROF aie_host_split part=165 kind=linear pack_ms=0.154 scatter_ms=0.220 dma_ms=3.312 wait_ms=0.639
+
+PROF part=166 op=aie_host_attn47 ms=0.162 bf16_expand_ms=0.000 site_ms=0.162 aie_ms=0.000
+
+PROF part=167 op=aie_host_attn47 ms=0.058 bf16_expand_ms=0.000 site_ms=0.769 aie_ms=0.710
+
+PROF part=169 op=aie_host_linear48 ms=0.278 bf16_expand_ms=0.002 site_ms=3.992 aie_ms=3.716
+
+PROF aie_host_split part=169 kind=linear pack_ms=0.076 scatter_ms=0.199 dma_ms=3.033 wait_ms=0.683
+
+PROF part=170 op=reshape_add_2 ms=0.082 bf16_expand_ms=0.000
+
+PROF part=171 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+
+PROF part=172 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=173 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.300 bf16_expand_ms=0.002
+
+PROF part=174 op=aie_host_linear49 ms=2.431 bf16_expand_ms=0.006 site_ms=15.774 aie_ms=13.349
+
+PROF aie_host_split part=174 kind=linear pack_ms=0.210 scatter_ms=2.212 dma_ms=7.854 wait_ms=5.497
+
+PROF part=175 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=5.910 bf16_expand_ms=0.000
+
+PROF part=176 op=aie_host_linear50 ms=0.515 bf16_expand_ms=0.002 site_ms=6.967 aie_ms=6.454
+
+PROF aie_host_split part=176 kind=linear pack_ms=0.281 scatter_ms=0.229 dma_ms=4.079 wait_ms=2.376
+
+PROF part=178 op=aie_host_conv51 ms=0.416 bf16_expand_ms=0.002 site_ms=2.542 aie_ms=2.129
+
+PROF aie_host_split part=178 kind=conv pack_ms=0.214 scatter_ms=0.198 dma_ms=1.391 wait_ms=0.738
+
+PROF part=179 op=concatenate ms=0.083 bf16_expand_ms=0.000
+
+PROF part=180 op=layout_transform_reshape_5 ms=0.221 bf16_expand_ms=0.000
+
+PROF part=181 op=mean_3 ms=0.085 bf16_expand_ms=0.000
+
+PROF part=182 op=variance_3 ms=0.064 bf16_expand_ms=0.000
+
+PROF part=183 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=3.350 bf16_expand_ms=0.005
+
+PROF part=184 op=kl_temb_x_wexpand ms=1.894 bf16_expand_ms=0.000
+
+PROF part=185 op=nn_contrib_dense_pack_add_1 ms=3.176 bf16_expand_ms=1.891
+
+PROF part=186 op=expand_dims_expand_dims_layout_transform_2 ms=0.003 bf16_expand_ms=0.000
+
+PROF part=187 op=aie_host_conv52 ms=1.711 bf16_expand_ms=0.001 site_ms=21.424 aie_ms=19.714
+
+PROF aie_host_split part=187 kind=conv pack_ms=1.413 scatter_ms=0.294 dma_ms=8.724 wait_ms=10.990
+
+PROF part=189 op=mean_2 ms=0.031 bf16_expand_ms=0.000
+
+PROF part=190 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+
+PROF part=191 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=1.670 bf16_expand_ms=0.003
+
+PROF part=192 op=aie_host_conv53 ms=0.720 bf16_expand_ms=0.001 site_ms=11.002 aie_ms=10.283
+
+PROF aie_host_split part=192 kind=conv pack_ms=0.533 scatter_ms=0.185 dma_ms=4.914 wait_ms=5.369
+
+PROF part=193 op=aie_host_conv54 ms=3.357 bf16_expand_ms=0.001 site_ms=6.598 aie_ms=3.242
+
+PROF aie_host_split part=193 kind=conv pack_ms=3.167 scatter_ms=0.187 dma_ms=1.950 wait_ms=1.292
+
+PROF part=194 op=layout_transform_reshape_4 ms=0.106 bf16_expand_ms=0.000
+
+PROF part=195 op=mean_2 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=196 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+
+PROF part=197 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=0.367 bf16_expand_ms=0.002
+
+PROF part=198 op=aie_host_conv55 ms=0.364 bf16_expand_ms=0.002 site_ms=2.483 aie_ms=2.121
+
+PROF aie_host_split part=198 kind=conv pack_ms=0.174 scatter_ms=0.187 dma_ms=1.385 wait_ms=0.736
+
+PROF part=200 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+
+PROF part=201 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=202 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.306 bf16_expand_ms=0.003
+
+PROF part=203 op=aie_host_linear56 ms=0.713 bf16_expand_ms=0.000 site_ms=7.385 aie_ms=6.671
+
+PROF aie_host_split part=203 kind=linear pack_ms=0.115 scatter_ms=0.596 dma_ms=4.452 wait_ms=2.222
+
+PROF part=204 op=reshape_split_2 ms=0.173 bf16_expand_ms=0.000
+
+PROF part=205 op=aie_host_attn57 ms=0.149 bf16_expand_ms=0.000 site_ms=0.149 aie_ms=0.000
+
+PROF part=206 op=aie_host_attn57 ms=0.157 bf16_expand_ms=0.000 site_ms=0.157 aie_ms=0.000
+
+PROF part=209 op=aie_host_attn58 ms=0.090 bf16_expand_ms=0.000 site_ms=0.090 aie_ms=0.000
+
+PROF part=210 op=aie_host_attn58 ms=0.056 bf16_expand_ms=0.000 site_ms=0.709 aie_ms=0.653
+
+PROF part=212 op=aie_host_linear59 ms=0.277 bf16_expand_ms=0.002 site_ms=3.779 aie_ms=3.503
+
+PROF aie_host_split part=212 kind=linear pack_ms=0.078 scatter_ms=0.196 dma_ms=2.769 wait_ms=0.736
+
+PROF part=213 op=reshape_add_2 ms=0.078 bf16_expand_ms=0.000
+
+PROF part=214 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+
+PROF part=215 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=216 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.301 bf16_expand_ms=0.003
+
+PROF part=217 op=aie_host_linear60 ms=0.262 bf16_expand_ms=0.000 site_ms=4.085 aie_ms=3.823
+
+PROF aie_host_split part=217 kind=linear pack_ms=0.076 scatter_ms=0.186 dma_ms=3.089 wait_ms=0.734
+
+PROF part=218 op=aie_host_attn63 ms=0.146 bf16_expand_ms=0.000 site_ms=0.146 aie_ms=0.000
+
+PROF part=219 op=aie_host_linear61 ms=0.395 bf16_expand_ms=0.000 site_ms=4.577 aie_ms=4.181
+
+PROF aie_host_split part=219 kind=linear pack_ms=0.168 scatter_ms=0.226 dma_ms=3.543 wait_ms=0.640
+
+PROF part=220 op=aie_host_attn63 ms=0.188 bf16_expand_ms=0.000 site_ms=0.188 aie_ms=0.000
+
+PROF part=223 op=aie_host_linear62 ms=0.369 bf16_expand_ms=0.000 site_ms=4.337 aie_ms=3.969
+
+PROF aie_host_split part=223 kind=linear pack_ms=0.152 scatter_ms=0.216 dma_ms=3.324 wait_ms=0.645
+
+PROF part=224 op=aie_host_attn64 ms=0.164 bf16_expand_ms=0.000 site_ms=0.164 aie_ms=0.000
+
+PROF part=225 op=aie_host_attn64 ms=0.055 bf16_expand_ms=0.000 site_ms=0.765 aie_ms=0.710
+
+PROF part=227 op=aie_host_linear65 ms=0.263 bf16_expand_ms=0.001 site_ms=4.034 aie_ms=3.772
+
+PROF aie_host_split part=227 kind=linear pack_ms=0.076 scatter_ms=0.185 dma_ms=3.033 wait_ms=0.740
+
+PROF part=228 op=reshape_add_2 ms=0.074 bf16_expand_ms=0.000
+
+PROF part=229 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+
+PROF part=230 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=231 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.300 bf16_expand_ms=0.003
+
+PROF part=232 op=aie_host_linear66 ms=2.372 bf16_expand_ms=0.008 site_ms=16.284 aie_ms=13.919
+
+PROF aie_host_split part=232 kind=linear pack_ms=0.209 scatter_ms=2.152 dma_ms=7.957 wait_ms=5.964
+
+PROF part=233 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=7.874 bf16_expand_ms=0.000
+
+PROF part=234 op=aie_host_linear67 ms=0.525 bf16_expand_ms=0.002 site_ms=7.064 aie_ms=6.542
+
+PROF aie_host_split part=234 kind=linear pack_ms=0.282 scatter_ms=0.238 dma_ms=4.173 wait_ms=2.371
+
+PROF part=236 op=aie_host_conv68 ms=0.413 bf16_expand_ms=0.002 site_ms=2.619 aie_ms=2.208
+
+PROF aie_host_split part=236 kind=conv pack_ms=0.216 scatter_ms=0.194 dma_ms=1.473 wait_ms=0.735
+
+PROF part=237 op=concatenate_1 ms=0.122 bf16_expand_ms=0.000
+
+PROF part=238 op=layout_transform_reshape_6 ms=0.161 bf16_expand_ms=0.000
+
+PROF part=239 op=mean_7 ms=0.049 bf16_expand_ms=0.000
+
+PROF part=240 op=variance_7 ms=0.047 bf16_expand_ms=0.000
+
+PROF part=241 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=2.505 bf16_expand_ms=0.005
+
+PROF part=242 op=kl_temb_x_wexpand ms=1.835 bf16_expand_ms=0.000
+
+PROF part=243 op=nn_contrib_dense_pack_add_1 ms=3.048 bf16_expand_ms=1.833
+
+PROF part=244 op=expand_dims_expand_dims_layout_transform_2 ms=0.001 bf16_expand_ms=0.000
+
+PROF part=245 op=aie_host_conv69 ms=1.231 bf16_expand_ms=0.001 site_ms=16.413 aie_ms=15.183
+
+PROF aie_host_split part=245 kind=conv pack_ms=0.939 scatter_ms=0.290 dma_ms=6.914 wait_ms=8.269
+
+PROF part=247 op=mean_2 ms=0.031 bf16_expand_ms=0.000
+
+PROF part=248 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+
+PROF part=249 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=1.671 bf16_expand_ms=0.004
+
+PROF part=250 op=aie_host_conv70 ms=0.726 bf16_expand_ms=0.002 site_ms=11.091 aie_ms=10.367
+
+PROF aie_host_split part=250 kind=conv pack_ms=0.537 scatter_ms=0.186 dma_ms=4.993 wait_ms=5.374
+
+PROF part=251 op=aie_host_conv71 ms=0.441 bf16_expand_ms=0.002 site_ms=3.083 aie_ms=2.643
+
+PROF aie_host_split part=251 kind=conv pack_ms=0.256 scatter_ms=0.183 dma_ms=1.683 wait_ms=0.960
+
+PROF part=252 op=layout_transform_reshape_4 ms=0.105 bf16_expand_ms=0.000
+
+PROF part=253 op=mean_2 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=254 op=variance_2 ms=0.031 bf16_expand_ms=0.000
+
+PROF part=255 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=0.340 bf16_expand_ms=0.002
+
+PROF part=256 op=aie_host_conv72 ms=0.349 bf16_expand_ms=0.002 site_ms=2.499 aie_ms=2.152
+
+PROF aie_host_split part=256 kind=conv pack_ms=0.168 scatter_ms=0.179 dma_ms=1.470 wait_ms=0.681
+
+PROF part=258 op=mean_6 ms=0.028 bf16_expand_ms=0.000
+
+PROF part=259 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=260 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.300 bf16_expand_ms=0.002
+
+PROF part=261 op=aie_host_linear73 ms=0.787 bf16_expand_ms=0.000 site_ms=7.427 aie_ms=6.641
+
+PROF aie_host_split part=261 kind=linear pack_ms=0.116 scatter_ms=0.668 dma_ms=4.606 wait_ms=2.038
+
+PROF part=262 op=reshape_split_2 ms=0.206 bf16_expand_ms=0.000
+
+PROF part=263 op=aie_host_attn74 ms=0.150 bf16_expand_ms=0.000 site_ms=0.150 aie_ms=0.000
+
+PROF part=264 op=aie_host_attn74 ms=0.178 bf16_expand_ms=0.000 site_ms=0.178 aie_ms=0.000
+
+PROF part=267 op=aie_host_attn75 ms=0.097 bf16_expand_ms=0.000 site_ms=0.097 aie_ms=0.000
+
+PROF part=268 op=aie_host_attn75 ms=0.057 bf16_expand_ms=0.000 site_ms=0.733 aie_ms=0.676
+
+PROF part=270 op=aie_host_linear76 ms=0.282 bf16_expand_ms=0.001 site_ms=3.876 aie_ms=3.596
+
+PROF aie_host_split part=270 kind=linear pack_ms=0.084 scatter_ms=0.195 dma_ms=2.862 wait_ms=0.736
+
+PROF part=271 op=reshape_add_2 ms=0.081 bf16_expand_ms=0.000
+
+PROF part=272 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+
+PROF part=273 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=274 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.301 bf16_expand_ms=0.003
+
+PROF part=275 op=aie_host_linear77 ms=0.268 bf16_expand_ms=0.000 site_ms=4.177 aie_ms=3.910
+
+PROF aie_host_split part=275 kind=linear pack_ms=0.077 scatter_ms=0.190 dma_ms=3.172 wait_ms=0.738
+
+PROF part=276 op=aie_host_attn80 ms=0.146 bf16_expand_ms=0.000 site_ms=0.146 aie_ms=0.000
+
+PROF part=277 op=aie_host_linear78 ms=0.394 bf16_expand_ms=0.000 site_ms=4.635 aie_ms=4.241
+
+PROF aie_host_split part=277 kind=linear pack_ms=0.180 scatter_ms=0.212 dma_ms=3.607 wait_ms=0.635
+
+PROF part=278 op=aie_host_attn80 ms=0.188 bf16_expand_ms=0.000 site_ms=0.188 aie_ms=0.000
+
+PROF part=281 op=aie_host_linear79 ms=0.359 bf16_expand_ms=0.000 site_ms=4.424 aie_ms=4.065
+
+PROF aie_host_split part=281 kind=linear pack_ms=0.154 scatter_ms=0.205 dma_ms=3.428 wait_ms=0.637
+
+PROF part=282 op=aie_host_attn81 ms=0.167 bf16_expand_ms=0.000 site_ms=0.167 aie_ms=0.000
+
+PROF part=283 op=aie_host_attn81 ms=0.056 bf16_expand_ms=0.000 site_ms=0.763 aie_ms=0.707
+
+PROF part=285 op=aie_host_linear82 ms=0.264 bf16_expand_ms=0.002 site_ms=4.081 aie_ms=3.818
+
+PROF aie_host_split part=285 kind=linear pack_ms=0.076 scatter_ms=0.186 dma_ms=3.138 wait_ms=0.681
+
+PROF part=286 op=reshape_add_2 ms=0.077 bf16_expand_ms=0.000
+
+PROF part=287 op=mean_6 ms=0.029 bf16_expand_ms=0.000
+
+PROF part=288 op=variance_6 ms=0.030 bf16_expand_ms=0.000
+
+PROF part=289 op=subtract_add_rsqrt_multiply_multiply_add_reshape_2 ms=0.301 bf16_expand_ms=0.003
+
+PROF part=290 op=aie_host_linear83 ms=2.396 bf16_expand_ms=0.008 site_ms=16.296 aie_ms=13.907
+
+PROF aie_host_split part=290 kind=linear pack_ms=0.213 scatter_ms=2.173 dma_ms=7.961 wait_ms=5.948
+
+PROF part=291 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=6.119 bf16_expand_ms=0.000
+
+PROF part=292 op=aie_host_linear84 ms=0.526 bf16_expand_ms=0.002 site_ms=7.061 aie_ms=6.537
+
+PROF aie_host_split part=292 kind=linear pack_ms=0.286 scatter_ms=0.236 dma_ms=4.165 wait_ms=2.374
+
+PROF part=294 op=aie_host_conv85 ms=0.409 bf16_expand_ms=0.001 site_ms=2.563 aie_ms=2.155
+
+PROF aie_host_split part=294 kind=conv pack_ms=0.215 scatter_ms=0.192 dma_ms=1.478 wait_ms=0.677
+
+PROF part=295 op=layout_transform_image_resize2d_layout_transform ms=0.199 bf16_expand_ms=0.000
+
+PROF part=296 op=aie_host_conv86 ms=2.798 bf16_expand_ms=0.004 site_ms=23.768 aie_ms=20.974
+
+PROF aie_host_split part=296 kind=conv pack_ms=2.148 scatter_ms=0.645 dma_ms=5.761 wait_ms=15.213
+
+PROF part=297 op=concatenate_2 ms=0.449 bf16_expand_ms=0.000
+
+PROF part=298 op=layout_transform_reshape_7 ms=0.642 bf16_expand_ms=0.000
+
+PROF part=299 op=mean_8 ms=0.227 bf16_expand_ms=0.000
+
+PROF part=300 op=variance_8 ms=0.236 bf16_expand_ms=0.000
+
+PROF part=301 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=9.251 bf16_expand_ms=0.005
+
+PROF part=302 op=kl_temb_x_wexpand ms=1.146 bf16_expand_ms=0.000
+
+PROF part=303 op=nn_contrib_dense_pack_add_6 ms=1.713 bf16_expand_ms=1.141
+
+PROF part=304 op=expand_dims_expand_dims_layout_transform_1 ms=0.001 bf16_expand_ms=0.000
+
+PROF part=305 op=aie_host_conv87 ms=4.693 bf16_expand_ms=0.001 site_ms=20.911 aie_ms=16.218
+
+PROF aie_host_split part=305 kind=conv pack_ms=3.990 scatter_ms=0.701 dma_ms=4.898 wait_ms=11.320
+
+PROF part=307 op=mean_3 ms=0.062 bf16_expand_ms=0.000
+
+PROF part=308 op=variance_3 ms=0.063 bf16_expand_ms=0.000
+
+PROF part=309 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=3.091 bf16_expand_ms=0.003
+
+PROF part=310 op=aie_host_conv88 ms=0.940 bf16_expand_ms=0.002 site_ms=7.177 aie_ms=6.238
+
+PROF aie_host_split part=310 kind=conv pack_ms=0.650 scatter_ms=0.289 dma_ms=2.367 wait_ms=3.871
+
+PROF part=311 op=aie_host_conv89 ms=1.192 bf16_expand_ms=0.001 site_ms=3.947 aie_ms=2.756
+
+PROF aie_host_split part=311 kind=conv pack_ms=0.844 scatter_ms=0.347 dma_ms=1.434 wait_ms=1.322
+
+PROF part=312 op=layout_transform_reshape_2 ms=0.215 bf16_expand_ms=0.000
+
+PROF part=313 op=mean_3 ms=0.062 bf16_expand_ms=0.000
+
+PROF part=314 op=variance_3 ms=0.062 bf16_expand_ms=0.000
+
+PROF part=315 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=0.704 bf16_expand_ms=0.001
+
+PROF part=316 op=aie_host_conv90 ms=0.546 bf16_expand_ms=0.001 site_ms=2.137 aie_ms=1.593
+
+PROF aie_host_split part=316 kind=conv pack_ms=0.258 scatter_ms=0.286 dma_ms=1.016 wait_ms=0.577
+
+PROF part=318 op=mean_4 ms=0.244 bf16_expand_ms=0.000
+
+PROF part=319 op=variance_4 ms=0.285 bf16_expand_ms=0.000
+
+PROF part=320 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.594 bf16_expand_ms=0.002
+
+PROF part=321 op=aie_host_linear91 ms=1.585 bf16_expand_ms=0.000 site_ms=6.364 aie_ms=4.779
+
+PROF aie_host_split part=321 kind=linear pack_ms=0.251 scatter_ms=1.332 dma_ms=3.209 wait_ms=1.572
+
+PROF part=322 op=reshape_split_1 ms=0.609 bf16_expand_ms=0.000
+
+PROF part=323 op=aie_host_attn92 ms=0.174 bf16_expand_ms=0.000 site_ms=0.174 aie_ms=0.000
+
+PROF part=324 op=aie_host_attn92 ms=0.516 bf16_expand_ms=0.000 site_ms=0.516 aie_ms=0.000
+
+PROF part=327 op=aie_host_attn93 ms=0.207 bf16_expand_ms=0.000 site_ms=0.207 aie_ms=0.000
+
+PROF part=328 op=aie_host_attn93 ms=0.119 bf16_expand_ms=0.000 site_ms=1.231 aie_ms=1.112
+
+PROF part=330 op=aie_host_linear94 ms=0.499 bf16_expand_ms=0.001 site_ms=3.533 aie_ms=3.035
+
+PROF aie_host_split part=330 kind=linear pack_ms=0.183 scatter_ms=0.314 dma_ms=2.500 wait_ms=0.536
+
+PROF part=331 op=reshape_add_1 ms=0.208 bf16_expand_ms=0.000
+
+PROF part=332 op=mean_4 ms=0.246 bf16_expand_ms=0.000
+
+PROF part=333 op=variance_4 ms=0.286 bf16_expand_ms=0.000
+
+PROF part=334 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.593 bf16_expand_ms=0.003
+
+PROF part=335 op=aie_host_linear95 ms=0.444 bf16_expand_ms=0.000 site_ms=3.361 aie_ms=2.917
+
+PROF aie_host_split part=335 kind=linear pack_ms=0.163 scatter_ms=0.280 dma_ms=2.339 wait_ms=0.579
+
+PROF part=336 op=aie_host_attn98 ms=0.152 bf16_expand_ms=0.000 site_ms=0.152 aie_ms=0.000
+
+PROF part=337 op=aie_host_linear96 ms=0.277 bf16_expand_ms=0.000 site_ms=4.221 aie_ms=3.943
+
+PROF aie_host_split part=337 kind=linear pack_ms=0.166 scatter_ms=0.111 dma_ms=3.632 wait_ms=0.312
+
+PROF part=338 op=aie_host_attn98 ms=0.094 bf16_expand_ms=0.000 site_ms=0.094 aie_ms=0.000
+
+PROF part=341 op=aie_host_linear97 ms=0.256 bf16_expand_ms=0.000 site_ms=4.433 aie_ms=4.177
+
+PROF aie_host_split part=341 kind=linear pack_ms=0.151 scatter_ms=0.104 dma_ms=3.861 wait_ms=0.317
+
+PROF part=342 op=aie_host_attn99 ms=0.077 bf16_expand_ms=0.000 site_ms=0.077 aie_ms=0.000
+
+PROF part=343 op=aie_host_attn99 ms=0.117 bf16_expand_ms=0.000 site_ms=1.056 aie_ms=0.940
+
+PROF part=345 op=aie_host_linear100 ms=0.480 bf16_expand_ms=0.001 site_ms=4.283 aie_ms=3.805
+
+PROF aie_host_split part=345 kind=linear pack_ms=0.168 scatter_ms=0.309 dma_ms=3.233 wait_ms=0.572
+
+PROF part=346 op=reshape_add_1 ms=0.161 bf16_expand_ms=0.000
+
+PROF part=347 op=mean_4 ms=0.246 bf16_expand_ms=0.000
+
+PROF part=348 op=variance_4 ms=0.285 bf16_expand_ms=0.000
+
+PROF part=349 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.593 bf16_expand_ms=0.003
+
+PROF part=350 op=aie_host_linear101 ms=4.566 bf16_expand_ms=0.004 site_ms=13.953 aie_ms=9.391
+
+PROF aie_host_split part=350 kind=linear pack_ms=0.472 scatter_ms=4.087 dma_ms=4.766 wait_ms=4.627
+
+PROF part=351 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=15.600 bf16_expand_ms=0.000
+
+PROF part=352 op=aie_host_linear102 ms=1.061 bf16_expand_ms=0.002 site_ms=6.043 aie_ms=4.984
+
+PROF aie_host_split part=352 kind=linear pack_ms=0.600 scatter_ms=0.457 dma_ms=3.053 wait_ms=1.933
+
+PROF part=354 op=aie_host_conv103 ms=0.804 bf16_expand_ms=0.001 site_ms=2.339 aie_ms=1.536
+
+PROF aie_host_split part=354 kind=conv pack_ms=0.411 scatter_ms=0.391 dma_ms=1.018 wait_ms=0.519
+
+PROF part=355 op=concatenate_3 ms=0.267 bf16_expand_ms=0.000
+
+PROF part=356 op=layout_transform_reshape_8 ms=0.324 bf16_expand_ms=0.000
+
+PROF part=357 op=mean_9 ms=0.114 bf16_expand_ms=0.000
+
+PROF part=358 op=variance_9 ms=0.101 bf16_expand_ms=0.000
+
+PROF part=359 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=4.635 bf16_expand_ms=0.003
+
+PROF part=360 op=kl_temb_x_wexpand ms=1.099 bf16_expand_ms=0.000
+
+PROF part=361 op=nn_contrib_dense_pack_add_6 ms=1.681 bf16_expand_ms=1.092
+
+PROF part=362 op=expand_dims_expand_dims_layout_transform_1 ms=0.002 bf16_expand_ms=0.000
+
+PROF part=363 op=aie_host_conv104 ms=2.268 bf16_expand_ms=0.002 site_ms=10.694 aie_ms=8.428
+
+PROF aie_host_split part=363 kind=conv pack_ms=1.585 scatter_ms=0.681 dma_ms=2.933 wait_ms=5.495
+
+PROF part=365 op=mean_3 ms=0.062 bf16_expand_ms=0.000
+
+PROF part=366 op=variance_3 ms=0.063 bf16_expand_ms=0.000
+
+PROF part=367 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=3.091 bf16_expand_ms=0.003
+
+PROF part=368 op=aie_host_conv105 ms=0.958 bf16_expand_ms=0.001 site_ms=7.488 aie_ms=6.531
+
+PROF aie_host_split part=368 kind=conv pack_ms=0.654 scatter_ms=0.302 dma_ms=2.332 wait_ms=4.199
+
+PROF part=369 op=aie_host_conv106 ms=0.752 bf16_expand_ms=0.001 site_ms=2.516 aie_ms=1.765
+
+PROF aie_host_split part=369 kind=conv pack_ms=0.391 scatter_ms=0.358 dma_ms=1.097 wait_ms=0.668
+
+PROF part=370 op=layout_transform_reshape_2 ms=0.213 bf16_expand_ms=0.000
+
+PROF part=371 op=mean_3 ms=0.062 bf16_expand_ms=0.000
+
+PROF part=372 op=variance_3 ms=0.062 bf16_expand_ms=0.000
+
+PROF part=373 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=0.705 bf16_expand_ms=0.001
+
+PROF part=374 op=aie_host_conv107 ms=0.553 bf16_expand_ms=0.001 site_ms=2.094 aie_ms=1.542
+
+PROF aie_host_split part=374 kind=conv pack_ms=0.264 scatter_ms=0.287 dma_ms=1.019 wait_ms=0.523
+
+PROF part=376 op=mean_4 ms=0.243 bf16_expand_ms=0.000
+
+PROF part=377 op=variance_4 ms=0.286 bf16_expand_ms=0.000
+
+PROF part=378 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.592 bf16_expand_ms=0.002
+
+PROF part=379 op=aie_host_linear108 ms=1.607 bf16_expand_ms=0.000 site_ms=6.580 aie_ms=4.972
+
+PROF aie_host_split part=379 kind=linear pack_ms=0.243 scatter_ms=1.361 dma_ms=3.242 wait_ms=1.732
+
+PROF part=380 op=reshape_split_1 ms=0.583 bf16_expand_ms=0.000
+
+PROF part=381 op=aie_host_attn109 ms=0.175 bf16_expand_ms=0.000 site_ms=0.175 aie_ms=0.000
+
+PROF part=382 op=aie_host_attn109 ms=0.480 bf16_expand_ms=0.000 site_ms=0.480 aie_ms=0.000
+
+PROF part=385 op=aie_host_attn110 ms=0.208 bf16_expand_ms=0.000 site_ms=0.208 aie_ms=0.000
+
+PROF part=386 op=aie_host_attn110 ms=0.124 bf16_expand_ms=0.000 site_ms=1.228 aie_ms=1.104
+
+PROF part=388 op=aie_host_linear111 ms=0.511 bf16_expand_ms=0.001 site_ms=3.577 aie_ms=3.067
+
+PROF aie_host_split part=388 kind=linear pack_ms=0.184 scatter_ms=0.323 dma_ms=2.497 wait_ms=0.572
+
+PROF part=389 op=reshape_add_1 ms=0.213 bf16_expand_ms=0.000
+
+PROF part=390 op=mean_4 ms=0.246 bf16_expand_ms=0.000
+
+PROF part=391 op=variance_4 ms=0.284 bf16_expand_ms=0.000
+
+PROF part=392 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.592 bf16_expand_ms=0.003
+
+PROF part=393 op=aie_host_linear112 ms=0.451 bf16_expand_ms=0.000 site_ms=3.380 aie_ms=2.929
+
+PROF aie_host_split part=393 kind=linear pack_ms=0.163 scatter_ms=0.285 dma_ms=2.336 wait_ms=0.596
+
+PROF part=394 op=aie_host_attn115 ms=0.154 bf16_expand_ms=0.000 site_ms=0.154 aie_ms=0.000
+
+PROF part=395 op=aie_host_linear113 ms=0.268 bf16_expand_ms=0.000 site_ms=4.198 aie_ms=3.930
+
+PROF aie_host_split part=395 kind=linear pack_ms=0.159 scatter_ms=0.107 dma_ms=3.612 wait_ms=0.318
+
+PROF part=396 op=aie_host_attn115 ms=0.095 bf16_expand_ms=0.000 site_ms=0.095 aie_ms=0.000
+
+PROF part=399 op=aie_host_linear114 ms=0.269 bf16_expand_ms=0.000 site_ms=4.438 aie_ms=4.168
+
+PROF aie_host_split part=399 kind=linear pack_ms=0.157 scatter_ms=0.111 dma_ms=3.854 wait_ms=0.316
+
+PROF part=400 op=aie_host_attn116 ms=0.086 bf16_expand_ms=0.000 site_ms=0.086 aie_ms=0.000
+
+PROF part=401 op=aie_host_attn116 ms=0.117 bf16_expand_ms=0.000 site_ms=1.045 aie_ms=0.928
+
+PROF part=403 op=aie_host_linear117 ms=0.491 bf16_expand_ms=0.002 site_ms=4.277 aie_ms=3.787
+
+PROF aie_host_split part=403 kind=linear pack_ms=0.174 scatter_ms=0.314 dma_ms=3.224 wait_ms=0.564
+
+PROF part=404 op=reshape_add_1 ms=0.164 bf16_expand_ms=0.000
+
+PROF part=405 op=mean_4 ms=0.246 bf16_expand_ms=0.000
+
+PROF part=406 op=variance_4 ms=0.286 bf16_expand_ms=0.000
+
+PROF part=407 op=subtract_add_rsqrt_multiply_multiply_add_reshape_1 ms=0.593 bf16_expand_ms=0.003
+
+PROF part=408 op=aie_host_linear118 ms=4.580 bf16_expand_ms=0.004 site_ms=13.966 aie_ms=9.390
+
+PROF aie_host_split part=408 kind=linear pack_ms=0.471 scatter_ms=4.102 dma_ms=4.764 wait_ms=4.628
+
+PROF part=409 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=12.074 bf16_expand_ms=0.000
+
+PROF part=410 op=aie_host_linear119 ms=1.053 bf16_expand_ms=0.003 site_ms=5.872 aie_ms=4.822
+
+PROF aie_host_split part=410 kind=linear pack_ms=0.595 scatter_ms=0.452 dma_ms=3.036 wait_ms=1.788
+
+PROF part=412 op=aie_host_conv120 ms=0.806 bf16_expand_ms=0.001 site_ms=2.395 aie_ms=1.590
+
+PROF aie_host_split part=412 kind=conv pack_ms=0.414 scatter_ms=0.390 dma_ms=1.018 wait_ms=0.571
+
+PROF part=413 op=layout_transform_image_resize2d_layout_transform_1 ms=0.448 bf16_expand_ms=0.000
+
+PROF part=414 op=aie_host_conv121 ms=6.625 bf16_expand_ms=0.004 site_ms=75.962 aie_ms=69.341
+
+PROF aie_host_split part=414 kind=conv pack_ms=5.247 scatter_ms=1.373 dma_ms=3.739 wait_ms=65.602
+
+PROF part=415 op=concatenate_4 ms=1.089 bf16_expand_ms=0.000
+
+PROF part=416 op=layout_transform_reshape_9 ms=1.913 bf16_expand_ms=0.000
+
+PROF part=417 op=mean_10 ms=0.767 bf16_expand_ms=0.000
+
+PROF part=418 op=variance_10 ms=0.423 bf16_expand_ms=0.000
+
+PROF part=419 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=18.381 bf16_expand_ms=0.004
+
+PROF part=420 op=kl_temb_x_wexpand ms=0.517 bf16_expand_ms=0.000
+
+PROF part=421 op=nn_contrib_dense_pack_add_2 ms=0.734 bf16_expand_ms=0.512
+
+PROF part=422 op=expand_dims_expand_dims_layout_transform ms=0.001 bf16_expand_ms=0.000
+
+PROF part=423 op=aie_host_conv122 ms=8.413 bf16_expand_ms=0.001 site_ms=33.067 aie_ms=24.655
+
+PROF aie_host_split part=423 kind=conv pack_ms=6.949 scatter_ms=1.463 dma_ms=4.055 wait_ms=20.600
+
+PROF part=425 op=mean ms=0.124 bf16_expand_ms=0.000
+
+PROF part=426 op=variance ms=0.125 bf16_expand_ms=0.000
+
+PROF part=427 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=6.143 bf16_expand_ms=0.002
+
+PROF part=428 op=aie_host_conv123 ms=2.321 bf16_expand_ms=0.001 site_ms=11.544 aie_ms=9.224
+
+PROF aie_host_split part=428 kind=conv pack_ms=1.687 scatter_ms=0.633 dma_ms=2.216 wait_ms=7.008
+
+PROF part=429 op=aie_host_conv124 ms=3.063 bf16_expand_ms=0.001 site_ms=6.804 aie_ms=3.741
+
+PROF aie_host_split part=429 kind=conv pack_ms=2.089 scatter_ms=0.973 dma_ms=1.400 wait_ms=2.341
+
+PROF part=430 op=layout_transform_reshape ms=0.490 bf16_expand_ms=0.000
+
+PROF part=431 op=mean ms=0.155 bf16_expand_ms=0.000
+
+PROF part=432 op=variance ms=0.140 bf16_expand_ms=0.000
+
+PROF part=433 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=1.365 bf16_expand_ms=0.001
+
+PROF part=434 op=aie_host_conv125 ms=1.331 bf16_expand_ms=0.001 site_ms=3.117 aie_ms=1.787
+
+PROF aie_host_split part=434 kind=conv pack_ms=0.629 scatter_ms=0.701 dma_ms=1.159 wait_ms=0.628
+
+PROF part=436 op=mean_1 ms=0.475 bf16_expand_ms=0.000
+
+PROF part=437 op=variance_1 ms=0.561 bf16_expand_ms=0.000
+
+PROF part=438 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.298 bf16_expand_ms=0.001
+
+PROF part=439 op=aie_host_linear126 ms=3.601 bf16_expand_ms=0.000 site_ms=12.082 aie_ms=8.480
+
+PROF aie_host_split part=439 kind=linear pack_ms=0.453 scatter_ms=3.147 dma_ms=6.382 wait_ms=2.099
+
+PROF part=440 op=reshape_split ms=1.887 bf16_expand_ms=0.000
+
+PROF part=441 op=aie_host_attn127 ms=0.407 bf16_expand_ms=0.000 site_ms=0.407 aie_ms=0.000
+
+PROF part=442 op=aie_host_attn127 ms=1.455 bf16_expand_ms=0.000 site_ms=1.455 aie_ms=0.000
+
+PROF part=445 op=aie_host_attn128 ms=0.476 bf16_expand_ms=0.000 site_ms=0.476 aie_ms=0.000
+
+PROF part=446 op=aie_host_attn128 ms=0.491 bf16_expand_ms=0.000 site_ms=5.040 aie_ms=4.548
+
+PROF part=448 op=aie_host_linear129 ms=1.195 bf16_expand_ms=0.001 site_ms=4.534 aie_ms=3.340
+
+PROF aie_host_split part=448 kind=linear pack_ms=0.427 scatter_ms=0.765 dma_ms=2.711 wait_ms=0.629
+
+PROF part=449 op=reshape_add ms=0.522 bf16_expand_ms=0.000
+
+PROF part=450 op=mean_1 ms=0.479 bf16_expand_ms=0.000
+
+PROF part=451 op=variance_1 ms=0.564 bf16_expand_ms=0.000
+
+PROF part=452 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.310 bf16_expand_ms=0.001
+
+PROF part=453 op=aie_host_linear130 ms=1.121 bf16_expand_ms=0.000 site_ms=4.327 aie_ms=3.206
+
+PROF aie_host_split part=453 kind=linear pack_ms=0.427 scatter_ms=0.694 dma_ms=2.557 wait_ms=0.649
+
+PROF part=454 op=aie_host_attn133 ms=0.334 bf16_expand_ms=0.000 site_ms=0.334 aie_ms=0.000
+
+PROF part=455 op=aie_host_linear131 ms=0.217 bf16_expand_ms=0.000 site_ms=3.080 aie_ms=2.863
+
+PROF aie_host_split part=455 kind=linear pack_ms=0.164 scatter_ms=0.050 dma_ms=2.703 wait_ms=0.161
+
+PROF part=456 op=aie_host_attn133 ms=0.047 bf16_expand_ms=0.000 site_ms=0.047 aie_ms=0.000
+
+PROF part=459 op=aie_host_linear132 ms=0.201 bf16_expand_ms=0.000 site_ms=4.481 aie_ms=4.280
+
+PROF aie_host_split part=459 kind=linear pack_ms=0.152 scatter_ms=0.048 dma_ms=4.118 wait_ms=0.162
+
+PROF part=460 op=aie_host_attn134 ms=0.040 bf16_expand_ms=0.000 site_ms=0.040 aie_ms=0.000
+
+PROF part=461 op=aie_host_attn134 ms=0.364 bf16_expand_ms=0.000 site_ms=2.723 aie_ms=2.359
+
+PROF part=463 op=aie_host_linear135 ms=1.130 bf16_expand_ms=0.001 site_ms=4.467 aie_ms=3.338
+
+PROF aie_host_split part=463 kind=linear pack_ms=0.424 scatter_ms=0.704 dma_ms=2.711 wait_ms=0.627
+
+PROF part=464 op=reshape_add ms=0.403 bf16_expand_ms=0.000
+
+PROF part=465 op=mean_1 ms=0.483 bf16_expand_ms=0.000
+
+PROF part=466 op=variance_1 ms=0.560 bf16_expand_ms=0.000
+
+PROF part=467 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.301 bf16_expand_ms=0.001
+
+PROF part=468 op=aie_host_linear136 ms=9.169 bf16_expand_ms=0.003 site_ms=21.835 aie_ms=12.668
+
+PROF aie_host_split part=468 kind=linear pack_ms=0.505 scatter_ms=8.659 dma_ms=7.022 wait_ms=5.647
+
+PROF part=469 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=32.671 bf16_expand_ms=0.000
+
+PROF part=470 op=aie_host_linear137 ms=2.762 bf16_expand_ms=0.001 site_ms=8.282 aie_ms=5.522
+
+PROF aie_host_split part=470 kind=linear pack_ms=1.652 scatter_ms=1.105 dma_ms=3.165 wait_ms=2.359
+
+PROF part=472 op=aie_host_conv138 ms=1.780 bf16_expand_ms=0.001 site_ms=3.591 aie_ms=1.811
+
+PROF aie_host_split part=472 kind=conv pack_ms=0.739 scatter_ms=1.039 dma_ms=1.177 wait_ms=0.634
+
+PROF part=473 op=concatenate_5 ms=0.790 bf16_expand_ms=0.000
+
+PROF part=474 op=layout_transform_reshape_10 ms=1.189 bf16_expand_ms=0.000
+
+PROF part=475 op=mean_11 ms=0.404 bf16_expand_ms=0.000
+
+PROF part=476 op=variance_11 ms=0.263 bf16_expand_ms=0.000
+
+PROF part=477 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=12.251 bf16_expand_ms=0.003
+
+PROF part=478 op=kl_temb_x_wexpand ms=0.550 bf16_expand_ms=0.000
+
+PROF part=479 op=nn_contrib_dense_pack_add_2 ms=0.788 bf16_expand_ms=0.546
+
+PROF part=480 op=expand_dims_expand_dims_layout_transform ms=0.001 bf16_expand_ms=0.000
+
+PROF part=481 op=aie_host_conv139 ms=5.909 bf16_expand_ms=0.001 site_ms=23.087 aie_ms=17.179
+
+PROF aie_host_split part=481 kind=conv pack_ms=4.502 scatter_ms=1.405 dma_ms=3.116 wait_ms=14.062
+
+PROF part=483 op=mean ms=0.124 bf16_expand_ms=0.000
+
+PROF part=484 op=variance ms=0.126 bf16_expand_ms=0.000
+
+PROF part=485 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=6.138 bf16_expand_ms=0.001
+
+PROF part=486 op=aie_host_conv140 ms=2.400 bf16_expand_ms=0.001 site_ms=11.584 aie_ms=9.186
+
+PROF aie_host_split part=486 kind=conv pack_ms=1.766 scatter_ms=0.632 dma_ms=2.180 wait_ms=7.006
+
+PROF part=487 op=aie_host_conv141 ms=2.407 bf16_expand_ms=0.001 site_ms=4.792 aie_ms=2.385
+
+PROF aie_host_split part=487 kind=conv pack_ms=1.372 scatter_ms=1.034 dma_ms=1.297 wait_ms=1.088
+
+PROF part=488 op=layout_transform_reshape ms=0.502 bf16_expand_ms=0.000
+
+PROF part=489 op=mean ms=0.153 bf16_expand_ms=0.000
+
+PROF part=490 op=variance ms=0.140 bf16_expand_ms=0.000
+
+PROF part=491 op=subtract_add_rsqrt_multiply_multiply_add_reshape_add_layout_transfor ms=1.370 bf16_expand_ms=0.001
+
+PROF part=492 op=aie_host_conv142 ms=1.444 bf16_expand_ms=0.001 site_ms=3.248 aie_ms=1.805
+
+PROF aie_host_split part=492 kind=conv pack_ms=0.664 scatter_ms=0.779 dma_ms=1.178 wait_ms=0.627
+
+PROF part=494 op=mean_1 ms=0.479 bf16_expand_ms=0.000
+
+PROF part=495 op=variance_1 ms=0.562 bf16_expand_ms=0.000
+
+PROF part=496 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.298 bf16_expand_ms=0.001
+
+PROF part=497 op=aie_host_linear143 ms=3.629 bf16_expand_ms=0.000 site_ms=12.097 aie_ms=8.468
+
+PROF aie_host_split part=497 kind=linear pack_ms=0.470 scatter_ms=3.157 dma_ms=6.372 wait_ms=2.097
+
+PROF part=498 op=reshape_split ms=1.946 bf16_expand_ms=0.000
+
+PROF part=499 op=aie_host_attn144 ms=0.423 bf16_expand_ms=0.000 site_ms=0.423 aie_ms=0.000
+
+PROF part=500 op=aie_host_attn144 ms=1.352 bf16_expand_ms=0.000 site_ms=1.352 aie_ms=0.000
+
+PROF part=503 op=aie_host_attn145 ms=0.552 bf16_expand_ms=0.000 site_ms=0.552 aie_ms=0.000
+
+PROF part=504 op=aie_host_attn145 ms=0.311 bf16_expand_ms=0.000 site_ms=4.871 aie_ms=4.560
+
+PROF part=506 op=aie_host_linear146 ms=1.156 bf16_expand_ms=0.001 site_ms=4.503 aie_ms=3.348
+
+PROF aie_host_split part=506 kind=linear pack_ms=0.425 scatter_ms=0.728 dma_ms=2.722 wait_ms=0.627
+
+PROF part=507 op=reshape_add ms=0.830 bf16_expand_ms=0.000
+
+PROF part=508 op=mean_1 ms=0.483 bf16_expand_ms=0.000
+
+PROF part=509 op=variance_1 ms=0.559 bf16_expand_ms=0.000
+
+PROF part=510 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.301 bf16_expand_ms=0.001
+
+PROF part=511 op=aie_host_linear147 ms=1.121 bf16_expand_ms=0.000 site_ms=4.324 aie_ms=3.204
+
+PROF aie_host_split part=511 kind=linear pack_ms=0.429 scatter_ms=0.691 dma_ms=2.558 wait_ms=0.646
+
+PROF part=512 op=aie_host_attn150 ms=0.336 bf16_expand_ms=0.000 site_ms=0.336 aie_ms=0.000
+
+PROF part=513 op=aie_host_linear148 ms=0.227 bf16_expand_ms=0.000 site_ms=3.088 aie_ms=2.860
+
+PROF aie_host_split part=513 kind=linear pack_ms=0.170 scatter_ms=0.056 dma_ms=2.703 wait_ms=0.159
+
+PROF part=514 op=aie_host_attn150 ms=0.048 bf16_expand_ms=0.000 site_ms=0.047 aie_ms=0.000
+
+PROF part=517 op=aie_host_linear149 ms=0.203 bf16_expand_ms=0.000 site_ms=4.470 aie_ms=4.267
+
+PROF aie_host_split part=517 kind=linear pack_ms=0.152 scatter_ms=0.049 dma_ms=4.111 wait_ms=0.159
+
+PROF part=518 op=aie_host_attn151 ms=0.042 bf16_expand_ms=0.000 site_ms=0.042 aie_ms=0.000
+
+PROF part=519 op=aie_host_attn151 ms=0.308 bf16_expand_ms=0.000 site_ms=2.668 aie_ms=2.361
+
+PROF part=521 op=aie_host_linear152 ms=1.161 bf16_expand_ms=0.001 site_ms=4.507 aie_ms=3.347
+
+PROF aie_host_split part=521 kind=linear pack_ms=0.424 scatter_ms=0.736 dma_ms=2.716 wait_ms=0.631
+
+PROF part=522 op=reshape_add ms=0.520 bf16_expand_ms=0.000
+
+PROF part=523 op=mean_1 ms=0.482 bf16_expand_ms=0.000
+
+PROF part=524 op=variance_1 ms=0.561 bf16_expand_ms=0.000
+
+PROF part=525 op=subtract_add_rsqrt_multiply_multiply_add_reshape ms=1.301 bf16_expand_ms=0.001
+
+PROF part=526 op=aie_host_linear153 ms=9.284 bf16_expand_ms=0.004 site_ms=21.943 aie_ms=12.663
+
+PROF aie_host_split part=526 kind=linear pack_ms=0.510 scatter_ms=8.769 dma_ms=7.017 wait_ms=5.647
+
+PROF part=527 op=reshape_strided_slice_strided_slice_divide_erf_add_multiply_multiply ms=23.378 bf16_expand_ms=0.000
+
+PROF part=528 op=aie_host_linear154 ms=2.741 bf16_expand_ms=0.002 site_ms=8.321 aie_ms=5.581
+
+PROF aie_host_split part=528 kind=linear pack_ms=1.642 scatter_ms=1.094 dma_ms=3.149 wait_ms=2.435
+
+PROF part=530 op=aie_host_conv155 ms=2.782 bf16_expand_ms=0.001 site_ms=4.586 aie_ms=1.805
+
+PROF aie_host_split part=530 kind=conv pack_ms=0.749 scatter_ms=2.031 dma_ms=1.173 wait_ms=0.632
+
+PROF part=532 op=mean ms=0.147 bf16_expand_ms=0.000
+
+PROF part=533 op=variance ms=0.129 bf16_expand_ms=0.000
+
+PROF part=534 op=subtract_add_rsqrt_multiply_multiply_add_reshape_multiply_add_sigmoi ms=6.135 bf16_expand_ms=0.001
+
+PROF part=535 op=nn_contrib_conv2d_NCHWc_add_11 ms=8.256 bf16_expand_ms=0.013
+
+PROF part=536 op=layout_transform_1 ms=0.004 bf16_expand_ms=0.000
+
+PROF total_nonaie_ms=559.631 vs_graph_minus_aie=1.0217 graph_run_ms=1305.815 aie_wall_ms=758.053 sites=455 cpu_ms=345.869 aie_host_ms=200.904 bf16_expand_ms=12.857 (calls=331 tail=0.000) aie_ms_in_sites=758.053
+
+PROF aie_host_split_total host_split_n=120 pack_ms=77.960 scatter_ms=105.124 dma_ms=381.485 wait_ms=345.702
+
+HEAP max_sbrked=98539200 heap=134217728
+
+AIE unet: unet_aie_conv calls=156 (planned 156) run_rc=0 aie_launches=258 (planned 258) PH_COREEN calls=258 cycles=3628953 aie_macs=54369320960 aie_flop_frac=0.9996
+
+[SHIM_BD_CTRL] routed=1 flushes=2939 segs=11756 words=1172856 prep=3562118 enc=352439 sync=5271303 kick=456549 poll=4102157 spins=6248 fallbacks=0 aot_calls=116504 aot_fallbacks=0
+
+[CTRLPKT_AOT] table=1 writes_hit=258 writes_miss=0 plan_hit=258 plan_miss=0 plan_aot=119 sb_prefix=119 bd_calls=2112 bd_pre=543072 bd_take=108106 bd_post=184058 window_fast=2807 win_fast=222906 win_commit=8665926 win_addr=1729052
+
+CMP unet skipped runtime-input aie_launches=258 run_rc=0
+
+AIO_BEGIN tag=unet bytes=16384 elems=4096 dtype=f32
+
+AIO_D 000000 a6b40f3ebeba07bf3fabf8be321a22c084e0e33f440e933f7d15abbe15f9433f4b0a853e78d710bff6df783f7d74acbe4432c5beff6955bf40eadc3e5b8fe1bd
+
+AIO_D 000040 63700d3fb2b81dbf626a1a3e30d55dbfc4355e3fb6a5713ebe97b73eea41d33ead0881bf3bcc4c3ff8630640b4a7d4bf45e7e3bf5a53c4bfd557653f38cb8a3e
+
+AIO_D 000080 7c33813f63f91f3fe2f2b33dc051ed3dfa4082beb3fd433f56069fbfebcd03bfef89263e2852e03f451958bf41d696bf451825bf6c80673fb5ed99be86c2a33f
+
+AIO_D 0000c0 47d6f7bfc76c8b3f97fc7d3ff908bebf3cbbe23d9fb8973f404ac63c0a61723f07af134032dd603e64abb3be992657bfa3e3133f0e7d75be213f72be176115be
+
+AIO_D 000100 dc73253f00c588bfe0b8c7bf8bee1ec05876973fb9c58b3d2af6c13f524e553c264d3bbfc30a033fbe7267bd449f9fbf61635dbf6fa8e83fdbaed03e6b36ef3e
+
+AIO_D 000140 ebf37abe04ce2bbf441d693f61dccdbd52a440bfa53a03be295367bfe444623e4477943f4ae84cbffcd6b93f503f25bf1fe02b3ef88052bf1dcd5abe949d313d
+
+AIO_D 000180 e580d9bed82332bf9cdb2cbf421d53bf0482c8bfee0481be328cdb3ea3496f3f59aa2f3f0ead21403651bc3ea0f1d7be604ff33f884480bf2497823fb53c66bf
+
+AIO_D 0001c0 27cec43ed61bf8bf56836f3ff40810be4f9173bfd7e3d83fced9503f574aaf3ded2b35bf6bb8b63b9129efbd8577443f63d2533fd5c522bf396104bff1e002bf
+
+AIO_D 000200 2d87b0bf3c8f14bfe9189abd31d7343fe28bac3fb3e049bfd739103f67ccdcbee8470640da0de53bb713083f9b1a69bff8ba4abf8c4f633e74efb7be688dcb3e
+
+AIO_D 000240 87b6c1bff6fe373fc7265abfab84e33f6db171be31bd913f7a7eabbf07e8ea3e36e15abfe5d8edbe47b77d3df7938ebe820a993e637e483f0d0e323f7db25bbd
+
+AIO_D 000280 48f9afbf1a0949bfd2be37be8a8406c0ce41473f3b0e68be4d486dbee098783fdf61313f9771713e83ae80bfdcf3973efecda83e13cf65bfa6fa863faa8e0d3f
+
+AIO_D 0002c0 4bfbf3bfe1ed3c3e424596bf90f59b3fbabe623fb10f84bf3cd853bf7ed00a3edc4f4ebe71d1c63fe0b3443f149c81beaf9f183fb7bd00c0e267af3e14b75f3f
+
+AIO_D 000300 34ef40be2e2236bf17cb143f1fdcfc3fbb5d663e3a778dbf923dba3fc228eebfa826023f88d211bf01a96f3fd1b157bf2753ac3f1ddfad3e1577d0bfe2b6e7bf
+
+AIO_D 000340 807e0ebe7ebab63f2d4d833ec85a613e1ab862bd7835663f971df73e3b65a73e41a170bf394c9c3f4b71b33fdd0fa3bf4bc514403256433f07b1ecbe28f3f2bf
+
+AIO_D 000380 772b2c3fd7b80f3faea815bfbc3de5bfe420923f83620fbfd2efeabe77413740d7530a407357803f52d2d2beef3a343fc9be07c06e01803e36c717bf7bc090bf
+
+AIO_D 0003c0 3ef7babfca5ded3e6ce355bd9b2a04bcbebc3a3f360d4cbf780e8cbf5b34cebf6eaf86be3ce74f3faa7fc1bdba5c2e3f498193bf1280ebbe565045bfd607a0bf
+
+AIO_D 000400 f2ccef3f26e9613f00e03fbfadfe42bf37bb77bdd3e3b7bf593ce73e52a3a0bf93909bbe6a1069bf8506a0be109f8fbf589dbdbf6db34cbf78b7e7be93ad14be
+
+AIO_D 000440 85fd013d4e21a93f9e2e313f0d0facbe661a143f3be956bf46fea63f0e17163fbf729bbf57cf533f11bf683f5de426c0c41d34bf8441e2bebf32f6bf303789bf
+
+AIO_D 000480 31fd7abf9295063fe611a03edb572840efd7c5be495f953faea9b63df932ac3e70e684bf6c8edebf231a4ebf0440373f306dc13ffbbe1b3fb90cf33ec36848bf
+
+AIO_D 0004c0 4c72b73fbd8da03f7b5b12bf15532ebec4a68dbfc0f1a53f68cf8b3e453051bec1d7ef3e6bef0c3f82e8b7bed16f98bfab87a0bf2c37d8bf4d9bfe3e60210e40
+
+AIO_D 000500 8815dbbf7165383ec6e6df3ebb5d79bfe9676a3ed7a789bfd81e9f3fa979f9be9fb2713e842a233fee6ed6be3e6fdbbf6f1ae4be84db453f0fb88bbd8be48b3e
+
+AIO_D 000540 d45f84bfd83fa53df76e243f234e26bd9cdde03fc898abbe37ab8abfbb3dd0bfd5908a3ff485e73cf6e6853f78b6fc3edbe3cb3f60d7a33f15e7adbe14d79d3e
+
+AIO_D 000580 27e2863fdd7d9bbf6095b93f80549a3ff5bb7a3f81164abee651b93ea6177ebff558ca3d81690ebf28a4023e621aebbeeaeab03ec8e19a3fd45f9abf64fa673f
+
+AIO_D 0005c0 f7baeebfc29808c0f20f50be1529ddbd2faaa83ee2e3d6bfbe5401be868cf23daa849a3fa693b1bd75b52c3f12cb5dbfd66326be9b0fd4be57e3383fb89f76bf
+
+AIO_D 000600 c8d95bbf27b9143f90a3e53fcca3c53ec075993ec79ea8becd63933f1d1e283f8fc9df3f3e57d33e3ae957bfe9f6f2beada066bfd9bb8ebffa949d3f21ad4c3f
+
+AIO_D 000640 7e1097bf821fd33f13ba293e165d88bf20d2863e084504be8f7250bf9e7ceebf0bb1733b70b1803e3de319c0e4512c3fab122f3f4db9d4be56de183ea31078be
+
+AIO_D 000680 d54e47bfcd6788be460eb93f9530afbfcfc9a83ee55f943e0bb815bf381da7bec4cfa6bfe8213dbf11c3fd3d84dac83e7a1547bfbcf93f40744b03bf46eb243e
+
+AIO_D 0006c0 e10b5cbe7ecbdabe2ca3963f23610fbfa1e69a3faefe863f9a0082bf55c6703fc32527bf8e672440149784beddca34bf9064ddbf893697bfdf63eebe67bd62bf
+
+AIO_D 000700 8b9490bfcb7406bf35256a3c6aa1d93f03e6b6bf806a9ebeca6a3fbf91b6b0bfa40891bf2e8349bf2b05483fb5d891bdfd18d3be121f323fe04acb3efc3521be
+
+AIO_D 000740 86d9c93e1df550bfc160123f64e3bd3ea3c7f2be422ca1bf435cb53f3c49843de9913640ff023bbf38836d3fc6cd51be61b3053fdef08b3f6a5506bf625b2a3e
+
+AIO_D 000780 18e8b53d0ca2713ec723263fa689813f61ed563fba62bf3ea59199be61b696bf8d0c18bfde15d0be2c243d3f564973beb6ad8bbfd8f1333f04a729bf9f4027bf
+
+AIO_D 0007c0 f55a33becf03e13ec6cd14c08b8f87bf6c23103e6d92c0bed2e965bf703514bf5743a33fdc7300bfdf2d263fc0ff4f3f56dfc6be41a0e63e6ee3cabe919cfcbe
+
+AIO_D 000800 44eba4bf102d483fffa8b6be0ece00bfaac68ebfcfe6e13f795d343f46d907be7af80ebf3847b4bf93b9b73e2378c43e19ca9ebf68aea23f4a2f633f32575fbf
+
+AIO_D 000840 3a42efbe9e429cbea66d5a3e797e9dbddca6c7bf3edeb63fdd539e3e0856993f98528e3fe1af8bbe0a6d543e2cee0e3f97ed3d3fadacf1bd052239bfa8041fbe
+
+AIO_D 000880 d5993bbfab33bfbee4c0f5bf2755cc3d51ec60bfea40c7bece4ef43c8728a33ee40201408375aa3e1e74a9bfb8183d3ea9f0f9bef692ff3eb9310dbf0b6210bf
+
+AIO_D 0008c0 f71bb7be246f06bf8be5d4bf0bc70bbf900fd43dca149b3f1f3186be9fc6c0be8d78063fcf33083f22b3c43fc47efe3e567695bd1829a23fca28cc3f0575d1be
+
+AIO_D 000900 22fe2f3dc674cbbf5afe6abefb6a4abf17d02fbee17fccbe27c69bbdd7a1e8bd566b0a3f512f963e8b0100bf821c9ebf5d3da53ff5d1c13fea2d9abe3e5a2a3f
+
+AIO_D 000940 86f6afbf4c69b2bf4fa5fbbd925ac73fdf1663bfb75632bf2c5cd23fdee6e9bf3a452c3f035a0b3fdf6f42be6400843e535a2c40c9d789bfae4019be3c5efebd
+
+AIO_D 000980 4c0826bf6dc09dbff530d53fe542823ee055d9bf807d29bfb835be3e161cc23e14b7b7bfccddcebd4bb4793e34f5c43e8c89d43e82c7ddbf9853f83f75b4943e
+
+AIO_D 0009c0 7310f23fed753b4045202bbdbb488cbf9b677d3fc411a8bd3615c9beb03e6fbf7911df3fbc71e0becc83b8bfc4b2c1be22b681bf88e1793e3d1fb2be24e076bf
+
+AIO_D 000a00 2834193f22d7ebbe0904613f825cad3f0c0a68be6fa0e1be2772903ef0ac6a3f5bbee43c5b28013eb47b95bdde5a793ed4c00e3f1b6f39bf29c9ecbed48dbc3d
+
+AIO_D 000a40 601c16bf0689653e27ce1b3fdc1e003d9ecb02bfb4592dbf4158e53f286b753f5d1690bf60af4bbf7e15fd3f4214d43fc6468b3e5419a43f01bda6bfd75b663e
+
+AIO_D 000a80 095a123f3246ecbf468c3abf9ed2473fb37e933f5dca0cbfe286a03e4608ca3f876ba5be0effa4bfba678abd4e9de1befcf19c3f5f6bbf3d92e960bfac5d1640
+
+AIO_D 000ac0 50dbfdbe4483f63e763b343f5948533fafda623e61ad1b3fc8ad82bd7174b1bf61b400be5b9b9bbdc47816beb76f6c3e6254e3be40d4ba3fdda8dd3fe74103c0
+
+AIO_D 000b00 7fdcd43cd71a16bfe22221c00649023f6b1fdfbe6a0e35bed9f501bfdec3913f0ea5993f2c83663eb76c393fb60914bde404193e8acc41bfc912f6bce4a941bf
+
+AIO_D 000b40 5bcdb13e68024c3f8c48a93ea33c9c3f5e992d40c71605c00458fc3af0b011bf9151debe34d99cbfb08a7f3ee5f386bd1ef2ecbe122cc4bd6c9ebbbe171705c0
+
+AIO_D 000b80 fb02873f815ed9bd9d6449bf5a45c33eb30e18bfc60705c0e724823f427bbfbf44bf89bd6739293ee4d2a63fa9ca8c3f3aa7e33d073741bf7ef1cfbe1d8b8b3f
+
+AIO_D 000bc0 47f6e63ffeb2103f217624bf420d833ffa68cbbed500e7be707ca9bee57c223f0856ce3e4b4e903fb028b73fe539273fe9ac0ac01268cdbf467fa13e6909f23d
+
+AIO_D 000c00 ded70040e72b90bb786a02bea94e733f7cc18d3f9ae42ebe75ac033faadc86bf5d3f5bbfe6b2a13f7c42abbf24c2783f2ed9283f597e403fe7be633f819d123f
+
+AIO_D 000c40 1f7a06c0e3e87cbf18a41fbf743b5e3f24a68ebfe42c18bf02b27dbe228bbd3f6f559abff17094bf5b40583f665bfabf67770c3fed5345be2dbfa0bf4735eebd
+
+AIO_D 000c80 084978bfe1538f3ebf4ef63eeba5c53fa72b4b3dc9733b3e3f3e09bfc47f93bc250c8a3fa0beebbf0dab333f6beb05bf0dfb9c3d464eb13ef1235a3fea26883e
+
+AIO_D 000cc0 35e4c5bed1d5913e72d33c3c501665be8d9b533ee46b593f8d42013eefcc253e940ca9bf567807be8712ecbf7181373f8dc964bfc66daf3f74db4540a2584ebe
+
+AIO_D 000d00 d959963f07ada83eca4627bfabf363bfa15bee3ecddfb03f0b62813ecad9c6bfabe895bf57bb7ebe944da23f52e8333e4fad883e3a3d893f4ef887bee07e89be
+
+AIO_D 000d40 a52cbfbecfc3efbfff019b3eacd3ba3e670e4d3f7724a2bf715964bfdfd9453fb97e843eb0eda53f58b170bf52cbe23d62be41bfa7e2283e74e7ffbefa95f73e
+
+AIO_D 000d80 3846783f52ae373f7fd1e8bf71a36e3f54abed3e9cdd84bf544c64bfaf6bb93c73170f3f1433ecbe04eed4bfeb03943e10f3503e2fb81b402b3aa0bf34531a40
+
+AIO_D 000dc0 4c9dd93f8d10a13e180ed33fe879d63d318d603fec883ebf9edfca3d6a088abfe87fd0bf3124a2be49de2fbfc55e123fb460a23f5d5144be3464123e8e28a43e
+
+AIO_D 000e00 28f4f0bf79b3943dfff035be890381be45baa2bff3b909c0f00cdbbee0d9293eb061993f6eda753fa3ada83f8e75823e68e3813fad86b5becd42da3e2b4f3e3f
+
+AIO_D 000e40 518222406e2b093ecbb9b3bfcfc8933ff9a480bf39d04bbec56fcebeab4884bf1c60903fe944e23ed2e547bfa339adbdcf9716bfe83ae43e45f7fbbee3d25dbf
+
+AIO_D 000e80 0c474cbf1f8e0dbf092e943e85a95fbf21cd29be82b0053f1f5a0b40f12f513fe7773dc0dd7117bfb641d1bec330b23ecbc9bc3fca81493fd45613c098df873e
+
+AIO_D 000ec0 41070a3d7cefbf3ebd43a13f538885bff9bc8c3fc855d6bf6b5ae53c102cea3e03c50b40db8925bfdb76cfbf46cf233f5a1301bf776cc33f63280ebfddb86dbf
+
+AIO_D 000f00 376d873fb0a3fabcf23f693f1580adbf7f85c83fefdbf0be14482a3f10e781bfd905c2bf8a88aabeba41623e38a4cd3f958fb63ead893c3f84473d3ffd1b4140
+
+AIO_D 000f40 c8e839bfeef1983f7aee76bd2bf5313e86a9dfbea458883f965695bf7ec5a5bfb78685be397a92bf629a483f48c0753f00e627bfce25393fb5c908bf495da4bd
+
+AIO_D 000f80 193f863d8c1b0340e607003eef5850bf502b53bfb467ac3f3334cdbf3ef6d1beac49b1be94541bc02f00cbbe5179943f251eda3e7aad38bf735a7c3f0a7d463f
+
+AIO_D 000fc0 bb621840b90008bf01e16fbec0ed3d3eb81e053bd2ca4b3e78f71abce47620bfc74fcabf851709bf7622acbf41ec80bf5819f1bec4d5223f62838a3f90af53bf
+
+AIO_D 001000 1e4dbf3d4563243fd34271be8ebdefbf3a9e16c087822a3fb0054f3fb25c163e7aa197bf6720ad3ff5af8e3f86db29be8492c4be1de506c05785163f2ec2e0bf
+
+AIO_D 001040 7e24123febee273fdd388a3b11f9c43f7152c4be27810c3fb41e3e3fa29b463e3e8300bf2653933f1933b73e5cc88bbe198999be17947c3d61ce0d4094c09c3b
+
+AIO_D 001080 21478dbd49cb76bfbb0d8ebf8531e8bf96d9bb3ec20c1a3e82a369bffcddafbf20894ebe6713cabeb10c9bbfcd58e23ee66d953e542c093ec7ed713fad5bf9be
+
+AIO_D 0010c0 35a4c23f14b856bf60e0283f5374493fa352dbbdeb4f003fcd0498bf9d82adbfb283aebda08d17bf4c32403f25fc3c3ecbdb3f3f3438e53edcfaba3e3eda313e
+
+AIO_D 001100 886874be575db2be81810940ce9ed3bf12e090bd6aa38f3f2b69093ffbe3c53f00e72e3f8a2391bf2e174ebe9f53a4bfa0f0903f89a4ce3f667788be4eb0363f
+
+AIO_D 001140 413d8dbe0f06a5bff93997beafa0b8bfdb58dabef6cfb63efdc95e3f4cf2ba3f627c28befceed03ea430103f28912f3fdd0b30c050652abf7c3a6b3ff8b580bf
+
+AIO_D 001180 20fe963e2b4e603fe551f0bf9db227be23db8a3ec0405d3d830dbdbfd411cf3e02a7f8bee3d7673fcc8efc3e48bff2be8bbb6f3e54bb18bfe9681abfb19fbebf
+
+AIO_D 0011c0 422130be79b95f3f8eac313e2ff9b63c715414bf184cf1be5bf74a3f096eb4bfb50b08401c6e873cda840e40d36e9d3fc2f8c0be0b54433ffa8b8d3e5714f23e
+
+AIO_D 001200 0143493f41b70abf1a881fbf8e0fd0be1ec0afbf7b3b83beb3fa693e9a62893ef60c643efdffb5be79db4f3f812700c0f271babe5b2a92be150c713f24b3323f
+
+AIO_D 001240 0762513fe244223c8e98733ffc647dbf3d56a73dd99d05c03a0adb3f93a0cf3f3f9814bfc87c52bf25b103c0a64ac0bf977f0f3e823b1ebe6214bebf4d0b09bf
+
+AIO_D 001280 82ea3cbf0c46d93e95b62b3f731578be426baf3d3f991dbde10707c0829b213e4c85a3bd491a3f3f18b3eabf75ab423ffbbf20bfe187953e4fd89c3fe6cbb8bf
+
+AIO_D 0012c0 fb2da5bf033d7c3f1b1f8fbf3c0f72bff4801a3f4f1142bec1c5483f966ba03e92390dbb77b0813f58550e40911ab4bd346ebc3f53438f3ff9afc93d51cad63e
+
+AIO_D 001300 83ce80bf5ddf28bfc15f7b3e891d9ebd7118a33f2fd4a8bf2e13a8be08b124bfdfc01ebe0dea953fa42598bf04345e3f4a4a0cbfdacf85be62f3893f3e995dbe
+
+AIO_D 001340 72702c3fa480e73daad01ebe8511aabeb4e1d9bfae893abf95f4323e277a6e3e9197b7bf9b4e893ff3a7223fc2849ebf34497fbfc73f063ff70fddbf6c523dbf
+
+AIO_D 001380 b691c2bd851018be16e7adbdf890c33edcf04cbf8e27febe0c430440c336adbf24a1c1beafc0363eae6e12bf6b0ca83fc92b583e6808633ff2fd17c0e5d5a03f
+
+AIO_D 0013c0 c0b08e3fc7ed5bbf9461903f1cf1203ecaed633fcf72ea3f72603a3ed5eb6abfc7a6803d8d5a96bf561d35bf1dc42ebfb8c522bf39799b3f48de5f3ff2675cbf
+
+AIO_D 001400 4828913f42b0d4bf8faf24bf6cc4eebd4076993f16b0473faa2c063fb159b23f2976513ff928bd3f6f4e29bf20adbfbf5ea792bec246633fadd7b83ededd693f
+
+AIO_D 001440 254c163f552fa63e69c01d3ff06566bf03854e3fcf7895bfdaf4efbd6055a2bf9e78213f04a7b1bfac00c33faf599fbfcaa3ac3e26bf97bd763c51bf8e2ba33f
+
+AIO_D 001480 54b2cfbe2fb1c03f91ab79bfbf3241bf8e62f5bfca331d3fcb35813fb7d9aa3e5e7c45bd9f1c52bf71391340bb93293f411ee7bf033781bee7121bc0947cc33f
+
+AIO_D 0014c0 d646e43fcf3fab3f744cc9bd78fc1fbfe595b4bf4a9bd03eda5d6fbfcd10c0be49b705bf01ba53be3771803f02ade23f1c6e603e26ffa83dac9e85bf19be95bf
+
+AIO_D 001500 8e3c81bf91d7783f1ce9a43e966f873f136b023f9a1d91be1f628dbf2d8884be2157b0bf29bbeb3fcec4cc3d7442f8be5c17ea3feab6d0bed35d043fbcdafdbd
+
+AIO_D 001540 53d9af3ea971abbe6a4d003f544eb53fffb699bf59110ac08323a43f1338553d7dee623fa93159becaa2cf3fd1c2ef3f76708fbf7c78483fd49500bfd8f2bfbf
+
+AIO_D 001580 b64b67be21052e3f34f1a1bf34e897bf7ddeaa3f29121f3ef3dd083fb70785bf7fc52ebf4c97603c46a6003eebd7d03dc3dfc23f36bd163e4fe7b9bf3cf342bf
+
+AIO_D 0015c0 110438bc559f9d3fdcf62cbfd814a9bed25f4f3d3cb224bfe17e4dbf65708dbe14a45d3f146f113f518237becd42fe3e185da3bfe71e833fd6174c3f7126a53e
+
+AIO_D 001600 46efd0bf04ed0440330e39c05c5373bf75aa5fbf8c53443f489bb7bf1dff883e9fb780be71d7cfbef0ff383f97b6a93f194c973eb0e3acbe91590dc0bab6b63f
+
+AIO_D 001640 45068bbee364dcbfff75183e67edb83fe09da9bdd0dc86bf1a480e4022300f3f6811633eba14873fcf1901c084569f3d383f8ebd7e8e1540e1c2fbbe5e11edbe
+
+AIO_D 001680 fd8aacbfff7644bfb7bb15be074ea73e919205bec7780640ed3a153f2c882b3fe49aaa3ff2b30c3f10df13bfdb06c8bf3b68973e572560bfe15b9c3f593838bf
+
+AIO_D 0016c0 a0da07c08340573db4d0863fb36d2ebecb57853e26b65e3e151dde3fc8478e3e74150ebe28a52ebff588bbbf7496ce3fc79caa3fe7f15abf116c3e3fd0f0f33e
+
+AIO_D 001700 52f7a4be44df8abe635d573f3c918fbfb02ccfbe2b27153c0c06293d9f7d33be6c556d3ee2a5e33e850f7ebf8ca18e399caf1cbf3a3ab03fef99b9bfeb5491be
+
+AIO_D 001740 acd8203fc64687be913facbe83600abf0e629d3e58f88ebf882467bcbf02f4bd842bc3bfb021df3d302dc2bee790f53e631a863fa026fe3e0f6889bfde40023f
+
+AIO_D 001780 1593d3bf6ee94dbfc93dcd3fb274a13b9277cc3f30ca22be20e2ecbd8b1489bfb64f813fc6a85bbe77d3143f4dc6c13e77e6e83e3c16813eef04debd788e37bd
+
+AIO_D 0017c0 81c02dbf5d6a02c019e0013fe7a80140ee38843f667a1440644c003f78606abf61fc82bf6a08253fef609a3e1c4b42be1800313fd9a965bf45c3033f1f1190be
+
+AIO_D 001800 59b79cbc37fb883f925636be3560a63f592f993fa86e65bfeef30240a9b58fbf08d6b33dcb5a583fe7910cc0f2ec873ff1b1953feaa633bd8f46913e8603873e
+
+AIO_D 001840 3e4e26be5e898c3fbe5496be3793823d3966df3e7e706c3fa20b8f3f499cb4bfe8ad00c06e8a49bee72f1fbe04a093bfad4e863e07ac0e3f14d3783e50b4b63f
+
+AIO_D 001880 0d2a88bf7f06cebdb7aeed3fcf36203f818392bfa199cb3d8e77803f2183124087eb6f3f6821ac3f119b77bfeb0f09bea626a63f095153bfbb205f3db4ecdabf
+
+AIO_D 0018c0 29c7c03f3351cdbbd5df2c3f79dba5bf088895bf7bbeeb3f249392be22e805bfc5d3053fcac6013fcb8ff7bfe78a81bf1ce8313cea1fdebbc38ad23eee8df6be
+
+AIO_D 001900 4182cbbeaac5203e861d3cbf00a26abf50d61ebf06741cbdb4767fbef19fa2be93a919bde5d31b3e8e3afa3ed888063f8fef8cbfda31953f4f9bb1bfc615353f
+
+AIO_D 001940 cf2e06bfc9473d3f5e69963fdec3d5bf2d5e373f78ccc53e035cdabe698eda3e9454e7bef2a3d73d596582bfabba413f600b133f5335363ff7ed31bf3ed9d63f
+
+AIO_D 001980 89f0ee3f179344be0c81f0bef6d3d7be7e95263fd8fb723ff6744cbf9861f6bf34df173f0e7fd23d0e84a93e965d2e3fae4b69bfbaa4883e518190bda791193f
+
+AIO_D 0019c0 25c7b53f45165b3e299528bf6962b43fe17c583fdd68a0bd409cdcbfcd214abf74de243e6f34e93e83a219bf2130b93ec7bb3bbf234a11bf211cc13eb22cc6be
+
+AIO_D 001a00 8e36a83d45f8543fea50903f4be50ebf25416bbe7c89a9bfddcda9bfb3e6b33e38cbe5bee54be7bf59281a3fb2123cbfa18846be6a060e3f2ecb123fc43e0c3e
+
+AIO_D 001a40 e219e3bf4daf413ffd71dbbe2ffd9dbf82c601c078e3b33fe717833eed305f3e737e0f3f30064dbe843ec6bfd8ac0e3f1c44693fd3ccfb3e2cbeba3f9dd9e63f
+
+AIO_D 001a80 465c6abfb0180abfec94513fb023fc3d0222143e5cb0673fb7882a3f6ee1dabe2c56553e79bf26bf64dc34bee5e587bf7d9fecbf4a2ac2be244bcebecabd883f
+
+AIO_D 001ac0 1235de3f4b81583e91ec1e3f183be0be074233bf502015be4b1155beb975923e5e0cc43c0de3c23fa49aa0be2291debf84fa2b3d51c43abf17b1c23d7da8863f
+
+AIO_D 001b00 64023cbfa67c47be94c9e23e620a71bfb4cc313e0e0a073f8adb423f6548823fe474033ffff4df3eaba8a7bf586127c0425764bf3edbb93fb6243d3e18f40ac0
+
+AIO_D 001b40 1a8aacbeaabcea3e198ee0bffb41283fdd5f85bf2ad5883f9afca9bcfdbd3b40c1c5b4bf60973f3eb33ec4bf8f87873fafb8c43dfe71653f9d10ce3c994e98bf
+
+AIO_D 001b80 604730bf3448a3bfdf128ebf427c983deec4823f878c563fa3f4013fb60a08bfddcd003f4de467bf9a22f33d3ece5c3f2b068ebdcc14b5be1b6fa4bef068343f
+
+AIO_D 001bc0 a05d4cbe89faa3bf2eb3a4bedc707dbf5d75bd3f729587bdd074c7bfa8aa193e3e3c123fbe1c6d3ec9e2cfbe61d4ba3d365c683e7c7d6b3f841d6e3e71600b40
+
+AIO_D 001c00 515c69beaa2fbb3f0334b8bc442bddbf1d569dbfda27efbf4071e0bfa865933fdd3832bfb417133fbefe56bf5b5abfbc129188bf3577523f97fd84be7e38c0be
+
+AIO_D 001c40 9aa37cbdcc590e400e3cf03ec6d4503f2acb99bf2eee27bfad823e3e9d7ff6bfb406a53f4da8453e71a46dbd44158abe573e96bee52709bfa5e4a93f99881e3f
+
+AIO_D 001c80 8b97a43f02d086be6e4756bf9640b03f31b996bf603a0abf2d4e383f693c863f5063a4bfe5ad83be6417713d50e093bd75424bbfd85f3c3f5ec3d9be78e60abe
+
+AIO_D 001cc0 07f306c0dbbd64bd4c6debbfb4623e3fccf2fe3ec95502bfe154323e4da0d83da8bdfcbd8ad5b43e4b11efbdddcdfabe883c48bfc8b8d43ff5a8573ecc84b83b
+
+AIO_D 001d00 0642523fd228a5be2c0493be61164a3ffb408c3f2339453fc530b2bf3904053e029d453c014b053fc3494cbf73aa7dbf9e6248bd52d25abfa3fb73bfa872303d
+
+AIO_D 001d40 f36e7a3f6ef5633e0b24913fa56763bf03ce433f94ac4d3d479a4cbf4067b4be475142bf1a6422bee92521bf290bac3fa9375bbedf97a5bfe95cb0bdb403fb3e
+
+AIO_D 001d80 0621cbbe430d3c3f490783bf55c570bf8a43be3fc41b98bdc11fdf3e7899ce3eee8bee3e06ef8ebd9ca183be6e977f3f630316bf8e57a93c22a3163fb19de2be
+
+AIO_D 001dc0 0568c6bf7b31d03ed32a7c3fb357173e9206d7bfaa810d3f4c82ea3f80ded1bf649e31c0f60bafbe9f1b3c3c72db333f507c443f02c38d3d64d5ea3ede8a4a3e
+
+AIO_D 001e00 8bd5133e2aa366bcf74b97bdcb494c3fd3a8fd3e305490be026a943f5c4621bfbb9709be5197513ebc33e1bf4aeca1be5e0e703faeb25e3fc47e89bf873432bf
+
+AIO_D 001e40 a1465bbfab60e4bd3a7d53ba0758b9bfb1e9ef3e3d57503eb5a134bd38f514bfa0df87bd7dfad0bf8ff7ae3e6515983e25593b3c6b2a80bf25f6a33f57bb8b3f
+
+AIO_D 001e80 df4cc3bf978a0b3f5d59393e03a711c0e4a90a3fd098513fc4ee593f2542723e6f00f4be3305bbbe6b04123f3ca9a93f6dff94be7a10c3bdc607593f0e9ceebf
+
+AIO_D 001ec0 190d143f6f4ccabddd76f1bfddc45e3f03c422bfb87c633f778eac3f2eef82bf587d7bbf8b61483d33eabfbf9199443f941bde3e87988c3fbff7cabf40455f3e
+
+AIO_D 001f00 e63fbe3e1f49e0bfef492e3f74b7afbf972855bd11e7a0bfb467333f0757bd3f46c708bdc18d04be14558f3f26cc0abf23f785bd9abe233f32b7a53e3e40ac3f
+
+AIO_D 001f40 bac18f3f9b1ad43f2deb51bd4e20553ffe3250bf55f3383f3b29cd3f13fd0e406ca79abf361c8ebea8341f3f426068bffb95133f4a55043f6377e8be251511bf
+
+AIO_D 001f80 f8728ebfa081ec3d36ef8d3f2dc41c3e395a2340bd11d0bfad633ebf20bd073fc5bba0bf02255f3e91ec2a3f786ced3c44a5c5be1be9453f54605d3e117cf83e
+
+AIO_D 001fc0 e5dab53e3f5b59bf2e64a5bf938712bfbc7398bcf7e8a0be02db523f8879253ecb855c3f387685bbb32358bf5c7b3b3f9136ce3e8b2d6dbf6e9affbe6e9d2c40
+
+AIO_D 002000 dd3a4ac0fe2fa13ffe1f3a3eaf78a53d83e523becee8b6be1b2b20402ad390be367d3cbe2794663f7a01003f5bba97bdd4d03bbe92c99cbfd778943fd8ee75bf
+
+AIO_D 002040 68db17c0d5d98d3fcd50523fe2c2c73e4224efbe774b9c3f952c87bfc2100ac065b2453ea88c593f0776303f2fb40a408f8d653f9a9b33becb8033becfb56d3f
+
+AIO_D 002080 112f00bcc5661cbe1aa7debf414b9bbe5beba5bfe4a7633eaf9f063e08fc323fe276e43f4bde36be60fcb53f04ff91bff3bc103e43f96b3fb46af43f44e390bf
+
+AIO_D 0020c0 75fb9fbe2dd7f23d9df0efbd1c0d7ebfd96ed8bf8568a6bf427d06be76e1aebf1b27df3fdd619a3fdf75f9bf39b902bf067dab3f83d8bd3fad928c3f8f0bb9bf
+
+AIO_D 002100 29a198be849ead3fca843f3ea365c9bee1ce123f8c9a873fbd39573e2087953e09d68e3f7e8c08bfcec463bfdc6b523f564194bf4466083fe94e36bf5aa05a3f
+
+AIO_D 002140 ab7695bfae0b933f51e5943e1db197be02135bbf6da31fbeccbd6ebfaac298bf4d2f8a3fd469223f723ba23fd55aa7bf7102f6bfb8f8c6bf6036343f1089663f
+
+AIO_D 002180 219be9bf1109883f5b2bd3be208194bfa9767abd1efb113f39fe5abedff52abef27659bfc486b7bf8babcebe4e14d2bf8776113f252165bf54d1a23f3320d1bf
+
+AIO_D 0021c0 22c4ae3f69466abff41f74bf7927813ecdfb573fb30bcdbdd825cabe6bf8f83fdb49f43efe189fbff83195be8184d43f1d18a43e1290523f1cf401400b9115bf
+
+AIO_D 002200 5abcd53e8dcb24bf321238bbd4b70c3fb24daabfdc63103ebcd30a3e80e9843f52a51ebfa0b3a6bfa334be3e7bc693bf36b5253ed905073f0f396bbf075e29be
+
+AIO_D 002240 c28988bf171739c03789c1bfb2eb08c07d2261bdd9dc91bff92452be364debbd6343813f099bcabe6872eabe9299ea3ef857ca3f7b8ae0bd42d09d3e4fe94abe
+
+AIO_D 002280 457727bfeb0dc4bfe021d6bdff9a96bee2eb8cbec877fb3f6ea6b2be618d9d3edca8c4be9206923f5f12aabe5774e83fe0639fbebc863b3fbd51753fb51ca1be
+
+AIO_D 0022c0 60204c3fa92b233c49f654bf668f44bf7b5e613e0cb8d63f5a1711bf7f92f33e03475fbfac18483e04abafbf884a56bf916b45bd7a6d4abf22f1a0becec8813f
+
+AIO_D 002300 43589dbd3c2834bf827e9fbfac260cbfe25f8e3f9f02e2bd1e6b25be5955333f4c2c4f3f36ed763facfbc8be6d5475bf5546debf5b8543bfcc7ae7be9117283f
+
+AIO_D 002340 f3a5933ee82713bf609e583fa7b0a5bfe4a38bbffae899bf187794bf69f6abbeac5a69bfd65953bf35a5a13fc38bc2bf5ad48abfa3bc8cbe8d0bd03e70cdf23e
+
+AIO_D 002380 396477beb7ccbbbe2b8196be97fe353ff9d272bffd2417c031890e3e47879bbff04cc1bd183bab3fc413233db8c4d83f7046d7bf3e110f3ede6e973e3896393f
+
+AIO_D 0023c0 8d8339bfb722713e3288243e95bfeb3c9c25b9bfbb4ee9bfa856f73ed953a63ed15c6dbc13bc113ff404803f22029cbf16fa383fd233ba3f451f813f0ea51a3f
+
+AIO_D 002400 ef60423f7226b4bf8764f7bec4e0833f8e1cbd3f946eea3e695cf4be0e2b1ebe715e4f3f2892f93fe67d393fed5d01bfb126173fcafbc73e47ca1140846a143f
+
+AIO_D 002440 ab65503ef6c1ff3d78d98dbf026d7abfab3dc5be029d43bf192e273ec624d23c94bf713f9e56be3fd0201a3e441237be1edfebbf9eddd73e6435303f302538bf
+
+AIO_D 002480 25c4a4be493c27bf4270883fbc4c273fb4bb9d3ff08794bf2a9729405b9b5abfe19181bf3444623ed6fffbbe6fabe53f7718cabea3d034bf839c6b3f6f5da23f
+
+AIO_D 0024c0 3f7228bff6c5b9bef6f9c0bea7531ebe3a4bdd3f5347aa3ffded903f5d90a03f6e9981bca2525b3ff7bda6bd6c4540bf242ed53f41e4ddbfd6ec873bafcf0bbf
+
+AIO_D 002500 d2f0ccbf0f30b7be1818223d4d0be73ecb6d54bfc3e93d3fb8928a3e62e4413f2c3ff6bfa5b8c0be59ca13bf49a01d3fd03e2cbf6bd105bfe78c93bff7849dbf
+
+AIO_D 002540 ab7875bfef53673f9d318cbfe2a41cc09ac04a3e294003bff34f053f0bb8023f5d45b4be4baff8beb4df16bf037331bcd16e52bf339d133e69bfab3fabf530bf
+
+AIO_D 002580 c78018bf855325bfb7b6113f772c1f3ff5d7b13fcf242b3f0e32813d68ffb23ec5b2a3bf9d580b3fc421263e6309014042deac3f77605abf875325bf79293d3f
+
+AIO_D 0025c0 1a7604c0d48a76bff4a58d3e8c11133f3919d73d0379853f1ef6a4becf77813d554455be217a98bff3f9b1bc132b11bf7359673d558f28c03398b93d15d50dbf
+
+AIO_D 002600 084f11bf3bfb893d15e9febec518683fe77a9d3ff2175a3f57f7633f8513a13e4c86043ddc3a9dbf53b4acbe2b8c9b3fc6843f3f5d3707bfc1ef3d3cbfc8703f
+
+AIO_D 002640 6ef190be725fb93f001c51bff4fa333f55fe153fec3e953de2c2763ecd84f13eea1810c04f88de3ecfc2863fec42c93e7c81903f89f996bf9d40afbd3e2ba13e
+
+AIO_D 002680 c01f6abe83a0963fbbc2eb3e7a4a08bf8fa94a3ff663463f82b300bf09b2193f8c88c73e5f79b73e0f789cbf5fdc993f41f6163fe1c108beccdf683ecae85a3e
+
+AIO_D 0026c0 72b2debed68e27bf90d286bc86ef35bfb2c51bbf3731a8bf8d68c8be711b653f39ec2c3ea5c0563dc8e9cdbe923ce7bec76dc2bff7d3cf3ff00343bfeee1c8bf
+
+AIO_D 002700 6600e03ecaca813e6df706bf61e8b9bfdc9cafbfddedc33f783a22be092321bfa9a8ec3f51160fbfc64f7cbfd31af63e707ca33e5a23bd3ff8e5ccbf04032b3e
+
+AIO_D 002740 93a3e2bfa3c8823e223d48bf5c1a1bbf0cdb5fbf95bb233fe472b83f831845bec18db1bec59deebedf38df3e2c1a86bf9d926140bcd067be1fefd63fcda99a3d
+
+AIO_D 002780 37328fbfdd0aa8bfe655b4be609e3dbfaa541dbed59572bf784a1f4046050640303fe3bfe595ce3ef35c8e3fbbf9d9be9c929ebed27b773f0ed4d03e8b90a5bf
+
+AIO_D 0027c0 20b4843f1e9e2bbf44cfd33fbcc287bf385717c0613523bd001b863fa2e3c43e1a029c3daf946dbff0557b3f4d55d6bf7ef96d3f57e58ebf3b1bd6be8e258ebf
+
+AIO_D 002800 84898abfad5fad3f00c99cbfa341283e4cb16dbfbf985a3f9e79b4bf8b7688bd1106633fcc2608407f85a7bf60b481bfbdfa3bbef2e0a83f084d98bfce9c173f
+
+AIO_D 002840 d75251bfcae698bf6427e5bf5ba7aebd8edc463fc0029fbe219714c0ad6347bf7385553f7838513fefa53f3e39beaf3f506fa1bf398a97bfa56d11405203093f
+
+AIO_D 002880 93dc51bd529dc1be20df26c07a29503f071200c0aeaaf4bf15af3dbd3e4dbb3f36bef4be969a6e3e285320bfead6523eba93efbf056bf03f83ad95bf9c08a83e
+
+AIO_D 0028c0 52cf0ec03bbdc33f1646763e2350e23f871653bf8a5c5e3f3106c0be166940be76b09b3fa3c375bf4013343fd008f83fe04ada3f902c813f5537cb3e57c46abf
+
+AIO_D 002900 69eca53fdd9d2ebfe8bca43fde38a5be91636fbc6a108839a5bb293f3d3df0be3008063efeb526bf817acb3e9ed2043e49bc793e6bc486bf4c36da3deaba22be
+
+AIO_D 002940 95fac73e1b3bd6bd4cbf93bf614efd3e59e95bbf7ac81d3efe7f0cc0ee8bc63efefa103fa1576cbf159c273f5be09cbeefa5b33fbc3a383f921e97bf02e210be
+
+AIO_D 002980 0ec7e8bf4f92d0bef8f5f03e0ef83f3f549d32be7e27b3be26056f3dac1029bf4ed09a3eb888853f16466a3da9953b3ffe6e71bf90312dbf5fff103e29c4e73f
+
+AIO_D 0029c0 16f74e3f7ec2c13fb18e04be9009893fe29aecbf33b3c03ef9190dc05312923f20d7ec3e9a10983f44f9b33e6e15f9beb88630bf102f503e56fabe3fbf27233f
+
+AIO_D 002a00 7fd5ccbe67f6e0beca341cbf2519f1bda5d1773d7af6acbe7c0c043e0136c3bf65a8cf3fd566873ef7c6c03f8d71513e549497bec6effebc2a80ca3dc19d47bf
+
+AIO_D 002a40 a933fdbe558ae73fdc9f563f47c023bfd989d53e024663bf313aa83f3c3d85bf20af6e3f61dc063ee81a2f3e98a432bfda9669bedfa830bf9a363bbf998e1f3f
+
+AIO_D 002a80 0c2f1a40ea07bbbef0c47d3faf289fbd03a852bf97aca33f74b81e3f0e07993f2c667f3e8aca7b3ed03646bf275b9cbe9072d03fba7c16c003b68f3e8982b03f
+
+AIO_D 002ac0 be95383f3fc04a3fef90b3be1b66823f58b7833f5eb2debddfd4d03fcb49d3be4f0017c04a0a2c3db2a014be94d452bfabd9d2be49ca0bbfaf23ecbf7a40a63f
+
+AIO_D 002b00 6ea2de3d0f1b32401395f43cc12f033f0ea8afbf61e5933fb12a7fbf5dbe0f3f3458683fbd6c503f7feb36bf22e92fbf7c654e3f13a4973fab2cb33f2988e2bd
+
+AIO_D 002b40 d7ed2bbe46f7d93f68602cbf60cf323f9bf5abbeb989b0bf831385bf5f29fa3ec4876a3eab9f1b3f686376befb52e1befda79f3e0179e4bd697bb8bf7fa49bbe
+
+AIO_D 002b80 dcbfe73ff7e81abf56e22f3fea9f963a95b54a3f403551bff97497bf9ab50c3f9d6714bf9312943c6cb8acbeb594683f3f6d883e0898423ea25c6dbff18ec7bf
+
+AIO_D 002bc0 920b59bffbd54e3f530f2e3febbd1a3f3d6ac8be60e085bf5c4b913f40547b3e0c1a133f3e4d78bf92373fbf61e9203fdb783d3f6c7e80bf6d08853eee5a94bf
+
+AIO_D 002c00 29db883fa4c10f3fcad70a40a066ba3f1d6829bf0573203eb4fc01bfa8f83b3efc854f3fe1c0053c76c3183eaa9fa2bf3ff70f3f5fec23bd24510d3fa817793f
+
+AIO_D 002c40 7535173cabce2d3f8b651fbf0cba6b3fdbb5fe3cfa88ecbe4f78fcbd720badbfc67917bf3d45c9be1b5e933d260786bde60519bf1ef6d3bd769303c074e0013e
+
+AIO_D 002c80 0887343fb182663f3e64933f9de1efbdc058e4393518c3bec14adcbe05070a3e4487b53fabfbc6bf7254cabe2f21cc3e2d5757bfd380113fb38d9abf9a973cbe
+
+AIO_D 002cc0 33aec0bf9866d93eaccb23bf52de413f929444be939a65bff098b9be4a8f283ec6854c3c832e55be8a4ba0bebc07473d9e49603f6a940cbf5924033f630b9dbf
+
+AIO_D 002d00 60fe343f570a3d3e63d00bbf797e06bfde49f5bf037105bed65ff3be43f6c6bfb1c923bf0092c33e89550abdadc7853d02193fbfdb2d1d3fec1b63be30321f3f
+
+AIO_D 002d40 525a004037a308c01ca334bf86d551bef3146dbfe05e5a3f9e5b07bf8274bb3f5627103ff75b703e14477abef0fd193f67a27b3eace49b3faa846a3eb197603f
+
+AIO_D 002d80 d78c083fc8dc083f9d4cb5bf5d440b3e14a7073f518a84bf407b9fbfdc162fbe3edcc73e6cadc6bf36b1d83eaa2b8d3fefa5f1bde6b6c83e086e0a3fc03809bf
+
+AIO_D 002dc0 caaa423f445d113f4bbb83bfb7e7203f613b743f3cc564bf2661823f7b4c0bbe86989bbf669263bf6a423cbf8b9f2b3f63bda4bec9c390be8e678dbf855e593e
+
+AIO_D 002e00 c8ceaebf2d6161bfa12bc43e2440e03e240242bf220d6dbead75ba3e03cd66be0f3d7c3fefab903f5f36a4be45ffadbfcc05aebe99098c3f5bc0613f08866e3f
+
+AIO_D 002e40 f80a593fed1618bf21dcee3deb35523fad86913c06192f3fa6b28bbf0679aabf6287e23fe959103f7c04e63eeae29e3f4dc3ff3fc2de2740515621c09874a13e
+
+AIO_D 002e80 a2ef913feeede4bf3b07d7bfb8b7cabcbb6df13f2cd18b3fd21006409042a63e9aba983f8a22c93f71930d3f7f80793c10ffec3d041364c02502df3ef49be5bf
+
+AIO_D 002ec0 62273abf02911d3f0970e83ea99ffbbfbc86273fe966413f14d07d3e62eb343f1603133f1ebccdbf722713be18fe85be15938dbf405319bd2b632ebf58f032bd
+
+AIO_D 002f00 7ed17dbf3eaa733f17940840eba21bbf8cf721bdfe4c343caebba93e877b3cbe415d0ec0581ba73e9dcb16befda18ebf768985beb2ad0abf99e33f3e52deb8be
+
+AIO_D 002f40 aae39ebe61992e3d358d7c3ea6c4d7bccaea923f2fff4f3e3ddd3dbf6e93d93fd343ab3de195c23f7e1b8bbf9fa1fe3ef7a1cf3faa1d9b3f09110a3d1c2f20bf
+
+AIO_D 002f80 bda116bfbab8ffbdf5f272bf0fc546bfa36478bf5bb17ebff20f8e3ee7b1e5bff61f333effd33c3fb14674bf8e7b67bf8e1b403cd39438bd0b7f7a3fe1fefdbf
+
+AIO_D 002fc0 337f1cbde4b7bc3fecd1ec3d5c95ee3fcfe712405854f6be8decc53f9f32173f6cd0e23cba378cbe04b64abeed956fbfedaa1ebe83a1813f0283a13fcb39c2be
+
+AIO_D 003000 fa751e3fd683263f809710c059cf523ffeff8dbf374083bff4e97e3f51b8e93f025384bfbe5f4ebf819659bf229de2be561898befd9f3fbf6821c4bffa99f53f
+
+AIO_D 003040 f472e0be293335bfe75a7b3f7f059fbe5cb3933f2e7d623f805e8a3f4a80adbe763e363f6391bfbfe79ba7bfc77f0a3e93f08ebe4706b53ff13d76be1d8cdbbf
+
+AIO_D 003080 254b6f3d32d585be8811683e341496bf15d841bf7292b93d7393433f7ddcd53eb5a5483fe9dbb8bf426254be8d745e3ece4d793f63898e3e301966be39e5a3bd
+
+AIO_D 0030c0 03afc8bd9e29b3bfec356f3d3a91513f87903a3f0745ecbf4266f73a8dbabbbffcb0913fc659173f657a393fa9bb27bf5f14f9bfca0582bf13b4a2be6633c3bf
+
+AIO_D 003100 e60195bf9eefd43f708bb6bf3c31d63efd10fbbff496113efe13403f5caab03e5f268d3fd11cdb3fca74bdbf5c43293e6b9dd73eae83aa3e66f0bf3ff5d24d3e
+
+AIO_D 003140 607a8e3fb9ec8a3f6422a83d330bf93e485356bf269b813edc83043e59de60be1adf09bfdf4e673f0fc91fbe457b0e4072aaa03f7047343fb0f322bf47d0563f
+
+AIO_D 003180 f68b963dab4c733d38628ebf85730e3f724b603ef2f4fabebcda30bf4d3096be29a4aabfcfa90dbf1ebcae3fad6f2bbf8c6e12402549aebf8d7a8a3f66a9883f
+
+AIO_D 0031c0 6134933f453e133f5b39cdbf47ad933f2a11893f7d386f3deb4516c02c3f893fede66fbf365096bef40c9a3ff466a53fcbb7b83e4de416bf1ef5d93f85e28f3f
+
+AIO_D 003200 93e65cbe74c17bbf71f1893ef6d7aebf136ce03fde24f03ef831c9be5c20be3e4e6cd8bf7d70d1bd7cc02dbf3ad0d1bf7c2132bf6ddd923e4446bdbf44ef60be
+
+AIO_D 003240 004abcbffbad443e4919e2bfc2c1363fa4fc263f8dac4f3f68dae23fb3d2f33d2cc16d3d58e7093fe69107bf260ffdbfe56da5bf17d6a4bf9d650d3e613240bf
+
+AIO_D 003280 083ef4be5216f93e864cef3d059df63ff472fcbdb5fd82bf55c9973f32eef8be909917be900f6b3f28e4a43db8f41a3f6cbf34bfec6ac2be5dd3133f342d12bf
+
+AIO_D 0032c0 269ed1be03e530bd31f9cd3f58f7bf3f41b77c3e0876863ddd7a36bfe373a53f4e02c23e86976c3f875fb7bfd712493f82e1173e05663e3f8222843f52899fbc
+
+AIO_D 003300 c4a9bebeea9f353f313b98bfb427b83ff5aab63e11c68bbf20e4a73f16b9773f8cdfc43fa4f0803f7ee1033fdb9cbebcc24c85bf53d94b3f0bf0283f2c8ba8be
+
+AIO_D 003340 6dcf3e3ff9793bbfce919c3fe263a03e4e20d03e00ba12bfa19e833f267d5f3ee44106bf7d97d73e19ea36be5e45883f6c9bbcbf72998fbf9f3e03403e9800bf
+
+AIO_D 003380 f0a9053f739cafbeca4f7b3e12f32940e93ef7bfbc7a133f2b1cab3d97ea723d780345bf294471bfc148af3f8d56fa3e079a93bf381ae83c2a429fbf62193a40
+
+AIO_D 0033c0 1c46f63e2307d1bf7c1e873fa2673d3fd44bd73eddd0793e5ba1f5be246efdbdd84900c08087a73f5fcd0040990bfb3eeba81d3f6cccaebf75eae2be7d7cbabf
+
+AIO_D 003400 66c7a9bf60d4113f120eb63f972da3bd41861e40e52e543f1aaa11c0647fdcbe2b7da73f1206323e8a49883f843fcfbfcbde9e3f2c0297bfc831b03e658f0640
+
+AIO_D 003440 00dc033eae86debd179e693fe3bd2cbfe76a58bf81638f3f6a2cb5bff5759bbfef79e13f0f0ba2bf88b1e33e2c878e3f536e8abda35a8abfd6ff4c3f2c2680bf
+
+AIO_D 003480 6a060540355c0d407b1c86bf9774103feda038bf6ad5a83ebb5f97befca47cbf050c0c3f7b23cbbf1bd08c3ee6e335be6ab13ebff22f673fc012dd3deb8b90be
+
+AIO_D 0034c0 1d7969bd0cf6c8bd75c87d3fb8a558bea84633c0656943c0cb5e73bf1d1398bf92d280be474ea9bf249250bf6fd8a73f20c2adbfcc25523f60221dbe96b59f3f
+
+AIO_D 003500 a1ae583f4f29c63c13bb853ff11a413ed65594bfabf8e83eed04fc3e45b9ddbd7c70a33ef711c9be0790e73e3e040dbe1b3cb5bf3ddaf8bd05d8d83f1e31753f
+
+AIO_D 003540 2cc5cf3f8684c73ddc43c0bef6088abf0d3a0e3e8922853fd927603ff1ca573ff4d9c0beba94753e6e403abf87b3673f7da1293f976d26bfe7bddc3d3c6b12c0
+
+AIO_D 003580 97a1283f78605abff849d4beecf40e3f8dd11f3f749338bf7d41c93f55d50140ad21ba3f2853b03f948e0f3e722cb73f51324cbfea8380bfcfa4863ec198893e
+
+AIO_D 0035c0 0c2a43bf9977e43f1b0bb9bfa72a0ac05de008bf8c71c43f97b9393fd105d83eaedb733e4a94243f5936b43ed564d93d3559cbbd63f2cfbfe4e06d3f8dbd04bf
+
+AIO_D 003600 8d87883ecba6d53ef69a733f446b5abfda573f3f2c5c463f6f6f10bed2f6afbd40c5163e28ad6ebf49e5c3be237788bf2afb9d3fb0a730bf5dcd82bf9bb2f83d
+
+AIO_D 003640 02eb0c3f6b34cabe2fab7bbf5898b03e819c403fa792d6bf073e563f2286d4bf36933a3f0bccb2be01ad88becae7273f7a46b53fb1d30040ecf4a33f97a70f3f
+
+AIO_D 003680 7a0fb8bf73e3f2becc8ba13d4d3326bfae850b3f7bd597bed0bde13fc9197cbee29ba4bf7c82fdbe5dff26bf3564373fdc79b83f239e823fcd7c833f8a4125bf
+
+AIO_D 0036c0 2ce788bfea9f4abf431c8c3c0ed09ebef30e9d3e81b6833f55cf1b3ebd31de3f44ba1ebfff62393f7a401bbd73417e3f09a56dbd734c10bff09a4bbeee8681bf
+
+AIO_D 003700 f6a58fbf29fc483f042e11bf9e77a53fd8fa2440e41cb4bef9785c3f00d20dbe0704f4bfaf7599bda72cbe3fe83091bf505bb1bdbcc8ecbd2104a9bf5699b93e
+
+AIO_D 003740 5f71dabd399f163fb806923dfeadabbfa6a5533ea912333fa56650be9d80223f29cd173f02d203c06505243f258905c027ddabbfcf7d3bbe1d8d8bbfbe847cbf
+
+AIO_D 003780 abb09d3f980467bf94c09b3f7019e73fc298bb3f977a6dbf8cbeb7bf289e25bd6667fc3fc61e96be8b471fbf2f1a1bbed0e0403ff5af943f8acffe3cbaa9bdbd
+
+AIO_D 0037c0 d877fb3e09f4a43b7f9adbbe9c6fd9bfaac2433e966202bf4a8421bea59774be4f565cbf2862123fe3a8953f91262d3f3fcb0ebf9d714b3ea942473f701d42bd
+
+AIO_D 003800 12f5ed3e87a3ccbf88df68bee3b2b73fa7f8633f2ea357be4ef19f3d9588034018d16a3fec5950bf4b687b3e872e01bf30cb16bf48a39abf852f313f67410c40
+
+AIO_D 003840 eef3663febc89bbf10c20a3f102eb4bf797ba03e24628f3f6106c83fa728553e1699b63e4ba5383d71a346be62b8c23f513d56bf7143bfbf7e3bd33f4cd90140
+
+AIO_D 003880 1763aebf19798c3f4ad15d3fcec2b5be5dcf38bf7199b93e6c6083bebec5313f6a9946bff5d8863f074d38bf34c3c73fa848583fa4068d3fe6a0c6be6ad048be
+
+AIO_D 0038c0 c2fa9cbdf691963f42321bbf841e3dbf3b8d23be0b24cd3ef0bc183d7a1c22bb8d2e9fbf45b213bf3de081bff5f9833f3cd7adbd535c2e3f1a118fbf91c0253c
+
+AIO_D 003900 b716813e2df381bf960301bfa3afecbe710c1f3ecc0ec43e8bb3a7bf77ca2d3ece66023db2ebf73dd8f181bfa22d49bedb0b983f7fc2873f234326bf5ac2c53f
+
+AIO_D 003940 afb2dfbe2dc561bf4b178d3ffe2cad3ed4b61040a17613be681e423ebf7a403f3822a53ebb1ba1be6a05193e4aaae23d2ab1ae3d6e068c3d1776adbf854d663f
+
+AIO_D 003980 0ee824bf67d4a2beeccb58bfe97e7dbeebe66f3f9479993f5b467c3e60d4913bd20b35bfc3ccdebe48437d3d325a91be42e28bbfd744e5bc3b3a90bfe0c4f93f
+
+AIO_D 0039c0 6c65563ed9d024bf4116d03e957c44bfdf108fbebf94c33f0266a13f041d97bf131791bfc2160dbf38b40c406f1d0a3e743eb73eec8ffabee511a43fd16d6d3f
+
+AIO_D 003a00 7034cbbf09332bbfc9d4dabf487986bf0b8522bf208c90bf9ac006bff10d213f06887c3f674235bd0184163f735fc1bfa620a73f05f4084017df8cbefb3ce33e
+
+AIO_D 003a40 2b657d3efa6a10c0273c6a3fcb42c53ef6add6bfac2d01bfa92d8a3f4df80b3fc981adbf6e6be8bea73e0abf2c458c3e4f7b1bbfe68d463eda55b3bc7a38b4bf
+
+AIO_D 003a80 afb25b3e93de4c3e558a3cbf490f243fa4b60a402492d5bf6a34183e7f064a3f9f5b8d3cf0ca2bbf10ae0440655f27bf6f197bbea09d49bfc045833fe7a213c0
+
+AIO_D 003ac0 fc3888bf26e41bbfccf52b3edc56583ec2385d3f4aac7dbe5a3147bffde5b33cee2e3ebf2943f7be3fa2fdbe7651c23e2d1d6a3f30bf8cbf08361dbfa86183bd
+
+AIO_D 003b00 049e0f3d55c933bec6381a3f563595bd5bbecfbf4c69bb3fe78595bf991bc93f9d08003e1e6d7d3eca24c0bf347e683eaa2f92be7bc873bf4110d53ebde91d3f
+
+AIO_D 003b40 4e3a8a3f29f2a7bf8a4965bfce0fa73fe8ddf93e53c44b3f685cecbe7f15bc3ecf9b5b3f748784bf2f46fbbe4a95b23e59b7b83f47f6a9be1f354c3f5fa32fbf
+
+AIO_D 003b80 935986bff227563f769a5fbf9ed2ea3d5306f0be50fb183fa5928dbfc26c98bfd58aa5bfde0f62bef11f913f931f2d3fc9cdc23db73d52bede47903f121344be
+
+AIO_D 003bc0 f0346d3ff5a49f3fb3d7143ff601bb3e7cafb13e0f7d16be2505853e44aa42bfb66045bf1b34c73f4fb3cabd689dcfbfd6f8ae3fcdfea63fdb65d83e63579ebf
+
+AIO_D 003c00 9516db3f3408783f6de1913fdefc86bef5f6cc3ed5cf93be3f1f6bbe3a0688bf4de335bfbd88edbebe49db3d9b6e763fb338e03e8770f7bf6851573fba1ccfbf
+
+AIO_D 003c40 7367b83ece6aa4beab19abbda71112bf237283bfeda7dc3ff12414c045c23fbf40cfb73f26cd653d1445063e71064ebf46fc87bf05eb323f9dd0cdbdcc4aa73e
+
+AIO_D 003c80 c151673f5c4fc6bf6a1d5fbf036711bfd197b23e6ef6603f0a6370bfa04c1dbe8b3b893d2e9c703cca2ad73f62dd1dbf2ff3913e5e4b0ac07760cfbbebff5b3e
+
+AIO_D 003cc0 0d38453fbd18e6becf9be7befdca8ebff55bd3befc9f1b4008d6d1bf9975cbbfa9a63b3e223c59bf8c0cac3fc004b4bf5db8db3f01b0c0beddf9c4bfd62d05c0
+
+AIO_D 003d00 53ff95bf1c1f62bf4a13e53d9af7bdbfdece3240ca4b263fb1e3d7be58453dbfc4621a40a59173bfc04d0a3f9c7f9d3f61488fbf36b8a03e621730bf87d6903f
+
+AIO_D 003d40 68dc963f8843ae3e4045ffbd135bb2bf2f4a0b40d6c9a63f26600c3fee0ea43f963a2cbe8b2da9bf5dc6383fca639cbf18fb47bfc63dfb3e86f0ddbfc0e037be
+
+AIO_D 003d80 1cdd18be9de474bf1c638ebfd2d22dbd7c72febd204a9f3ea09bafbf9064823ec57691bf1c4930bf7dbf8b3f7cfb04bfa57bb5be776e2abf4d6dd13dc7ed6f3f
+
+AIO_D 003dc0 65b744be6f05563fbc3293bfba601b3fee071c3ca2be5e3e5ad444bfa89704bf2508cd3e08b887bf5154623f92f497be08a8183fa78583bf5dc1bfbf6f293d3f
+
+AIO_D 003e00 9ed71e3feb4bf8bd0559173f042c8cbda682173f8e7af03d23cd81bf1dd6853f78c47fbf64360c4080ef4ebe610075bf49578fbef55f23bc141a483db4bfe53e
+
+AIO_D 003e40 20f620bf597102c0a3e46ebf1731b43e069f843f599f00c09a7e9a3dc99b883f0c55bdbf10ded73fc48853bfd8473bbe87370ebf76aae33fafb95e3f7eb8ce3d
+
+AIO_D 003e80 46a336bebc6acebf287778be9ca0e1be27b132be1f90e4bfaab79a3f6a2c6a3fb2efdb3fc56a0dbf5c2ea6bc3a9596bf6383683f5775f1bd3178e13fbee6503f
+
+AIO_D 003ec0 3ee54a3f6510043f6b1bb4bfcc37483fd951bebfc2399b3e96210b3fc87c8abfe1331cbfda82f5bdcf8cca3e436b913e6e204c3e9c715bbf041bef3e1a1c1d40
+
+AIO_D 003f00 e06728bf3fbbc03fa9c0a5bfb84b16bfb950993f49d5763f6c8bc43f50be153f9ead16bf91728fbc9c97f4bee988823f34d2093f4fcc973fa22f36bf1e9ad4be
+
+AIO_D 003f40 6eeed3be6bbff5bebed309be00df913f8516613e91548b3f0cf34b3e2ecceabfa80bbcbfe74078be80108f3f6ecbd0bd919ec0bf6961b5bbec0461bea28f0f3f
+
+AIO_D 003f80 668d4d3f033bb63e64b81bbf2dbd7fbfa83cb5be7e433f3bee47c13e7904dabef73c17bfbbc0053f24fb583fc615a53e41c27bbf97f38dbe000f1240dc1389bf
+
+AIO_D 003fc0 f3dc63be7a567f3f06e26bbf008c84be528cb33fdaad833fcca7e1bfd318243fce7da9be3d37b4bf6eba8b3f661509bfdfbfffbcb0b050bf34cd653fb5208a3f
+
+AIO_END tag=unet bytes=16384 elems=4096 crc32=7679ee6f dump_ms=3182.202
+
+device_teardown done
+
+main: signaling console_reader thread to stop...
+
+[Program completed after 10s]
+
+============================================================
+CONSOLE OUTPUT SUMMARY:
+============================================================
+
+>>> --netload: board left powered on, netboot supervisor stays resident
+
+============================================================
+Test complete!
+============================================================
+
+Connections closed.

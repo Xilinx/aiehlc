@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 
 #define UC_KW_ELEMS @MAXW@ /* largest ch*K (bf16) */
 #define UC_KX_ELEMS @MAXX@ /* largest px*K (bf16) */

@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // aiednn/conv2d/conv1x1_bf16.cc -- 1x1 conv (pointwise; stride 1, or 2 for the ResNet downsample shortcut) as a
 // GEMM over pixels: y[co][p] = sum_ci w[co][ci] x[ci][p] + b[co], bf16 in / out, fp32 accumulation on
 // aie::mmul<4,8,4,bf16,bf16,accfloat>, bias + optional activation fused (ACT: 0 none, 1 ReLU, 2 SiLU).

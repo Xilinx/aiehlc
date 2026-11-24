@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
 module attributes {routing.control_packet_mode = 0 : i64, routing.control_plan_dedicated_shim = 0 : i64, routing.control_plan_group_reg_write = 0 : i64, routing.control_plan_op_control_packet = 0 : i64, routing.control_plan_shim_bd_ctrl = 0 : i64, routing.fullconnect_auto = 1 : i64, routing.kernel_config_offload = 0 : i64, routing.output_tile_major = 0 : i64} {
   func.func @main(%arg0: memref<64x256xi8>, %arg1: memref<256x64xi8>, %arg2: memref<64x64xi8>) {
     %0 = routing.routingcreatehwmesh row = 4, col = 4 partition = 3, 6, 0, 6 -> i32

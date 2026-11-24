@@ -1,0 +1,33 @@
+{
+ "b_prefetch_b": 164140.0965,
+ "chunk_ovh_cyc": 58.42,
+ "compute_exposed": 0.0,
+ "ddr_bw_scale": 1.7503,
+ "ddr_model": "bytes",
+ "ddr_run0_b": 51.1319,
+ "fitted_on": [
+  "u_conv_1024x2880x320",
+  "u_conv_256x2880x640",
+  "u_conv_256x5760x640",
+  "u_conv_64x11520x1280",
+  "u_lin_1024x1280x320",
+  "u_lin_1024x320x2560",
+  "u_lin_1024x320x320",
+  "u_lin_1024x320x960",
+  "u_lin_256x640x1920",
+  "u_lin_256x640x5120",
+  "u_lin_256x640x640",
+  "u_lin_64x1280x1280",
+  "u_lin_64x1280x3840",
+  "u_lin_77x768x640",
+  "y_conv_1600x192x128",
+  "y_conv_1600x64x64",
+  "y_conv_400x576x64"
+ ],
+ "k_form": "m5",
+ "meas": "rt_wait_io",
+ "n": 17,
+ "round_fixed_cyc": 12048.6471,
+ "src_params": "/scratch/staff/huaj/aiehlc/aiehlcopensource/aiehlchj/.worktrees/costmodel/script/perf/params/palmyra213.json",
+ "wait_call_cyc": 582.2456
+}

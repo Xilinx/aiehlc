@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // aiednn/conv2d/dw3x3_bf16.cc -- depthwise 3x3 conv (groups = C, stride 1, pad 1; the YOLO DWConv), bf16 in / out,
 // fp32 accumulation, bias + optional activation fused (ACT: 0 none, 1 ReLU, 2 SiLU).
 // Per channel, 16 output pixels of a row per step: 9 aie::mac of a shifted 16-pixel input vector by the

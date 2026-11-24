@@ -52,5 +52,5 @@ aiehlc = "aiegraph._tools:aiehlc_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["aiegraph*", "frontend*"]
+include = ["aiegraph*", "costmodel*", "frontend*"]
 namespaces = true                  # src/frontend has no __init__.py

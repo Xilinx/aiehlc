@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 // aiednn/conv2d/conv_silu_bf16.cc -- KxK conv (stride 1 or 2) with bias + SiLU fused into the epilogue:
 // the YOLO Conv -> Sigmoid -> Mul block as ONE kernel (y = z * sigmoid(z), z = conv + bias, fp32), bf16 in / out,
 // fp32 accumulation. Implicit GEMM on aie::mmul<4,8,4,bf16,bf16,accfloat>.

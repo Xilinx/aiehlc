@@ -69,6 +69,10 @@ XAie_DevInst *getOrCreateDeviceInstance(void) { return g_DevInst; }
 #ifndef AIEHLC_PROFILING
 #define AIEHLC_PROFILING 0
 #endif
+/* M3.1.1: per-wait core-counter snapshot (diagnostic, perturbs the waits); default off = one A/B read per launch */
+#ifndef AIEHLC_CORE_PERF_WIN
+#define AIEHLC_CORE_PERF_WIN 0
+#endif
 
 #if AIEHLC_PROFILING && defined(__aarch64__) && !defined(__AIESIM__)
 static inline unsigned long long __rt_pmccntr(void) {
@@ -105,7 +109,8 @@ static unsigned long long g_prof_excl_cyc = 0ULL;
 static inline unsigned long long __rt_prof_now(void) { return __rt_pmccntr() - g_prof_excl_cyc; }
 
 #if AIEHLC_PROFILING
-#define RT_PROF_TIC() __rt_prof_now()
+static inline unsigned long long __rt_prof_tic(void);
+#define RT_PROF_TIC() __rt_prof_tic()
 #define RT_PROF_ADD(cyc, n, t0)                                                                                        \
     do {                                                                                                               \
         (cyc) += (__rt_prof_now() - (t0));                                                                             \
@@ -135,6 +140,9 @@ static inline unsigned long long __rt_prof_now(void) { return __rt_pmccntr() - g
 /* GAP-RT1: always-on wait_io time in generic-timer ticks (XTime clock), independent of AIEHLC_PROFILING */
 static unsigned long long g_hs_wait_ticks = 0ULL;
 static unsigned int g_hs_wait_calls = 0U;
+/* always-on log-dump time (klog + debug snapshot), same tick axis as g_hs_wait_ticks */
+static unsigned long long g_log_dump_ticks = 0ULL;
+static unsigned int g_log_dump_calls = 0U;
 static unsigned long long g_wait_io_cycles = 0ULL;
 static unsigned int g_wait_io_calls = 0U;
 static unsigned long long g_wait_io_iters = 0ULL;
@@ -144,6 +152,66 @@ static int g_ctrl_high_throughput_ready = 0;
 enum { PH_KLOAD = 0, PH_BDCFG = 1, PH_COREEN = 2, PH_STARTIO = 3, PH_N = 4 };
 static unsigned long long g_ph_cyc[PH_N] = {0, 0, 0, 0};
 static unsigned int g_ph_calls[PH_N] = {0, 0, 0, 0};
+/* M1.1 launch words (AIEHLC_PROFILING): device words the host writes per phase.
+ * g_wc_mmio = MMIO words that reach the real IO backend (Write32 / MaskWrite32 = 1, BlockWrite32 /
+ * BlockSet32 = n, wide PM writes = n; fa84 maxwell/mmio-count 021cbf8 backend wrap, cumulative, no
+ * LAUNCH_TL); writes the shim-BD control-packet window captures never reach it. g_wc_cp = control-packet
+ * words sent by that window ([SHIM_BD_CTRL] words). Every RT_PROF_TIC() snapshots (tic, total words,
+ * attributed words) in a ring; RT_PROF_PHASE(ph, t0) charges the words since its t0 not already charged to
+ * a nested phase to g_wc_ph[ph] (t0 not in the ring: g_wc_miss++). */
+static unsigned long long g_wc_mmio = 0ULL, g_wc_cp = 0ULL, g_wc_ph[PH_N] = {0, 0, 0, 0}, g_wc_attr = 0ULL,
+                          g_wc_miss = 0ULL;
+#if AIEHLC_PROFILING
+#define RT_WC_RING 256U
+static struct {
+    unsigned long long tic, tot, attr;
+} g_wc_ring[RT_WC_RING];
+static unsigned int g_wc_ring_n = 0U;
+static inline unsigned long long __rt_prof_tic(void) {
+    const unsigned long long t = __rt_prof_now();
+    const unsigned int i = (g_wc_ring_n++) & (RT_WC_RING - 1U);
+    g_wc_ring[i].tic = t;
+    g_wc_ring[i].tot = g_wc_mmio + g_wc_cp;
+    g_wc_ring[i].attr = g_wc_attr;
+    return t;
+}
+static inline void __rt_wc_phase(int ph, unsigned long long t0) {
+    const unsigned int n = g_wc_ring_n < RT_WC_RING ? g_wc_ring_n : RT_WC_RING;
+    for (unsigned int k = 1U; k <= n; k++) {
+        const unsigned int i = (g_wc_ring_n - k) & (RT_WC_RING - 1U);
+        if (g_wc_ring[i].tic == t0) {
+            const unsigned long long d = (g_wc_mmio + g_wc_cp - g_wc_ring[i].tot) - (g_wc_attr - g_wc_ring[i].attr);
+            g_wc_ph[ph] += d;
+            g_wc_attr += d;
+            return;
+        }
+    }
+    g_wc_miss++;
+}
+#define RT_WC_MMIO(n) (g_wc_mmio += (n))
+#define RT_WC_CP(n) (g_wc_cp += (n))
+static XAie_Backend s_wc_be;
+static const XAie_Backend *s_wc_real;
+static AieRC rt_wc_w32(void *io, u64 off, u32 v) { g_wc_mmio++; return s_wc_real->Ops.Write32(io, off, v); }
+static AieRC rt_wc_mw32(void *io, u64 off, u32 m, u32 v) { g_wc_mmio++; return s_wc_real->Ops.MaskWrite32(io, off, m, v); }
+static AieRC rt_wc_bw32(void *io, u64 off, const u32 *d, u32 n) { g_wc_mmio += n; return s_wc_real->Ops.BlockWrite32(io, off, d, n); }
+static AieRC rt_wc_bset(void *io, u64 off, u32 d, u32 n) { g_wc_mmio += n; return s_wc_real->Ops.BlockSet32(io, off, d, n); }
+static void rt_wc_install(XAie_DevInst *dev) {
+    if (dev->Backend == &s_wc_be)
+        return;
+    s_wc_real = dev->Backend;
+    s_wc_be = *dev->Backend;
+    s_wc_be.Ops.Write32 = rt_wc_w32;
+    s_wc_be.Ops.MaskWrite32 = rt_wc_mw32;
+    s_wc_be.Ops.BlockWrite32 = rt_wc_bw32;
+    s_wc_be.Ops.BlockSet32 = rt_wc_bset;
+    dev->Backend = &s_wc_be;
+}
+#else
+#define RT_WC_MMIO(n) ((void)0)
+#define RT_WC_CP(n) ((void)0)
+static inline void rt_wc_install(XAie_DevInst *dev) { (void)dev; }
+#endif
 
 static unsigned long long g_bd_init_cyc = 0ULL, g_bd_write_cyc = 0ULL;
 static unsigned int g_bd_init_n = 0U, g_bd_write_n = 0U;
@@ -199,6 +267,7 @@ static unsigned int g_pmap_print_n = 0U;
 static inline void __rt_ph_add(int ph, unsigned long long t0) {
     g_ph_cyc[ph] += (__rt_prof_now() - t0);
     g_ph_calls[ph]++;
+    __rt_wc_phase(ph, t0);
 }
 #endif
 
@@ -213,6 +282,17 @@ void __Runtime_host_split_wait_ticks(unsigned long long *ticks, unsigned int *ca
         *ticks = g_hs_wait_ticks;
     if (calls)
         *calls = g_hs_wait_calls;
+}
+void __Runtime_log_dump_ticks(unsigned long long *ticks, unsigned int *calls) {
+    if (ticks)
+        *ticks = g_log_dump_ticks;
+    if (calls)
+        *calls = g_log_dump_calls;
+}
+unsigned long long __Runtime_log_dump_now(void) { return ahs_now(); }
+void __Runtime_log_dump_account(unsigned long long ticks) {
+    g_log_dump_ticks += ticks;
+    g_log_dump_calls++;
 }
 void __Runtime_wait_io_iters(unsigned long long *iters) {
     if (iters)
@@ -280,6 +360,24 @@ void __Runtime_kload_split_cycles(unsigned long long *elf_cyc, unsigned int *elf
     if (rst_n)
         *rst_n = g_kl_rst_n;
 }
+/* M1.1: cumulative launch words since boot (AIEHLC_PROFILING; zeros otherwise): MMIO words, control-packet
+ * words, words per phase (PH_KLOAD/PH_BDCFG/PH_COREEN/PH_STARTIO), BD configs issued (bd_n, incl. AOT window
+ * calls), core resets (rst_n), phase ends whose t0 left the snapshot ring (miss). */
+void __Runtime_launch_words(unsigned long long *mmio_w, unsigned long long *cp_w, unsigned long long *ph_w,
+                            unsigned int *bd_n, unsigned int *rst_n, unsigned long long *miss) {
+    if (mmio_w)
+        *mmio_w = g_wc_mmio;
+    if (cp_w)
+        *cp_w = g_wc_cp;
+    for (int i = 0; ph_w && i < PH_N; i++)
+        ph_w[i] = g_wc_ph[i];
+    if (bd_n)
+        *bd_n = g_bd_write_n;
+    if (rst_n)
+        *rst_n = g_kl_rst_n;
+    if (miss)
+        *miss = g_wc_miss;
+}
 void __Runtime_kload_fill_cycles(unsigned long long *fill_cyc, unsigned int *fill_n, int *aot) {
     if (fill_cyc)
         *fill_cyc = g_kl_elf_fill_cyc;
@@ -313,28 +411,259 @@ static XAie_DevInst *s_core_perf_probe_dev = NULL;
 #define RT_CORE_PERF_MAX_TILES 64
 static XAie_LocType s_core_perf_tiles[RT_CORE_PERF_MAX_TILES];
 static int s_core_perf_ntiles = 0;
-/* Snapshot of ACTIVE / LOCK_STALL taken right before the first DMA start of a launch, so the
- * report can separate "core enabled, host still configuring BDs / flushing inputs" from the
- * on-array run (the kernel group is enabled before the host writes BDs and starts IO). */
-static uint32_t s_core_perf_snap_a[RT_CORE_PERF_MAX_TILES];
-static uint32_t s_core_perf_snap_ls[RT_CORE_PERF_MAX_TILES];
-static int s_core_perf_snap_pending = 0;
-static int s_core_perf_snap_valid = 0;
-__attribute__((unused)) static void rt_core_perf_snap_at_startio(void) {
-    if (!s_core_perf_snap_pending || s_core_perf_probe_dev == NULL)
+/* M3.1.1 counter window (launch window). The core counters (0 ACTIVE / 2 STREAM_STALL / 3 LOCK_STALL, armed
+ * and zeroed by rt_kernel_profile_setup when the kernel group is enabled) are read ONCE per launch at A
+ * (rt_core_perf_launch_snap(0): off before the launch's first startio, aot-kco before the first wait_io's
+ * rt_sb_commit) and ONCE at B (rt_core_perf_launch_snap(1): after the launch's last wait RT_PROF_ADD, before
+ * [PERFIO] / the site-perf getter). Per tile, A->B:
+ *   compute   = dACTIVE - dLOCK_STALL - dSTREAM_STALL
+ *   ovl       = (host time of this tile's B read - its A read) - sum(wait of this launch), AIE cycles at
+ *               RT_CORE_PERF_AIE_MHZ (per tile: the A/B reads of 16 tiles take ~28 us, so a launch-wide host
+ *               window would be off by that much per tile)
+ *   io_active = max(0, dACTIVE - ovl) = counter 0 inside the waits, lower bound (ACTIVE outside the waits <= ovl)
+ *   snap_gap  = last wait end -> B start, AIE cycles
+ * Nothing of the counter path runs per wait: the wait path only stores ahs_now() and adds the wait ticks
+ * after RT_PROF_ADD (plain stores, no MMIO, outside __wio_t0..RT_PROF_ADD -- WINLINT). The old per-wait
+ * snapshot (~27.8 us of MMIO per wait, ~960 waits per u_lin launch, ISS-1120090911-PD) shrank the measured
+ * waits; it is compiled only with AIEHLC_CORE_PERF_WIN (diagnostic, then io_active = per-wait window sum). */
+#ifndef RT_CORE_PERF_AIE_MHZ
+#define RT_CORE_PERF_AIE_MHZ 1000ULL /* p0_one_kernel.sh --aie-clk-mhz default */
+#endif
+static uint32_t s_klw_a0[RT_CORE_PERF_MAX_TILES], s_klw_ls0[RT_CORE_PERF_MAX_TILES], s_klw_ss0[RT_CORE_PERF_MAX_TILES];
+static unsigned char s_klw_ok[RT_CORE_PERF_MAX_TILES];     /* A and B read OK on this tile */
+static uint32_t s_klw_act[RT_CORE_PERF_MAX_TILES];         /* ACTIVE total at B (since kernel-group enable) */
+static unsigned long long s_klw_compute[RT_CORE_PERF_MAX_TILES]; /* A->B ACTIVE - LOCK - STREAM */
+static unsigned long long s_klw_io[RT_CORE_PERF_MAX_TILES];      /* max(0, compute - ovl) */
+static unsigned long long s_klw_ls[RT_CORE_PERF_MAX_TILES];      /* A->B LOCK_STALL */
+static unsigned long long s_klw_ss[RT_CORE_PERF_MAX_TILES];      /* A->B STREAM_STALL */
+static unsigned long long s_klw_da[RT_CORE_PERF_MAX_TILES];      /* A->B ACTIVE */
+static unsigned long long s_klw_ta[RT_CORE_PERF_MAX_TILES];      /* ahs_now() just before this tile's A read */
+static unsigned long long s_klw_tovl[RT_CORE_PERF_MAX_TILES];    /* per-tile ovl, AIE cycles */
+static int s_klw_state = 0;                     /* 0 idle, 1 A pending, 2 A taken, 3 B taken */
+static int s_klw_given = 0;                     /* this launch was handed out (__Runtime_core_perf_last_launch*) */
+static int s_klw_given_b = -1;                  /* tile _win handed out (the _ovl getter reads the same one) */
+static unsigned s_klw_nwait = 0;                /* waits between A and B */
+static unsigned long long s_klw_a_end_t = 0ULL; /* ahs_now() at the end of A */
+static unsigned long long s_klw_wait_t = 0ULL;  /* sum(wait) between A and B, host ticks */
+static unsigned long long s_klw_wend_t = 0ULL;  /* ahs_now() at the end of the last wait */
+static unsigned long long s_klw_ovl_cyc = 0ULL;
+static unsigned long long s_klw_gap_cyc = 0ULL;
+static unsigned long long s_klw_tic[2];    /* RT_PROF_TIC() at A / B */
+
+/* host generic-timer ticks (ahs_now's counter) -> AIE cycles; 0 where there is no counter (x86) */
+static unsigned long long rt_core_perf_ticks_to_cyc(unsigned long long t) {
+    unsigned long long f = 0ULL;
+#if defined(__aarch64__) && !defined(__AIESIM__) && !defined(__chess__)
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+#endif
+    if (f == 0ULL)
+        return 0ULL;
+    return (unsigned long long)((double)t * ((double)RT_CORE_PERF_AIE_MHZ * 1e6) / (double)f);
+}
+
+#if AIEHLC_CORE_PERF_WIN
+/* diagnostic per-wait window (old M3.1.1 PA): snapshot after rt_sb_ack_wait(), before __wio_t0; read after
+ * RT_PROF_ADD; per-wait deltas summed per launch. ~48 MMIO reads per wait: perturbs the waits it measures. */
+static uint32_t s_kwin_snap_a[RT_CORE_PERF_MAX_TILES];
+static uint32_t s_kwin_snap_ls[RT_CORE_PERF_MAX_TILES];
+static uint32_t s_kwin_snap_ss[RT_CORE_PERF_MAX_TILES];
+static unsigned char s_kwin_snap_ok[RT_CORE_PERF_MAX_TILES];
+static unsigned long long s_kwin_a[RT_CORE_PERF_MAX_TILES];  /* in-window ACTIVE, this launch */
+static int s_kwin_snap_valid = 0;
+static unsigned long long s_kwin_snap_t = 0ULL;
+static unsigned long long s_kwin_wio_t = 0ULL;
+static unsigned long long s_kwin_gap_cyc = 0ULL;
+
+static void rt_core_perf_wait_snap(void) {
+    if (s_core_perf_probe_dev == NULL || s_core_perf_ntiles == 0)
         return;
-    s_core_perf_snap_pending = 0;
+    s_kwin_snap_t = ahs_now();
     for (int i = 0; i < s_core_perf_ntiles; i++) {
-        s_core_perf_snap_a[i] = 0;
-        s_core_perf_snap_ls[i] = 0;
-        (void)XAie_PerfCounterGet(s_core_perf_probe_dev, s_core_perf_tiles[i], XAIE_CORE_MOD, 0, &s_core_perf_snap_a[i]);
-        (void)XAie_PerfCounterGet(s_core_perf_probe_dev, s_core_perf_tiles[i], XAIE_CORE_MOD, 3, &s_core_perf_snap_ls[i]);
+        uint32_t a = 0, ss = 0, ls = 0;
+        s_kwin_snap_ok[i] = __Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, NULL, &ss,
+                                                     &ls) == XAIE_OK;
+        s_kwin_snap_a[i] = a;
+        s_kwin_snap_ss[i] = ss;
+        s_kwin_snap_ls[i] = ls;
     }
-    s_core_perf_snap_valid = 1;
+    s_kwin_snap_valid = 1;
+}
+
+static inline void rt_core_perf_wio_mark(unsigned long long hs_t0) { s_kwin_wio_t = hs_t0; }
+
+static void rt_core_perf_site_read(void) {
+    if (!s_kwin_snap_valid || s_core_perf_probe_dev == NULL || s_core_perf_ntiles == 0)
+        return;
+    s_kwin_snap_valid = 0;
+    for (int i = 0; i < s_core_perf_ntiles; i++) {
+        uint32_t a = 0;
+        if (!s_kwin_snap_ok[i] ||
+            __Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, NULL, NULL, NULL) != XAIE_OK)
+            continue;
+        s_kwin_a[i] += (uint32_t)(a - s_kwin_snap_a[i]);
+    }
+    if (s_kwin_wio_t > s_kwin_snap_t)
+        s_kwin_gap_cyc += rt_core_perf_ticks_to_cyc(s_kwin_wio_t - s_kwin_snap_t);
+}
+#endif
+
+/* launch start (kernel group enabled, counters zeroed): A pending, sums cleared */
+static void rt_core_perf_launch_reset(void) {
+    s_klw_given_b = -1;
+    for (int i = 0; i < RT_CORE_PERF_MAX_TILES; i++) {
+        s_klw_ok[i] = 0;
+        s_klw_compute[i] = s_klw_io[i] = s_klw_ls[i] = s_klw_ss[i] = s_klw_da[i] = s_klw_ta[i] = s_klw_tovl[i] = 0ULL;
+        s_klw_act[i] = 0;
+#if AIEHLC_CORE_PERF_WIN
+        s_kwin_a[i] = 0ULL;
+#endif
+    }
+#if AIEHLC_CORE_PERF_WIN
+    s_kwin_snap_valid = 0;
+    s_kwin_gap_cyc = 0ULL;
+#endif
+    s_klw_state = 1;
+    s_klw_given = 0;
+    s_klw_nwait = 0;
+    s_klw_wait_t = s_klw_wend_t = s_klw_a_end_t = 0ULL;
+    s_klw_ovl_cyc = s_klw_gap_cyc = 0ULL;
+}
+
+/* __Runtime_wait_io, after RT_PROF_ADD: account this wait to the launch window (plain stores, no MMIO) */
+static inline void rt_core_perf_wait_done(unsigned long long hs_t0, unsigned long long hs_t1) {
+    if (s_klw_state != 2)
+        return;
+    s_klw_wait_t += hs_t1 - hs_t0;
+    s_klw_wend_t = hs_t1;
+    s_klw_nwait++;
+}
+
+/* One counter read per launch end: end=0 -> A (no-op unless pending), end=1 -> B (no-op unless A was taken).
+ * Reads counters 0/2/3 of every armed core tile and marks RT_PROF_TIC (+ ahs_now for the host window). */
+static void rt_core_perf_launch_snap(int end) {
+    if (s_core_perf_probe_dev == NULL || s_core_perf_ntiles == 0 || s_klw_state != (end ? 2 : 1))
+        return;
+    const unsigned long long t0 = ahs_now();
+    s_klw_tic[end ? 1 : 0] = RT_PROF_TIC();
+    for (int i = 0; i < s_core_perf_ntiles; i++) {
+        uint32_t a = 0, ss = 0, ls = 0;
+        const unsigned long long ti = ahs_now(); /* counter 0 (ACTIVE) is read first */
+        const int ok = __Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, NULL, &ss, &ls) ==
+                       XAIE_OK;
+        if (!end) {
+            s_klw_ok[i] = (unsigned char)ok;
+            s_klw_ta[i] = ti;
+            s_klw_a0[i] = a;
+            s_klw_ls0[i] = ls;
+            s_klw_ss0[i] = ss;
+            continue;
+        }
+        if (!ok)
+            s_klw_ok[i] = 0;
+        if (!s_klw_ok[i])
+            continue;
+        const unsigned long long da = (uint32_t)(a - s_klw_a0[i]);
+        s_klw_ls[i] = (uint32_t)(ls - s_klw_ls0[i]);
+        s_klw_ss[i] = (uint32_t)(ss - s_klw_ss0[i]);
+        s_klw_act[i] = a;
+        s_klw_da[i] = da;
+        s_klw_compute[i] = da > s_klw_ls[i] + s_klw_ss[i] ? da - s_klw_ls[i] - s_klw_ss[i] : 0ULL;
+        s_klw_ta[i] = ti > s_klw_ta[i] ? ti - s_klw_ta[i] : 0ULL; /* now: this tile's A->B host window */
+    }
+    if (!end) {
+        s_klw_a_end_t = ahs_now();
+        s_klw_state = 2;
+        return;
+    }
+    const unsigned long long host = t0 > s_klw_a_end_t ? t0 - s_klw_a_end_t : 0ULL;
+    s_klw_ovl_cyc = rt_core_perf_ticks_to_cyc(host > s_klw_wait_t ? host - s_klw_wait_t : 0ULL);
+    s_klw_gap_cyc = s_klw_nwait && t0 > s_klw_wend_t ? rt_core_perf_ticks_to_cyc(t0 - s_klw_wend_t) : 0ULL;
+    for (int i = 0; i < s_core_perf_ntiles; i++) {
+        s_klw_tovl[i] = rt_core_perf_ticks_to_cyc(s_klw_ta[i] > s_klw_wait_t ? s_klw_ta[i] - s_klw_wait_t : 0ULL);
+        s_klw_io[i] = s_klw_da[i] > s_klw_tovl[i] ? s_klw_da[i] - s_klw_tovl[i] : 0ULL;
+#if AIEHLC_CORE_PERF_WIN
+        s_klw_io[i] = s_kwin_a[i]; /* diagnostic: per-wait window sum */
+#endif
+    }
+#if AIEHLC_CORE_PERF_WIN
+    s_klw_gap_cyc = s_kwin_gap_cyc;
+#endif
+    s_klw_state = 3;
+}
+
+/* slowest core of this launch: index into s_core_perf_tiles, -1 if B was not taken */
+static int rt_core_perf_kwin_best(void) {
+    int b = -1;
+    if (s_klw_state != 3 || s_klw_nwait == 0)
+        return -1;
+    for (int i = 0; i < s_core_perf_ntiles; i++)
+        if (s_klw_ok[i] && (b < 0 || s_klw_io[i] > s_klw_io[b]))
+            b = i;
+    return b;
+}
+
+int __Runtime_core_perf_last_launch(unsigned long long *io_act_cyc, unsigned long long *lock_stall_cyc,
+                                    unsigned long long *stream_stall_cyc) {
+    return __Runtime_core_perf_last_launch_win(io_act_cyc, lock_stall_cyc, stream_stall_cyc, NULL, NULL);
+}
+
+/* + pre_io_act_cyc (slowest core's ACTIVE since kernel-group enable not credited to io) and snap_gap_cyc */
+int __Runtime_core_perf_last_launch_win(unsigned long long *io_act_cyc, unsigned long long *lock_stall_cyc,
+                                        unsigned long long *stream_stall_cyc, unsigned long long *pre_io_act_cyc,
+                                        unsigned long long *snap_gap_cyc) {
+    rt_core_perf_launch_snap(1);
+    const int b = s_klw_given ? -1 : rt_core_perf_kwin_best();
+    const int v = b >= 0;
+    if (io_act_cyc)
+        *io_act_cyc = v ? s_klw_io[b] : 0ULL;
+    if (lock_stall_cyc)
+        *lock_stall_cyc = v ? s_klw_ls[b] : 0ULL;
+    if (stream_stall_cyc)
+        *stream_stall_cyc = v ? s_klw_ss[b] : 0ULL;
+    if (pre_io_act_cyc)
+        *pre_io_act_cyc = v && (unsigned long long)s_klw_act[b] > s_klw_io[b] ? s_klw_act[b] - s_klw_io[b] : 0ULL;
+    if (snap_gap_cyc)
+        *snap_gap_cyc = v ? s_klw_gap_cyc : 0ULL;
+    if (v) {
+        s_klw_given = 1; /* handed out once per launch; [PERFIO] still sees the sums */
+        s_klw_given_b = b;
+    }
+    return v;
+}
+
+/* the overlap-model fields of the tile the last successful _win call handed out (same tile, same A->B window as
+ * its io_act and as [PERFIO]): compute_cyc = dACTIVE - dLOCK - dSTREAM, ovl_cyc = per-tile ovl, dact_cyc = dACTIVE.
+ * Returns 1 when that tile is valid, else 0 (all outputs 0). Reads no counters. */
+int __Runtime_core_perf_last_launch_ovl(unsigned long long *compute_cyc, unsigned long long *ovl_cyc,
+                                        unsigned long long *dact_cyc) {
+    const int b = s_klw_given_b;
+    const int v = b >= 0 && b < RT_CORE_PERF_MAX_TILES;
+    if (compute_cyc)
+        *compute_cyc = v ? s_klw_compute[b] : 0ULL;
+    if (ovl_cyc)
+        *ovl_cyc = v ? s_klw_tovl[b] : 0ULL;
+    if (dact_cyc)
+        *dact_cyc = v ? s_klw_da[b] : 0ULL;
+    return v;
+}
+
+/* Core perf counter 0 is not free when aie-rt ECC is on (DevInst->EccStatus, the XAie_CfgInitialize default):
+ * XAie_LoadElf -> _XAie_EccOnPM/_XAie_EccOnDM -> _XAie_EccPerfCntConfig (aie-rt pm/xaie_ecc.c:58) programs core
+ * counter 0 as the ECC-scrub period timer: Counter0_Event_Value = 1000000, Performance_Control2.Cnt0_Reset_Event =
+ * PERF_CNT_0 (event 5), start/stop = TRUE. Re-arming only start/stop (ACTIVE_CORE) leaves the self-reset in place,
+ * so counter 0 counted ACTIVE modulo 1e6 (palmyra213 resident: perfctl2=0x00000005, every read < 1e6, non-monotonic
+ * across launches; GAP-aie_runtime-core-perf-co-2da35c). Arming counter 0 for profiling therefore takes full
+ * ownership: reset event -> NONE (no self-reset; the scrub trigger then fires once at 1e6 instead of every 1e6
+ * cycles for the rest of the profiled run) before the counter is zeroed. */
+static AieRC rt_core_perf_claim_ctr0(XAie_DevInst *dev, XAie_LocType tile) {
+    return XAie_PerfCounterResetControlSet(dev, tile, XAIE_CORE_MOD, 0, XAIE_EVENT_NONE_CORE);
 }
 
 AieRC __Runtime_core_perf_setup(XAie_DevInst *dev, XAie_LocType tile) {
     AieRC rc;
+    rc = rt_core_perf_claim_ctr0(dev, tile);
+    if (rc != XAIE_OK)
+        return rc;
     rc = XAie_PerfCounterSet(dev, tile, XAIE_CORE_MOD, 0, 0);
     if (rc != XAIE_OK)
         return rc;
@@ -421,15 +750,23 @@ void __Runtime_core_perf_report(int tag) {
         printf("[PERF] tag=%d no core tiles armed (build with --profiling and set g_runtime_debug_level |= 0x100)\n", tag);
         return;
     }
+    rt_core_perf_launch_snap(1); /* B: after the launch's last wait, before [PERFIO] */
     for (int i = 0; i < s_core_perf_ntiles; i++) {
         uint32_t a = 0, v = 0, ss = 0, ls = 0;
         AieRC rc = __Runtime_core_perf_read(s_core_perf_probe_dev, s_core_perf_tiles[i], &a, &v, &ss, &ls);
         printf("[PERF] tag=%d tile=(%u,%u) rc=%d active_cyc=%u vec_instr=%u stream_stall=%u lock_stall=%u\n", tag,
                (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row, (int)rc, a, v, ss, ls);
-        if (s_core_perf_snap_valid)
-            printf("[PERFIO] tag=%d tile=(%u,%u) pre_io_active=%u pre_io_lock_stall=%u io_active=%u io_lock_stall=%u\n",
-                   tag, (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row, s_core_perf_snap_a[i],
-                   s_core_perf_snap_ls[i], a - s_core_perf_snap_a[i], ls - s_core_perf_snap_ls[i]);
+        /* launch window A->B: io_active = max(0, dACTIVE - ovl), compute = dACTIVE - dLOCK - dSTREAM,
+         * ovl = this tile's A->B read-to-read host time outside the waits; pre_io_* = the rest since kernel-group enable;
+         * snap_gap_cyc = last wait end -> B. compute_cyc/ovl_cyc, then dact_cyc (= A->B counter-0 change of this tile,
+         * M3.1.1 PD: KWIN done=1 when ovl - dact - snap_gap >= wait) appended (old fields unchanged). */
+        if (s_klw_state == 3 && s_klw_nwait > 0 && s_klw_ok[i] && rc == XAIE_OK)
+            printf("[PERFIO] tag=%d tile=(%u,%u) pre_io_active=%llu pre_io_lock_stall=%llu io_active=%llu "
+                   "io_lock_stall=%llu snap_gap_cyc=%llu compute_cyc=%llu ovl_cyc=%llu dact_cyc=%llu\n",
+                   tag, (unsigned)s_core_perf_tiles[i].Col, (unsigned)s_core_perf_tiles[i].Row,
+                   (unsigned long long)a > s_klw_io[i] ? (unsigned long long)a - s_klw_io[i] : 0ULL,
+                   (unsigned long long)ls > s_klw_ls[i] ? (unsigned long long)ls - s_klw_ls[i] : 0ULL, s_klw_io[i],
+                   s_klw_ls[i], s_klw_gap_cyc, s_klw_compute[i], s_klw_tovl[i], s_klw_da[i]);
         asum += a;
         if (a > amax)
             amax = a;
@@ -2459,9 +2796,11 @@ void __Runtime_read_kernel_log(XAie_DevInst *dev, XAie_LocType tile) {
 }
 
 void __Runtime_read_kernel_logs(XAie_DevInst *dev, const uint8_t *cols, const uint8_t *rows, uint32_t n) {
+    unsigned long long __ld_t0 = ahs_now();
     printf("[kernel_log] ===== Kernel Log (DM offset 0x%X, %u core tiles) =====\n", KLOG_DM_OFFSET, (unsigned)n);
     for (uint32_t i = 0; i < n; i++)
         __Runtime_read_kernel_log(dev, XAie_TileLoc(cols[i], rows[i]));
+    __Runtime_log_dump_account(ahs_now() - __ld_t0);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2870,6 +3209,26 @@ void __Runtime_perfcnt_read_mm2s_bd_finished_partition(XAie_DevInst *dev, uint8_
     }
 }
 
+/* Every VAddr cache sync goes through here so a failure is never silent.
+ * On the board (xaie_baremetal.c) both VAddr syncs are an unconditional
+ * Xil_DCache{Flush,Invalidate}Range and always return XAIE_OK; only the sim
+ * backend can fail (XAIE_INVALID_ADDRESS when the VA is not an XAie_MemAllocate
+ * block), and then the DMA reads/writes an unmapped address with no other sign.
+ * Count every failure (g_sync_err_n, readable by JTAG/host) and print the first
+ * RT_SYNC_ERR_PRINT, independent of AIEHLC_LOG. Cost on the board: one compare. */
+#define RT_SYNC_ERR_PRINT 4U
+unsigned long long g_sync_err_n;
+static inline AieRC rt_sync_rc(AieRC rc, const char *dir, const void *ptr, uint64_t n) {
+    if (rc != XAIE_OK) {
+        if (g_sync_err_n < RT_SYNC_ERR_PRINT)
+            printf("[aie_runtime] ERROR sync_for_%s(%p, %llu) rc=%d: range not synced%s\n", dir, ptr,
+                   (unsigned long long)n, (int)rc,
+                   g_sync_err_n + 1 == RT_SYNC_ERR_PRINT ? " (further errors only counted)" : "");
+        g_sync_err_n++;
+    }
+    return rc;
+}
+
 void __Runtime_sync_for_dev(XAie_DevInst *dev, void *ptr, size_t size) {
     if (rt_nc_covers((uintptr_t)ptr, (uintptr_t)ptr + size)) {
         __asm__ volatile("dsb sy" ::: "memory"); /* drain the write buffer; nothing is cached */
@@ -2877,7 +3236,7 @@ void __Runtime_sync_for_dev(XAie_DevInst *dev, void *ptr, size_t size) {
     }
     unsigned long long __sd_t0 = RT_PROF_TIC();
     if (dev) {
-        AieRC rc = XAie_MemSyncForDevVAddr(dev, ptr, (uint64_t)size);
+        AieRC rc = rt_sync_rc(XAie_MemSyncForDevVAddr(dev, ptr, (uint64_t)size), "dev", ptr, size);
         AIEHLC_LOG(printf("[aie_runtime] sync_for_dev(%p, %zu) via VAddr rc=%d\n", ptr, size, rc););
     } else {
         Xil_DCacheFlushRange((UINTPTR)ptr, size);
@@ -2891,8 +3250,12 @@ void __Runtime_sync_for_cpu(XAie_DevInst *dev, void *ptr, size_t size) {
      * control-packet ack token, so draining here ran the whole deferred queue
      * inside the kernel-ELF load (measured: kload 28 -> 84 us). The emitted
      * __aie_launch drains after host_canonicalized instead. */
+    if (rt_nc_covers((uintptr_t)ptr, (uintptr_t)ptr + size)) {
+        __asm__ volatile("dsb sy" ::: "memory"); /* uncached: nothing to invalidate */
+        return;
+    }
     if (dev) {
-        AieRC rc = XAie_MemSyncForCPUVAddr(dev, ptr, (uint64_t)size);
+        AieRC rc = rt_sync_rc(XAie_MemSyncForCPUVAddr(dev, ptr, (uint64_t)size), "cpu", ptr, size);
         AIEHLC_LOG(printf("[aie_runtime] sync_for_cpu(%p, %zu) via VAddr rc=%d\n", ptr, size, rc););
     } else {
         Xil_DCacheInvalidateRange((UINTPTR)ptr, size);
@@ -2943,6 +3306,17 @@ static inline void rt_wait_hook_step(void) {
 #define RT_DSYNC_MAX 16
 #define RT_DSYNC_CHUNK 16384U /* bytes of maintenance per wait_io poll step */
 #define RT_DEVWR_MAX 8
+/* A78 D-cache line. A registered range must own every line it touches: if an
+ * edge shared a line with CPU data, a CPU write to the neighbour would dirty a
+ * line holding OLD range bytes and its later write-back (eviction, or the
+ * neighbour's own clean) would land on top of what the array wrote. So both
+ * registrations refuse ranges whose ptr or size is not line aligned; the range
+ * then keeps the conservative per-launch maintenance. __Runtime_alloc blocks
+ * are always line aligned (64 B base, size rounded to 64 B). */
+#define RT_CACHE_LINE 64u
+static int rt_line_aligned(uintptr_t lo, size_t size) {
+    return ((lo | (uintptr_t)size) & (RT_CACHE_LINE - 1u)) == 0;
+}
 typedef struct {
     XAie_DevInst *dev;
     uintptr_t cur, end;
@@ -2959,6 +3333,11 @@ void __Runtime_buffer_device_written(void *ptr, size_t size) {
     if (!ptr || !size)
         return;
     uintptr_t lo = (uintptr_t)ptr, hi = lo + size;
+    if (!rt_line_aligned(lo, size)) {
+        printf("[aie_runtime] buffer_device_written: %p+%zu not %u B aligned; keeps clean+invalidate\n", ptr, size,
+               RT_CACHE_LINE);
+        return;
+    }
     for (int i = 0; i < g_devwr_n; i++)
         if (g_devwr[i].lo == lo && g_devwr[i].hi == hi)
             return;
@@ -2973,12 +3352,69 @@ void __Runtime_buffer_device_written(void *ptr, size_t size) {
     g_devwr_n++;
 }
 
+/* Device-only ranges: the CPU neither writes nor reads them after registration,
+ * so no line of them can be dirty (cleaned here, never written since) and no
+ * stale clean line can be consumed (the CPU does not read; the non-coherent DMA
+ * reads DDR). A launch arg inside one needs no maintenance at all. This is the
+ * "weights CIVAC once at load" + "device-only activation arena" class from
+ * steve/tasks/2026-11-13_launch-arg-cache-maintenance-price.md. */
+#define RT_DEVONLY_MAX 8
+static struct {
+    uintptr_t lo, hi;
+} g_devonly[RT_DEVONLY_MAX];
+static int g_devonly_n;
+static unsigned long long g_devonly_skip_bytes;
+
+int __Runtime_buffer_device_only(void *ptr, size_t size) {
+    if (!ptr || !size)
+        return -1;
+    uintptr_t lo = (uintptr_t)ptr, hi = lo + size;
+    if (hi < lo)
+        return -1;
+    if (!rt_line_aligned(lo, size)) {
+        printf("[aie_runtime] buffer_device_only: %p+%zu not %u B aligned; keeps per-launch clean\n", ptr, size,
+               RT_CACHE_LINE);
+        return -1;
+    }
+    int i = 0;
+    while (i < g_devonly_n && !(g_devonly[i].lo == lo && g_devonly[i].hi == hi))
+        i++;
+    if (i == g_devonly_n && g_devonly_n == RT_DEVONLY_MAX) {
+        printf("[aie_runtime] buffer_device_only: table full; %p keeps per-launch clean\n", ptr);
+        return -1;
+    }
+    /* Clean BEFORE the range is published: a launch that sees it registered may
+     * skip its maintenance, so no dirty line may exist at that point. Also done
+     * on a repeat registration (the caller wrote it again). */
+    Xil_DCacheFlushRange((UINTPTR)ptr, size);
+    if (i == g_devonly_n) {
+        g_devonly[i].lo = lo;
+        g_devonly[i].hi = hi;
+        g_devonly_n++;
+    }
+    return 0;
+}
+
+unsigned long long __Runtime_buffer_device_only_skipped(void) { return g_devonly_skip_bytes; }
+
+static int rt_devonly_covers(uintptr_t lo, uintptr_t hi) {
+    for (int i = 0; i < g_devonly_n; i++)
+        if (lo >= g_devonly[i].lo && hi <= g_devonly[i].hi)
+            return 1;
+    return 0;
+}
+
 void __Runtime_buffer_forget(void *ptr) {
     int k = 0;
     for (int i = 0; i < g_devwr_n; i++)
         if (g_devwr[i].lo != (uintptr_t)ptr)
             g_devwr[k++] = g_devwr[i];
     g_devwr_n = k;
+    k = 0;
+    for (int i = 0; i < g_devonly_n; i++)
+        if (g_devonly[i].lo != (uintptr_t)ptr)
+            g_devonly[k++] = g_devonly[i];
+    g_devonly_n = k;
 }
 
 static int rt_devwr_covers(uintptr_t lo, uintptr_t hi) {
@@ -3001,9 +3437,11 @@ static void rt_dsync_run(int inputs_only, size_t budget) {
             unsigned long long t0 = RT_PROF_TIC();
             size_t n = (size_t)(r->end - r->cur) < budget ? (size_t)(r->end - r->cur) : budget;
             if (r->inval_only)
-                (void)XAie_MemSyncForCPUVAddr(r->dev, (void *)r->cur, (uint64_t)n);
+                (void)rt_sync_rc(XAie_MemSyncForCPUVAddr(r->dev, (void *)r->cur, (uint64_t)n), "cpu",
+                                 (void *)r->cur, n);
             else
-                (void)XAie_MemSyncForDevVAddr(r->dev, (void *)r->cur, (uint64_t)n);
+                (void)rt_sync_rc(XAie_MemSyncForDevVAddr(r->dev, (void *)r->cur, (uint64_t)n), "dev",
+                                 (void *)r->cur, n);
             r->cur += n;
             budget -= n;
             RT_PROF_ADD(g_sync_dev_cyc, g_sync_dev_n, t0);
@@ -3034,9 +3472,71 @@ static inline void rt_dsync_drain_inputs(void) {
         rt_dsync_run(1, (size_t)-1);
 }
 
+/* Post-DMA invalidate (opt-in, AIEHLC_POST_DMA_INVAL).
+ *
+ * The queue above cleans/invalidates every argument BEFORE (or, for ranges
+ * registered with __Runtime_buffer_device_written, DURING) the data-plane DMA,
+ * and nothing after it. On ARMv8 Normal cacheable memory a line may be
+ * allocated speculatively at any time (hardware prefetch, speculative loads),
+ * and a line that shares a 64-B granule with CPU-touched data (a 16-B aligned
+ * XAie_MemAllocate buffer's head/tail) is refilled on purpose. A line refilled
+ * after its invalidate but before the S2MM wrote it holds the PRE-DMA bytes,
+ * and the CPU reads those after the launch. Linux arm64 invalidates again on
+ * dma_unmap(FROM_DEVICE) for exactly this reason; rt_dmabuf (runtime design
+ * note R5) does to_cpu after the S2MM wait.
+ *   0 (default) = old behaviour, nothing after the DMA
+ *   1           = invalidate every __Runtime_buffer_device_written range of
+ *                 this launch after the DMA (outputs the caller declared)
+ *   2           = invalidate EVERY queued argument after the DMA (the runtime
+ *                 cannot tell inputs from outputs; conservative)
+ * Cost = one more DC CIVAC pass over the chosen bytes on clean/absent lines;
+ * counted in g_post_inval_cyc / g_post_inval_bytes. */
+#ifndef AIEHLC_POST_DMA_INVAL
+#define AIEHLC_POST_DMA_INVAL 0
+#endif
+#if AIEHLC_POST_DMA_INVAL
+static rt_dsync_rng g_post[RT_DSYNC_MAX];
+static int g_post_n;
+unsigned long long g_post_inval_cyc, g_post_inval_n, g_post_inval_bytes;
+
+static void rt_post_record(XAie_DevInst *dev, uintptr_t lo, uintptr_t hi, int dev_written) {
+    if (AIEHLC_POST_DMA_INVAL == 1 && !dev_written)
+        return;
+    for (int i = 0; i < g_post_n; i++)
+        if (g_post[i].dev == dev && g_post[i].cur == lo && g_post[i].end == hi)
+            return;
+    if (g_post_n == RT_DSYNC_MAX) {
+        printf("[aie_runtime] post_dma_inval: table full; %p not re-invalidated\n", (void *)lo);
+        return;
+    }
+    g_post[g_post_n].dev = dev;
+    g_post[g_post_n].cur = lo;
+    g_post[g_post_n].end = hi;
+    g_post[g_post_n].inval_only = 1;
+    g_post_n++;
+}
+
+/* Runs after the launch's DMA is complete (called from __Runtime_dsync_drain,
+ * which the emitted __aie_launch calls after host_canonicalized returns). */
+static void rt_post_inval_run(void) {
+    for (int i = 0; i < g_post_n; i++) {
+        unsigned long long t0 = RT_PROF_TIC();
+        size_t n = (size_t)(g_post[i].end - g_post[i].cur);
+        __Runtime_sync_for_cpu(g_post[i].dev, (void *)g_post[i].cur, n);
+        g_post_inval_bytes += n;
+        RT_PROF_ADD(g_post_inval_cyc, g_post_inval_n, t0);
+    }
+    g_post_n = 0;
+}
+#else
+#define rt_post_record(dev, lo, hi, dev_written) ((void)0)
+#define rt_post_inval_run() ((void)0)
+#endif
+
 void __Runtime_dsync_drain(void) {
     if (g_dsync_n)
         rt_dsync_run(0, (size_t)-1);
+    rt_post_inval_run();
 }
 
 void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size) {
@@ -3046,7 +3546,16 @@ void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size) 
 #endif
     if (!ptr || !size)
         return;
+    if (rt_devonly_covers((uintptr_t)ptr, (uintptr_t)ptr + size)) {
+        g_devonly_skip_bytes += size; /* cleaned at registration; CPU has not touched it since */
+        return;
+    }
     if (!dev || g_dsync_n == RT_DSYNC_MAX) {
+#if AIEHLC_POST_DMA_INVAL
+        if (!rt_nc_covers((uintptr_t)ptr, (uintptr_t)ptr + size))
+            rt_post_record(dev, (uintptr_t)ptr, (uintptr_t)ptr + size,
+                           rt_devwr_covers((uintptr_t)ptr, (uintptr_t)ptr + size));
+#endif
         __Runtime_sync_for_dev(dev, ptr, size);
         return;
     }
@@ -3059,6 +3568,7 @@ void __Runtime_sync_for_dev_deferred(XAie_DevInst *dev, void *ptr, size_t size) 
     g_dsync[g_dsync_n].cur = lo;
     g_dsync[g_dsync_n].end = hi;
     g_dsync[g_dsync_n].inval_only = rt_devwr_covers(lo, hi);
+    rt_post_record(dev, lo, hi, g_dsync[g_dsync_n].inval_only);
     g_dsync_n++;
 }
 
@@ -3329,6 +3839,7 @@ XAie_DevInst *__Runtime_explicit_init(void) {
 #else
     XAie_SetIOBackend(dev, XAIE_IO_BACKEND_BAREMETAL);
 #endif
+    rt_wc_install(dev);
 
 #if AIE_GEN >= 2
 #ifndef __AIESIM__
@@ -3406,6 +3917,7 @@ XAie_DevInst *__Runtime_explicit_init_partition(int startCol, int numCols) {
 #else
     XAie_SetIOBackend(dev, XAIE_IO_BACKEND_BAREMETAL);
 #endif
+    rt_wc_install(dev);
 
 #if AIE_GEN >= 2
 #ifndef __AIESIM__
@@ -3654,6 +4166,8 @@ XAie_DmaDesc __Runtime_dma_bd_config(XAie_DevInst *dev, XAie_LocType tile, void 
                                                 out_of_order_bd_id, 1, 4, len / 4, 0, 0, 0, 0, 0, 0);
 
     unsigned long long __bd_t0 = RT_PROF_TIC();
+    RT_PROF_INC(g_bd_write_n);
+    RT_PROF_INC(g_bd_init_n);
     XAie_DmaDesc DmaInst;
     XAie_DmaDescInit(dev, &DmaInst, tile);
     uint8_t tile_type = XAie_GetTileTypefromLoc(dev, tile);
@@ -6324,6 +6838,7 @@ static AieRC rt_sb_kick(void) {
     g_sb_stats.sync += t_kick - t_sync;
     g_sb_stats.kick += RT_PROF_TIC() - t_kick;
     g_sb_stats.words += words;
+    RT_WC_CP(words);
     g_sb_stats.segs += nseg;
     g_sb_stats.flushes++;
     if (rc != XAIE_OK)
@@ -6677,6 +7192,8 @@ XAie_DmaDesc __Runtime_dma_bd_config_multidim(XAie_DevInst *dev, XAie_LocType ti
                                               int32_t dim_wrap3) {
 
     unsigned long long __bd_t0 = RT_PROF_TIC();
+    RT_PROF_INC(g_bd_write_n);
+    RT_PROF_INC(g_bd_init_n);
     const int32_t aot_args[19] = {bd_id,           len,         next_bd,          enable_packet,   packet_id,
                                   acquire_lock_id, acquire_lock_val, release_lock_id, release_lock_val,
                                   out_of_order_bd_id, num_dims, dim_stride0, dim_wrap0, dim_stride1, dim_wrap1,
@@ -6778,6 +7295,8 @@ XAie_DmaDesc __Runtime_dma_bd_config_multidim_ooo(XAie_DevInst *dev, XAie_LocTyp
                                                   int32_t iter_wrap) {
 
     unsigned long long __bd_t0 = RT_PROF_TIC();
+    RT_PROF_INC(g_bd_write_n);
+    RT_PROF_INC(g_bd_init_n);
     const int32_t aot_args[19] = {bd_id,           len,         next_bd,          enable_packet,   packet_id,
                                   acquire_lock_id, acquire_lock_val, release_lock_id, release_lock_val,
                                   out_of_order_bd_id, num_dims, dim_stride0, dim_wrap0, dim_stride1, dim_wrap1,
@@ -6945,7 +7464,8 @@ void __Runtime_dma_channel_enable_ooo(XAie_DevInst *dev, XAie_LocType tile, int3
 struct_ioevent __Runtime_startio(XAie_DevInst *dev, struct_io io, int32_t bd_id, int32_t repeat) {
     rt_dsync_drain_inputs(); /* CPU-written launch args clean before any DMA starts */
 #if AIEHLC_PROFILING
-    rt_core_perf_snap_at_startio();
+    /* M3.1.1 launch window A (off): no-op unless this launch's A is still pending */
+    rt_core_perf_launch_snap(0);
 #endif
     unsigned long long __sio_t0 = RT_PROF_TIC();
     struct_ioevent evt;
@@ -7058,6 +7578,10 @@ static int rt_aot_window_fast(XAie_DevInst *dev, const rt_aot_window *w, void *c
     (void)bufs;
     g_sb.aot_i = w->ncalls;
     g_sb_stats.aot_calls += w->ncalls;
+#if AIEHLC_PROFILING
+    for (uint32_t i = 0U; i < w->ncalls; i++) /* AOT-encoded BDs: issued (bd_n) without a descriptor init */
+        g_bd_write_n += w->calls[i].kind == RT_AOT_CALL_BD || w->calls[i].kind == RT_AOT_CALL_BD_OOO;
+#endif
     g_sb_win = w;
     g_sb_win_bufs = bufs;
     return 1;
@@ -7238,6 +7762,7 @@ static int __Runtime_pm_write_wide(XAie_DevInst *dev, XAie_LocType loc, const un
     const u64 tile = dev->BaseAddr + ((u64)loc.Col << dev->DevProp.ColShift) + ((u64)loc.Row << dev->DevProp.RowShift);
     const uintptr_t base = (uintptr_t)(tile + cm->ProgMemHostOffset + phdr->p_paddr);
     const u32 nwords = (phdr->p_memsz + 3U) / 4U;
+    RT_WC_MMIO(nwords);
     u32 w = 0;
     for (; w + 4U <= nwords; w += 4U) {
         __asm__ volatile("ldr q30, [%0]\n\tstr q30, [%1]" ::"r"(src + 4U * w), "r"(base + 4U * w) : "v30", "memory");
@@ -7348,10 +7873,27 @@ static void rt_pm_warm_verify(XAie_DevInst *dev, XAie_LocType loc, const unsigne
 #endif
 #endif
 
-/* mode 1: skip every zero-filled (.bss-only) segment (unsafe if the kernel
- *         reads a zero-initialised static before writing it).
+/* mode 1: skip every zero-filled (.bss-only) segment larger than
+ *         AIEHLC_SKIP_BSS_KEEP_SMALL bytes. Smaller ones are still zero-filled:
+ *         chess gives each scalar static its own tiny .bss segment (e.g. the
+ *         4-byte aiehlc_blk_cursor of every load_buffer port), and those rely on
+ *         C zero-init. Skipping them left the cursor at whatever the previous
+ *         ELF had in that word, so blk checks ran at a wrong round phase (false
+ *         BLKE on every block). Big segments (port buffers, scratch arrays) are
+ *         still skipped; they are unsafe only if the kernel reads them before
+ *         writing them.
  * mode 2: skip only .bss segments made entirely of DMA port buffers; all other
  *         .bss is still zero-filled. */
+#ifndef AIEHLC_SKIP_BSS_KEEP_SMALL
+#define AIEHLC_SKIP_BSS_KEEP_SMALL 64U
+#endif
+static int __Runtime_bss_seg_skippable(const unsigned char *elfmem, const Elf32_Phdr *phdr, int mode) {
+    if (phdr->p_filesz != 0U)
+        return 0;
+    if (mode == 1)
+        return phdr->p_memsz > (u32)(AIEHLC_SKIP_BSS_KEEP_SMALL);
+    return __Runtime_elf_range_is_port_bufs(elfmem, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz);
+}
 static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc, const unsigned char *elfmem,
                                              int mode) {
     g_elf_load_seq++;
@@ -7367,8 +7909,7 @@ static AieRC __Runtime_load_elf_mem_skip_bss(XAie_DevInst *dev, XAie_LocType loc
         const Elf32_Phdr *phdr = (const Elf32_Phdr *)(elfmem + ehdr->e_phoff + (u64)ph * sizeof(Elf32_Phdr));
         if (phdr->p_type != (u32)PT_LOAD)
             continue;
-        if (phdr->p_filesz == 0U &&
-            (mode == 1 || __Runtime_elf_range_is_port_bufs(elfmem, phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz))) {
+        if (__Runtime_bss_seg_skippable(elfmem, phdr, mode)) {
             skipped++;
             skipped_bytes += phdr->p_memsz;
             continue;
@@ -8404,8 +8945,7 @@ static void rt_kernel_profile_setup(XAie_DevInst *dev, struct_kernel_group kg) {
     if (AIE_DEBUG_HAS_FLAG(g_runtime_debug_level, AIE_DEBUG_FLAG_CORE_PERF_COUNTER)) {
         int chosen = 0;
         s_core_perf_ntiles = 0;
-        s_core_perf_snap_pending = 1;
-        s_core_perf_snap_valid = 0;
+        rt_core_perf_launch_reset();
         for (uint32_t i = 0; i < kg.num_tiles; i++) {
             if (__Runtime_is_aie_core_tile(kg.tiles[i])) {
                 __Runtime_core_perf_setup(dev, kg.tiles[i]);
@@ -8574,8 +9114,17 @@ static void rt_wait_io_timeout_dump(XAie_DevInst *dev) {
  * Reference: aeg_runtime_api.cpp waitDMAChannelTaskQueue / waitDMAChannelDone
  */
 void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
+#if AIEHLC_PROFILING
+    /* M3.1.1 launch window A (aot-kco: startio comes from the control packet, no __Runtime_startio): no-op
+     * unless pending, i.e. only before the launch's first wait_io's rt_sb_commit (off took A at startio) */
+    rt_core_perf_launch_snap(0);
+#endif
     rt_sb_commit();
     (void)rt_sb_ack_wait();
+#if AIEHLC_PROFILING && AIEHLC_CORE_PERF_WIN
+    /* diagnostic per-wait snapshot (perturbs the wait, ISS-1120090911-PD). WINLINT: outside the window. */
+    rt_core_perf_wait_snap();
+#endif
     unsigned long long __wio_t0 = RT_PROF_TIC();
     const unsigned long long __hs_t0 = ahs_now();
     XAie_LocType tile = io_event.io.tile_loc;
@@ -8656,6 +9205,13 @@ void __Runtime_wait_io(XAie_DevInst *dev, struct_ioevent io_event) {
     g_hs_wait_ticks += ahs_now() - __hs_t0;
     g_hs_wait_calls++;
     RT_PROF_ADD(g_wait_io_cycles, g_wait_io_calls, __wio_t0);
+#if AIEHLC_PROFILING
+    rt_core_perf_wait_done(__hs_t0, ahs_now()); /* plain stores, after the timed window (WINLINT) */
+#endif
+#if AIEHLC_PROFILING && AIEHLC_CORE_PERF_WIN
+    rt_core_perf_wio_mark(__hs_t0);
+    rt_core_perf_site_read(); /* after the timed wait window (WINLINT: no printf inside it) */
+#endif
 }
 
 /**

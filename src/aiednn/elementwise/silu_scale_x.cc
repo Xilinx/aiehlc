@@ -1,3 +1,7 @@
+/******************************************************************************
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ ******************************************************************************/
 /* aiednn elementwise/silu_scale_x.cc -- driver step of a "dense+silu" group (aiegraph.fold.dense_silu).
  *
  * The dense's packed weight was layout(W * s) every call, s a per-K scale (sigmoid(x) of the dense input

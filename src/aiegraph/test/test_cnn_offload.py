@@ -35,6 +35,7 @@ STUBS = {
 GLUE = r"""
 void __Runtime_phase_cycles(unsigned long long *c, unsigned int *n) { for (int i = 0; i < 4; i++) { c[i] = 0; n[i] = 0; } }
 void __Runtime_wait_io_cycles(unsigned long long *c, unsigned int *n) { *c = 0; *n = 0; }
+void __Runtime_host_split_wait_ticks(unsigned long long *t, unsigned int *n) { *t = 0; *n = 0; } /* aie_runtime.c */
 """
 MAIN = r"""
 #include <vector>
