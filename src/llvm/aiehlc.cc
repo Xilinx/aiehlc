@@ -4282,10 +4282,13 @@ public:
                         kernelBlocksByKernel[kb.first] = kb.second;
                     for (auto &kd : ko.window_bytes)
                         traceWindowBytesByKernel[kd.first] = kd.second;
-                    // GAP-MKROUTE: aiehlc emits ONE routing() for the whole program. Kernels whose
-                    // port topologies ((role, distribution) per port) differ would silently run on
-                    // one kernel's stream routes and hang on the board -> hard build error.
-                    // Same rule as script/test/multikernel_routing_check.py (1fbf524).
+                    // GAP-MKROUTE: kernels of one program with different port topologies ((role,
+                    // distribution) per port). This used to be a hard error because aiehlc emitted ONE
+                    // routing() for the whole program. A program with several mesh kernels now gets
+                    // routing_<kernel> per kernel, and __aie_launch re-initializes the partition with
+                    // the launched kernel's routing (__Runtime_init_mesh_partition_with), so mixed
+                    // topologies are legal; they are reported, not refused (eager instances: a weightless
+                    // row op such as rope next to GEMMs).
                     {
                         std::map<std::string, std::vector<std::string>> topo;
                         std::vector<std::string> order;
@@ -4332,12 +4335,10 @@ public:
                                 llvm::errs() << "[KernelAnalysis] MKROUTE topology " << t << ": " << g.second.size()
                                              << " kernel(s) " << ks << "\n";
                             }
-                            llvm::errs() << "[KernelAnalysis] ERROR: MKROUTE kernels=" << order.size()
+                            llvm::errs() << "[KernelAnalysis] note: MKROUTE kernels=" << order.size()
                                          << " topologies=" << groups.size()
-                                         << ": aiehlc emits one routing() for all kernels of a program; kernels "
-                                            "with different port topologies would hang on the board. Give every "
-                                            "kernel the same port topology (or build them as separate programs).\n";
-                            std::exit(1);
+                                         << ": each kernel gets its own routing_<kernel>, set up when it is "
+                                            "launched\n";
                         }
                     }
                 }
