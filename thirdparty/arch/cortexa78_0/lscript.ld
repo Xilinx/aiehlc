@@ -289,6 +289,18 @@ SECTIONS
    __bss_end__ = .;
 } > noc_ddr4_C0_DDR_LOW0
 
+/* Uninitialized data kept across a warm restart / re-download (e.g. the runtime's
+   rt_result block). NOLOAD and outside [__bss_start__,__bss_end__), so crt0 never
+   clears it. Explicit rule so it does not depend on orphan placement. */
+.noinit (NOLOAD) : {
+   . = ALIGN(64);
+   __noinit_start = .;
+   KEEP(*(.noinit))
+   KEEP(*(.noinit.*))
+   . = ALIGN(64);
+   __noinit_end = .;
+} > noc_ddr4_C0_DDR_LOW0
+
 _SDA_BASE_ = __sdata_start + ((__sbss_end - __sdata_start) / 2 );
 
 _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );

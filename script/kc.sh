@@ -512,9 +512,18 @@ fi
 #                                 (channel) and "STOF"/"STVL" (start reg + value).
 #
 # Off by default: klog costs cycles and trace-buffer space in a normal run.
-if [ -f "${AIEHLC_ROOT_DIR}/aout/kernel_build_flags.sh" ]; then
-    . "${AIEHLC_ROOT_DIR}/aout/kernel_build_flags.sh"
+#
+# aiehlc writes the file to ./aout/ of the directory it RUNS in (AOUT in
+# gcommon.h), and aiehlc.sh sets KERNEL_DIR=$(pwd)/aout/ and wipes it at the
+# start of every run. Read it from there, not from <repo>/aout: an
+# out-of-tree build would otherwise lose the pragma, or pick up a stale file
+# that an earlier in-tree run left behind in <repo>/aout.
+_kc_flags="${KERNEL_DIR:-$(pwd)/aout/}"
+_kc_flags="${_kc_flags%/}/kernel_build_flags.sh"
+if [ -f "$_kc_flags" ]; then
+    . "$_kc_flags"
 fi
+unset _kc_flags
 if [ "${AIEHLC_KERNEL_LOG:-0}" != "0" ]; then
     for _d in -DKERNEL_LOG_ENABLED -DKERNELCONFIGOFFLOAD_TRACE; do
         compiler_flags_chess+=" $_d"

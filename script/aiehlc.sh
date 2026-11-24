@@ -25,7 +25,7 @@ usage() {
     echo "                'baremetal_debug' builds a baremetal ELF and writes sim_config.sh so the debug"
     echo "                UI can run either a hardware test or a simulator run from one build."
     echo "  --profiling   build the host with the PMU profiling layer (-DAIEHLC_PROFILING=1)"
-    echo "  --skip-bss    skip ALL .bss zero-init on kernel load (-DAIEHLC_SKIP_BSS_DEFAULT=1; unsafe if the kernel reads zeroed statics)"
+    echo "  --skip-bss    skip .bss zero-init on kernel load except segments <=64 B (-DAIEHLC_SKIP_BSS_DEFAULT=1; unsafe if the kernel reads a bigger zeroed array)"
     echo "  --skip-port-bss  skip zero-init only for DMA port-buffer .bss (buf_in_*/buf_out_*), keep it for the rest (-DAIEHLC_SKIP_BSS_DEFAULT=2)"
     echo "  -serialize    take an exclusive lock on thirdparty/alib for the whole run, so parallel aiehlc.sh runs"
     echo "                on this tree wait for each other (also AIEHLC_SERIALIZE=1). Default: no lock -- two runs"
@@ -399,6 +399,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 aiehlc_ts aiehlc_start
+# shellcheck source=profiling_env_check.sh
+source "${SCRIPT_DIR}/profiling_env_check.sh"
+aiehlc_profiling_env_check "${PROFILING}"
+
 # Parameter validation
 if [ "$COMPILE_AIELIB_ONLY" -eq 0 ] && [ -z "$runtime_source_file" ]; then
     echo "Error: --runtime-source-file is required."
@@ -732,7 +736,9 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
         hc_extra_defs="${hc_extra_defs} -DAIEHLC_SKIP_BSS_DEFAULT=${SKIP_BSS}"
     fi
     aiehlc_ts host_link_begin
-    WORKLOCAL_DIR="${WORKLOCAL_DIR}" AIE_VERSION="${aie_version}" PLATFORM="${platform}" \
+    # KERNEL_DIR: hostcompile.sh cd's into WORKLOCAL_DIR before it sources kc.sh,
+    # so kc.sh must be told where aiehlc wrote kernel_build_flags.sh.
+    KERNEL_DIR="${KERNEL_DIR}" WORKLOCAL_DIR="${WORKLOCAL_DIR}" AIE_VERSION="${aie_version}" PLATFORM="${platform}" \
         SIM_TILES="${SIM_TILES:-}" DEBUG_SYMS="${DEBUG_SYMS}" \
         AIEHLC_PROFILING="${PROFILING}" EXTRA_DEFS="${hc_extra_defs}" \
         USE_LLVM_AIE="${use_llvm_aie}" LLVM_AIE_PATH="${LLVM_AIE_PATH:-}" \
@@ -747,7 +753,13 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
     # Copy the built ELF to the standard output location
     TILING_BUILD_DIR="${WORKLOCAL_DIR}/build"
     if [ -f "${TILING_BUILD_DIR}/host" ]; then
-        cp -f "${TILING_BUILD_DIR}/host" "${HOST_BUILD_DIR}/main.elf"
+        # hostcompile.sh already published main.elf (stripped unless
+        # DEBUG_SYMS=1) + main.debug.elf. Copying the unstripped host over it
+        # here undid the strip. Only copy if nothing newer was published.
+        if [ ! -f "${HOST_BUILD_DIR}/main.elf" ] || \
+           [ "${TILING_BUILD_DIR}/host" -nt "${HOST_BUILD_DIR}/main.elf" ]; then
+            cp -f "${TILING_BUILD_DIR}/host" "${HOST_BUILD_DIR}/main.elf"
+        fi
         echo "Build complete (tiling mode)."
         echo "    ${HOST_BUILD_DIR}/main.elf"
     else
@@ -1006,8 +1018,15 @@ if [ ${GPP_RC:-1} -ne 0 ]; then
     return ${GPP_RC}
 fi
 if [ "${DEBUG_SYMS}" -eq 0 ]; then
-    echo "Stripping extra ELF symbols..."
+    # Keep the full ELF next to the stripped one (same contract as
+    # hostcompile.sh): rt_result/heap-hook checks and addr2line on a board
+    # fault need the symbols of the exact binary that ran.
+    cp -f $HOST_BUILD_DIR/main.elf $HOST_BUILD_DIR/main.debug.elf
+    echo "Stripping extra ELF symbols (full symbols kept in main.debug.elf)..."
     ${TOOL_PREFIX}strip $HOST_BUILD_DIR/main.elf
+else
+    # main.elf already has symbols; drop a stale debug copy from an earlier build.
+    rm -f $HOST_BUILD_DIR/main.debug.elf
 fi
 aiehlc_ts host_link_end
 
