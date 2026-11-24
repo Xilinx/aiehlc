@@ -200,6 +200,21 @@ def _read_names(f, blob_path: Path) -> list:
     return names
 
 
+def params_view(blob_path: Path):
+    """F21: a read-only view of the whole params blob that does not read it.
+
+    ``np.memmap`` (mode "r") instead of ``read_bytes()``: callers that look up a
+    few parameters by :func:`param_offsets` touch only those pages (the UNet
+    blob is 1.29 GB; three full reads cost ~2.3 s per warm --fast build). The
+    view supports the buffer protocol (``np.frombuffer``, ``struct.unpack_from``,
+    slicing + ``bytes()``); an empty file gives ``b""`` (mmap of 0 bytes fails).
+    """
+    import numpy as np
+    if os.path.getsize(blob_path) == 0:
+        return b""
+    return np.memmap(blob_path, dtype=np.uint8, mode="r")
+
+
 def param_offsets(blob_path: Path) -> dict:
     """``{name: (byte_offset, nbytes)}`` into the raw blob for each parameter.
 
