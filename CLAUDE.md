@@ -973,6 +973,7 @@ Read the matching skill when the task fits:
 | Raw-XAie sim debug bundle | raw-xaie-sim-debug-bundle |
 | Sim build/run separation | sim-build-run-separation |
 | Sim build (`pr_sim_test.sh`, `-D__AIESIM__`) fails in aie_runtime.c with "use of undeclared identifier" while the HW build is fine | aiesimguardedsymbol |
+| `bash script/docker.sh` shell starts in an empty root-owned dir, no repo files, `Permission denied` on every write (checkout outside /proj and /scratch) | dockerworkdirmount |
 | Build fails on missing snap cmake / libz.so / ZLIB::ZLIB; fast single-file compile check | mlirbuildsandbox |
 | `aiehlc.sh` rebuild caches: `alib up to date` / `alib needs a rebuild`, `KOBJ cache hit/store`, `object cache ... reused`; suspect a stale kernel or library, force a rebuild (`--rebuild-alib`, `HOSTCOMPILE_KERNEL_REBUILD=1`) or turn a cache off | aiehlcbuildcache |
 | `aiehlc.sh` hangs at `waiting for alib lock .../.aiehlc_alib.lock` with no other build running (a shell that sourced an older aiehlc.sh still holds the flock fd) | alibflocklease |

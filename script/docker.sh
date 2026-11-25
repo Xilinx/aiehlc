@@ -37,9 +37,14 @@ under_mounted() {
     done
     return 1
 }
+# The checkout and the cwd themselves are candidates too: `-w <dir>` on an
+# unmounted path makes docker create an EMPTY root-owned dir there, so the shell
+# would start where the (non-root) container user can neither see nor write
+# (matters when a parent is "/", e.g. a checkout at /storage1/aiehlc).
 # Shortest path first, so a folder inside an already-mapped one is skipped.
 CANDS=$(printf '%s\n' /proj /scratch "$(dirname "$AIEHLC_DIR")" "$(dirname "$(pwd)")" \
-            ${AIEHLC_DOCKER_MOUNTS:-} | awk '{ print length($0) "\t" $0 }' | sort -n | cut -f2-)
+            "$AIEHLC_DIR" "$(pwd)" ${AIEHLC_DOCKER_MOUNTS:-} \
+            | awk '{ print length($0) "\t" $0 }' | sort -n | cut -f2-)
 while IFS= read -r d; do
     case "$d" in
         *:*) MOUNTS+=(-v "$d") ;;
