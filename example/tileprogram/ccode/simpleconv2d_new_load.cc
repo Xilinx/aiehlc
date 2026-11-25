@@ -39,15 +39,15 @@ __global__(conv, map) void conv2d_spatial(
     const int pid_h = aie::program_id(0); // mesh row: which OH band
     const int pid_c = aie::program_id(1); // mesh col: which OC group
     const int S = conv.stride, KH = conv.kh, KW = conv.kw;
-    const int C = map.c_align; // 4
-    klog("PIDH", pid_h);       // 4-char tag + one int32; printed by the host after the run
-    klog("PIDC", pid_c);       // 4-char tag + one int32; printed by the host after the run
+    const int C = map.c_align;                         // 4
+    klog("PIDH", pid_h);                               // 4-char tag + one int32; printed by the host after the run
+    klog("PIDC", pid_c);                               // 4-char tag + one int32; printed by the host after the run
     klog("C", C);
     // Lower-case locals: the desugar also emits OH_T/OW_T/TILE_* kernel #defines.
     const int oh_t = map.oh_t, ow_t = map.ow_t; // 7 x 28 output block
     const int ih_t = map.ih_t, iw_t = map.iw_t; // 19 x 61 input block (halo)
     const int oc_t = map.oc_per_core;           // 16
-    const int TAPS = KH * KW * C;               // 196 (not K: simpleconv2d_new_load.h #defines K)
+    const int TAPS = KH * KW * C; // 196 (not K: simpleconv2d_new_load.h #defines K)
 
     // This core's filters: output channels [pid_c*16, +16), all taps.
     const int8_t *w = aie::load_buffer(win_b, {pid_c * oc_t, 0, 0, 0}, {oc_t, KH, KW, C});

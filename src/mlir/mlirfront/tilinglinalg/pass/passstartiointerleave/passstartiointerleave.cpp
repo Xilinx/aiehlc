@@ -10,6 +10,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstdlib>
+#include <string>
 #include <functional>
 
 using namespace mlir;
@@ -85,6 +86,11 @@ static SmallVector<Operation *> outputGroup(emitc::CallOpaqueOp createio) {
         if (isCall(u, "__Runtime_startio") && u->getBlock() == createio->getBlock())
             group.push_back(u);
     return group;
+}
+
+static bool envOn(const char *name) {
+    const char *v = std::getenv(name);
+    return v && *v && std::string(v) != "0";
 }
 
 // Move every shim output channel's programming behind the last input start: the
@@ -458,7 +464,7 @@ static unsigned syncInputStarts(Block &block) {
 // run (~5 us of 28 on the VEK280 GEMM). Clone the first shim BD config of each shape
 // before the kernel launch between __Runtime_bd_template_prepare_begin/_end, where it
 // only encodes the template (no register write); every run's BDs are then template
-// hits. Shape key: callee + every argument except the BD id. AIEHLC_NO_BDT_PREPARE=1 off.
+// hits. Shape key: callee + every argument except the BD id.
 static bool isShimTile(Value tile) {
     auto loc = tile.getDefiningOp<emitc::CallOpaqueOp>();
     if (!loc || loc.getCallee() != "XAie_TileLoc" || !loc.getArgsAttr() || loc.getArgsAttr().size() != 2)
@@ -555,8 +561,6 @@ void StartioInterleavePass::runOnOperation() {
     }
     llvm::errs() << "[TilingLinalg] StartioInterleavePass: " << moved << " of " << starts.size()
                  << " startio moved next to their createio\n";
-    if (std::getenv("AIEHLC_NO_OUTPUTS_LAST"))
-        return;
     SmallVector<Block *> blocks;
     for (emitc::CallOpaqueOp call : starts)
         if (!llvm::is_contained(blocks, call->getBlock()))
@@ -601,11 +605,13 @@ void StartioInterleavePass::runOnOperation() {
     });
     if (bdOverflow)
         return signalPassFailure();
-    unsigned groups = 0;
-    for (Block *b : blocks)
-        groups += outputsLast(*b);
-    llvm::errs() << "[TilingLinalg] StartioInterleavePass: " << groups
-                 << " shim output channel(s) programmed after the inputs\n";
+    if (envOn("AIEHLC_OUTPUTS_LAST")) {
+        unsigned groups = 0;
+        for (Block *b : blocks)
+            groups += outputsLast(*b);
+        llvm::errs() << "[TilingLinalg] StartioInterleavePass: " << groups
+                     << " shim output channel(s) programmed after the inputs\n";
+    }
     if (mod->hasAttr("routing.kernel_block_round_loop")) {
         unsigned armed = 0;
         for (Block *b : blocks)
@@ -613,7 +619,7 @@ void StartioInterleavePass::runOnOperation() {
         llvm::errs() << "[TilingLinalg] StartioInterleavePass: " << armed
                      << " shim output channel(s) armed before the kernel-block input loop\n";
     }
-    if (!std::getenv("AIEHLC_NO_BDT_PREPARE")) {
+    if (envOn("AIEHLC_BDT_PREPARE")) {
         unsigned shapes = 0;
         for (Block *b : blocks)
             shapes += bdTemplatePrepare(*b);

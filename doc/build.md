@@ -33,24 +33,22 @@ sudo apt-get install libncurses5-dev
 sudo apt-get install ninja-build
 ```
 
-5. Install LLVM, MLIR, and clang, build from LLVM 19.1.4 source or Install llvm 19.1.4 with RTTI enable. 
+5. LLVM, MLIR and clang 24 (RTTI on). aiehlc's TableGen files need LLVM 24; an older
+   `mlir-tblgen` stops with `Value 'useStrictPropertiesInAssemblyFormat' unknown!`.
 
-Build from source and enable RTTI option
-
-<https://mlir.llvm.org/getting_started/>
-
-When configuring your project with CMake, we recommend including the following settings to ensure compatibility with aiehlc.
-The most critical setting is enabling Run-Time Type Information (RTTI) for the LLVM build:
--DLLVM_ENABLE_RTTI=ON
-This is required to resolve "undefined reference to typeinfo" linker errors and to enable the use of dynamic casting mechanisms like mlir::dyn_cast.
+   Nothing to do by hand: when CMake does not get an LLVM 24+ build, `script/ensure_llvm.sh`
+   looks for one (`$LLVM_INSTALL_DIR`, `$AIEHLC_LLVM_BUILD`, `$AIEHLC_LLVM_SRC/build`,
+   `/scratch/staff/$USER/llvm-project/build`, `thirdparty/llvm-project/build`) and, if there is
+   none, builds the pinned commit with `script/build_llvm.sh` (Release + assertions + RTTI,
+   projects `mlir;clang`; about an hour on 32 cores, once). To build it ahead of time:
 
 ```bash
--DLLVM_ENABLE_PROJECTS="mlir;clang" \
--DLLVM_TARGETS_TO_BUILD="Native;NVPTX;AMDGPU" \
--DCMAKE_BUILD_TYPE=Release \
--DLLVM_ENABLE_ASSERTIONS=ON \
--DLLVM_ENABLE_RTTI=ON 
+bash script/build_llvm.sh            # --src DIR / --jobs N / --ref REF / --update
+source script/llvm_env.sh            # tcsh: source script/llvm_env.csh
 ```
+
+   An LLVM you built yourself needs `-DLLVM_ENABLE_RTTI=ON` ("undefined reference to typeinfo"
+   otherwise) and `-DLLVM_ENABLE_PROJECTS="mlir;clang"`.
 
 5. Install Vitis
 
@@ -61,22 +59,13 @@ This is required to resolve "undefined reference to typeinfo" linker errors and 
 
 ## Compile
 
-### Find the llvm build or install path
-
-for example the llvm build is
-
-```
-/Users/user/src/app/thirdparty/llvm-project/build
-```
-
-### cmake with set llvm path into the said path
-
-default will use /usr/local/, if the LLVM path is different or need to use local llvm do following
+### Configure and build
 
 ```bash
 mkdir ./build
 cd ./build
-cmake ../ -DLLVM_INSTALL_DIR=/Users/user/src/app/thirdparty/llvm-project/build
-make -j32
-ls
+cmake -G Ninja ..                                   # finds or builds LLVM 24 (see above)
+# cmake -G Ninja .. -DLLVM_INSTALL_DIR=<llvm build> # use a specific LLVM 24+ build
+# cmake -G Ninja .. -DAIEHLC_AUTO_BUILD_LLVM=OFF    # only look, never build LLVM
+ninja
 ```

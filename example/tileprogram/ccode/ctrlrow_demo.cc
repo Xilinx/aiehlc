@@ -52,7 +52,6 @@
 
 #include "xaiengine.h"
 #include <stdio.h>
-#include <string.h>
 
 #ifndef __AIESIM__
 #include "xil_cache.h"
@@ -328,90 +327,6 @@ int run_ctrlrow_demo(XAie_DevInst *dev) {
 #define DEMO_TXN_MR_BASE 0x4B0000u /* payload word i = DEMO_TXN_MR_BASE | i */
 #define DEMO_TXN_MR_BD 6           /* shim MM2S BD for the broadcast send */
 
-#define DEMO_2PKT_ADDR 0x7000u
-#define DEMO_2PKT_NW 5u
-#define DEMO_2PKT_BASE 0x5A110000u
-#define DEMO_2PKT_BD 7
-
-static uint32_t demo_count_ctrl_pkts(const uint32_t *pkt, uint32_t nw) {
-    uint32_t nacc = 0u;
-    for (uint32_t i = 0u; i < nw;) {
-        uint32_t addr = 0u, op = 0u, beats = 0u, rsid = 0u;
-        if (i + 2u > nw || !__Runtime_ctrl_parse_ctrl_hdr(pkt[i + 1u], &addr, &op, &beats, &rsid) || beats == 0u)
-            return 0u;
-        if (i + 2u + beats > nw)
-            return 0u;
-        nacc++;
-        i += 2u + beats;
-    }
-    return nacc;
-}
-
-int demo_two_pkt_one_bd(XAie_DevInst *dev) {
-    __Runtime_CtrlRowFabric fab;
-    static const __Runtime_CtrlRowChain kRows[] = {
-        {DEMO_CORE_ROW_A, DEMO_COL_LO, DEMO_COL_HI},
-    };
-    AieRC rc = __Runtime_ctrl_plan_init(&fab, dev, DEMO_SHIM_COL, DEMO_S2MM_CH, (uint8_t)DEMO_CTRL_ID, kRows, 1u);
-    if (rc != XAIE_OK) {
-        printf("[2pkt] plan_init rc=%d\n", (int)rc);
-        return -1;
-    }
-
-    uint32_t poke = 0xA5A5A5A5u, got = 0u;
-    (void)XAie_DataMemBlockWrite(dev, XAie_TileLoc(DEMO_COL_LO, DEMO_CORE_ROW_A), DEMO_2PKT_ADDR, &poke, sizeof(poke));
-    (void)XAie_DataMemBlockRead(dev, XAie_TileLoc(DEMO_COL_LO, DEMO_CORE_ROW_A), DEMO_2PKT_ADDR, &got, sizeof(got));
-    printf("[2pkt] datamem poke wrote=0x%08x read=0x%08x %s\n", poke, got, got == poke ? "OK" : "MISS");
-
-    uint32_t one = 0xC0DEC001u;
-    rc = __Runtime_ctrl_row_broadcast_write(&fab, DEMO_SCRATCH_ADDR, &one, 1u, DEMO_BD_ID, DEMO_MM2S_CH, 1);
-    got = 0u;
-    (void)XAie_DataMemBlockRead(dev, XAie_TileLoc(DEMO_COL_LO, DEMO_CORE_ROW_A), DEMO_SCRATCH_ADDR, &got, sizeof(got));
-    printf("[2pkt] 1pkt bcast wrote=0x%08x read=0x%08x %s\n", one, got, got == one ? "OK" : "MISS");
-
-    uint32_t data[DEMO_2PKT_NW];
-    for (uint32_t i = 0u; i < DEMO_2PKT_NW; i++)
-        data[i] = DEMO_2PKT_BASE | i;
-
-    uint32_t pkt[16] = {0u};
-    uint32_t nw = __Runtime_ctrl_pktize_write(pkt, (uint32_t)(sizeof(pkt) / sizeof(pkt[0])), (uint32_t)ACR_ID_BCAST,
-                                              DEMO_2PKT_ADDR, data, DEMO_2PKT_NW, 0, 0u, NULL);
-    uint32_t nacc = demo_count_ctrl_pkts(pkt, nw);
-    printf("[2pkt] pktize nwords=%u payload=%u packets=%u (expect 2) bd=%d\n", (unsigned)DEMO_2PKT_NW, (unsigned)nw,
-           (unsigned)nacc, DEMO_2PKT_BD);
-    if (nw == 0u || nacc != 2u) {
-        printf("[2pkt] FAIL: did not form two control packets\n");
-        __Runtime_ctrl_row_close(&fab);
-        return -1;
-    }
-
-    rc = __Runtime_ctrl_row_broadcast_write(&fab, DEMO_2PKT_ADDR, data, DEMO_2PKT_NW, DEMO_2PKT_BD, DEMO_MM2S_CH, 1);
-    if (rc != XAIE_OK) {
-        printf("[2pkt] broadcast_write rc=%d\n", (int)rc);
-        __Runtime_ctrl_row_close(&fab);
-        return -1;
-    }
-
-    int fails = 0;
-    for (uint8_t dc = DEMO_COL_LO; dc <= DEMO_COL_HI; dc++) {
-        int tile_ok = 1;
-        printf("[2pkt] tile(%u,%u) words:", (unsigned)dc, (unsigned)DEMO_CORE_ROW_A);
-        for (uint32_t i = 0u; i < DEMO_2PKT_NW; i++) {
-            uint32_t v = 0u;
-            (void)XAie_DataMemBlockRead(dev, XAie_TileLoc(dc, DEMO_CORE_ROW_A), DEMO_2PKT_ADDR + i * 4u, &v, sizeof(v));
-            printf(" [%u]=0x%08x", (unsigned)i, v);
-            if (v != data[i])
-                tile_ok = 0;
-        }
-        printf(" %s\n", tile_ok ? "PASS" : "FAIL");
-        if (!tile_ok)
-            fails++;
-    }
-    __Runtime_ctrl_row_close(&fab);
-    printf("[2pkt] DONE %s (%d failure(s)) — two packets, one BD\n", fails == 0 ? "PASS" : "FAIL", fails);
-    return fails == 0 ? 0 : -1;
-}
-
 /* Capture one BlockWrite32 as a control-packet transaction and MULTICAST it to
  * every column of @row via the row-control fabric @fab. Flow:
  *   1. start_transaction (nothing touches HW; DISABLE_AUTO_FLUSH)
@@ -649,10 +564,6 @@ int demo_txn_multipl_row(XAie_DevInst *dev) {
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
-#ifndef __AIESIM__
-    setvbuf(stdout, NULL, _IONBF, 0);
-    xil_printf("[2pkt] entered main\r\n");
-#endif
 
     XAie_SetupConfig(ConfigPtr, HW_GEN, XAIE_BASE_ADDR, XAIE_COL_SHIFT, XAIE_ROW_SHIFT, XAIE_NUM_COLS, XAIE_NUM_ROWS,
                      XAIE_SHIM_ROW, XAIE_RES_TILE_ROW_START, XAIE_RES_TILE_NUM_ROWS, XAIE_AIE_TILE_ROW_START,
@@ -687,7 +598,6 @@ int main(int argc, char *argv[]) {
     PartInitOpts.NumUseTiles = 0;
     PartInitOpts.InitOpts = XAIE_PART_INIT_OPT_DEFAULT | XAIE_PART_INIT_OPT_CTRL_TLASTERROR_DISABLE;
     RC = XAie_PartitionInitialize(&DevInst, &PartInitOpts);
-    xil_printf("[2pkt] partition init rc=%d\r\n", (int)RC);
 #else
     XAie_PmRequestTiles(&DevInst, NULL, 0);
 #endif
@@ -697,7 +607,7 @@ int main(int argc, char *argv[]) {
     /* Control-plan transaction demo: capture write-only ops into an XAie
      * transaction, commit them into control-packet words, and push them. */
     // run_ctrol_trasaction(&DevInst);
-    int rc = demo_two_pkt_one_bd(&DevInst);
-    printf("device_teardown done\n");
-    return rc;
+    /* Same transaction API, delivered by broadcast to a 4x4 tile grid. */
+    demo_txn_multipl_row(&DevInst);
+    return 0;
 }

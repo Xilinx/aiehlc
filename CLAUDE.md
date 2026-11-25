@@ -964,7 +964,11 @@ tiny_vit 8.3 ms with ntile, direct conv on ntile); the library's own block stays
 images along each conv's GEMM M (`conv_geo.nimg` / `pstride`, direct conv padded to 32 rows per image;
 design §22, skill **aiednnbatching**): resnet18 64.4 / mobilenet_v2 98.0 ms per image at batch 4.
 
-**LLVM 24 is the default build.** Our own clone `/scratch/staff/$USER/llvm-project`
+**LLVM 24 is required** (the `.td` files use LLVM 24 TableGen options). A plain `cmake ..` finds it
+or builds it: `script/ensure_llvm.sh` checks `$LLVM_INSTALL_DIR`, `$AIEHLC_LLVM_BUILD`,
+`$AIEHLC_LLVM_SRC/build`, `/scratch/staff/$USER/llvm-project/build`, `thirdparty/llvm-project/build`
+and otherwise runs `script/build_llvm.sh`, which builds the pinned commit `fb6414db`
+(`-DAIEHLC_AUTO_BUILD_LLVM=OFF` only looks). Our own clone `/scratch/staff/$USER/llvm-project`
 (`script/build_llvm.sh`, `source script/llvm_env.sh` / `llvm_env.csh`); `build/` is configured on
 it (the LLVM-19 tree is kept in `build_llvm19/`, `AIEHLC_BIN=` picks any binary for `aiehlc.sh`).
 Generated host/kernel/routing code was checked equivalent to LLVM 19's
@@ -1162,9 +1166,12 @@ cannot be used. portobello13: 0.204 (per-call AOT) → 0.194–0.197 ms; JIT 0.2
 `StartioInterleavePass` (`pass/passstartiointerleave/`) moves each `__Runtime_startio` up to its
 `createio` so a channel starts as soon as its BD chain is written (mlir-aie's runtime-sequence order);
 skipped under AOT / `control_plan_shim_bd_ctrl`, off with `AIEHLC_NO_STARTIO_INTERLEAVE=1`.
-It also clones the first shim BD config of each shape before the kernel launch between
-`__Runtime_bd_template_prepare_begin/_end` (encode the AIE-ML shim BD template, no register
-write), so the first run's BDs are template hits too (`AIEHLC_NO_BDT_PREPARE=1` off). The
+**`aiehlc.sh --fast-shim-bd`** (opt-in; default flows keep main's host.cc order and shim BD writes;
+`dnn_build` passes it for vek280 / vek385) adds three speedups: outputs programmed after the inputs
+(`AIEHLC_OUTPUTS_LAST=1`), the first shim BD config of each shape cloned before the kernel launch
+between `__Runtime_bd_template_prepare_begin/_end` (`AIEHLC_BDT_PREPARE=1`; encodes the AIE-ML
+shim BD template, no register write), and the runtime's cached shim BD template on AIE-ML
+baremetal (`-DAIEHLC_BD_TEMPLATE`), so every run's BDs are template hits. The
 template path needs the absolute column for NoC vs PL: aie-rt's public
 `XAie_GetTileTypefromLoc` ignores `StartCol`, so a partition starting at column 2 reported
 every NoC shim as PL (skill **aiehlc-vek280-gen2**). `AIEHLC_CORE_BANKS=1` makes

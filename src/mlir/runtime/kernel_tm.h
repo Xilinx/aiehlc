@@ -99,13 +99,7 @@
  * front end) rejects: "address of non DefSymbol/SpaceSymbol '__aiehlc_tm_anchor'
  * is undefined" (GAP-KCO-TMANCHOR).
  */
-#if __AIE_ARCH__ == 20
-/* AIE-ML's chess leaves an `inline` TM object undefined at link ("address of non DefSymbol/SpaceSymbol
- * '__aiehlc_tm_anchor' is undefined"): static, as the vendor's tile_control_aie2gen.h declares its own. */
 static volatile unsigned int chess_storage(TM : TM_BASE_ADDR) __aiehlc_tm_anchor;
-#else
-inline volatile unsigned int chess_storage(TM : TM_BASE_ADDR) __aiehlc_tm_anchor;
-#endif
 
 /* Pointer arithmetic is in uint32 units, hence /4: the result is the byte
  * address TM_BASE_ADDR + off. `off` must be 4-byte aligned. */

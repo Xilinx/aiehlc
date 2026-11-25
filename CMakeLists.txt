@@ -30,19 +30,39 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffunction-sections -fdata-sections -fvi
 set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -ffunction-sections -fdata-sections -fvisibility=hidden")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--gc-sections -Wl,--icf=all -fuse-ld=gold")
 
-message(STATUS "aFound LLVM ${LLVM_INSTALL_DIR}/bin/")
-#set the llvm path find path into the path you installed
-if(NOT DEFINED LLVM_INSTALL_DIR OR "${LLVM_INSTALL_DIR}" STREQUAL "")
-  # Assign a default value if LLVM_INSTALL_DIR is not defined or is empty
-  set(LLVM_INSTALL_DIR "/usr/local/")
+# the .td files use LLVM 24 TableGen options
+set(AIEHLC_LLVM_MIN_MAJOR 24)
+option(AIEHLC_AUTO_BUILD_LLVM "Build the pinned LLVM (script/build_llvm.sh) when no LLVM 24+ is found" ON)
+set(LLVM_INSTALL_DIR "" CACHE PATH "Root of an LLVM/Clang/MLIR 24+ build (empty: script/ensure_llvm.sh finds or builds one)")
+set(_aiehlc_llvm_major 0)
+if(NOT "${LLVM_INSTALL_DIR}" STREQUAL "" AND EXISTS "${LLVM_INSTALL_DIR}/bin/llvm-config")
+  execute_process(COMMAND "${LLVM_INSTALL_DIR}/bin/llvm-config" --version
+                  OUTPUT_VARIABLE _aiehlc_llvm_ver OUTPUT_STRIP_TRAILING_WHITESPACE)
+  string(REGEX MATCH "^[0-9]+" _aiehlc_llvm_major "${_aiehlc_llvm_ver}")
 endif()
-message(STATUS "use set LLVM_ROOT to change LLVM into your local llvm if the compile failed!!!")
-#set(LLVM_INSTALL_DIR "/Users/username/src/project/thirdparty/llvm-project/build/" CACHE PATH "Root of an LLVM/Clang/MLIR install")
-set(LLVM_INSTALL_DIR "/scratch/staff/huaj/llvm-project/build/" CACHE PATH "Root of an LLVM/Clang/MLIR install")
+if(_aiehlc_llvm_major LESS AIEHLC_LLVM_MIN_MAJOR)
+  if(NOT "${LLVM_INSTALL_DIR}" STREQUAL "")
+    message(STATUS "LLVM_INSTALL_DIR=${LLVM_INSTALL_DIR} is not an LLVM ${AIEHLC_LLVM_MIN_MAJOR}+ build; looking for one")
+  endif()
+  set(_aiehlc_ensure_args --out "${CMAKE_BINARY_DIR}/aiehlc_llvm_dir.txt")
+  if(NOT AIEHLC_AUTO_BUILD_LLVM)
+    list(APPEND _aiehlc_ensure_args --check-only)
+  endif()
+  execute_process(COMMAND ${CMAKE_COMMAND} -E env LLVM_INSTALL_DIR=
+                          bash "${CMAKE_CURRENT_SOURCE_DIR}/script/ensure_llvm.sh" ${_aiehlc_ensure_args}
+                  RESULT_VARIABLE _aiehlc_ensure_rc)
+  if(NOT _aiehlc_ensure_rc EQUAL 0)
+    message(FATAL_ERROR "No LLVM ${AIEHLC_LLVM_MIN_MAJOR}+ build: pass -DLLVM_INSTALL_DIR=<llvm build>, "
+                        "or run script/build_llvm.sh (pinned LLVM), or configure with -DAIEHLC_AUTO_BUILD_LLVM=ON")
+  endif()
+  file(STRINGS "${CMAKE_BINARY_DIR}/aiehlc_llvm_dir.txt" _aiehlc_llvm_dir LIMIT_COUNT 1)
+  set(LLVM_INSTALL_DIR "${_aiehlc_llvm_dir}" CACHE PATH "Root of an LLVM/Clang/MLIR 24+ build" FORCE)
+  unset(LLVM_CONFIG CACHE)
+endif()
 message(STATUS "Found LLVM ${LLVM_INSTALL_DIR}/bin/")
 
 set(CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}/bin/" ${CMAKE_PREFIX_PATH})
-find_program(LLVM_CONFIG ${LLVM_INSTALL_DIR}/bin/llvm-config REQUIRED)
+find_program(LLVM_CONFIG llvm-config PATHS "${LLVM_INSTALL_DIR}/bin" NO_DEFAULT_PATH REQUIRED)
 #find_package(LLVM REQUIRED CONFIG)
 
 message(STATUS "Found LLVM ${LLVM_CONFIG}")

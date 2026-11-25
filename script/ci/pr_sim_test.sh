@@ -85,28 +85,13 @@ on_exit() {
 trap on_exit EXIT
 
 root="$(pwd)"
-# The tree builds against LLVM 24 (script/llvm_env.sh, script/build_llvm.sh): its .td files use
-# TableGen options an older mlir-tblgen rejects ("Value 'useStrictPropertiesInAssemblyFormat' unknown!").
-# Take LLVM_INSTALL_DIR if set, else llvm_env.sh's build, else the shared fallback -- the first one that is
-# LLVM >= 24.
-llvm_min=24
-llvm_major() { "$1/bin/llvm-config" --version 2>/dev/null | cut -d. -f1; }
-ci_user="${USER:-$(id -un)}"
-llvm_dir=""
-for cand in "${LLVM_INSTALL_DIR:-}" "${AIEHLC_LLVM_BUILD:-}" \
-            "${AIEHLC_LLVM_SRC:-/scratch/staff/${ci_user}/llvm-project}/build" \
-            "/scratch/staff/huaj/llvm-project/build"; do
-    [ -n "${cand}" ] && [[ "${cand}" != /Users/* ]] && [ -x "${cand}/bin/llvm-config" ] || continue
-    if [ "$(llvm_major "${cand}")" -ge "${llvm_min}" ] 2>/dev/null; then
-        llvm_dir="${cand}"
-        break
-    fi
-    echo "skipping LLVM ${cand}: $("${cand}/bin/llvm-config" --version), this tree needs ${llvm_min}+"
-done
-if [ -z "${llvm_dir}" ]; then
-    echo "No LLVM ${llvm_min}+ build found: set LLVM_INSTALL_DIR (script/build_llvm.sh builds one)."
+llvm_out="$(mktemp)"
+if ! bash script/ensure_llvm.sh --out "${llvm_out}"; then
+    echo "No LLVM 24+ build found or built: set LLVM_INSTALL_DIR (script/build_llvm.sh builds one)."
     exit 1
 fi
+llvm_dir="$(cat "${llvm_out}")"
+rm -f "${llvm_out}"
 echo "LLVM: ${llvm_dir} ($("${llvm_dir}/bin/llvm-config" --version))"
 
 source script/setup.sh >>"$log" 2>&1

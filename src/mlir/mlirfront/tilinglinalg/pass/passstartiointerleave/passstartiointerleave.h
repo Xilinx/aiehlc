@@ -25,7 +25,7 @@ using namespace mlir;
 // Second step, outputs last: each shim S2MM channel's programming (BD chain,
 // OOO enable, createio, startio) moves behind the last input start, so input
 // DMAs and compute begin while the host still programs the output BDs
-// (AIEHLC_NO_OUTPUTS_LAST=1 turns just this step off).
+// (AIEHLC_OUTPUTS_LAST=1, aiehlc.sh --fast-shim-bd).
 //
 // Third step, synchronized input start: all input startios move to just before
 // the first output group, so every input channel starts within a few hundred ns

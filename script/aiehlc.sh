@@ -20,7 +20,7 @@ run_cmd() {
 }
 
 usage() {
-    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss] [-serialize] [--warm-launch] [--persistent]"
+    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss] [-serialize] [--warm-launch] [--persistent] [--fast-shim-bd]"
     echo "  --platform    baremetal (default) | sim | linux | baremetal_debug"
     echo "                'baremetal_debug' builds a baremetal ELF and writes sim_config.sh so the debug"
     echo "                UI can run either a hardware test or a simulator run from one build."
@@ -34,6 +34,8 @@ usage() {
     echo "                (script/persist_transform.py; needs #pragma KERNELCONFIGOFFLOAD)"
     echo "  --warm-launch cheap relaunch of the same kernel ELF: --skip-bss + hardware DM zeroisation,"
     echo "                program memory kept warm, whole-register core/DMA reset (baremetal HW only)"
+    echo "  --fast-shim-bd faster host shim-BD programming: outputs programmed after the inputs, shim BD"
+    echo "                templates built before the launch, VEK280 shim BDs written from a cached template"
     return 1
 }
 
@@ -330,6 +332,7 @@ GEN_ONLY=0   # --gen-only: stop after code generation (host.cc / kernel*.cc / ro
 PROFILING=0
 SKIP_BSS=0
 WARM_LAUNCH=0
+FAST_SHIM_BD=0
 PERSISTENT=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -408,6 +411,10 @@ while [[ $# -gt 0 ]]; do
         --warm-launch)
             SKIP_BSS=1
             WARM_LAUNCH=1
+            shift
+            ;;
+        --fast-shim-bd)
+            FAST_SHIM_BD=1
             shift
             ;;
         *)
@@ -664,6 +671,15 @@ if [[ "$aie_version" == "2" ]]; then
     AIEHLC_ARGS+=(--extra-arg="-DXPAR_CPU_CORTEXA72_0_TIMESTAMP_CLK_FREQ=99999908")
 fi
 
+# hostcompile.sh links every routing_*.cc here, including a previous build's
+rm -f "$(pwd)/aout/worklocal"/routing_*.cc
+
+# not exported: this script is sourced
+PIPE_ENV=()
+if [ "${FAST_SHIM_BD}" -eq 1 ]; then
+    PIPE_ENV=(AIEHLC_OUTPUTS_LAST=1 AIEHLC_BDT_PREPARE=1)
+fi
+
 if [ "$GDB_MODE" -eq 1 ]; then
     # Debug aiehlc under gdb. aiehlc is passed directly as the *exec file* so gdb
     # loads its symbols ('i files' shows aiehlc) AND breakpoints actually trigger.
@@ -677,13 +693,13 @@ if [ "$GDB_MODE" -eq 1 ]; then
     echo "Launching aiehlc under gdb (-gdb)..."
     echo "  Tip: 'run' to start, 'bt' on crash, 'break <fn>' before run. aiehlc args are pre-set."
     dbg_echo "+ gdb --args ${AIEHLC} ${AIEHLC_ARGS[*]} ${runtime_source_file} --"
-    gdb --args "${AIEHLC}" \
+    env "${PIPE_ENV[@]}" gdb --args "${AIEHLC}" \
         "${AIEHLC_ARGS[@]}" \
         ${runtime_source_file} --
     AIEHLC_RC=$?
 else
     dbg_echo "+ $LD_SO --library-path ${LIB_PATH}:${LIB_BASE_PATH} ${AIEHLC} ${AIEHLC_ARGS[*]} ${runtime_source_file} --"
-    "$LD_SO" --library-path "${LIB_PATH}:${LIB_BASE_PATH}" "${AIEHLC}" \
+    env "${PIPE_ENV[@]}" "$LD_SO" --library-path "${LIB_PATH}:${LIB_BASE_PATH}" "${AIEHLC}" \
         "${AIEHLC_ARGS[@]}" \
         ${runtime_source_file} -- 2> >(tee "$AIEHLC_ERRLOG" >&2)
     AIEHLC_RC=$?
@@ -771,6 +787,9 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
     fi
     if [ "${WARM_LAUNCH}" -eq 1 ]; then
         hc_extra_defs="${hc_extra_defs} -DAIEHLC_WARM_TEXT -DAIEHLC_HW_ZERO_BSS -DAIEHLC_PLAIN_WRITE_RESET"
+    fi
+    if [ "${FAST_SHIM_BD}" -eq 1 ]; then
+        hc_extra_defs="${hc_extra_defs} -DAIEHLC_BD_TEMPLATE"
     fi
     aiehlc_ts host_link_begin
     # KERNEL_DIR: hostcompile.sh cd's into WORKLOCAL_DIR before it sources kc.sh,

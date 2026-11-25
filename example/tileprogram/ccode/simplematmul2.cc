@@ -6,7 +6,7 @@
  */
 #include "simplematmul.h"
 // #pragma aie_debug_level(2 | AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN)
-#pragma aie_debug_level(0 | AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN)
+#pragma aie_debug_level(0 | AIE_KERNEL_CONFIG_TRACE | AIE_DEBUG_FLAG_DISABLE_PARTITIONTEARDOWN)
 // Declarative per-tile core trace: mesh/partition-relative (col,row) of the
 // compute tile to trace. Repeatable; supports ranges e.g. #pragma aie_trace(1:2, 3).
 // #pragma aie_trace((0, 3), (PARAMETER, "win_a"))
@@ -14,7 +14,7 @@
 #pragma control_plan_op_control_packet
 // #pragma control_plan_op_control_packet // enable control plan #1. reserve stream switch routing to cooperate with ir
 // #2. call control plan init in platform init
-// #pragma aie_trace((0, 3), (STREAM, "s2mm", 1))
+#pragma aie_trace((0, 3), (STREAM, "s2mm", 1))
 // Composition-based spatial spaces: a generic SpatialPolicy composed with a
 // PER-PORT 2D iteration space. Each port describes its OWN matrix via d1/d2:
 //   win_a A=[M,K] -> d1 = M-tile,  d2 = K-chunk
@@ -42,7 +42,7 @@ constexpr aie::GemmSpace LtoR_Merge = {
     .d1 = {.fullsize = M, .tile_size = 16, .stride = 16},  // C: M-tile
     .d2 = {.fullsize = N, .tile_size = 16, .stride = 16}}; // C: N-tile
 #define DEBUG_OUTPUT_ORDER 1
-// #define DEBUG_NOCOMPUTE 1
+#define DEBUG_NOCOMPUTE 1
 //  Per-kernel GLOBAL policy, bound explicitly at the declaration site via
 //  __global__(matmul_policy). The <kernel>_policy naming convention still works
 //  as a fallback when no explicit binding is given.

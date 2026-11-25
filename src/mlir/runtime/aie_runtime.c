@@ -7242,7 +7242,7 @@ int __Runtime_ctrl_shim_bd_sync(void) { return rt_sb_ack_wait() == XAIE_OK ? 0 :
  * _XAieMl_ShimDmaWriteBdPrep, then one XAie_BlockWrite32.
  *
  * AIE-ML shim tiles, baremetal backend only; never inside a transaction or the
- * shim-row control window. -DAIEHLC_NO_BD_TEMPLATE disables it;
+ * shim-row control window. Enabled by -DAIEHLC_BD_TEMPLATE (aiehlc.sh --fast-shim-bd);
  * -DAIEHLC_BD_TEMPLATE_VERIFY encodes every BD both ways and reports mismatches.
  * ------------------------------------------------------------------------- */
 #define RT_BDT_MAX 16
@@ -7281,7 +7281,7 @@ static AieRC rt_bdt_cap_runop(void *io, XAie_DevInst *dev, XAie_BackendOpCode op
 static unsigned g_bdt_reject[5]; /* tile type, generation, backend, open transaction, shim-BD window */
 
 static int rt_bdt_usable(XAie_DevInst *dev, uint8_t tt) {
-#if defined(AIEHLC_NO_BD_TEMPLATE) || defined(__AIESIM__)
+#if !defined(AIEHLC_BD_TEMPLATE) || defined(AIEHLC_NO_BD_TEMPLATE) || defined(__AIESIM__)
     (void)dev, (void)tt;
     return 0;
 #else
