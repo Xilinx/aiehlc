@@ -193,17 +193,25 @@ else
 fi
 unset _gcc_include_base _gcc_version
 # LLVM/MLIR/clang build (script/llvm/build.sh). Respect a caller-set value;
-# otherwise use thirdparty/llvm-project/build (script/llvm/build.sh default),
-# then an older sibling ../llvm-project/build.
+# otherwise use <main checkout>/thirdparty/llvm-project/build (script/llvm/build.sh
+# default, shared by all git worktrees), then this tree's own
+# thirdparty/llvm-project/build, then an older sibling ../llvm-project/build.
 if [ -z "${LLVM_INSTALL_DIR:-}" ]; then
-    for _llvm_cand in "$(cd "$AIEHLC_DIR" && pwd)/thirdparty/llvm-project/build" \
+    _aiehlc_main="$(cd "$AIEHLC_DIR" && pwd)"
+    if _gcd="$(git -C "$AIEHLC_DIR" rev-parse --git-common-dir 2>/dev/null)"; then
+        case "$_gcd" in /*) ;; *) _gcd="$AIEHLC_DIR/$_gcd" ;; esac
+        _gcd="$(cd "$_gcd" && pwd)"
+        [ "$(basename "$_gcd")" = ".git" ] && _aiehlc_main="$(dirname "$_gcd")"
+    fi
+    for _llvm_cand in "$_aiehlc_main/thirdparty/llvm-project/build" \
+                      "$(cd "$AIEHLC_DIR" && pwd)/thirdparty/llvm-project/build" \
                       "$(cd "$AIEHLC_DIR/.." && pwd)/llvm-project/build" /usr/local; do
         if [ -x "$_llvm_cand/bin/llvm-config" ] && [ -d "$_llvm_cand/lib/cmake/mlir" ]; then
             export LLVM_INSTALL_DIR="$_llvm_cand"
             break
         fi
     done
-    unset _llvm_cand
+    unset _llvm_cand _aiehlc_main _gcd
 fi
 if [ -z "${LLVM_INSTALL_DIR:-}" ]; then
     echo "WARNING: LLVM_INSTALL_DIR not set and no LLVM+MLIR build found; run: bash script/llvm/build.sh"

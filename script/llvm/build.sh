@@ -5,7 +5,8 @@
 ###############################################################################
 # Fetch and build the LLVM/MLIR/clang aiehlc links against (doc/build.md:
 # LLVM 19.1.4, RTTI on, mlir+clang).
-#   bash script/llvm/build.sh [LLVM_SRC_DIR]   (default: thirdparty/llvm-project)
+#   bash script/llvm/build.sh [LLVM_SRC_DIR]
+#   (default: <main checkout>/thirdparty/llvm-project, shared by all git worktrees)
 # Env: LLVM_TAG (default llvmorg-19.1.4), LLVM_JOBS (default nproc),
 #      LLVM_TARGETS (default "Native;NVPTX;AMDGPU").
 # Result: <LLVM_SRC_DIR>/build -- pass it as LLVM_INSTALL_DIR
@@ -14,7 +15,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIEHLC_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LLVM_TAG="${LLVM_TAG:-llvmorg-19.1.4}"
-LLVM_SRC="${1:-$AIEHLC_DIR/thirdparty/llvm-project}"
+# Main checkout: parent of the git common dir (same for every worktree).
+MAIN_DIR="$AIEHLC_DIR"
+if GCD="$(git -C "$AIEHLC_DIR" rev-parse --git-common-dir 2>/dev/null)"; then
+    case "$GCD" in /*) ;; *) GCD="$AIEHLC_DIR/$GCD" ;; esac
+    GCD="$(cd "$GCD" && pwd)"
+    [ "$(basename "$GCD")" = ".git" ] && MAIN_DIR="$(dirname "$GCD")"
+fi
+LLVM_SRC="${1:-$MAIN_DIR/thirdparty/llvm-project}"
 LLVM_JOBS="${LLVM_JOBS:-$(nproc)}"
 LLVM_TARGETS="${LLVM_TARGETS:-Native;NVPTX;AMDGPU}"
 

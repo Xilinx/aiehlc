@@ -31,20 +31,37 @@ set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -ffunction-sections -fdata-sections -fvi
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--gc-sections -Wl,--icf=all -fuse-ld=gold")
 
 # LLVM/Clang/MLIR location: -DLLVM_INSTALL_DIR=..., else $ENV{LLVM_INSTALL_DIR}
-# (exported by script/setup.sh), else thirdparty/llvm-project/build (what
-# script/llvm/build.sh produces), else an older sibling ../llvm-project/build,
-# else /usr/local. If none of them holds a usable
+# (exported by script/setup.sh), else <main checkout>/thirdparty/llvm-project/build
+# (what script/llvm/build.sh produces; every git worktree of the repo shares
+# the main checkout's LLVM), else this tree's own thirdparty/llvm-project/build,
+# else an older sibling ../llvm-project/build, else /usr/local. If none of them holds a usable
 # LLVM (llvm-config + Clang/MLIR cmake packages), script/llvm/build.sh is run at
 # configure time to fetch and build LLVM 19.1.4 into AIEHLC_LLVM_SRC_DIR/build
 # (about an hour). -DAIEHLC_AUTO_BUILD_LLVM=OFF turns that into an error.
 option(AIEHLC_AUTO_BUILD_LLVM "Build LLVM with script/llvm/build.sh when none is found" ON)
-set(_llvm_src_default "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/llvm-project")
+# Main checkout of this repo: the parent of `git rev-parse --git-common-dir`
+# (the same .git for every worktree). Not a git checkout -> this source tree.
+set(_aiehlc_main_dir "${CMAKE_CURRENT_SOURCE_DIR}")
+execute_process(COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --git-common-dir
+                OUTPUT_VARIABLE _git_common_dir OUTPUT_STRIP_TRAILING_WHITESPACE
+                RESULT_VARIABLE _git_common_rc ERROR_QUIET)
+if(_git_common_rc EQUAL 0 AND NOT "${_git_common_dir}" STREQUAL "")
+  get_filename_component(_git_common_dir "${_git_common_dir}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+  get_filename_component(_git_common_name "${_git_common_dir}" NAME)
+  if("${_git_common_name}" STREQUAL ".git")
+    get_filename_component(_aiehlc_main_dir "${_git_common_dir}" DIRECTORY)
+  endif()
+endif()
+set(_llvm_src_default "${_aiehlc_main_dir}/thirdparty/llvm-project")
+set(_llvm_src_own "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/llvm-project")
 get_filename_component(_llvm_src_sibling "${CMAKE_CURRENT_SOURCE_DIR}/../llvm-project" ABSOLUTE)
 set(AIEHLC_LLVM_SRC_DIR "${_llvm_src_default}" CACHE PATH "llvm-project checkout used by the LLVM auto-build")
-# A build dir configured before the default moved into thirdparty/ caches the
-# old sibling default; follow the new default (an LLVM already built there is
-# still found through the candidate list below).
-if("${AIEHLC_LLVM_SRC_DIR}" STREQUAL "${_llvm_src_sibling}")
+# A build dir configured by an older CMakeLists caches an old default (the
+# sibling ../llvm-project, or a worktree's own thirdparty/llvm-project); follow
+# the new shared default. An LLVM already built at either place is still found
+# through the candidate list below.
+if("${AIEHLC_LLVM_SRC_DIR}" STREQUAL "${_llvm_src_sibling}"
+   OR "${AIEHLC_LLVM_SRC_DIR}" STREQUAL "${_llvm_src_own}")
   set(AIEHLC_LLVM_SRC_DIR "${_llvm_src_default}" CACHE PATH "llvm-project checkout used by the LLVM auto-build" FORCE)
 endif()
 
@@ -67,7 +84,7 @@ elseif(DEFINED ENV{LLVM_INSTALL_DIR} AND NOT "$ENV{LLVM_INSTALL_DIR}" STREQUAL "
   set(_llvm_dir "$ENV{LLVM_INSTALL_DIR}")
 else()
   set(_llvm_dir "")
-  foreach(_cand "${AIEHLC_LLVM_SRC_DIR}/build" "${_llvm_src_sibling}/build" "/usr/local")
+  foreach(_cand "${AIEHLC_LLVM_SRC_DIR}/build" "${_llvm_src_own}/build" "${_llvm_src_sibling}/build" "/usr/local")
     aiehlc_llvm_usable("${_cand}" _ok)
     if(_ok)
       set(_llvm_dir "${_cand}")
