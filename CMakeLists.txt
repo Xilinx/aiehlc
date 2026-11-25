@@ -80,6 +80,22 @@ elseif("${_llvm_dir}" STREQUAL "")
     message(FATAL_ERROR "No LLVM/Clang/MLIR found. Run: bash script/llvm/build.sh, "
                         "or pass -DLLVM_INSTALL_DIR=<llvm build>.")
   endif()
+  # Fail before the (long) build if the LLVM location cannot be written:
+  # check the deepest existing directory of AIEHLC_LLVM_SRC_DIR (and its build/).
+  foreach(_want "${AIEHLC_LLVM_SRC_DIR}" "${AIEHLC_LLVM_SRC_DIR}/build")
+    set(_probe "${_want}")
+    while(NOT EXISTS "${_probe}")
+      get_filename_component(_probe "${_probe}" DIRECTORY)
+    endwhile()
+    execute_process(COMMAND test -w "${_probe}" RESULT_VARIABLE _not_writable)
+    if(NOT _not_writable EQUAL 0)
+      message(FATAL_ERROR
+        "No LLVM found, and cannot build it into ${AIEHLC_LLVM_SRC_DIR}: "
+        "no write permission on ${_probe}.\n"
+        "Choose a writable location:   cmake .. -DAIEHLC_LLVM_SRC_DIR=<writable dir>\n"
+        "or use an existing LLVM build: cmake .. -DLLVM_INSTALL_DIR=<llvm build dir>")
+    endif()
+  endforeach()
   message(STATUS "No LLVM found: building LLVM with script/llvm/build.sh into "
                  "${AIEHLC_LLVM_SRC_DIR}/build (this takes a while)")
   execute_process(

@@ -18,6 +18,18 @@ LLVM_SRC="${1:-$(dirname "$AIEHLC_DIR")/llvm-project}"
 LLVM_JOBS="${LLVM_JOBS:-$(nproc)}"
 LLVM_TARGETS="${LLVM_TARGETS:-Native;NVPTX;AMDGPU}"
 
+# Report an unwritable target up front instead of a git/cmake permission error.
+for want in "$LLVM_SRC" "$LLVM_SRC/build"; do
+    probe="$want"
+    while [ ! -e "$probe" ]; do probe="$(dirname "$probe")"; done
+    if [ ! -w "$probe" ]; then
+        echo "ERROR: cannot build LLVM into $LLVM_SRC: no write permission on $probe." >&2
+        echo "       Pass a writable directory: bash script/llvm/build.sh <dir>" >&2
+        echo "       (from cmake: -DAIEHLC_LLVM_SRC_DIR=<dir>)" >&2
+        exit 1
+    fi
+done
+
 if [ ! -d "$LLVM_SRC/llvm" ]; then
     git clone --depth 1 --branch "$LLVM_TAG" https://github.com/llvm/llvm-project.git "$LLVM_SRC"
 fi
