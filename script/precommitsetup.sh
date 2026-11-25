@@ -69,3 +69,5 @@ EOF
 }
 
 setup_git_hooks
+# pre-push: block a push that fails script/ci/check_opensource.py
+bash "${SCRIPT_DIR}/install_git_hooks.sh" || echo "Warning: git hook install failed (see above)."

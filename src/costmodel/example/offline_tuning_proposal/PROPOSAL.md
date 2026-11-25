@@ -65,7 +65,7 @@ Runtime ~19 s on x86.
 
 ## Limits — be honest
 
-* **L1 Post-compilation only** (COSTMODEL.md ch. 9 "还没做到的" #1). Every input of `estimate()` comes from a
+* **L1 Post-compilation only** (COSTMODEL.md ch. 9 "what is not done yet" #1). Every input of `estimate()` comes from a
   compiled build: static features from host.cc / aiek sources, core cycles from ISS or `kernel.lst`
   (`tools/kcyc_lst.py`, `tools/kcyc_unet.py`). So step 2 (compile) cannot be skipped and the search space is
   bounded by build time, not by `estimate()` (which takes milliseconds to seconds). Enumerating tiling knobs

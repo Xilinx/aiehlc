@@ -22,9 +22,10 @@ usage() {
 }
 
 aierepo_download_check() {
-    set -e
-
+    # No `set -e` here: this file is sourced, and errexit would leak into (and
+    # later kill) the caller's interactive shell. Failures return non-zero.
     local AIE_REPO="$1"
+    local AIE_BRANCH="${AIE_RT_BRANCH:-xlnx_rel_v2026.2}"
     if [ -z "$AIE_REPO" ]; then
          echo "AIE_REPO is $AIE_REPO set to empty exit"
          return 1
@@ -43,8 +44,8 @@ aierepo_download_check() {
     fi
 
     if [ ! -d "$AIE_DRIVER_PARENT_DIR/aie-rt/driver/src" ] ; then
-        if ! git clone --branch main-aie "$AIE_REPO" "$AIE_DRIVER_PARENT_DIR/aie-rt"; then
-            echo "ERROR: failed to clone aie-rt (branch main-aie) from $AIE_REPO."
+        if ! git clone --branch "$AIE_BRANCH" "$AIE_REPO" "$AIE_DRIVER_PARENT_DIR/aie-rt"; then
+            echo "ERROR: failed to clone aie-rt (branch $AIE_BRANCH) from $AIE_REPO."
             echo "       Check GitHub credentials for that repo, or set AIE_RT_REPO to a reachable URL or local clone."
             return 1
         fi
@@ -53,15 +54,21 @@ aierepo_download_check() {
     fi
     ##temporary disable PLM support privledge register, as compile have issue
     find $AIE_DRIVER_PARENT_DIR/aie-rt/driver/src -name "Makefile" -exec sed -i 's/-DXAIE_PROD//g' {} \;
-    bash -c "cd $AIE_DRIVER_PARENT_DIR/aie-rt/driver/src; make -f Makefile.Linux include"
-    bash -c "cd $AIE_DRIVER_PARENT_DIR/aie-rt/driver/src; make -f Makefile.Linux include INCLUDEDIR=../../../include INTERNALDIR=../../../internal"
+    make -C "$AIE_DRIVER_PARENT_DIR/aie-rt/driver/src" -f Makefile.Linux include || return 1
+    make -C "$AIE_DRIVER_PARENT_DIR/aie-rt/driver/src" -f Makefile.Linux include \
+        INCLUDEDIR=../../../include INTERNALDIR=../../../internal || return 1
 }
 
 USE_LLVMAIE=0
 SKIP_BSP=0
 LOCAL_AIE_RT_REPO=0
 PATH_SET_ONLY=0
-AIE_RT_DEFAULT_REPO="${AIE_RT_REPO:-https://github.com/AMD-AECG-AIENGINE/aie-rt.git}"
+# Public upstream aie-rt. Default branch xlnx_rel_v2026.2: it has the AIE2PS
+# driver and XAIE_PART_INIT_OPT_CTRL_TLASTERROR_DISABLE (used by the
+# high-throughput control path in src/mlir/runtime/aie_runtime.c, required);
+# main-aie and xlnx_rel_v2026.1 lack it and are not supported.
+# Override with AIE_RT_REPO=<url|local clone> and AIE_RT_BRANCH=<branch>.
+AIE_RT_DEFAULT_REPO="${AIE_RT_REPO:-https://github.com/Xilinx/aie-rt.git}"
 #VITIS_SETTINGS_PATH="/proj/xbuilds/2025.2_0414_1/installs/lin64/HEAD/Vitis/settings64.sh"
 #VITIS_SETTINGS_PATH="/proj/xbuilds/HEAD_qualified_latest/installs/lin64/HEAD/Vitis/settings64.sh"
 VITIS_SETTINGS_PATH="/proj/xbuilds/HEAD_qualified_latest/installs/lin64/HEAD/Vitis/settings64.sh"
@@ -86,7 +93,7 @@ while [[ $# -gt 0 ]]; do
             LOCAL_AIE_RT_REPO="${1#*=}"
             shift
             ;;
-        --path-to-vitis-settings)
+        --vitis-settings|--path-to-vitis-settings)
             VITIS_SETTINGS_PATH="$2"
             shift 2
             ;;
@@ -134,12 +141,43 @@ elif which aiecompiler > /dev/null 2>&1; then
     echo "XILINX_VITIS is set to $XILINX_VITIS based on aiecompiler location."
 else
     echo "XILINX_VITIS is not set or aiecompiler not found."
+    if [ ! -f "$VITIS_SETTINGS_PATH" ]; then
+        # Not at the default (AMD-internal /proj) path: use a local install,
+        # newest first -- the aiehlc-managed one (script/install_vitis.sh),
+        # then the AMD installer defaults.
+        _aiehlc_vitis_dest="${AIEHLC_VITIS_INSTALL_DIR:-$(cd "$AIEHLC_DIR/.." && pwd)/Xilinx}"
+        _aiehlc_local=$(ls -1 "$_aiehlc_vitis_dest"/*/Vitis/settings64.sh \
+                              /tools/Xilinx/*/Vitis/settings64.sh /tools/Xilinx/Vitis/*/settings64.sh \
+                              /opt/Xilinx/*/Vitis/settings64.sh "$HOME"/Xilinx/*/Vitis/settings64.sh \
+                              2>/dev/null | sort -V | tail -1)
+        if [ -n "$_aiehlc_local" ]; then
+            echo "No Vitis at ${VITIS_SETTINGS_PATH}; using local install ${_aiehlc_local}"
+            VITIS_SETTINGS_PATH="$_aiehlc_local"
+        elif [ "${AIEHLC_VITIS_AUTO_INSTALL:-1}" = "1" ]; then
+            echo "No Vitis at ${VITIS_SETTINGS_PATH} or in a local install:"
+            echo "installing the latest Vitis from the AMD website into ${_aiehlc_vitis_dest}"
+            echo "(script/install_vitis.sh; AIEHLC_VITIS_AUTO_INSTALL=0 to skip)"
+            _aiehlc_local=$(bash "$SCRIPT_DIR/install_vitis.sh" --dest "$_aiehlc_vitis_dest" \
+                            | sed -n 's/^VITIS_SETTINGS=//p')
+            if [ -z "$_aiehlc_local" ]; then
+                echo "ERROR: Vitis installation did not complete (see the messages above)."
+                unset _aiehlc_local _aiehlc_vitis_dest
+                return 1
+            fi
+            VITIS_SETTINGS_PATH="$_aiehlc_local"
+        fi
+        unset _aiehlc_local _aiehlc_vitis_dest
+    fi
     echo "Trying to source ${VITIS_SETTINGS_PATH}"
     case $- in
         *u*) _aiehlc_nounset=1; set +u ;;
         *) _aiehlc_nounset=0 ;;
     esac
-    source "$VITIS_SETTINGS_PATH"
+    if ! source "$VITIS_SETTINGS_PATH" || ! command -v vitis >/dev/null 2>&1; then
+        echo "ERROR: sourcing $VITIS_SETTINGS_PATH did not set up the Vitis environment."
+        echo "       Pass --vitis-settings <Vitis>/settings64.sh, or (in docker) mount /proj with"
+        echo "       rslave propagation (script/docker.sh does) so autofs paths resolve."
+    fi
     if [ -n "${XILINX_VITIS:-}" ]; then
         export XILINX_VITIS
     fi
@@ -181,7 +219,32 @@ else
     export CLANG_INCLUDE_PATH="${_gcc_include_base}/${_gcc_version}/include/"
 fi
 unset _gcc_include_base _gcc_version
-export LLVM_INSTALL_DIR=/Users/hua/src/dsamlir/thirdparty/llvm-project/build/
+# LLVM/MLIR/clang build (script/llvm/build.sh). Respect a caller-set value;
+# otherwise use <main checkout>/thirdparty/llvm-project/build (script/llvm/build.sh
+# default, shared by all git worktrees), then this tree's own
+# thirdparty/llvm-project/build, then an older sibling ../llvm-project/build.
+if [ -z "${LLVM_INSTALL_DIR:-}" ]; then
+    _aiehlc_main="$(cd "$AIEHLC_DIR" && pwd)"
+    if _gcd="$(git -C "$AIEHLC_DIR" rev-parse --git-common-dir 2>/dev/null)"; then
+        case "$_gcd" in /*) ;; *) _gcd="$AIEHLC_DIR/$_gcd" ;; esac
+        _gcd="$(cd "$_gcd" && pwd)"
+        [ "$(basename "$_gcd")" = ".git" ] && _aiehlc_main="$(dirname "$_gcd")"
+    fi
+    for _llvm_cand in "$_aiehlc_main/thirdparty/llvm-project/build" \
+                      "$(cd "$AIEHLC_DIR" && pwd)/thirdparty/llvm-project/build" \
+                      "$(cd "$AIEHLC_DIR/.." && pwd)/llvm-project/build" /usr/local; do
+        if [ -x "$_llvm_cand/bin/llvm-config" ] && [ -d "$_llvm_cand/lib/cmake/mlir" ]; then
+            export LLVM_INSTALL_DIR="$_llvm_cand"
+            break
+        fi
+    done
+    unset _llvm_cand _aiehlc_main _gcd
+fi
+if [ -z "${LLVM_INSTALL_DIR:-}" ]; then
+    echo "WARNING: LLVM_INSTALL_DIR not set and no LLVM+MLIR build found; run: bash script/llvm/build.sh"
+else
+    echo "LLVM_INSTALL_DIR: $LLVM_INSTALL_DIR"
+fi
 
 if [ "$SKIP_BSP" -eq 0 ]; then
     if [ -d "${AIE_DRIVER_PARENT_DIR}/include/" ]; then

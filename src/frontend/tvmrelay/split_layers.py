@@ -62,6 +62,7 @@ Standalone use, against an already-generated tree:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import re
 import subprocess
@@ -90,35 +91,48 @@ _NOISE_OPS = ("expand_dims",)
 # --------------------------------------------------------------------------- #
 
 
+_BRACE_SCAN = re.compile(r"[\"'{}]|//|/\*")
+
+
 def _match_brace(source: str, open_idx: int) -> int:
     """Index just past the ``}`` closing the ``{`` at *open_idx*.
 
     String and char literals are skipped: generated code calls
     ``TVMAPISetLastError("...")`` with messages that can contain braces, and a
     naive counter would end the function in the middle of one.
+
+    Jumps between the interesting tokens with a regex instead of walking every
+    character in Python (the char loop cost ~32 s per warm UNet build).
     """
     depth = 0
     i, n = open_idx, len(source)
-    while i < n:
-        ch = source[i]
-        if ch in ('"', "'"):
+    search = _BRACE_SCAN.search
+    while True:
+        m = search(source, i)
+        if m is None:
+            break
+        i = m.start()
+        tok = m.group()
+        if tok in ('"', "'"):
             i += 1
-            while i < n and source[i] != ch:
+            while i < n and source[i] != tok:
                 i += 2 if source[i] == "\\" else 1
             i += 1
+            if i > n:
+                break
             continue
-        if ch == "/" and i + 1 < n and source[i + 1] == "/":
+        if tok == "//":
             i = source.find("\n", i)
             if i < 0:
                 return n
             continue
-        if ch == "/" and i + 1 < n and source[i + 1] == "*":
+        if tok == "/*":
             end = source.find("*/", i + 2)
             i = n if end < 0 else end + 2
             continue
-        if ch == "{":
+        if tok == "{":
             depth += 1
-        elif ch == "}":
+        else:
             depth -= 1
             if depth == 0:
                 return i + 1
@@ -136,6 +150,24 @@ def iter_c_functions(source: str):
     for m in _DEF_RE.finditer(source):
         open_idx = source.index("{", m.start(1))
         yield m.group(2), m.start(), _match_brace(source, open_idx)
+
+
+@functools.lru_cache(maxsize=4)
+def function_spans(source: str) -> dict:
+    """``{name: (start, end)}`` of :func:`iter_c_functions`, first definition wins.
+
+    Cached per source text: ``network_md.kernel_param_usage`` looks up one
+    symbol per graph node, and rescanning the 1.5 MB module from the top each
+    time was quadratic. Indexing stops at the first unbalanced function, which
+    is where a per-symbol scan would also have given up.
+    """
+    spans = {}
+    try:
+        for name, start, end in iter_c_functions(source):
+            spans.setdefault(name, (start, end))
+    except ValueError:
+        pass
+    return spans
 
 
 def split_module(source: str) -> tuple:

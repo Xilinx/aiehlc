@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import os
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -60,6 +62,24 @@ SKIP_EXACT = {
 }
 
 ALLOWED_SPDX = {"Apache-2.0", "MIT"}
+
+# ---- language check: published text must be English ------------------------------------------
+# Every tracked text file is scanned (docs, comments, string literals, skills), not only the files
+# that need a license header: .cursor/ and .claude/ are published too. Skipped: vendor code and
+# generated IR dumps. Binary files (a NUL in the first 8 KB) are not text.
+LANG_SKIP_PREFIXES = (
+    "thirdparty/",
+    "ir/",
+)
+# Files that must keep non-English text on purpose (e.g. an i18n test fixture): fnmatch globs.
+# Keep this empty unless a file genuinely needs it -- and say why next to the entry.
+LANG_ALLOW_GLOBS: tuple[str, ...] = ()
+LANG_SAMPLE_BYTES = 8192
+LANG_MAX_PER_FILE = 5      # offending lines reported per file (the count covers all of them)
+# Letters of these scripts are allowed: English is written in Latin; Greek letters are math
+# notation (alpha, Sigma). Accented Latin (a name like "Jose" with an accent) cannot be told
+# apart from English here and passes.
+_LANG_OK_LETTER_PREFIXES = ("LATIN", "GREEK", "MICRO SIGN", "MODIFIER LETTER")
 
 RE_SPDX = re.compile(
     r"SPDX-License-Identifier:\s*([A-Za-z0-9.\-+]+)", re.IGNORECASE
@@ -113,6 +133,76 @@ def _read_header(path: Path) -> str | None:
     return "\n".join(text.splitlines()[:HEADER_LINES])
 
 
+def _non_english(ch: str) -> bool:
+    """True for a character of a non-English writing system: a letter outside Latin / Greek
+    (CJK, kana, Hangul, Cyrillic, Arabic, ...) or CJK / fullwidth punctuation (U+3000-303F,
+    U+FF00-FFEF, e.g. the fullwidth colon). Symbols English technical text uses -- arrows, math
+    operators, the micro sign, superscripts, letterlike symbols (U+2100-214F) -- pass."""
+    o = ord(ch)
+    if o < 0x80:
+        return False
+    if 0x3000 <= o <= 0x303F or 0xFF00 <= o <= 0xFFEF:
+        return True
+    if 0x2100 <= o <= 0x214F:
+        return False
+    if not unicodedata.category(ch).startswith("L"):
+        return False
+    return not unicodedata.name(ch, "").startswith(_LANG_OK_LETTER_PREFIXES)
+
+
+def _lang_scanned(path: str) -> bool:
+    if path.startswith(LANG_SKIP_PREFIXES):
+        return False
+    return not any(fnmatch.fnmatch(path, g) for g in LANG_ALLOW_GLOBS)
+
+
+def _lang_file_errors(rel: str, text: str) -> list[str]:
+    hits = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        bad = [(col, ch) for col, ch in enumerate(line, 1) if _non_english(ch)]
+        if bad:
+            hits.append((lineno, bad))
+    errors = []
+    for lineno, bad in hits[:LANG_MAX_PER_FILE]:
+        col, ch = bad[0]
+        run = "".join(ch for _, ch in bad)[:40]
+        errors.append(
+            f"{rel}: line {lineno} col {col}: non-English text \"{run}\" "
+            f"(U+{ord(ch):04X} {unicodedata.name(ch, '?')})"
+        )
+    if len(hits) > LANG_MAX_PER_FILE:
+        errors.append(f"{rel}: ... {len(hits) - LANG_MAX_PER_FILE} more line(s) with non-English text")
+    return errors
+
+
+def check_language(files: list[str]) -> tuple[list[str], list[str]]:
+    """Every scanned text file must be English (see _non_english). Returns (errors, files)."""
+    errors: list[str] = []
+    bad_files: list[str] = []
+    checked = 0
+    for rel in files:
+        if not _lang_scanned(rel):
+            continue
+        path = REPO_ROOT / rel
+        if path.is_symlink() or not path.is_file():
+            continue            # a symlink's target is scanned under its own name
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            errors.append(f"{rel}: cannot read ({exc})")
+            bad_files.append(rel)
+            continue
+        if b"\0" in raw[:LANG_SAMPLE_BYTES]:
+            continue
+        checked += 1
+        errs = _lang_file_errors(rel, raw.decode("utf-8", errors="replace"))
+        if errs:
+            errors.extend(errs)
+            bad_files.append(rel)
+    print(f"language: checked {checked} file(s)", flush=True)
+    return errors, bad_files
+
+
 def check_root_license() -> list[str]:
     license_path = REPO_ROOT / "LICENSE"
     if not license_path.is_file():
@@ -163,35 +253,45 @@ def check_license_headers(files: list[str]) -> tuple[list[str], list[str]]:
     return errors, missing_files
 
 
+LICENSE_HINT = [
+    "Expected header (comment syntax as appropriate):",
+    "  Copyright (C) <YEAR> Advanced Micro Devices, Inc. All Rights Reserved.",
+    "  SPDX-License-Identifier: Apache-2.0",
+]
+LANGUAGE_HINT = [
+    "Published text must be English: translate the comments / docs / strings above. A file that",
+    "genuinely needs another language (e.g. an i18n test fixture) goes into LANG_ALLOW_GLOBS in",
+    "script/ci/check_opensource.py, with the reason next to the entry.",
+]
+
+
 def format_report(
     *,
     scope: str,
     errors: list[str],
     missing_files: list[str],
+    lang_files: list[str] | None = None,
 ) -> str:
+    lang_files = lang_files or []
     lines = [
         "AIEHLC open-source check FAILED",
         f"scope: {scope}",
         f"violations: {len(errors)}",
         f"files missing license info: {len(missing_files)}",
+        f"files with non-English text: {len(lang_files)}",
         "",
         "Files missing license info:",
     ]
-    if missing_files:
-        lines.extend(missing_files)
-    else:
-        lines.append("(none — see violation details below)")
+    lines.extend(missing_files or ["(none)"])
+    lines.extend(["", "Files with non-English text:"])
+    lines.extend(lang_files or ["(none)"])
     lines.extend(["", "Violation details:"])
     lines.extend(f"  - {e}" for e in errors)
-    lines.extend(
-        [
-            "",
-            "Expected header (comment syntax as appropriate):",
-            "  Copyright (C) <YEAR> Advanced Micro Devices, Inc. All Rights Reserved.",
-            "  SPDX-License-Identifier: Apache-2.0",
-            "",
-        ]
-    )
+    lines.append("")
+    if missing_files:
+        lines.extend(LICENSE_HINT + [""])
+    if lang_files:
+        lines.extend(LANGUAGE_HINT + [""])
     return "\n".join(lines)
 
 
@@ -201,9 +301,10 @@ def write_report(
     scope: str,
     errors: list[str],
     missing_files: list[str],
+    lang_files: list[str] | None = None,
 ) -> str:
     text = format_report(
-        scope=scope, errors=errors, missing_files=missing_files
+        scope=scope, errors=errors, missing_files=missing_files, lang_files=lang_files
     )
     path.write_text(text, encoding="utf-8")
     return text
@@ -235,7 +336,7 @@ def emit_annotations(missing_files: list[str], errors: list[str]) -> None:
     # Cap annotations so huge trees stay readable in the Checks UI.
     limit = 50
     for rel in missing_files[:limit]:
-        detail = "; ".join(by_file.get(rel, ["missing license info"]))
+        detail = "; ".join(by_file.get(rel, ["open-source violation"]))
         print(
             f"::error file={rel},title=Open-source check::{detail}",
             flush=True,
@@ -311,6 +412,8 @@ def main(argv: list[str]) -> int:
     errors.extend(hdr_errs)
     missing_files.extend(hdr_missing)
     missing_files = list(dict.fromkeys(missing_files))
+    lang_errs, lang_files = check_language(files)
+    errors.extend(lang_errs)
 
     report_path = Path(args.report)
 
@@ -320,26 +423,13 @@ def main(argv: list[str]) -> int:
             scope=scope,
             errors=errors,
             missing_files=missing_files,
+            lang_files=lang_files,
         )
         write_step_summary(report_text)
-        emit_annotations(missing_files, errors)
+        emit_annotations(list(dict.fromkeys(missing_files + lang_files)), errors)
         print(f"\nFAIL: {len(errors)} open-source violation(s):", flush=True)
-        print(
-            f"Files missing license info ({len(missing_files)}):",
-            flush=True,
-        )
-        for rel in missing_files:
-            print(f"  {rel}", flush=True)
-        print("\nViolation details:", flush=True)
-        for e in errors:
-            print(f"  - {e}", flush=True)
-        print(
-            "\nExpected header (comment syntax as appropriate):\n"
-            "  Copyright (C) <YEAR> Advanced Micro Devices, Inc. All Rights Reserved.\n"
-            "  SPDX-License-Identifier: Apache-2.0",
-            flush=True,
-        )
-        print(f"\nReport written to {report_path}", flush=True)
+        print(report_text.split("\n", 3)[3], flush=True)
+        print(f"Report written to {report_path}", flush=True)
         return 1
 
     if report_path.exists():
@@ -347,7 +437,7 @@ def main(argv: list[str]) -> int:
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as fh:
-            fh.write("## Open-source check passed\n\nNo license-header violations.\n")
+            fh.write("## Open-source check passed\n\nNo license-header or language violations.\n")
     print("PASS: open-source checks clean", flush=True)
     return 0
 

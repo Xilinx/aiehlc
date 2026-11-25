@@ -72,6 +72,138 @@ kernel_stamp() {
     } | sha256sum | cut -d' ' -f1
 }
 
+# --- F2 (-fast): content-addressed kernel object cache, shared across build dirs ------------------
+# AIEHLC_KOBJ_CACHE=<dir> turns it on (unset/empty = off, behaviour unchanged). The key extends
+# kernel_stamp with what kc.sh reads besides kernel.cc: the bcf the prx names (bridge.cfg), the
+# ctrl-packet sites/manifest and host.cc (aot-kco writes host_ctrlpkt_<f>.h from them), every header
+# on kc.sh's include path that can change per checkout (worklocal *.h minus generated ctrl-packet
+# headers, src/mlir/runtime, include/) and the AIE tool path. An entry stores build/kernel.o, the
+# linked build/kernel ELF, kernel.calltree and the files kc.sh writes into its cwd for this kernel
+# (host_ctrlpkt_<f>.h, kernel_<f>_ctrlpkt.h, ctrlpkt_<f>/). Measured 2026-11-22 on UNet m3121 vs
+# m31223: same key -> loaded sections of all 88 .o identical (only .debug_* differ by path).
+kobj_cache_key() {
+    local fn="$1" f bcfname deps
+    deps="$(mktemp)" || return 1
+    kobj_kernel_deps "$deps" || { rm -f "$deps"; return 1; }
+    {
+        kernel_stamp "$fn"
+        bcfname=$(sed -nE 's/.*id="bridge.cfg" value="([^"]+)".*/\1/p' "${WORKLOCAL_DIR}/aieml.prx" 2>/dev/null | head -1)
+        for f in ${bcfname:+"${WORKLOCAL_DIR}/${bcfname}"} \
+                 "${WORKLOCAL_DIR}/ctrlpkt_sites_${fn}.txt" "${WORKLOCAL_DIR}/ctrlpkt_manifest_${fn}.json" \
+                 "${WORKLOCAL_DIR}/ctrlpkt_sites.txt" "${WORKLOCAL_DIR}/ctrlpkt_manifest.json"; do
+            [ -f "$f" ] && { echo "$(basename "$f")"; sha256sum < "$f"; }
+        done
+        if [ -f "${WORKLOCAL_DIR}/ctrlpkt_sites_${fn}.txt" ] || [ -f "${WORKLOCAL_DIR}/ctrlpkt_sites.txt" ]; then
+            echo host.cc; sha256sum < "${WORKLOCAL_DIR}/host.cc" 2>/dev/null
+        fi
+        for f in "${WORKLOCAL_DIR}"/*.h; do
+            case "$(basename "$f")" in host_ctrlpkt*.h|kernel_*_ctrlpkt.h) continue ;; esac
+            [ -f "$f" ] && { echo "$(basename "$f")"; sha256sum < "$f"; }
+        done
+        find "${AIEHLC_ROOT}/src/mlir/runtime" "${AIEHLC_ROOT}/include" -type f \( -name '*.h' -o -name '*.hpp' \) \
+            2>/dev/null | LC_ALL=C sort | xargs -r sha256sum | sed "s#${AIEHLC_ROOT}/##"
+        for f in "${AIEHLC_ROOT}/script/build_ctrlpkt_tool.sh" "${AIEHLC_ROOT}/script/hostcompile.sh"; do
+            [ -f "$f" ] && sha256sum < "$f"
+        done
+        echo "${XILINX_VITIS_AIETOOLS:-} ${XILINX_VITIS:-} ${LLVM_AIE_PATH:-}"
+        echo "defines=${AIEHLC_KERNEL_DEFINES:-} klog=${AIEHLC_KERNEL_LOG:-}"
+        echo "deps"; cat "$deps"
+    } | sha256sum | cut -d' ' -f1
+    rm -f "$deps"
+}
+
+# kobj_kernel_deps <out>: "<sha256>  <path>" of every file kernel.cc includes, as kc.sh compiles it
+# (same -I list, -include kernel_log.h, the AIE defines, __chess__). kernel.cc #includes the user
+# kernel body (e.g. matmul.cc / conv2d.cc), which can change while the generated kernel.cc stays
+# byte-identical -- hashing only kernel.cc + *.h reused a stale kernel. Host g++ -M -MG lists the
+# includes (~0.4 s; -MG keeps going past headers only the AIE toolchain has). rc 1 = could not list
+# them: the caller then compiles without the cache rather than risk a stale hit.
+kobj_kernel_deps() {
+    local out="$1" xa="${XILINX_VITIS_AIETOOLS:-${XILINX_VITIS:-}/aietools}" arch d f
+    case "${AIE_VERSION:-5}" in 1) arch=10 ;; 2) arch=20 ;; *) arch=22 ;; esac
+    local inc=(-I"${xa}/include" -I"${xa}/include/aie_api")
+    for d in "${AIEHLC_ROOT}/thirdparty/alib/include" "${xa}/include/drivers/aiengine"; do
+        [ -d "$d" ] && inc+=(-I"$d")
+    done
+    inc+=(-I"${AIEHLC_ROOT}/src/mlir/runtime" -I"${AIEHLC_ROOT}/include" -I"${WORKLOCAL_DIR}")
+    # shellcheck disable=SC2086
+    g++ -std=c++20 -M -MG -w -nostdinc -D__chess__ -D__AIENGINE__ -D__AIE_ARCH__=${arch} -D__AIEARCH=${arch} \
+        ${AIEHLC_KERNEL_DEFINES:-} -include "${AIEHLC_ROOT}/src/mlir/runtime/kernel_log.h" "${inc[@]}" \
+        "${WORKLOCAL_DIR}/kernel.cc" -MT k 2>/dev/null > "${out}.mk" || { rm -f "${out}.mk"; return 1; }
+    sed -e 's/^k://' -e 's/\\$//' "${out}.mk" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u |
+    while read -r f; do
+        case "$f" in /*) ;; *) f="${WORKLOCAL_DIR}/$f" ;; esac
+        if [ -f "$f" ]; then sha256sum "$f"; else echo "missing  $f"; fi   # -MG: not on this include path
+    done | sed "s#${WORKLOCAL_DIR}/#<W>/#; s#${AIEHLC_ROOT}/#<R>/#" > "$out"
+    rm -f "${out}.mk"
+    grep -q '<W>/kernel.cc$' "$out"   # sanity: the list must at least name kernel.cc itself
+}
+
+# ON by default: a per-user dir that all build dirs and checkouts share (aiehlc.sh wipes aout/ every
+# run, so the per-dir kernel.stamp reuse above never hits on a plain rerun; xchesscc + xchessmk are
+# ~45 s per kernel). Pruned to AIEHLC_KOBJ_CACHE_MAX_MB (default 4096) after each store.
+# AIEHLC_KOBJ_CACHE=<dir> picks the dir; AIEHLC_KOBJ_CACHE=off (or 0 / none) turns it off;
+# HOSTCOMPILE_KERNEL_REBUILD=1 compiles anyway (an existing entry for the key is kept).
+case "${AIEHLC_KOBJ_CACHE:-}" in
+    off|0|none) AIEHLC_KOBJ_CACHE="" ;;
+    "") AIEHLC_KOBJ_CACHE="${XDG_CACHE_HOME:-${HOME}/.cache}/aiehlc/kobj" ;;
+esac
+
+# kobj_cache_get <fn> <key>: restore an entry into BUILD_DIR / cwd. rc 0 = hit.
+kobj_cache_get() {
+    local fn="$1" e="${AIEHLC_KOBJ_CACHE}/$2" f
+    [ -f "$e/kernel.o" ] && [ -f "$e/DONE" ] || return 1
+    # no -p: restored files must look new to the mtime-based reuse checks and make
+    mkdir -p "${BUILD_DIR}" || return 1   # a fresh aout/ (aiehlc.sh wipes it) has no build/ yet
+    cp "$e/kernel.o" "${BUILD_DIR}/kernel.o" || return 1
+    if [ -d "$e/build" ]; then   # kernel ELF, kernel.lst/.map/.calltree, linemap, kernel_debug, xchessmk.log
+        for f in "$e/build"/*; do cp "$f" "${BUILD_DIR}/" || return 1; done
+    else                         # entries stored before the build/ dir existed
+        for f in kernel kernel.calltree; do [ -f "$e/$f" ] && cp "$e/$f" "${BUILD_DIR}/$f"; done
+    fi
+    if [ -f "$e/bcf.name" ] && [ -f "$e/bcf.after" ]; then
+        # kc.sh shrinks the bcf stack in place when kernel statics overflow DM: replay that edit
+        f="./$(cat "$e/bcf.name")"
+        if ! cmp -s "$e/bcf.after" "$f"; then rm -f "$f"; cp "$e/bcf.after" "$f" || return 1; fi
+    fi
+    if [ -d "$e/cwd" ]; then
+        for f in "$e/cwd"/* ; do
+            [ -e "$f" ] || continue
+            # a concurrent prune may rename the entry away mid-copy: treat as a miss (compile rewrites these)
+            rm -rf "./$(basename "$f")"; cp -r "$f" ./ || return 1
+        done
+    fi
+    touch "$e/DONE"   # LRU hint for a later prune
+    echo "[hostcompile] KOBJ cache hit ${fn} ($2)"
+    return 0
+}
+
+# kobj_cache_put <fn> <key>: store after a good compile (tmp dir + rename = atomic for parallel builds).
+kobj_cache_put() {
+    local fn="$1" e="${AIEHLC_KOBJ_CACHE}/$2" t f
+    [ -f "$e/DONE" ] && return 0
+    mkdir -p "${AIEHLC_KOBJ_CACHE}" || return 0
+    t="$(mktemp -d "${AIEHLC_KOBJ_CACHE}/.tmp.XXXXXX")" || return 0
+    cp -p "${BUILD_DIR}/kernel.o" "$t/" || { rm -rf "$t"; return 0; }
+    mkdir -p "$t/build"
+    for f in "${BUILD_DIR}"/kernel "${BUILD_DIR}"/kernel.* "${BUILD_DIR}"/kernel_* "${BUILD_DIR}/xchessmk.log"; do
+        case "$(basename "$f")" in kernel.o|kernel.stamp|kernel_*.o) continue ;; esac
+        [ -f "$f" ] && cp -p "$f" "$t/build/"
+    done
+    f=$(sed -nE 's/.*id="bridge.cfg" value="([^"]+)".*/\1/p' ./aieml.prx 2>/dev/null | head -1)
+    if [ -n "$f" ] && [ -f "./$f" ]; then echo "$f" > "$t/bcf.name"; cp -L "./$f" "$t/bcf.after"; fi
+    mkdir -p "$t/cwd"
+    for f in "./host_ctrlpkt_${fn}.h" "./kernel_${fn}_ctrlpkt.h" "./ctrlpkt_${fn}"; do
+        # -L: in the parallel path these may be links into the worklocal that kc.sh wrote through
+        [ -e "$f" ] && cp -rpL "$f" "$t/cwd/"
+    done
+    echo "${fn}" > "$t/FUNC"
+    touch "$t/DONE"
+    mv -T "$t" "$e" 2>/dev/null || rm -rf "$t"   # lost a race: another build stored the same key
+    echo "[hostcompile] KOBJ cache store ${fn} ($2)"
+    return 0
+}
+
 # check_kernel_stack <prx>: the BCF stack is [0x70000, buffer area start). CoreMemAllocator
 # shrinks it from the default 32 KB when the port buffers do not fit above 0x78000, so
 # compare chess's "Maximum stack size" (kernel.calltree) with the BCF _stack size.
@@ -118,6 +250,18 @@ compile_one_kernel() {
         return 0
     fi
     rm -f "${BUILD_DIR}/kernel.stamp"
+
+    local kobj_key=""
+    if [ -n "${AIEHLC_KOBJ_CACHE:-}" ]; then
+        kobj_key="$(cd "${WORKLOCAL_DIR}" && kobj_cache_key "${kernel_func_name}")" ||
+            { kobj_key=""; echo "[hostcompile] KOBJ cache off for ${kernel_func_name}: could not list kernel.cc's includes"; }
+    fi
+    if [ -n "${kobj_key}" ] && [ "${HOSTCOMPILE_KERNEL_REBUILD:-0}" != "1" ]; then
+        if (cd "${WORKLOCAL_DIR}" && kobj_cache_get "${kernel_func_name}" "${kobj_key}"); then
+            echo "${kstamp}" > "${BUILD_DIR}/kernel.stamp"
+            return 0
+        fi
+    fi
 
     if [ -f "${AIEHLC_ROOT}/script/setup.sh" ]; then
         local saved_pwd
@@ -171,6 +315,10 @@ compile_one_kernel() {
     fi
     if [ ${kc_rc} -eq 0 ] && [ -f "${BUILD_DIR}/kernel.o" ]; then
         echo "${kstamp}" > "${BUILD_DIR}/kernel.stamp"
+        [ -n "${kobj_key}" ] && (cd "${WORKLOCAL_DIR}" && kobj_cache_put "${kernel_func_name}" "${kobj_key}")
+        if [ -n "${kobj_key}" ]; then
+            bash "${AIEHLC_ROOT}/script/kobj_cache_prune.sh" "${AIEHLC_KOBJ_CACHE}" >/dev/null || true
+        fi
     fi
     return ${kc_rc}
 }
@@ -551,10 +699,15 @@ cd "${BUILD_DIR}"
 # KERNEL_OBJ_LIST is set above (single file or multiple files for multi-kernel)
 
 echo "Kernel object(s):"
+if [ "${AIEHLC_FAST:-0}" = "1" ]; then
+    # -fast (F18): the nm listing is log only and costs ~1.4 s for UNet's 44 kernel objects.
+    echo "  $(echo ${KERNEL_OBJ_LIST} | wc -w) object(s) (nm listing skipped with -fast)"
+else
 for kobj in ${KERNEL_OBJ_LIST}; do
     echo "  $(basename ${kobj}):"
     nm "${kobj}" | grep _binary_ || true
 done
+fi
 echo ""
 
 # Library vs executable mode.
@@ -630,6 +783,155 @@ void host_canonicalized();\
         "${WORKLOCAL_DIR}/host.cc" > "${HOST_FIXED}"
 fi
 HOST_SRC="${HOST_FIXED}"
+
+# F18 (-fast): content cache for the library archive. In aiegraph's install step this script rebuilds
+# a byte-identical archive on every warm build (UNet carrier: host.o + 8 runtime objects + ar of
+# 430 MB of kernel objects, ~9 s). The key is ccache's preprocessor mode for every object it would
+# compile (compiler --version, the exact flags with the build dir masked, `-E -P` of the source,
+# which covers every header and -D) plus the bytes of the kernel objects, the object list, the
+# archive name, ar --version and this script. A hit hardlinks the archive (0444) and skips the
+# compiles and ar. Only for library mode with a full rebuild and no -g (a -g object holds paths).
+# HOSTCOMPILE_ARCHIVE_CACHE=<dir> or AIEHLC_FAST=1 (${XDG_CACHE_HOME:-~/.cache}/aiehlc/hca);
+# keeps the newest HOSTCOMPILE_ARCHIVE_CACHE_KEEP (default 3) entries.
+_HCA_DIR="${HOSTCOMPILE_ARCHIVE_CACHE:-}"
+if [ -z "${_HCA_DIR}" ] && [ "${AIEHLC_FAST:-0}" = "1" ]; then
+    _HCA_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/aiehlc/hca"
+fi
+_HCA_KEY=""
+case " ${HOST_OPT_FLAGS} ${OPT_FLAGS} ${EXTRA_DEFS:-} " in *" -g"*) _HCA_DIR="" ;; esac
+if [ -n "${_HCA_DIR}" ] && [ "${HOST_ENTRY_KIND}" = "library" ] && [ "${REBUILD}" -eq 1 ]; then
+    _hca_pp() {   # same compiler + flags as _hc_one / the serial blocks below, -E -P instead of -c -o
+        case "$1" in
+            host)    echo "${TOOL_PREFIX}g++ ${HOST_OPT_FLAGS} -std=c++20 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag}"
+                     ${TOOL_PREFIX}g++ ${HOST_OPT_FLAGS} -std=c++20 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -E -P "${HOST_SRC}" ;;
+            routing) echo "${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++17 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag}"
+                     ${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++17 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -E -P "${WORKLOCAL_DIR}/routing.cc" ;;
+            *)       echo "${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++17 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} $1"
+                     ${TOOL_PREFIX}g++ ${OPT_FLAGS} -std=c++17 ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -E -P "${AIEHLC_ROOT}/src/mlir/runtime/$1.c" ;;
+        esac
+    }
+    _hca_names=(host aie_runtime aie_runtime_debug aie_runtime_stream_debug aie_runtime_common
+                aie_runtime_control_plan aie_runtime_resource aie_ctrlpkt_encode aie_runtime_xaie_seq)
+    [ "${HAS_ROUTING}" -eq 1 ] && _hca_names+=(routing)
+    _hca_t="$(mktemp -d)"
+    for _n in "${_hca_names[@]}"; do
+        ( _hca_pp "${_n}" | sed -e "1s#${BUILD_DIR}#<B>#g" -e "1s#${WORKLOCAL_DIR}#<W>#g" | sha1sum > "${_hca_t}/${_n}"
+          [ "${PIPESTATUS[0]}" -eq 0 ] || echo fail > "${_hca_t}/${_n}.fail" ) 2>/dev/null &
+    done
+    # sha1 of every kernel object (in parallel: 430 MB for UNet), sorted by basename
+    _hca_kobj="$(printf '%s\n' ${KERNEL_OBJ_LIST} | xargs -r -P 8 -n 8 sha1sum | sed -e 's#  .*/#  #' | LC_ALL=C sort -k2 | sha1sum)"
+    wait
+    if ! ls "${_hca_t}"/*.fail >/dev/null 2>&1; then
+        _HCA_KEY="$( { echo hca1; echo "${HOST_LIB_NAME} ${HAS_ROUTING}"; ${TOOL_PREFIX}g++ --version; ${TOOL_PREFIX}ar --version
+                       sha1sum < "${BASH_SOURCE[0]}"; echo "${_hca_kobj}"
+                       for _n in "${_hca_names[@]}"; do echo "${_n} $(cat "${_hca_t}/${_n}")"; done; } | sha1sum | cut -c1-40)"
+    fi
+    rm -rf "${_hca_t}"
+    if [ -n "${_HCA_KEY}" ] && [ -f "${_HCA_DIR}/${_HCA_KEY}/lib.a" ]; then
+        rm -f "${HOST_LIB_NAME}"
+        ln "${_HCA_DIR}/${_HCA_KEY}/lib.a" "${HOST_LIB_NAME}" 2>/dev/null || cp "${_HCA_DIR}/${_HCA_KEY}/lib.a" "${HOST_LIB_NAME}"
+        touch "${_HCA_DIR}/${_HCA_KEY}"   # LRU hint
+        echo "[hostcompile] archive cache hit ${_HCA_KEY:0:12}: ${BUILD_DIR}/${HOST_LIB_NAME} (no compile, no ar)"
+        ls -l "${HOST_LIB_NAME}"
+        AOUT_DIR="$(dirname "${WORKLOCAL_DIR}")"
+        # hardlink, never copy: this inode is the cache entry (0444; nothing writes an archive in place)
+        ln -f "${HOST_LIB_NAME}" "${AOUT_DIR}/${HOST_LIB_NAME}" 2>/dev/null || cp -f "${HOST_LIB_NAME}" "${AOUT_DIR}/${HOST_LIB_NAME}"
+        echo "Published: ${AOUT_DIR}/${HOST_LIB_NAME} (hardlink)"
+        cd "${_HOSTCOMPILE_ORIG_PWD}"
+        exit 0
+    fi
+fi
+
+# HOSTCOMPILE_HOST_JOBS: compile host.cc, the 8 aie_runtime*.c files and routing.cc at once
+# (default 10; 1 = the old serial blocks below). Same commands and flags as the serial blocks,
+# so the objects are identical; on the UNet carrier layer this cuts ~7.9 s of serial g++ to the
+# longest single compile (host.cc, ~3.6 s). On success REBUILD=0 makes the serial blocks skip.
+_HC_JOBS="${HOSTCOMPILE_HOST_JOBS:-10}"
+if [ "${REBUILD}" -eq 1 ] && [ "${_HC_JOBS}" -gt 1 ] 2>/dev/null; then
+    # Same unquoted expansions as the serial blocks (no re-parsing through bash -c, so EXTRA_DEFS
+    # word-splits exactly as before).
+    # _hc_cc <name> c|pp: the object's exact compile command (c), or the same command with -E -P (pp).
+    _hc_cc() {
+        local src flags std
+        case "$1" in
+            host)    src="${HOST_SRC}"; flags="${HOST_OPT_FLAGS}"; std=-std=c++20 ;;
+            routing) src="${WORKLOCAL_DIR}/routing.cc"; flags="${OPT_FLAGS}"; std=-std=c++17 ;;
+            *)       src="${AIEHLC_ROOT}/src/mlir/runtime/$1.c"; flags="${OPT_FLAGS}"; std=-std=c++17 ;;
+        esac
+        if [ "$2" = c ]; then
+            ${TOOL_PREFIX}g++ ${flags} ${std} ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -c "${src}" -o "$1.o"
+        else
+            echo "${TOOL_PREFIX}g++ ${flags} ${std} ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag}" |
+                sed -e "s#${BUILD_DIR}#<B>#g" -e "s#${WORKLOCAL_DIR}#<W>#g" -e "s#${AIEHLC_ROOT}#<R>#g"
+            ${TOOL_PREFIX}g++ ${flags} ${std} ${DEFS} ${INCLUDE_OPTS} ${compiler_cpu_flag} -E -P "${src}"
+        fi
+    }
+    # Object cache (step 3, default ON; HOSTCOMPILE_OBJ_CACHE=<dir> | off): ccache's preprocessor mode --
+    # key = compiler --version + the command (build paths masked) + the `-E -P` text, which covers every
+    # header and -D; same key -> byte-identical object, so a hit copies it instead of compiling (the 8
+    # runtime files barely ever change; aie_runtime.c alone is ~1.9 s). Off for -g builds: their objects
+    # record the build directory. Keeps the newest HOSTCOMPILE_OBJ_CACHE_KEEP (default 2000) objects.
+    _HC_OC="${HOSTCOMPILE_OBJ_CACHE:-${XDG_CACHE_HOME:-${HOME}/.cache}/aiehlc/hobj}"
+    case "${_HC_OC}" in off|0|none) _HC_OC="" ;; esac
+    case " ${HOST_OPT_FLAGS} ${OPT_FLAGS} ${DEFS} " in *" -g"*) _HC_OC="" ;; esac
+    [ -n "${_HC_OC}" ] && { mkdir -p "${_HC_OC}" 2>/dev/null || _HC_OC=""; }
+    _HC_CCID="$(${TOOL_PREFIX}g++ --version 2>&1 | head -1)"
+    _hc_one() {
+        local key=""
+        if [ -n "${_HC_OC}" ]; then
+            # a failing -E (e.g. a missing header) gets no key: compile and let the compiler report it
+            if _hc_cc "$1" pp > "hc_$1.pp" 2>/dev/null; then
+                key="$( { echo "hobj1 ${_HC_CCID}"; cat "hc_$1.pp"; } | sha1sum | cut -c1-40)"
+            fi
+            rm -f "hc_$1.pp"
+            if [ -n "$key" ] && cp "${_HC_OC}/${key}.o" "$1.o" 2>/dev/null; then
+                touch "${_HC_OC}/${key}.o" 2>/dev/null; echo "$1" >> hc_cachehit.list; return 0
+            fi
+        fi
+        _hc_cc "$1" c || return 1
+        if [ -n "$key" ] && [ -f "$1.o" ]; then
+            cp "$1.o" "${_HC_OC}/.${key}.$$" 2>/dev/null && mv -f "${_HC_OC}/.${key}.$$" "${_HC_OC}/${key}.o"
+        fi
+    }
+    rm -f hc_cachehit.list
+    _hc_names=(host aie_runtime aie_runtime_debug aie_runtime_stream_debug aie_runtime_common
+               aie_runtime_control_plan aie_runtime_resource aie_ctrlpkt_encode aie_runtime_xaie_seq)
+    [ "${HAS_ROUTING}" -eq 1 ] && _hc_names+=(routing)
+    echo "Compiling host.cc + runtime (${#_hc_names[@]} objects, ${_HC_JOBS} at a time; HOSTCOMPILE_HOST_JOBS=1 for serial)..."
+    _hc_pids=(); _hc_fail=""
+    for _i in "${!_hc_names[@]}"; do
+        rm -f "${_hc_names[$_i]}.o"
+        ( set +e; _hc_one "${_hc_names[$_i]}" ) > "hc_${_hc_names[$_i]}.log" 2>&1 &
+        _hc_pids+=($!)
+        if [ "${#_hc_pids[@]}" -ge "${_HC_JOBS}" ]; then
+            wait "${_hc_pids[0]}" || true          # failures are caught by the .o check below
+            _hc_pids=("${_hc_pids[@]:1}")
+        fi
+    done
+    for _p in "${_hc_pids[@]}"; do wait "${_p}" || true; done
+    for _n in "${_hc_names[@]}"; do
+        [ -s "hc_${_n}.log" ] && { echo "--- ${_n}:"; cat "hc_${_n}.log"; }
+        [ -f "${_n}.o" ] || _hc_fail="${_hc_fail} ${_n}"
+        rm -f "hc_${_n}.log"
+    done
+    if [ -n "${_hc_fail}" ]; then
+        echo "Error: failed to compile:${_hc_fail}"
+        exit 1
+    fi
+    if [ -n "${_HC_OC}" ]; then
+        echo "[hostcompile] object cache ${_HC_OC}: $(wc -l < hc_cachehit.list 2>/dev/null || echo 0) of ${#_hc_names[@]} objects reused"
+        rm -f hc_cachehit.list
+        # prune: keep the newest objects (hits touch theirs)
+        _hc_keep="${HOSTCOMPILE_OBJ_CACHE_KEEP:-2000}"
+        if [ "$(find "${_HC_OC}" -maxdepth 1 -name '*.o' | wc -l)" -gt "${_hc_keep}" ]; then
+            find "${_HC_OC}" -maxdepth 1 -name '*.o' -printf '%T@ %p\n' | sort -rn | tail -n +$((_hc_keep + 1)) |
+                cut -d' ' -f2- | xargs -r rm -f
+        fi
+        find "${_HC_OC}" -maxdepth 1 -name '.*.[0-9]*' -mmin +60 -delete 2>/dev/null || true
+    fi
+    REBUILD=0
+    echo "(compiled in parallel; the 'Skipping ...' lines below are expected)"
+fi
 
 # Compile host
 if [ "${REBUILD}" -eq 1 ] || [ ! -f host.o ]; then
@@ -775,7 +1077,21 @@ if [ "${HOST_ENTRY_KIND}" = "library" ]; then
         echo "Error: failed to archive ${HOST_LIB_NAME}"
         exit 1
     fi
-    ${TOOL_PREFIX}ranlib "${HOST_LIB_NAME}" 2>/dev/null || true
+    if [ -n "${_HCA_KEY}" ] && [ ! -e "${_HCA_DIR}/${_HCA_KEY}" ]; then   # F18 store (never fails the build)
+        _hca_tmp="${_HCA_DIR}/.tmp-${_HCA_KEY}-$$"
+        # hardlink (cp fallback): the build's archive becomes 0444 too, same as on a hit
+        if mkdir -p "${_hca_tmp}" 2>/dev/null && { ln "${HOST_LIB_NAME}" "${_hca_tmp}/lib.a" 2>/dev/null \
+                || cp "${HOST_LIB_NAME}" "${_hca_tmp}/lib.a" 2>/dev/null; } \
+           && chmod 0444 "${_hca_tmp}/lib.a" && mv -T "${_hca_tmp}" "${_HCA_DIR}/${_HCA_KEY}" 2>/dev/null; then
+            echo "[hostcompile] archive cache store ${_HCA_KEY:0:12}"
+            ls -1dt "${_HCA_DIR}"/[0-9a-f]*/ 2>/dev/null | tail -n +$(( ${HOSTCOMPILE_ARCHIVE_CACHE_KEEP:-3} + 1 )) \
+                | while read -r _old; do rm -rf "${_old}"; done
+        fi
+        rm -rf "${_hca_tmp}" 2>/dev/null
+        find "${_HCA_DIR}" -maxdepth 1 -name '.tmp-*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+    fi
+    # No ranlib: `ar rcs` already writes the symbol index (ranlib left the 430 MB UNet carrier
+    # archive byte-identical and cost 3.0 s).
 
     echo ""
     echo "============================================"
@@ -809,8 +1125,14 @@ if [ "${HOST_ENTRY_KIND}" = "library" ]; then
     # Publish next to the ELF the executable path would have produced, so
     # callers have one predictable location to look in.
     AOUT_DIR="$(dirname "${WORKLOCAL_DIR}")"
-    cp -f "${HOST_LIB_NAME}" "${AOUT_DIR}/${HOST_LIB_NAME}"
-    echo "Published: ${AOUT_DIR}/${HOST_LIB_NAME}"
+    if [ "${AIEHLC_FAST:-0}" = "1" ] && ln -f "${HOST_LIB_NAME}" "${AOUT_DIR}/${HOST_LIB_NAME}" 2>/dev/null; then
+        # -fast (F18): hardlink instead of a 430 MB copy (2.2 s for UNet). ar, isolate and install
+        # replace archives by name (rm/rename), never in place, so the two names stay equal.
+        echo "Published: ${AOUT_DIR}/${HOST_LIB_NAME} (hardlink)"
+    else
+        cp -f "${HOST_LIB_NAME}" "${AOUT_DIR}/${HOST_LIB_NAME}"
+        echo "Published: ${AOUT_DIR}/${HOST_LIB_NAME}"
+    fi
 
     cd "${_HOSTCOMPILE_ORIG_PWD}"
     exit 0

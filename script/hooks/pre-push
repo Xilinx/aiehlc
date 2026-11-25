@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+###############################################################################
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+###############################################################################
+# pre-push: refuse a push unless script/ci/check_opensource.py passes on EVERY commit tip being pushed.
+#
+# The check runs on the pushed commit itself (a throw-away detached worktree), not on the working
+# tree, so uncommitted or untracked files can neither hide a violation nor cause a false one.
+# Installed by script/install_git_hooks.sh (also run by `source script/setup.sh`).
+# Bypass (not recommended; CI still checks): git push --no-verify
+set -uo pipefail
+
+ZERO=0000000000000000000000000000000000000000
+CHECK=script/ci/check_opensource.py
+fail=0
+checked=""
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$ZERO" ] && continue                 # deleting a remote branch: nothing to check
+    case " $checked " in *" $local_sha "*) continue ;; esac
+    checked="$checked $local_sha"
+    if ! git cat-file -e "${local_sha}:${CHECK}" 2>/dev/null; then
+        echo "[pre-push] ${local_ref}: ${CHECK} not in ${local_sha:0:12}; skipping open-source check"
+        continue
+    fi
+    wt="$(mktemp -d "${TMPDIR:-/tmp}/oscheck.XXXXXX")"
+    if ! git worktree add -q --detach "$wt" "$local_sha" 2>/dev/null; then
+        echo "[pre-push] ERROR: could not check out ${local_sha:0:12} to run ${CHECK}"
+        rm -rf "$wt"; fail=1; continue
+    fi
+    echo "[pre-push] open-source check: ${local_ref} (${local_sha:0:12})"
+    if ! (cd "$wt" && python3 "$CHECK" --all --report "$wt/opensource-check-report.txt"); then
+        cp -f "$wt/opensource-check-report.txt" ./opensource-check-report.txt 2>/dev/null || true
+        echo ""
+        echo "[pre-push] BLOCKED: ${local_ref} fails the open-source check (report: ./opensource-check-report.txt)."
+        echo "[pre-push] Add the license header to the files above, commit, and push again."
+        fail=1
+    fi
+    git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+done
+git worktree prune >/dev/null 2>&1 || true
+exit $fail

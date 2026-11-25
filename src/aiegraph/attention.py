@@ -238,11 +238,11 @@ def _param_values(cg: CallGraph, workdir) -> dict:
     if len(blobs) != 1:
         return {}
     try:
-        from frontend.tvmrelay.arm_build import param_offsets
+        from frontend.tvmrelay.arm_build import param_offsets, params_view
     except ImportError:
         return {}
     offs = param_offsets(blobs[0])
-    data = blobs[0].read_bytes()
+    data = params_view(blobs[0])    # F21: mmap, only the 4-byte scalars are touched
     out = {}
     for t, nm in cg.names.items():
         if nm in offs and cg.dtype[t] == "float32":

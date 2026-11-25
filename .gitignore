@@ -19,6 +19,8 @@ thirdparty/arch
 
 # llvm-aie
 thirdparty/llvm-aie/
+# LLVM/MLIR/clang fetched and built by script/llvm/build.sh (cmake auto-build)
+thirdparty/llvm-project/
 *.whl
 *.dist-info/
 
@@ -155,3 +157,4 @@ src/aietensorop/conv2dstem/test_conv2d_vec.cc
 
 # per-user Claude Code settings (permissions, local paths)
 .claude/settings.local.json
+download/

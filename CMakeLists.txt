@@ -30,15 +30,109 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffunction-sections -fdata-sections -fvi
 set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -ffunction-sections -fdata-sections -fvisibility=hidden")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--gc-sections -Wl,--icf=all -fuse-ld=gold")
 
-message(STATUS "aFound LLVM ${LLVM_INSTALL_DIR}/bin/")
-#set the llvm path find path into the path you installed
-if(NOT DEFINED LLVM_INSTALL_DIR OR "${LLVM_INSTALL_DIR}" STREQUAL "")
-  # Assign a default value if LLVM_INSTALL_DIR is not defined or is empty
-  set(LLVM_INSTALL_DIR "/usr/local/")
+# LLVM/Clang/MLIR location: -DLLVM_INSTALL_DIR=..., else $ENV{LLVM_INSTALL_DIR}
+# (exported by script/setup.sh), else <main checkout>/thirdparty/llvm-project/build
+# (what script/llvm/build.sh produces; every git worktree of the repo shares
+# the main checkout's LLVM), else this tree's own thirdparty/llvm-project/build,
+# else an older sibling ../llvm-project/build, else /usr/local. If none of them holds a usable
+# LLVM (llvm-config + Clang/MLIR cmake packages), script/llvm/build.sh is run at
+# configure time to fetch and build LLVM 19.1.4 into AIEHLC_LLVM_SRC_DIR/build
+# (about an hour). -DAIEHLC_AUTO_BUILD_LLVM=OFF turns that into an error.
+option(AIEHLC_AUTO_BUILD_LLVM "Build LLVM with script/llvm/build.sh when none is found" ON)
+# Main checkout of this repo: the parent of `git rev-parse --git-common-dir`
+# (the same .git for every worktree). Not a git checkout -> this source tree.
+set(_aiehlc_main_dir "${CMAKE_CURRENT_SOURCE_DIR}")
+execute_process(COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --git-common-dir
+                OUTPUT_VARIABLE _git_common_dir OUTPUT_STRIP_TRAILING_WHITESPACE
+                RESULT_VARIABLE _git_common_rc ERROR_QUIET)
+if(_git_common_rc EQUAL 0 AND NOT "${_git_common_dir}" STREQUAL "")
+  get_filename_component(_git_common_dir "${_git_common_dir}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+  get_filename_component(_git_common_name "${_git_common_dir}" NAME)
+  if("${_git_common_name}" STREQUAL ".git")
+    get_filename_component(_aiehlc_main_dir "${_git_common_dir}" DIRECTORY)
+  endif()
 endif()
-message(STATUS "use set LLVM_ROOT to change LLVM into your local llvm if the compile failed!!!")
-#set(LLVM_INSTALL_DIR "/Users/username/src/project/thirdparty/llvm-project/build/" CACHE PATH "Root of an LLVM/Clang/MLIR install")
-set(LLVM_INSTALL_DIR "/scratch/staff/huaj/llvm-project/build/" CACHE PATH "Root of an LLVM/Clang/MLIR install")
+set(_llvm_src_default "${_aiehlc_main_dir}/thirdparty/llvm-project")
+set(_llvm_src_own "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/llvm-project")
+get_filename_component(_llvm_src_sibling "${CMAKE_CURRENT_SOURCE_DIR}/../llvm-project" ABSOLUTE)
+set(AIEHLC_LLVM_SRC_DIR "${_llvm_src_default}" CACHE PATH "llvm-project checkout used by the LLVM auto-build")
+# A build dir configured by an older CMakeLists caches an old default (the
+# sibling ../llvm-project, or a worktree's own thirdparty/llvm-project); follow
+# the new shared default. An LLVM already built at either place is still found
+# through the candidate list below.
+if("${AIEHLC_LLVM_SRC_DIR}" STREQUAL "${_llvm_src_sibling}"
+   OR "${AIEHLC_LLVM_SRC_DIR}" STREQUAL "${_llvm_src_own}")
+  set(AIEHLC_LLVM_SRC_DIR "${_llvm_src_default}" CACHE PATH "llvm-project checkout used by the LLVM auto-build" FORCE)
+endif()
+
+function(aiehlc_llvm_usable dir out)
+  if(EXISTS "${dir}/bin/llvm-config"
+     AND EXISTS "${dir}/lib/cmake/clang/ClangConfig.cmake"
+     AND EXISTS "${dir}/lib/cmake/mlir/MLIRConfig.cmake")
+    set(${out} TRUE PARENT_SCOPE)
+  else()
+    set(${out} FALSE PARENT_SCOPE)
+  endif()
+endfunction()
+
+set(_llvm_explicit FALSE)
+if(DEFINED LLVM_INSTALL_DIR AND NOT "${LLVM_INSTALL_DIR}" STREQUAL "")
+  set(_llvm_explicit TRUE)
+  set(_llvm_dir "${LLVM_INSTALL_DIR}")
+elseif(DEFINED ENV{LLVM_INSTALL_DIR} AND NOT "$ENV{LLVM_INSTALL_DIR}" STREQUAL "")
+  set(_llvm_explicit TRUE)
+  set(_llvm_dir "$ENV{LLVM_INSTALL_DIR}")
+else()
+  set(_llvm_dir "")
+  foreach(_cand "${AIEHLC_LLVM_SRC_DIR}/build" "${_llvm_src_own}/build" "${_llvm_src_sibling}/build" "/usr/local")
+    aiehlc_llvm_usable("${_cand}" _ok)
+    if(_ok)
+      set(_llvm_dir "${_cand}")
+      break()
+    endif()
+  endforeach()
+endif()
+
+if(_llvm_explicit)
+  aiehlc_llvm_usable("${_llvm_dir}" _ok)
+  if(NOT _ok)
+    message(FATAL_ERROR "LLVM_INSTALL_DIR=${_llvm_dir} has no llvm-config + Clang/MLIR cmake "
+                        "packages. Fix the path, or unset it to let cmake build LLVM "
+                        "(script/llvm/build.sh) into ${AIEHLC_LLVM_SRC_DIR}/build.")
+  endif()
+elseif("${_llvm_dir}" STREQUAL "")
+  if(NOT AIEHLC_AUTO_BUILD_LLVM)
+    message(FATAL_ERROR "No LLVM/Clang/MLIR found. Run: bash script/llvm/build.sh, "
+                        "or pass -DLLVM_INSTALL_DIR=<llvm build>.")
+  endif()
+  # Fail before the (long) build if the LLVM location cannot be written:
+  # check the deepest existing directory of AIEHLC_LLVM_SRC_DIR (and its build/).
+  foreach(_want "${AIEHLC_LLVM_SRC_DIR}" "${AIEHLC_LLVM_SRC_DIR}/build")
+    set(_probe "${_want}")
+    while(NOT EXISTS "${_probe}")
+      get_filename_component(_probe "${_probe}" DIRECTORY)
+    endwhile()
+    execute_process(COMMAND test -w "${_probe}" RESULT_VARIABLE _not_writable)
+    if(NOT _not_writable EQUAL 0)
+      message(FATAL_ERROR
+        "No LLVM found, and cannot build it into ${AIEHLC_LLVM_SRC_DIR}: "
+        "no write permission on ${_probe}.\n"
+        "Choose a writable location:   cmake .. -DAIEHLC_LLVM_SRC_DIR=<writable dir>\n"
+        "or use an existing LLVM build: cmake .. -DLLVM_INSTALL_DIR=<llvm build dir>")
+    endif()
+  endforeach()
+  message(STATUS "No LLVM found: building LLVM with script/llvm/build.sh into "
+                 "${AIEHLC_LLVM_SRC_DIR}/build (this takes a while)")
+  execute_process(
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/script/llvm/build.sh" "${AIEHLC_LLVM_SRC_DIR}"
+    RESULT_VARIABLE _llvm_build_rc)
+  set(_llvm_dir "${AIEHLC_LLVM_SRC_DIR}/build")
+  aiehlc_llvm_usable("${_llvm_dir}" _ok)
+  if(NOT _llvm_build_rc EQUAL 0 OR NOT _ok)
+    message(FATAL_ERROR "script/llvm/build.sh failed (rc=${_llvm_build_rc}); see the output above.")
+  endif()
+endif()
+set(LLVM_INSTALL_DIR "${_llvm_dir}" CACHE PATH "Root of an LLVM/Clang/MLIR install" FORCE)
 message(STATUS "Found LLVM ${LLVM_INSTALL_DIR}/bin/")
 
 set(CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}/bin/" ${CMAKE_PREFIX_PATH})

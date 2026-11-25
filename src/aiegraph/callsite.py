@@ -362,6 +362,22 @@ def check_conv_arg0(layers_dir, symbols) -> int:
     return len(syms)
 
 
+def _packed_equal(blob, offs, c, wnk) -> bool:
+    """``unpack(packed [N/nb][K][nb]) == wnk [N][K]`` (same answer as comparing the full
+    unpacked copy). The packed weight is a view on the params memmap (no copy), and
+    three probe rows are compared first, so a wrong candidate costs O(K), not O(N*K)
+    plus two full copies (F17: 252 candidate compares in UNet took 11.7 s)."""
+    import numpy as np
+    on, kk, ob = c["wshape"]
+    off, nb = offs[c["wname"]]
+    pk = blob[off:off + nb].view("<f4").reshape(on, kk, ob)
+    N = on * ob
+    for n in sorted({0, N // 2, N - 1}):
+        if not np.array_equal(pk[n // ob, :, n % ob], wnk[n]):
+            return False
+    return bool(np.array_equal(pk.transpose(0, 2, 1).reshape(N, kk), wnk))
+
+
 def linear_groups(cg, workdir, onnx_path, partition, model=None) -> list:
     """One group per partition ``cls == "linear"`` row, matched to a TVM dense call by
     weight value (packed ``[N/nb][K][nb]`` unpacked == ONNX ``[N][K]``)."""
@@ -395,7 +411,7 @@ def linear_groups(cg, workdir, onnx_path, partition, model=None) -> list:
         if n is None or n.op_type not in ("MatMul", "Gemm") or L["weight"] not in n.input:
             raise AiegraphError(_STAGE, f"partition row {L.get('idx')} {L['node']}: not an ONNX "
                                 f"MatMul/Gemm with weight {L.get('weight')}")
-        b = numpy_helper.to_array(inits[L["weight"]]).astype(np.float32)
+        b = numpy_helper.to_array(inits[L["weight"]]).astype(np.float32, copy=False)  # F17: no 2nd copy
         at = {a.name: helper.get_attribute_value(a) for a in n.attribute}
         wnk = b if (n.op_type == "Gemm" and at.get("transB", 0)) else b.T
         M, K, N = L["pad"]["orig"] if "pad" in L else L["mkn"][0]
@@ -405,9 +421,7 @@ def linear_groups(cg, workdir, onnx_path, partition, model=None) -> list:
         for c in dense.get((N, K), []):
             if c["call"] in used or c["xshape"][0] != M:
                 continue
-            on, kk, ob = c["wshape"]
-            pk = _fp32(blob, offs, c["wname"]).reshape(on, kk, ob)
-            if np.array_equal(pk.transpose(0, 2, 1).reshape(N, K), wnk):
+            if _packed_equal(blob, offs, c, wnk):
                 hit.append(c)
         if len(hit) != 1:
             raise AiegraphError(_STAGE, f"linear {L['node']} ({L['weight']} M={M} K={K} N={N}): "

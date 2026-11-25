@@ -24,12 +24,30 @@ import json
 import os
 import signal
 import socket
+import tempfile
 import sys
 import time
 
 import devwatch
 
-LOCK_DIR = os.environ.get("BOARD_LOCK_DIR", "/scratch/staff/huaj/tmp/board_locks")
+def _default_lock_dir():
+    """BOARD_LOCK_DIR, else the shared lab dir when it is (or can be made)
+    writable, else a per-user dir -- outside the lab (no /scratch, or no write
+    permission on it) runs must not die on the lock directory."""
+    if os.environ.get("BOARD_LOCK_DIR"):
+        return os.environ["BOARD_LOCK_DIR"]
+    for d in ("/scratch/staff/huaj/tmp/board_locks",
+              os.path.join(os.path.expanduser("~"), ".cache", "aiehlc", "board_locks")):
+        try:
+            os.makedirs(d, exist_ok=True)
+            if os.access(d, os.W_OK):
+                return d
+        except OSError:
+            pass
+    return os.path.join(tempfile.gettempdir(), "aiehlc_board_locks")
+
+
+LOCK_DIR = _default_lock_dir()
 HWS_PORT = 3121
 POLL_SECS = 5
 HEARTBEAT_SECS = 30

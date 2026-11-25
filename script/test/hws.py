@@ -27,6 +27,7 @@ import os
 import re
 import subprocess
 import sys
+import shutil
 import tempfile
 import time
 
@@ -41,8 +42,22 @@ UP, DOWN, DEGRADED, FOREIGN, UNREACHABLE = "UP", "DOWN", "DEGRADED", "FOREIGN", 
 # Exit codes (contract §7)
 RC_OK, RC_DOWN, RC_USAGE, RC_DEGRADED, RC_BUSY, RC_FOREIGN, RC_UNREACHABLE, RC_STALLED = 0, 1, 2, 3, 4, 5, 6, 124
 
-LOG_ROOT = os.environ.get("HWS_LOG_DIR", "/scratch/staff/huaj/tmp/hws")
-XSDB = os.environ.get("HWS_XSDB", "/proj/custbuilds/2026.2_daily_latest/installs/lin64/2026.2/Vitis/bin/xsdb")
+LOG_ROOT = os.environ.get("HWS_LOG_DIR") or os.path.join(os.path.dirname(devlock.LOCK_DIR), "hws")
+def _default_xsdb():
+    """HWS_XSDB, else the lab build when present, else the installed Vitis
+    (XILINX_VITIS from script/setup.sh), else xsdb on PATH."""
+    if os.environ.get("HWS_XSDB"):
+        return os.environ["HWS_XSDB"]
+    lab = "/proj/custbuilds/2026.2_daily_latest/installs/lin64/2026.2/Vitis/bin/xsdb"
+    if os.path.exists(lab):
+        return lab
+    vitis = os.environ.get("XILINX_VITIS")
+    if vitis and os.path.exists(os.path.join(vitis, "bin", "xsdb")):
+        return os.path.join(vitis, "bin", "xsdb")
+    return shutil.which("xsdb") or lab
+
+
+XSDB = _default_xsdb()
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=10"]
 LAB_POINTER = "Likely a board/JTAG/cable issue -- lab check needed: ask Amit (JTAG cable, board power, UART)."
 COMMANDS = ("status", "up", "down", "clean", "restart")
