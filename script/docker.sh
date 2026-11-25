@@ -12,10 +12,28 @@
 # and the parent of the current folder are mapped 1:1, so absolute paths in
 # setup.sh (VITIS_SETTINGS_PATH, LLVM_INSTALL_DIR) work as-is.
 # Extra mounts: AIEHLC_DOCKER_MOUNTS="/a:/a /b:/b"
-# External (non-AMD-site) environment: AIEHLC_DOCKER_EXTERNAL=1 maps neither
-# /proj nor /scratch, so nothing from the internal xbuilds/shared disks leaks in;
-# setup.sh then finds (or installs) Vitis from the public AMD installer.
+# Options:
+#   -noproj      do not map /proj (no AMD-internal xbuilds Vitis/PetaLinux):
+#                setup.sh then uses a local Vitis or installs the latest one
+#                from the AMD website (script/install_vitis.sh)
+#   -noscratch   do not map /scratch
+#   -external    both: an environment like a machine outside AMD
+#                (same as AIEHLC_DOCKER_EXTERNAL=1)
+#   e.g. AIEHLC_DOCKER_NAME=aiehlc-ext AIEHLC_DOCKER_DETACH=1 bash script/docker.sh -noproj
 set -e
+MAP_PROJ=1
+MAP_SCRATCH=1
+[ "${AIEHLC_DOCKER_EXTERNAL:-0}" = "1" ] && { MAP_PROJ=0; MAP_SCRATCH=0; }
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -noproj|--noproj|--no-proj) MAP_PROJ=0 ;;
+        -noscratch|--noscratch|--no-scratch) MAP_SCRATCH=0 ;;
+        -external|--external) MAP_PROJ=0; MAP_SCRATCH=0 ;;
+        -h|--help) sed -n '6,30p' "$0"; exit 0 ;;
+        *) echo "Unknown option: $1 (see: bash $0 --help)" >&2; exit 1 ;;
+    esac
+    shift
+done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIEHLC_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMAGE="${AIEHLC_DOCKER_IMAGE:-aiehlc-dev:latest}"
@@ -45,8 +63,11 @@ under_mounted() {
 # would start where the (non-root) container user can neither see nor write
 # (matters when a parent is "/", e.g. a checkout at /storage1/aiehlc).
 # Shortest path first, so a folder inside an already-mapped one is skipped.
-SITE_DIRS="/proj /scratch"
-[ "${AIEHLC_DOCKER_EXTERNAL:-0}" = "1" ] && SITE_DIRS=""
+SITE_DIRS=""
+[ "$MAP_PROJ" = "1" ] && SITE_DIRS="$SITE_DIRS /proj"
+[ "$MAP_SCRATCH" = "1" ] && SITE_DIRS="$SITE_DIRS /scratch"
+[ "$MAP_PROJ" = "1" ] || echo "docker.sh: not mapping /proj"
+[ "$MAP_SCRATCH" = "1" ] || echo "docker.sh: not mapping /scratch"
 CANDS=$(printf '%s\n' $SITE_DIRS "$(dirname "$AIEHLC_DIR")" "$(dirname "$(pwd)")" \
             "$AIEHLC_DIR" "$(pwd)" ${AIEHLC_DOCKER_MOUNTS:-} \
             | awk '{ print length($0) "\t" $0 }' | sort -n | cut -f2-)
