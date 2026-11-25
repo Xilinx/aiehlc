@@ -45,7 +45,10 @@ status = platform.build()
 
 vitis.dispose()
 
-armclang_src = os.path.join(app_path, "script", "bsp_patch", "xpseudo_asm_armclang.h")
+# setup.sh runs this from script/ (app_path = <repo>/script); also accept the repo root.
+_armclang_cands = [os.path.join(app_path, "bsp_patch", "xpseudo_asm_armclang.h"),
+                   os.path.join(app_path, "script", "bsp_patch", "xpseudo_asm_armclang.h")]
+armclang_src = next((c for c in _armclang_cands if os.path.isfile(c)), _armclang_cands[0])
 if os.path.isfile(armclang_src):
     patched = 0
     for root, _dirs, files in os.walk(os.path.join(app_path, workspace)):

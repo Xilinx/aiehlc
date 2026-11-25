@@ -3744,6 +3744,9 @@ static AieRC __Runtime_partition_initialize(XAie_DevInst *dev) {
     g_ctrl_high_throughput_ready = 0;
     AIEHLC_PM_FOREIGN_BUMP();
 #if AIE_GEN == 5
+#ifndef XAIE_PART_INIT_OPT_CTRL_TLASTERROR_DISABLE
+#error "aie-rt lacks XAIE_PART_INIT_OPT_CTRL_TLASTERROR_DISABLE: use the aie-rt branch xlnx_rel_v2026.2 (script/setup.sh default)"
+#endif
     if (g_ctrl_high_throughput) {
         XAie_PartInitOpts opts;
         opts.Locs = NULL;

@@ -22,9 +22,10 @@ usage() {
 }
 
 aierepo_download_check() {
-    set -e
-
+    # No `set -e` here: this file is sourced, and errexit would leak into (and
+    # later kill) the caller's interactive shell. Failures return non-zero.
     local AIE_REPO="$1"
+    local AIE_BRANCH="${AIE_RT_BRANCH:-xlnx_rel_v2026.2}"
     if [ -z "$AIE_REPO" ]; then
          echo "AIE_REPO is $AIE_REPO set to empty exit"
          return 1
@@ -43,8 +44,8 @@ aierepo_download_check() {
     fi
 
     if [ ! -d "$AIE_DRIVER_PARENT_DIR/aie-rt/driver/src" ] ; then
-        if ! git clone --branch main-aie "$AIE_REPO" "$AIE_DRIVER_PARENT_DIR/aie-rt"; then
-            echo "ERROR: failed to clone aie-rt (branch main-aie) from $AIE_REPO."
+        if ! git clone --branch "$AIE_BRANCH" "$AIE_REPO" "$AIE_DRIVER_PARENT_DIR/aie-rt"; then
+            echo "ERROR: failed to clone aie-rt (branch $AIE_BRANCH) from $AIE_REPO."
             echo "       Check GitHub credentials for that repo, or set AIE_RT_REPO to a reachable URL or local clone."
             return 1
         fi
@@ -53,15 +54,21 @@ aierepo_download_check() {
     fi
     ##temporary disable PLM support privledge register, as compile have issue
     find $AIE_DRIVER_PARENT_DIR/aie-rt/driver/src -name "Makefile" -exec sed -i 's/-DXAIE_PROD//g' {} \;
-    bash -c "cd $AIE_DRIVER_PARENT_DIR/aie-rt/driver/src; make -f Makefile.Linux include"
-    bash -c "cd $AIE_DRIVER_PARENT_DIR/aie-rt/driver/src; make -f Makefile.Linux include INCLUDEDIR=../../../include INTERNALDIR=../../../internal"
+    make -C "$AIE_DRIVER_PARENT_DIR/aie-rt/driver/src" -f Makefile.Linux include || return 1
+    make -C "$AIE_DRIVER_PARENT_DIR/aie-rt/driver/src" -f Makefile.Linux include \
+        INCLUDEDIR=../../../include INTERNALDIR=../../../internal || return 1
 }
 
 USE_LLVMAIE=0
 SKIP_BSP=0
 LOCAL_AIE_RT_REPO=0
 PATH_SET_ONLY=0
-AIE_RT_DEFAULT_REPO="${AIE_RT_REPO:-https://github.com/AMD-AECG-AIENGINE/aie-rt.git}"
+# Public upstream aie-rt. Default branch xlnx_rel_v2026.2: it has the AIE2PS
+# driver and XAIE_PART_INIT_OPT_CTRL_TLASTERROR_DISABLE (used by the
+# high-throughput control path in src/mlir/runtime/aie_runtime.c, required);
+# main-aie and xlnx_rel_v2026.1 lack it and are not supported.
+# Override with AIE_RT_REPO=<url|local clone> and AIE_RT_BRANCH=<branch>.
+AIE_RT_DEFAULT_REPO="${AIE_RT_REPO:-https://github.com/Xilinx/aie-rt.git}"
 #VITIS_SETTINGS_PATH="/proj/xbuilds/2025.2_0414_1/installs/lin64/HEAD/Vitis/settings64.sh"
 #VITIS_SETTINGS_PATH="/proj/xbuilds/HEAD_qualified_latest/installs/lin64/HEAD/Vitis/settings64.sh"
 VITIS_SETTINGS_PATH="/proj/xbuilds/HEAD_qualified_latest/installs/lin64/HEAD/Vitis/settings64.sh"
@@ -86,7 +93,7 @@ while [[ $# -gt 0 ]]; do
             LOCAL_AIE_RT_REPO="${1#*=}"
             shift
             ;;
-        --path-to-vitis-settings)
+        --vitis-settings|--path-to-vitis-settings)
             VITIS_SETTINGS_PATH="$2"
             shift 2
             ;;
@@ -139,7 +146,11 @@ else
         *u*) _aiehlc_nounset=1; set +u ;;
         *) _aiehlc_nounset=0 ;;
     esac
-    source "$VITIS_SETTINGS_PATH"
+    if ! source "$VITIS_SETTINGS_PATH" || ! command -v vitis >/dev/null 2>&1; then
+        echo "ERROR: sourcing $VITIS_SETTINGS_PATH did not set up the Vitis environment."
+        echo "       Pass --vitis-settings <Vitis>/settings64.sh, or (in docker) mount /proj with"
+        echo "       rslave propagation (script/docker.sh does) so autofs paths resolve."
+    fi
     if [ -n "${XILINX_VITIS:-}" ]; then
         export XILINX_VITIS
     fi
@@ -181,7 +192,22 @@ else
     export CLANG_INCLUDE_PATH="${_gcc_include_base}/${_gcc_version}/include/"
 fi
 unset _gcc_include_base _gcc_version
-export LLVM_INSTALL_DIR=/Users/hua/src/dsamlir/thirdparty/llvm-project/build/
+# LLVM/MLIR/clang build (script/llvm/build.sh). Respect a caller-set value;
+# otherwise use the sibling checkout script/llvm/build.sh creates by default.
+if [ -z "${LLVM_INSTALL_DIR:-}" ]; then
+    for _llvm_cand in "$(cd "$AIEHLC_DIR/.." && pwd)/llvm-project/build" /usr/local; do
+        if [ -x "$_llvm_cand/bin/llvm-config" ] && [ -d "$_llvm_cand/lib/cmake/mlir" ]; then
+            export LLVM_INSTALL_DIR="$_llvm_cand"
+            break
+        fi
+    done
+    unset _llvm_cand
+fi
+if [ -z "${LLVM_INSTALL_DIR:-}" ]; then
+    echo "WARNING: LLVM_INSTALL_DIR not set and no LLVM+MLIR build found; run: bash script/llvm/build.sh"
+else
+    echo "LLVM_INSTALL_DIR: $LLVM_INSTALL_DIR"
+fi
 
 if [ "$SKIP_BSP" -eq 0 ]; then
     if [ -d "${AIE_DRIVER_PARENT_DIR}/include/" ]; then

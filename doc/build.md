@@ -1,5 +1,20 @@
 # Building aiehlc
 
+## Quick path (docker, tested with Vitis 2026.1 + LLVM 19.1.4)
+
+```bash
+bash script/docker.sh                 # builds aiehlc-dev image; maps /proj, /scratch, ~/.ssh, license dirs
+bash script/llvm/build.sh             # LLVM/MLIR/clang 19.1.4 (RTTI) into ../llvm-project/build
+source script/setup.sh                # BSPs + upstream aie-rt (branch xlnx_rel_v2026.2)
+mkdir -p build && cd build && cmake .. && make -j$(nproc) aiehlc && cd ..
+source script/aiehlc.sh --aie-version 5 \
+    --runtime-source-file ./example/tileprogram/ccode/simpleconv2dkernel_port_less.cc
+python3 script/test/apppaltest.py -y --netload ./aout/main.elf
+```
+
+`LLVM_INSTALL_DIR` is taken from `-DLLVM_INSTALL_DIR`, then the environment,
+then `../llvm-project/build`. aie-rt repo/branch: `AIE_RT_REPO`, `AIE_RT_BRANCH`.
+
 ## Dependencies
 
 1. Install cmake 20+

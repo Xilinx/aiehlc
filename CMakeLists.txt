@@ -30,15 +30,19 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffunction-sections -fdata-sections -fvi
 set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -ffunction-sections -fdata-sections -fvisibility=hidden")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--gc-sections -Wl,--icf=all -fuse-ld=gold")
 
-message(STATUS "aFound LLVM ${LLVM_INSTALL_DIR}/bin/")
-#set the llvm path find path into the path you installed
+# LLVM/Clang/MLIR location: -DLLVM_INSTALL_DIR=..., else $ENV{LLVM_INSTALL_DIR}
+# (exported by script/setup.sh), else the sibling ../llvm-project/build that
+# script/llvm/build.sh produces, else /usr/local.
 if(NOT DEFINED LLVM_INSTALL_DIR OR "${LLVM_INSTALL_DIR}" STREQUAL "")
-  # Assign a default value if LLVM_INSTALL_DIR is not defined or is empty
-  set(LLVM_INSTALL_DIR "/usr/local/")
+  if(DEFINED ENV{LLVM_INSTALL_DIR} AND NOT "$ENV{LLVM_INSTALL_DIR}" STREQUAL "")
+    set(_llvm_default "$ENV{LLVM_INSTALL_DIR}")
+  elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../llvm-project/build/bin/llvm-config")
+    get_filename_component(_llvm_default "${CMAKE_CURRENT_SOURCE_DIR}/../llvm-project/build" ABSOLUTE)
+  else()
+    set(_llvm_default "/usr/local/")
+  endif()
+  set(LLVM_INSTALL_DIR "${_llvm_default}" CACHE PATH "Root of an LLVM/Clang/MLIR install" FORCE)
 endif()
-message(STATUS "use set LLVM_ROOT to change LLVM into your local llvm if the compile failed!!!")
-#set(LLVM_INSTALL_DIR "/Users/username/src/project/thirdparty/llvm-project/build/" CACHE PATH "Root of an LLVM/Clang/MLIR install")
-set(LLVM_INSTALL_DIR "/scratch/staff/huaj/llvm-project/build/" CACHE PATH "Root of an LLVM/Clang/MLIR install")
 message(STATUS "Found LLVM ${LLVM_INSTALL_DIR}/bin/")
 
 set(CMAKE_PREFIX_PATH "${LLVM_INSTALL_DIR}/bin/" ${CMAKE_PREFIX_PATH})
