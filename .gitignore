@@ -157,3 +157,4 @@ src/aietensorop/conv2dstem/test_conv2d_vec.cc
 
 # per-user Claude Code settings (permissions, local paths)
 .claude/settings.local.json
+download/

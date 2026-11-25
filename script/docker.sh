@@ -12,6 +12,9 @@
 # and the parent of the current folder are mapped 1:1, so absolute paths in
 # setup.sh (VITIS_SETTINGS_PATH, LLVM_INSTALL_DIR) work as-is.
 # Extra mounts: AIEHLC_DOCKER_MOUNTS="/a:/a /b:/b"
+# External (non-AMD-site) environment: AIEHLC_DOCKER_EXTERNAL=1 maps neither
+# /proj nor /scratch, so nothing from the internal xbuilds/shared disks leaks in;
+# setup.sh then finds (or installs) Vitis from the public AMD installer.
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIEHLC_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -42,7 +45,9 @@ under_mounted() {
 # would start where the (non-root) container user can neither see nor write
 # (matters when a parent is "/", e.g. a checkout at /storage1/aiehlc).
 # Shortest path first, so a folder inside an already-mapped one is skipped.
-CANDS=$(printf '%s\n' /proj /scratch "$(dirname "$AIEHLC_DIR")" "$(dirname "$(pwd)")" \
+SITE_DIRS="/proj /scratch"
+[ "${AIEHLC_DOCKER_EXTERNAL:-0}" = "1" ] && SITE_DIRS=""
+CANDS=$(printf '%s\n' $SITE_DIRS "$(dirname "$AIEHLC_DIR")" "$(dirname "$(pwd)")" \
             "$AIEHLC_DIR" "$(pwd)" ${AIEHLC_DOCKER_MOUNTS:-} \
             | awk '{ print length($0) "\t" $0 }' | sort -n | cut -f2-)
 while IFS= read -r d; do

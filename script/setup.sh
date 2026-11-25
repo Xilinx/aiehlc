@@ -141,6 +141,33 @@ elif which aiecompiler > /dev/null 2>&1; then
     echo "XILINX_VITIS is set to $XILINX_VITIS based on aiecompiler location."
 else
     echo "XILINX_VITIS is not set or aiecompiler not found."
+    if [ ! -f "$VITIS_SETTINGS_PATH" ]; then
+        # Not at the default (AMD-internal /proj) path: use a local install,
+        # newest first -- the aiehlc-managed one (script/install_vitis.sh),
+        # then the AMD installer defaults.
+        _aiehlc_vitis_dest="${AIEHLC_VITIS_INSTALL_DIR:-$(cd "$AIEHLC_DIR/.." && pwd)/Xilinx}"
+        _aiehlc_local=$(ls -1 "$_aiehlc_vitis_dest"/*/Vitis/settings64.sh \
+                              /tools/Xilinx/*/Vitis/settings64.sh /tools/Xilinx/Vitis/*/settings64.sh \
+                              /opt/Xilinx/*/Vitis/settings64.sh "$HOME"/Xilinx/*/Vitis/settings64.sh \
+                              2>/dev/null | sort -V | tail -1)
+        if [ -n "$_aiehlc_local" ]; then
+            echo "No Vitis at ${VITIS_SETTINGS_PATH}; using local install ${_aiehlc_local}"
+            VITIS_SETTINGS_PATH="$_aiehlc_local"
+        elif [ "${AIEHLC_VITIS_AUTO_INSTALL:-1}" = "1" ]; then
+            echo "No Vitis at ${VITIS_SETTINGS_PATH} or in a local install:"
+            echo "installing the latest Vitis from the AMD website into ${_aiehlc_vitis_dest}"
+            echo "(script/install_vitis.sh; AIEHLC_VITIS_AUTO_INSTALL=0 to skip)"
+            _aiehlc_local=$(bash "$SCRIPT_DIR/install_vitis.sh" --dest "$_aiehlc_vitis_dest" \
+                            | sed -n 's/^VITIS_SETTINGS=//p')
+            if [ -z "$_aiehlc_local" ]; then
+                echo "ERROR: Vitis installation did not complete (see the messages above)."
+                unset _aiehlc_local _aiehlc_vitis_dest
+                return 1
+            fi
+            VITIS_SETTINGS_PATH="$_aiehlc_local"
+        fi
+        unset _aiehlc_local _aiehlc_vitis_dest
+    fi
     echo "Trying to source ${VITIS_SETTINGS_PATH}"
     case $- in
         *u*) _aiehlc_nounset=1; set +u ;;
