@@ -6,11 +6,15 @@
 # Build (once) and enter the aiehlc dev container.
 #   bash script/docker.sh                # interactive shell, --rm
 #   AIEHLC_DOCKER_NAME=aiehlc-dev AIEHLC_DOCKER_DETACH=1 bash script/docker.sh   # long-lived container
-# Host /proj (Vitis / PetaLinux installs) and /scratch are mapped 1:1 so the
-# absolute paths in setup.sh (VITIS_SETTINGS_PATH, LLVM_INSTALL_DIR) work as-is.
+# Host /proj (Vitis / PetaLinux installs), /scratch, the parent folder of this
+# checkout (e.g. /storage1/staff/<user> for /storage1/staff/<user>/aiehlc, so
+# the sibling ../llvm-project and other projects are reachable and writable)
+# and the parent of the current folder are mapped 1:1, so absolute paths in
+# setup.sh (VITIS_SETTINGS_PATH, LLVM_INSTALL_DIR) work as-is.
 # Extra mounts: AIEHLC_DOCKER_MOUNTS="/a:/a /b:/b"
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AIEHLC_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMAGE="${AIEHLC_DOCKER_IMAGE:-aiehlc-dev:latest}"
 NAME="${AIEHLC_DOCKER_NAME:-}"
 # ~/.docker is often on a small-quota home; keep buildx state elsewhere if asked.
@@ -24,15 +28,31 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 
 MOUNTS=()
-for d in /proj /scratch ${AIEHLC_DOCKER_MOUNTS:-}; do
+MOUNTED=()
+# under_mounted <dir>: true if <dir> is already inside a mounted directory.
+under_mounted() {
+    local m
+    for m in "${MOUNTED[@]}"; do
+        case "$1/" in "$m"/*) return 0 ;; esac
+    done
+    return 1
+}
+# Shortest path first, so a folder inside an already-mapped one is skipped.
+CANDS=$(printf '%s\n' /proj /scratch "$(dirname "$AIEHLC_DIR")" "$(dirname "$(pwd)")" \
+            ${AIEHLC_DOCKER_MOUNTS:-} | awk '{ print length($0) "\t" $0 }' | sort -n | cut -f2-)
+while IFS= read -r d; do
     case "$d" in
         *:*) MOUNTS+=(-v "$d") ;;
+        /) ;;   # never map the whole host root
         # rslave: /proj (xbuilds) is autofs; without propagation a submount
         # that expires on the host turns into "Too many levels of symbolic
         # links" inside the container and settings64.sh silently fails.
-        *) [ -d "$d" ] && MOUNTS+=(-v "$d:$d:rslave") ;;
+        *) if [ -d "$d" ] && ! under_mounted "$d"; then
+               MOUNTS+=(-v "$d:$d:rslave")
+               MOUNTED+=("$d")
+           fi ;;
     esac
-done
+done <<< "$CANDS"
 
 # ssh keys for script/test/apppaltest.py (board host) and git
 [ -d "$HOME/.ssh" ] && MOUNTS+=(-v "$HOME/.ssh:/home/$(id -un)/.ssh:ro")
