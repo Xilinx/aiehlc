@@ -31,14 +31,22 @@ set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -ffunction-sections -fdata-sections -fvi
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--gc-sections -Wl,--icf=all -fuse-ld=gold")
 
 # LLVM/Clang/MLIR location: -DLLVM_INSTALL_DIR=..., else $ENV{LLVM_INSTALL_DIR}
-# (exported by script/setup.sh), else the sibling ../llvm-project/build that
-# script/llvm/build.sh produces, else /usr/local. If none of them holds a usable
+# (exported by script/setup.sh), else thirdparty/llvm-project/build (what
+# script/llvm/build.sh produces), else an older sibling ../llvm-project/build,
+# else /usr/local. If none of them holds a usable
 # LLVM (llvm-config + Clang/MLIR cmake packages), script/llvm/build.sh is run at
 # configure time to fetch and build LLVM 19.1.4 into AIEHLC_LLVM_SRC_DIR/build
 # (about an hour). -DAIEHLC_AUTO_BUILD_LLVM=OFF turns that into an error.
 option(AIEHLC_AUTO_BUILD_LLVM "Build LLVM with script/llvm/build.sh when none is found" ON)
-get_filename_component(_llvm_src_default "${CMAKE_CURRENT_SOURCE_DIR}/../llvm-project" ABSOLUTE)
+set(_llvm_src_default "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/llvm-project")
+get_filename_component(_llvm_src_sibling "${CMAKE_CURRENT_SOURCE_DIR}/../llvm-project" ABSOLUTE)
 set(AIEHLC_LLVM_SRC_DIR "${_llvm_src_default}" CACHE PATH "llvm-project checkout used by the LLVM auto-build")
+# A build dir configured before the default moved into thirdparty/ caches the
+# old sibling default; follow the new default (an LLVM already built there is
+# still found through the candidate list below).
+if("${AIEHLC_LLVM_SRC_DIR}" STREQUAL "${_llvm_src_sibling}")
+  set(AIEHLC_LLVM_SRC_DIR "${_llvm_src_default}" CACHE PATH "llvm-project checkout used by the LLVM auto-build" FORCE)
+endif()
 
 function(aiehlc_llvm_usable dir out)
   if(EXISTS "${dir}/bin/llvm-config"
@@ -59,7 +67,7 @@ elseif(DEFINED ENV{LLVM_INSTALL_DIR} AND NOT "$ENV{LLVM_INSTALL_DIR}" STREQUAL "
   set(_llvm_dir "$ENV{LLVM_INSTALL_DIR}")
 else()
   set(_llvm_dir "")
-  foreach(_cand "${AIEHLC_LLVM_SRC_DIR}/build" "/usr/local")
+  foreach(_cand "${AIEHLC_LLVM_SRC_DIR}/build" "${_llvm_src_sibling}/build" "/usr/local")
     aiehlc_llvm_usable("${_cand}" _ok)
     if(_ok)
       set(_llvm_dir "${_cand}")

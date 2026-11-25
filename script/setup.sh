@@ -193,9 +193,11 @@ else
 fi
 unset _gcc_include_base _gcc_version
 # LLVM/MLIR/clang build (script/llvm/build.sh). Respect a caller-set value;
-# otherwise use the sibling checkout script/llvm/build.sh creates by default.
+# otherwise use thirdparty/llvm-project/build (script/llvm/build.sh default),
+# then an older sibling ../llvm-project/build.
 if [ -z "${LLVM_INSTALL_DIR:-}" ]; then
-    for _llvm_cand in "$(cd "$AIEHLC_DIR/.." && pwd)/llvm-project/build" /usr/local; do
+    for _llvm_cand in "$(cd "$AIEHLC_DIR" && pwd)/thirdparty/llvm-project/build" \
+                      "$(cd "$AIEHLC_DIR/.." && pwd)/llvm-project/build" /usr/local; do
         if [ -x "$_llvm_cand/bin/llvm-config" ] && [ -d "$_llvm_cand/lib/cmake/mlir" ]; then
             export LLVM_INSTALL_DIR="$_llvm_cand"
             break

@@ -5,7 +5,7 @@
 ###############################################################################
 # Fetch and build the LLVM/MLIR/clang aiehlc links against (doc/build.md:
 # LLVM 19.1.4, RTTI on, mlir+clang).
-#   bash script/llvm/build.sh [LLVM_SRC_DIR]
+#   bash script/llvm/build.sh [LLVM_SRC_DIR]   (default: thirdparty/llvm-project)
 # Env: LLVM_TAG (default llvmorg-19.1.4), LLVM_JOBS (default nproc),
 #      LLVM_TARGETS (default "Native;NVPTX;AMDGPU").
 # Result: <LLVM_SRC_DIR>/build -- pass it as LLVM_INSTALL_DIR
@@ -14,7 +14,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIEHLC_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LLVM_TAG="${LLVM_TAG:-llvmorg-19.1.4}"
-LLVM_SRC="${1:-$(dirname "$AIEHLC_DIR")/llvm-project}"
+LLVM_SRC="${1:-$AIEHLC_DIR/thirdparty/llvm-project}"
 LLVM_JOBS="${LLVM_JOBS:-$(nproc)}"
 LLVM_TARGETS="${LLVM_TARGETS:-Native;NVPTX;AMDGPU}"
 

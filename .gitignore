@@ -19,6 +19,8 @@ thirdparty/arch
 
 # llvm-aie
 thirdparty/llvm-aie/
+# LLVM/MLIR/clang fetched and built by script/llvm/build.sh (cmake auto-build)
+thirdparty/llvm-project/
 *.whl
 *.dist-info/
 

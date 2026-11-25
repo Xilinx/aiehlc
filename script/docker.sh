@@ -8,7 +8,7 @@
 #   AIEHLC_DOCKER_NAME=aiehlc-dev AIEHLC_DOCKER_DETACH=1 bash script/docker.sh   # long-lived container
 # Host /proj (Vitis / PetaLinux installs), /scratch, the parent folder of this
 # checkout (e.g. /storage1/staff/<user> for /storage1/staff/<user>/aiehlc, so
-# the sibling ../llvm-project and other projects are reachable and writable)
+# sibling projects are reachable and writable)
 # and the parent of the current folder are mapped 1:1, so absolute paths in
 # setup.sh (VITIS_SETTINGS_PATH, LLVM_INSTALL_DIR) work as-is.
 # Extra mounts: AIEHLC_DOCKER_MOUNTS="/a:/a /b:/b"

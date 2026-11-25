@@ -13,9 +13,9 @@ python3 script/test/apppaltest.py -y --netload ./aout/main.elf
 ```
 
 `LLVM_INSTALL_DIR` is taken from `-DLLVM_INSTALL_DIR`, then the environment,
-then `../llvm-project/build`, then `/usr/local`. If none has LLVM+Clang+MLIR,
+then `thirdparty/llvm-project/build`, then `../llvm-project/build`, then `/usr/local`. If none has LLVM+Clang+MLIR,
 `cmake ..` runs `script/llvm/build.sh` itself (LLVM 19.1.4 into
-`../llvm-project/build`, about an hour; `-DAIEHLC_LLVM_SRC_DIR=<dir>` to move it,
+`thirdparty/llvm-project/build`, about an hour; `-DAIEHLC_LLVM_SRC_DIR=<dir>` to move it,
 `-DAIEHLC_AUTO_BUILD_LLVM=OFF` to get an error instead). aie-rt repo/branch: `AIE_RT_REPO`, `AIE_RT_BRANCH`.
 
 ## Dependencies
