@@ -4,6 +4,7 @@
  ******************************************************************************/
 
 #include "dmaptodmaphop.h"
+#include "pass/passmemtilejoin/passmemtilejoin.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -258,9 +259,14 @@ static LogicalResult lowerDataMovementOp(Operation *op, ConversionPatternRewrite
         // hop chaining and don't need pkt_ids (saves scarce 5-bit pkt_id pool).
         mlir::IntegerAttr pktIdAttr = nullptr;
         if (direction == DataflowDirection::Pull) {
-            auto pktId = router.getRM()->allocatePktId(-1);
-            assert(pktId.has_value() && "pkt_id pool exhausted (max 31)");
-            pktIdAttr = rewriter.getI32IntegerAttr(static_cast<int32_t>(pktId.value()));
+            // Numbered within this flow, not from a global pool: see ResourceMgr::flowPktId.
+            auto pktId = router.getRM()->flowPktId(i);
+            if (!pktId) {
+                llvm::errs() << "[TilingLinalg] ERROR: output flow " << flowPrefix << " has more cores ("
+                             << coreGroup.getCoreCount() << ") than free packet ids\n";
+                return failure();
+            }
+            pktIdAttr = rewriter.getI32IntegerAttr(static_cast<int32_t>(*pktId));
         }
         corePortsOutOps.push_back(rewriter.create<dmaphop::port>(loc, coreTile, rewriter.getStringAttr("Out"),
                                                                  rewriter.getStringAttr(outPortName),
@@ -343,7 +349,19 @@ static LogicalResult lowerDataMovementOp(Operation *op, ConversionPatternRewrite
     std::cout << "Allocated DataIO: shim col=" << shimcol 
               << " channel=" << channel 
               << " IOID=" << dioid << std::endl;
-    
+
+    // #pragma memtile_staging(weights): publish the column-broadcast input channels (GEMM B)
+    // so the routing and host clones stage exactly these through the memtile.
+    if (direction == DataflowDirection::Push && coreGroup.getGroupAxis() == "col") {
+        if (auto mod = op->getParentOfType<ModuleOp>(); mod && (memtileStaging(mod) & kMemtileStageWeights)) {
+            SmallVector<Attribute> list;
+            if (auto prev = mod->getAttrOfType<ArrayAttr>("routing.memtile_weights_io"))
+                list.append(prev.begin(), prev.end());
+            list.push_back(rewriter.getI64IntegerAttr((int64_t)shimcol * 2 + channel));
+            mod->setAttr("routing.memtile_weights_io", rewriter.getArrayAttr(list));
+        }
+    }
+
     // --- 4. Create shim tile with allocated column ---
     // Note: Both shimPortOut and shimPortIn use the SAME channel (Rule #1)
     auto shimTile = rewriter.create<dmaphop::tile>(loc, rewriter.getStringAttr("shim"), 

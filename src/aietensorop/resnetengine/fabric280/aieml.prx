@@ -1,0 +1,9 @@
+<project name="kernel" processor="me">
+    <file type="lbc" name="kernel.ll" path="./build/"/>
+    <issinit/>
+    <option id="cpp.define" value="__AIENGINE__ __AIEARCH__=22" inherit="1"/>
+    <option id="llvm.xargs" value="-fno-jump-tables -fno-discard-value-names -mllvm -chess-collapse-struct-types-during-linking=0" inherit="1"/>
+    <option id="bridge.cfg" value="aieml.bcf" path="./"/>
+    <option id="project.name" value="kernel"/>
+    <option id="project.type" value="exe"/>
+</project>

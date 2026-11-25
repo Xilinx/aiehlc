@@ -22,13 +22,14 @@ include "mlir/IR/AttrTypeBase.td"
 // Provide a definition of the 'aie' dialect in the ODS framework so that we
 // can define our operations.
 def Aie_ADialect : Dialect {
+    // keep the pre-LLVM-24 textual form (inherent attrs in attr-dict)
+    let useStrictPropertiesInAssemblyFormat = 0;
   let name = "Aie";
   let cppNamespace = "::mlir::aie";
   dag discardableAttrs = (ins);
   let hasOperationAttrVerify = 0;
   let useDefaultTypePrinterParser = 1;
   let useDefaultAttributePrinterParser = 0;
-  let usePropertiesForAttributes = 0;
 }
 
 class Aie_Type<string name> : TypeDef<Aie_ADialect, name> {}

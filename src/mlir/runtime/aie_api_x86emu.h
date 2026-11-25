@@ -14,9 +14,11 @@
 //   aie::accum<acc32|acc64, N> (global tags, as in the AIE API)  from_vector / to_vector (SRS) / extract / insert
 //   aie::mmul<M, K, N, int8_t|int16_t, int8_t|int16_t>  A M x K, B K x N, C M x N,
 //                          all row-major; mul / mac / to_accum / to_vector
-//   aie::mul / aie::mac (vector x vector into acc32 / acc64), aie::tile::current()
 //   aie::load_v / load_unaligned_v / store_v / store_unaligned_v, aie::zeros, aie::concat,
-//   aie::shuffle_down_fill, aie::interleave_zip, aie::bit_and, aie::add
+//   aie::shuffle_down_fill, aie::interleave_zip, aie::bit_and, aie::bit_xor, aie::add, aie::max / min,
+//   aie::filter_even, aie::unpack (int8 -> int16 -> int32)
+//   bfloat16, accum<accfloat, N>, aie::mmul<M, K, N, bfloat16, bfloat16, accfloat>
+//   aie::mul / aie::mac (vector x scalar into acc32 / acc64)
 //   aie::set_rounding / set_saturation (the SRS modes of to_vector)
 //   Floating point (AIE2p bf16 path): aie::accum<accfloat, N> (fp32 lanes),
 //   aie::mmul<M, K, N, bfloat16, bfloat16, accfloat> (fp32 accumulation of exact
@@ -24,6 +26,8 @@
 //   aie::max / sub / mul(vector, scalar), aie::reduce_max / reduce_add,
 //   aie::exp2<T> (fp32 exp2, result converted to T), aie::inv (fp32 1/x) -- enough for an fp32-score
 //   online-softmax (flash) attention kernel.
+//   f32: sub, mul (-> accfloat), inv, invsqrt, to_fixed / to_float, vector_cast, up/downshift,
+//   reduce_add / reduce_max, shuffle_down_rotate, mask / gt / lt / select (aie_modes_fvec.h)
 //   bfloat16 (global scalar type: fp32 upper half, round-to-nearest-even from float)
 // Anything else is a compile error in the harness -- extend this file.
 //
@@ -154,6 +158,8 @@ inline void set_saturation(saturation_mode m) { emu::sat() = m; }
 inline void set_rounding(rounding_mode m) { emu::rnd() = m; }
 inline saturation_mode get_saturation() { return emu::sat(); }
 inline rounding_mode get_rounding() { return emu::rnd(); }
+
+using ::bfloat16; // one type: the global chess-native bfloat16 above (aie::bfloat16 names it too)
 
 template <class T, unsigned N> struct vector {
     T v[N];
@@ -328,10 +334,15 @@ template <class T, unsigned N> vector<T, N> add(const vector<T, N> &a, const vec
 }
 
 // Floating-point element-wise helpers (computed in fp32, result converted to T).
+// Integers subtract exactly (int32 past 2^24 must not round through fp32).
 template <class T, unsigned N> vector<T, N> sub(const vector<T, N> &a, const vector<T, N> &b) {
     vector<T, N> r;
-    for (unsigned i = 0; i < N; i++)
-        r.v[i] = T((float)a.v[i] - (float)b.v[i]);
+    for (unsigned i = 0; i < N; i++) {
+        if constexpr (std::is_integral<T>::value)
+            r.v[i] = (T)(a.v[i] - b.v[i]);
+        else
+            r.v[i] = T((float)a.v[i] - (float)b.v[i]);
+    }
     return r;
 }
 template <class T, unsigned N> vector<T, N> sub(const vector<T, N> &a, T b) {
@@ -354,10 +365,17 @@ template <class T, unsigned N> T reduce_max(const vector<T, N> &a) {
     return m;
 }
 template <class T, unsigned N> T reduce_add(const vector<T, N> &a) {
-    float s = 0.0f;
-    for (unsigned i = 0; i < N; i++)
-        s += (float)a.v[i];
-    return T(s);
+    if constexpr (std::is_integral<T>::value) { // exact: no fp32 rounding past 2^24
+        T s = 0;
+        for (unsigned i = 0; i < N; i++)
+            s += a.v[i];
+        return s;
+    } else {
+        float s = 0.0f;
+        for (unsigned i = 0; i < N; i++)
+            s += (float)a.v[i];
+        return T(s);
+    }
 }
 // 2^x per lane in fp32 (the AIE2p exp2 unit takes bf16/fp32 in, gives fp32 out).
 template <class TR = float, class T, unsigned N> vector<TR, N> exp2(const vector<T, N> &a) {
@@ -417,6 +435,83 @@ struct tile {
     uint64_t cycles() const { return 0; }
 };
 
+template <class T, unsigned N> vector<T, N> bit_xor(const vector<T, N> &a, const vector<T, N> &b) {
+    vector<T, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = (T)(a.v[i] ^ b.v[i]);
+    return r;
+}
+template <class T, unsigned N> vector<T, N> min(const vector<T, N> &a, const vector<T, N> &b) {
+    vector<T, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = a.v[i] < b.v[i] ? a.v[i] : b.v[i];
+    return r;
+}
+// Lane masks: gt / lt compare, select(a, b, m) = m ? b : a lane by lane (the AIE API's order).
+template <unsigned N> struct mask {
+    bool m[N];
+    bool test(unsigned i) const { return m[i]; }
+};
+template <class T, unsigned N> mask<N> gt(const vector<T, N> &a, const vector<T, N> &b) {
+    mask<N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.m[i] = a.v[i] > b.v[i];
+    return r;
+}
+template <class T, unsigned N> mask<N> lt(const vector<T, N> &a, const vector<T, N> &b) {
+    mask<N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.m[i] = a.v[i] < b.v[i];
+    return r;
+}
+template <class T, unsigned N> vector<T, N> select(const vector<T, N> &a, const vector<T, N> &b, const mask<N> &m) {
+    vector<T, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = m.m[i] ? b.v[i] : a.v[i];
+    return r;
+}
+// Even elements (step 1): lanes 0, 2, 4, ... of a 2N-lane vector.
+template <class T, unsigned N> vector<T, N / 2> filter_even(const vector<T, N> &v, unsigned step = 1) {
+    vector<T, N / 2> r;
+    for (unsigned i = 0, o = 0; i < N && o < N / 2; i += 2 * step)
+        for (unsigned k = 0; k < step && o < N / 2; k++)
+            r.v[o++] = v.v[i + k];
+    return r;
+}
+// Widen to the next type: int8 -> int16 -> int32 (sign-extending), as aie::unpack.
+namespace emu {
+template <class T> struct wider;
+template <> struct wider<int8_t> {
+    using type = int16_t;
+};
+template <> struct wider<int16_t> {
+    using type = int32_t;
+};
+} // namespace emu
+template <class T, unsigned N> vector<typename emu::wider<T>::type, N> unpack(const vector<T, N> &v) {
+    vector<typename emu::wider<T>::type, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = v.v[i];
+    return r;
+}
+
+// Lane-wise vector x integer scalar into a 32-bit accumulator (as aie::mul / aie::mac with a scalar
+// operand); a floating-point scalar takes the accfloat overload above.
+template <class Tag = acc32, class T, unsigned N, class S, class = std::enable_if_t<std::is_integral<S>::value>>
+accum<Tag, N> mul(const vector<T, N> &v, S x) {
+    accum<Tag, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = accum<Tag, N>::wrap((int64_t)v.v[i] * (int64_t)x);
+    return r;
+}
+template <class Tag, unsigned N, class T, class S, class = std::enable_if_t<std::is_integral<S>::value>>
+accum<Tag, N> mac(const accum<Tag, N> &a, const vector<T, N> &v, S x) {
+    accum<Tag, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = accum<Tag, N>::wrap(a.v[i] + (int64_t)v.v[i] * (int64_t)x);
+    return r;
+}
+
 // C (M x N) += A (M x K) * B (K x N), row-major, 32-bit accumulation for
 // 8/16-bit operands (acc32 wraps like the hardware accumulator); accfloat:
 // bf16 x bf16 products are exact in fp32 and are summed in fp32.
@@ -441,6 +536,93 @@ template <unsigned M, unsigned K, unsigned N, class TA, class TB, class Tag = ac
     const accum_type &to_accum() const { return c; }
     template <class T> vector<T, M * N> to_vector(int shift = 0) const { return c.template to_vector<T>(shift); }
 };
+
+// ── f32 vector arithmetic (the FVEC mode, aie_modes_fvec.h) ──────────────────
+// fp32 products exactly (the core's AIE2_FP32_EMULATION_ACCURACY_FAST products are close, not equal);
+// inv / invsqrt follow the AIE-ML aie_api algorithms (detail/aie2/elementary.hpp) step for step, so
+// their approximation error shows up here as it does on the core.
+template <unsigned N> accum<accfloat, N> mul(const vector<float, N> &a, const vector<float, N> &b) {
+    accum<accfloat, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = a.v[i] * b.v[i];
+    return r;
+}
+// a bit reinterpretation between equally wide lanes (float <-> int32)
+template <class To, class From, unsigned N> vector<To, N> vector_cast(const vector<From, N> &v) {
+    static_assert(sizeof(To) == sizeof(From), "vector_cast between equally wide lanes only");
+    vector<To, N> r;
+    std::memcpy(r.v, v.v, sizeof r.v);
+    return r;
+}
+template <class T, unsigned N> vector<T, N> upshift(const vector<T, N> &v, unsigned s) {
+    vector<T, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = (T)((uint32_t)v.v[i] << s);
+    return r;
+}
+template <class T, unsigned N> vector<T, N> downshift(const vector<T, N> &v, unsigned s) {
+    vector<T, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = (T)(v.v[i] >> s); /* arithmetic */
+    return r;
+}
+// v * 2^shift to an integer under the current rounding mode (floor / conv_even / ...), saturated
+template <class TR, unsigned N> vector<TR, N> to_fixed(const vector<float, N> &v, int shift = 0) {
+    vector<TR, N> r;
+    for (unsigned i = 0; i < N; i++) {
+        const double x = (double)v.v[i] * (double)((int64_t)1 << shift);
+        double q = emu::rnd() == rounding_mode::floor  ? __builtin_floor(x)
+                   : emu::rnd() == rounding_mode::ceil ? __builtin_ceil(x)
+                                                       : __builtin_nearbyint(x);
+        constexpr double lo = (double)std::numeric_limits<TR>::min(), hi = (double)std::numeric_limits<TR>::max();
+        r.v[i] = (TR)(q < lo ? lo : q > hi ? hi : q);
+    }
+    return r;
+}
+template <class TR, class T, unsigned N> vector<TR, N> to_float(const vector<T, N> &v, int shift = 0) {
+    vector<TR, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = (TR)((double)v.v[i] / (double)((int64_t)1 << shift));
+    return r;
+}
+// lane i takes lane (i + n) mod N
+template <class T, unsigned N> vector<T, N> shuffle_down_rotate(const vector<T, N> &v, unsigned n) {
+    vector<T, N> r;
+    for (unsigned i = 0; i < N; i++)
+        r.v[i] = v.v[(i + n) % N];
+    return r;
+}
+namespace emu {
+inline float bits_f(int32_t i) {
+    float f;
+    std::memcpy(&f, &i, 4);
+    return f;
+}
+inline int32_t f_bits(float f) {
+    int32_t i;
+    std::memcpy(&i, &f, 4);
+    return i;
+}
+} // namespace emu
+template <unsigned N> vector<float, N> inv(const vector<float, N> &v) {
+    vector<float, N> r;
+    for (unsigned i = 0; i < N; i++) {
+        const float x = v.v[i];
+        float y = emu::bits_f(0x7eb53567 - emu::f_bits(x));
+        y = -(((-x * y) + 1.436142f) * y * 1.9395974f); /* -y1 */
+        r.v[i] = -(y * (y * x + 2.0f));                 /* y1 (2 - y1 x) */
+    }
+    return r;
+}
+template <unsigned N> vector<float, N> invsqrt(const vector<float, N> &v) {
+    vector<float, N> r;
+    for (unsigned i = 0; i < N; i++) {
+        const float x = v.v[i], x2 = x * 0.703952253f;
+        const float y = emu::bits_f(0x5F1FFFF9 - (emu::f_bits(x) >> 1));
+        r.v[i] = y * (0.703952253f * 2.38924456f - x2 * (y * y));
+    }
+    return r;
+}
 
 } // namespace aie
 

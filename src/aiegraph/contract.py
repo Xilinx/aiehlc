@@ -66,6 +66,36 @@ class KernelContract:
         return "\n".join(lines)
 
 
+def op_family(spec) -> str:
+    """``conv2d`` / ``dense`` from the spec's ``op`` and ``match`` lines, or ''."""
+    text = " ".join([spec.op or ""] + list(spec.match))
+    return next((op for op in OPS if op in text), "")
+
+
+def logical_weight(spec, op: str) -> "tuple | None":
+    """The spec's weight as model-level dims -- ``(O, I, KH, KW)`` for a conv,
+    ``(O, I)`` for a dense -- each an int, or None where the spec leaves it open.
+
+    TVM packs weights (``OIHW{i}i{o}o`` = ``[O/o, I/i, KH, KW, i, o]``, dense
+    ``[O/n, I, n]``); a region's weight is ONNX OIHW / OI. Returns None when
+    the spec has no weight of a shape we can read."""
+    want = {"conv2d": (4, 6), "dense": (2, 3)}.get(op, ())
+    w = next((a for a in getattr(spec, "args", []) if a.kind == "param" and len(a.dims) in want), None)
+    if w is None:
+        return None
+    d = [x if isinstance(x, int) else None for x in w.dims]
+    mul = lambda a, b: a * b if a is not None and b is not None else None   # noqa: E731
+    if op == "conv2d":
+        return tuple(d) if len(d) == 4 else (mul(d[0], d[5]), mul(d[1], d[4]), d[2], d[3])
+    return tuple(d) if len(d) == 2 else (mul(d[0], d[2]), d[1])
+
+
+def weight_dtype(spec, op: str):
+    want = {"conv2d": (4, 6), "dense": (2, 3)}.get(op, ())
+    w = next((a for a in getattr(spec, "args", []) if a.kind == "param" and len(a.dims) in want), None)
+    return w.dtype if w is not None else None
+
+
 def _pick_spec(name: str, specs: list, source: Path):
     named = [s for s in specs if s.name == name]
     if named:
@@ -109,9 +139,7 @@ def make_contract(name, source, op, target="aie", constraints=None) -> KernelCon
     if not src.is_file():
         raise AiegraphError("register", f"{source} does not exist",
                             hint="paths are relative to the current directory")
-    _env.frontend("")
-    from frontend.tvmrelay.aiekernel.lint import lint_source
-    rep = lint_source(src)
+    rep = _env.aiekernel_pure("lint").lint_source(src)
     if not rep.ok:
         raise AiegraphError("register", f"{src.name}: lint: {rep.errors[0]}",
                             hint=f"ag.lint('{source}') lists every finding")

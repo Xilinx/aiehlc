@@ -7,6 +7,7 @@
 // routingresource.cpp  —  ResourceMgr & RoutingTile implementation
 //====================================================================
 #include "hw/ResourceManager.h"
+#include <cstdlib>
 #include <iostream>
 #include <cstdlib>
 #include <algorithm> 
@@ -46,8 +47,29 @@ std::optional<uint32_t> CoreMemAllocator::allocate(const std::string &name, uint
         if (slot.symbolName == name)
             return slot.address;
     }
+    if (const char *e = std::getenv("AIEHLC_CORE_BANKS"); e && *e && *e != '0') {
+        if (auto addr = allocateBanked(name, size, alignment)) {
+            allocations_.push_back({name, *addr, size, ownerId});
+            return addr;
+        }
+    }
     // Align nextFree_ up to the requested alignment
     uint32_t aligned = (nextFree_ + alignment - 1) & ~(alignment - 1);
+    // Keep the top kGlobalsReserve bytes for the linker's own .data/.bss (main()'s
+    // sync_buffer, libme's control_rnd/_sat, kernel statics: the BCF reserves everything
+    // outside this tile, so they must land here). A buffer that would eat into it goes
+    // BELOW baseAddr_ instead, growing down; the stack ends at the lowest buffer
+    // (getLowestAddr), so it gives up that space. Builds whose buffers fit are unchanged.
+    constexpr uint32_t kGlobalsReserve = 0x400;
+    if (aligned + size > baseAddr_ + totalSize_ - kGlobalsReserve) {
+        uint32_t top = lowNext_ ? lowNext_ : baseAddr_;
+        uint32_t down = (top - size) & ~(alignment - 1);
+        if (down >= baseAddr_ - 0x6000) { // leave at least 0x2000 of stack above 0x70000
+            lowNext_ = down;
+            allocations_.push_back({name, down, size, ownerId});
+            return down;
+        }
+    }
     if (aligned + size > baseAddr_ + totalSize_) {
         // Default layout keeps a 32 KB stack at [0x70000, 0x78000) although most kernels
         // need far less (GN+SiLU 512 B, vec8 192 B per kernel.calltree). Instead of failing,
@@ -99,8 +121,54 @@ uint32_t CoreMemAllocator::getSize(const std::string &name) const {
     return 0;
 }
 
+// AIEHLC_CORE_BANKS=1: the core reads both input windows every MAC cycle, and AIE-ML data
+// memory is four 16 KB banks (0x70000, 0x74000, 0x78000, 0x7C000).  Sequential placement
+// puts all four input windows in bank 2, so the A and B loads collide; mlir-aie's
+// bank-aware allocator gives each buffer its own bank.  Here input k (ping and pong)
+// takes bank 2 + k, and outputs grow down from 0x78000 into the top of the stack banks
+// (the stack then ends below them, see getLowestAddr).  Returns nullopt for anything else,
+// which falls back to sequential placement.
+std::optional<uint32_t> CoreMemAllocator::allocateBanked(const std::string &name, uint32_t size, uint32_t alignment) {
+    constexpr uint32_t kBank = 0x4000;
+    auto suffix = [&](const std::string &prefix) -> int {
+        if (name.compare(0, prefix.size(), prefix) != 0)
+            return -1;
+        return std::atoi(name.c_str() + prefix.size());
+    };
+    int k = std::max(suffix("buf_in_ping_"), suffix("buf_in_pong_"));
+    if (k == 0 || k == 1) {
+        uint32_t bankBase = baseAddr_ + k * kBank;
+        uint32_t &cur = bankNext_[k];
+        if (cur == 0)
+            cur = bankBase;
+        uint32_t aligned = (cur + alignment - 1) & ~(alignment - 1);
+        if (aligned + size > bankBase + kBank)
+            return std::nullopt;
+        cur = aligned + size;
+        return aligned;
+    }
+    if (name.compare(0, 8, "buf_out_") == 0) {
+        if (outNext_ == 0)
+            outNext_ = baseAddr_;
+        uint32_t addr = (outNext_ - size) & ~(alignment - 1);
+        outNext_ = addr;
+        return addr;
+    }
+    return std::nullopt;
+}
+
+uint32_t CoreMemAllocator::getLowestAddr() const {
+    uint32_t lo = baseAddr_;
+    for (const auto &slot : allocations_)
+        lo = std::min(lo, slot.address);
+    return lo;
+}
+
 void CoreMemAllocator::reset() {
     nextFree_ = baseAddr_;
+    bankNext_[0] = bankNext_[1] = 0;
+    outNext_ = 0;
+    lowNext_ = 0;
     allocations_.clear();
 }
 
@@ -928,6 +996,16 @@ bool ResourceMgr::releasePktId(int pktId, int ownerId) {
     slot.used = false;
     slot.ownerId = -1;
     return true;
+}
+
+std::optional<int> ResourceMgr::flowPktId(int indexInFlow) const {
+    for (int i = 1, n = 0; i < kMaxPktId; ++i) { // pkt_id=0 reserved
+        if (pktIdPool_[i].used && pktIdPool_[i].ownerId == kControlPlaneOwner)
+            continue;
+        if (n++ == indexInFlow)
+            return i;
+    }
+    return std::nullopt;
 }
 
 bool ResourceMgr::isPktIdFree(int pktId) const {

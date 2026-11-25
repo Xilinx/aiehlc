@@ -28,6 +28,7 @@ import argparse
 import glob
 import re
 import shlex
+import importlib.util
 
 try:
     import pexpect
@@ -622,6 +623,275 @@ def copy_elf_to_remote(local_elf):
         return False, None
 
 
+# --netload: run the ELF through the resident netboot supervisor instead of JTAG dow.
+# For VEK280 / galerina13, the supervisor is built with --a72 (Cortex-A72 BSP).
+# ---------------------------------------------------------------------------
+NETBOOT_LOCAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "tool", "netboot")
+NETBOOT_REMOTE_DIR = f"/home/{username}/aiehlc/netboot"
+NETBOOT_READY_TIMEOUT_S = 120
+# Multiplexed ssh: one persistent connection reused by all scp/ssh in the netload path.
+SSH_MUX = ["-o", "ControlMaster=auto", "-o", "ControlPersist=4h",
+           "-o", f"ControlPath=/tmp/appvek385-{username}-%C"]
+
+
+def ensure_netboot_built():
+    """Build netboot_a72.elf when it is missing or older than its sources."""
+    proxy = os.path.join(NETBOOT_LOCAL_DIR, "netboot_proxy.py")
+    if not os.path.isfile(proxy):
+        raise RuntimeError(f"{proxy} missing (it is part of the repo; check the checkout)")
+    elf = os.path.join(NETBOOT_LOCAL_DIR, "build", "netboot_a72.elf")
+    srcs = [p for pat in ("supervisor/*.c", "supervisor/*.S", "supervisor/*.h", "lwip/*",
+                          "bsp_a72/*.h", "netboot_proto.h", "build.sh")
+            for p in glob.glob(os.path.join(NETBOOT_LOCAL_DIR, pat))]
+    newest = max((os.path.getmtime(p) for p in srcs), default=0)
+    if os.path.isfile(elf) and os.path.getmtime(elf) >= newest:
+        return
+    why = "missing" if not os.path.isfile(elf) else "older than its sources"
+    print(f"[netload] netboot_a72.elf {why}: building it (src/tool/netboot/build.sh --a72)...")
+    r = subprocess.run(["bash", os.path.join(NETBOOT_LOCAL_DIR, "build.sh"), "--a72"],
+                       capture_output=True, text=True, timeout=1800)
+    if r.returncode != 0 or not os.path.isfile(elf):
+        tail = "\n".join((r.stdout + r.stderr).strip().splitlines()[-15:])
+        raise RuntimeError(f"building netboot_a72.elf failed (exit {r.returncode}):\n{tail}\n"
+                           "The A72 cross compiler must be on PATH (source Vitis settings64.sh).")
+    print(f"[netload] built {elf}")
+
+
+def stage_if_changed(local_paths):
+    """Copy files to NETBOOT_REMOTE_DIR on the lab host, skipping unchanged ones."""
+    import hashlib
+    names = [os.path.basename(p) for p in local_paths]
+    probe = (f"mkdir -p {NETBOOT_REMOTE_DIR} && cd {NETBOOT_REMOTE_DIR} && "
+             f"(sha256sum {' '.join(shlex.quote(n) for n in names)} 2>/dev/null; true)")
+    r = subprocess.run(["ssh", *SSH_MUX, host, f"bash -c {shlex.quote(probe)}"],
+                       capture_output=True, text=True, timeout=30)
+    remote = {ln.split()[1]: ln.split()[0] for ln in r.stdout.splitlines() if len(ln.split()) == 2}
+    stale = [p for p, n in zip(local_paths, names)
+             if remote.get(n) != hashlib.sha256(open(p, "rb").read()).hexdigest()]
+    if stale:
+        subprocess.run(["scp", "-q", *SSH_MUX, *stale, f"{host}:{NETBOOT_REMOTE_DIR}/"],
+                       check=True, capture_output=True, timeout=120)
+    print(f"[netload] staged on {vek385ip}: {', '.join(os.path.basename(p) for p in stale) or 'nothing (up to date)'}")
+
+
+def netboot_stage_proxy():
+    """Stage the relay script that netload.py talks through."""
+    stage_if_changed([os.path.join(NETBOOT_LOCAL_DIR, "netboot_proxy.py")])
+
+
+def netboot_stage_supervisor():
+    """Stage netboot_a72.elf for a JTAG bootstrap and return its remote path."""
+    local_elf = os.path.join(NETBOOT_LOCAL_DIR, "build", "netboot_a72.elf")
+    if not os.path.isfile(local_elf):
+        raise RuntimeError(f"{local_elf} missing: run src/tool/netboot/build.sh --a72 first")
+    stage_if_changed([local_elf])
+    return f"{NETBOOT_REMOTE_DIR}/netboot_a72.elf"
+
+
+_netload_mod = []
+
+
+class _Tee:
+    """stdout for an in-process netload: shown live AND kept for the caller."""
+    def __init__(self, live):
+        import io
+        self.buf, self.live = io.StringIO(), live
+
+    def write(self, text):
+        self.buf.write(text)
+        if self.live:
+            sys.__stdout__.write(text)
+            sys.__stdout__.flush()
+        return len(text)
+
+    def flush(self):
+        pass
+
+
+def netload_remote(argv, timeout=600, gate=None, live=False):
+    """Run netload.py's main() in-process through the multiplexed ssh.
+
+    Returns (exit status, printed text). live=True also prints as they come."""
+    import contextlib
+    if not _netload_mod:
+        spec = importlib.util.spec_from_file_location(
+            "netload", os.path.join(NETBOOT_LOCAL_DIR, "netload.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _netload_mod.append(mod)
+    out = _Tee(live)
+    extra = ["--via", host, "--proxy", f"{NETBOOT_REMOTE_DIR}/netboot_proxy.py"]
+    extra += [x for i in range(1, len(SSH_MUX), 2) for x in ("--ssh-opt", SSH_MUX[i])]
+    mod = _netload_mod[0]
+    mod.send_gate = gate
+    try:
+        with contextlib.redirect_stdout(out):
+            rc = mod.main(argv + extra)
+    finally:
+        mod.send_gate = None
+    return rc, out.buf.getvalue().strip()
+
+
+def open_console_fast():
+    """Open the board console quickly over the multiplexed ssh."""
+    child = pexpect.spawn("ssh", [*SSH_MUX, "-tt", host, "/opt/systest/common/bin/systest-client"],
+                          encoding='utf-8', codec_errors='replace', timeout=60)
+    child.expect(r'Systest[#>]', timeout=60)
+    child.sendline(f"connect {console_port}")
+    child.expect(rf'Connecting to device {console_port}.*escape', timeout=60)
+    return child
+
+
+def start_console(fast):
+    conn2 = open_console_fast() if fast else setup_second_connection()
+    stop_console_thread.clear()
+    th = threading.Thread(target=console_reader, args=(conn2, console_output_queue, stop_console_thread))
+    th.start()
+    return conn2, th
+
+
+def stop_console(conn2, th):
+    stop_console_thread.set()
+    th.join(timeout=5)
+    conn2.close(force=True)
+
+
+def drain_until(marker, timeout_s, collected):
+    """Echo console output until `marker` appears; True if it did."""
+    deadline = time.time() + timeout_s
+    seen = ""
+    while time.time() < deadline:
+        while not console_output_queue.empty():
+            chunk = console_output_queue.get()
+            collected.append(chunk)
+            print(chunk, end='', flush=True)
+            seen = (seen + chunk)[-4096:]
+            if marker in seen:
+                return True
+        time.sleep(0.2)
+    return False
+
+
+def netboot_park_app_core(park_addr):
+    """Free a stuck app core (A72 #0.1) without a full re-bootstrap.
+
+    Uses local JTAG (conn) rather than TCP, because VEK280 is JTAG-attached on
+    the lab host (no remote hw_server needed). Returns True when the commands
+    went through (the caller checks `status`)."""
+    print(f"\n>>> freeing the stuck app core over JTAG (stop, rst -proc, pc=0x{park_addr:x} nb_park, con)...",
+          flush=True)
+    child = None
+    try:
+        child = pexpect.spawn("ssh", [*SSH_MUX, "-tt", host, "/opt/systest/common/bin/systest-client"],
+                              encoding='utf-8', codec_errors='replace', timeout=60, dimensions=(200, 2000))
+        child.expect(r'Systest[#>]', timeout=60)
+        child.sendline(f"source {VITIS_SETTINGS}")
+        child.expect(r'Systest[#>]', timeout=60)
+        child.sendline("xsdb")
+        if child.expect([r'xsdb%', r'command not found', pexpect.TIMEOUT], timeout=30) != 0:
+            child.sendline(XSDB_ALT_PATH)
+            child.expect(r'xsdb%', timeout=60)
+        # VEK280: local JTAG, no connect -url needed
+        child.sendline("conn")
+        child.expect(r'xsdb%', timeout=60)
+        child.sendline('targets -set -nocase -filter {name =~ "*A72*#0.1*"}')
+        child.expect(r'xsdb%', timeout=30)
+        child.sendline("catch {stop}")
+        child.expect(r'xsdb%', timeout=30)
+        child.sendline("rst -proc")
+        child.expect(r'xsdb%', timeout=30)
+        child.sendline(f"rwr pc 0x{park_addr:x}")
+        child.expect(r'xsdb%', timeout=30)
+        child.sendline("con")
+        child.expect(r'xsdb%', timeout=30)
+        child.sendline("disconnect")
+        child.expect(r'xsdb%', timeout=30)
+        return True
+    except (RuntimeError, pexpect.ExceptionPexpect) as e:
+        print(f"[netload] JTAG park of the app core failed: {e}")
+        return False
+    finally:
+        if child is not None:
+            child.close(force=True)
+
+
+def netload_start(args, local_elf, collected):
+    """Fast path: console up, then `load` to the resident supervisor.
+
+    Falls back to a JTAG bootstrap when the supervisor is not answering or
+    --netload-bootstrap is given. Returns (conn1, conn2, console_thread, ok)."""
+    ip = args.netload_ip
+    ensure_netboot_built()
+    force_now = args.netload_force_now
+    load_argv = ["load", local_elf, "--host", ip, "--max-run-ms", str(args.netload_max_run_ms),
+                 "--wait", "0" if force_now else str(args.netload_wait)] + \
+        ([] if args.netload_no_force and not force_now else ["--force"])
+    if not args.netload_bootstrap:
+        box = {}
+        opener = threading.Thread(target=lambda: box.setdefault("c", start_console(fast=True)))
+        opener.start()
+        netboot_stage_proxy()
+
+        def console_attached():
+            opener.join(timeout=60)
+            if "c" not in box:
+                raise ConnectionError(f"{console_port} console did not attach")
+
+        t0 = time.time()
+        print(f"[netload] asking the supervisor at {ip} to run {os.path.basename(local_elf)} " +
+              ("(force now: a running app is taken over)" if force_now
+               else f"(waits up to {args.netload_wait:g} s if the board is busy)"), flush=True)
+        rc, out = netload_remote(load_argv, gate=console_attached, live=True)
+        opener.join(timeout=60)
+        if "c" not in box:
+            print(f"\n[ERROR] {console_port} console did not attach")
+            return None, None, None, False
+        conn2, th = box["c"]
+        if rc == 0:
+            print(f"[netload] streamed {local_elf} through the proxy on {vek385ip} in {time.time() - t0:.2f}s")
+            return None, conn2, th, True
+        if rc == 3 and not force_now:
+            print(f"\n[ERROR] board still busy after --netload-wait {args.netload_wait:g} s with a run "
+                  "within its max run time; retry later or raise --netload-wait")
+            return None, conn2, th, False
+        if rc == 4:
+            print("\n[ERROR] the previous app ran past its max run time; drop --netload-no-force to terminate it")
+            return None, conn2, th, False
+        if rc not in (2, 5) and not (rc == 3 and force_now) and "re-bootstrap" not in out:
+            return None, conn2, th, False
+        m = re.search(r"park_addr=0x([0-9a-f]+)", out)
+        if rc == 3:
+            print("[netload] --netload-force-now: taking the app core over", flush=True)
+        if rc in (3, 5) and m and netboot_park_app_core(int(m.group(1), 16)):
+            time.sleep(0.5)
+            st_rc, st = netload_remote(["status", "--host", ip, "--connect-timeout", "3"], timeout=30)
+            if st_rc == 0 and "app core parked" in st:
+                print("[netload] app core parked by JTAG; sending the ELF again", flush=True)
+                rc, out = netload_remote(load_argv, live=True)
+                if rc == 0:
+                    return None, conn2, th, True
+            print(f"[netload] JTAG park did not free the app core; falling back to re-bootstrap", flush=True)
+        stop_console(conn2, th)
+        why = (f"supervisor not answering at {ip}" if rc == 2 else
+               "previous app past its max run time and PDI cannot stop it" if rc == 5
+               else "--netload-force-now: running app could not be parked over JTAG" if rc == 3
+               else "app core still busy from the previous run")
+    else:
+        why = "--netload-bootstrap"
+    print(f"\n>>> {why}: loading the netboot supervisor over JTAG (one-time)...")
+    netboot_stage_proxy()
+    # power-cycle + PDI program + open xsdb (same flow as a normal run)
+    conn1 = setup_first_connection(board_rev=args.board_rev)
+    conn2, th = start_console(fast=False)
+    if not download_elf_and_continue(conn1, netboot_stage_supervisor()):
+        return conn1, conn2, th, False
+    if not drain_until("[netboot] ready", NETBOOT_READY_TIMEOUT_S, collected):
+        print(f"\n[ERROR] supervisor did not print '[netboot] ready' within {NETBOOT_READY_TIMEOUT_S}s")
+        return conn1, conn2, th, False
+    rc, out = netload_remote(load_argv, live=True)
+    return conn1, conn2, th, rc == 0
+
+
 def main():
     """Main test function."""
     # Parse command-line arguments
@@ -676,9 +946,56 @@ Examples:
              "from DIR over $VEK385_BOOT_PDI / $VEK385_PLD_PDI before programming "
              f"(default DIR: {ALLGMIOBOOT_PDI_DIR})"
     )
+    parser.add_argument(
+        "--netload",
+        action="store_true",
+        default=False,
+        help="Run via the resident netboot supervisor instead of JTAG dow; bootstraps the "
+             "supervisor over JTAG only if it does not answer (src/tool/netboot/README.md)"
+    )
+    parser.add_argument(
+        "--netload-ip",
+        default=os.environ.get("VEK280_NETBOOT_IP", ""),
+        help="Supervisor IP (set by build.sh NETBOOT_IP; or $VEK280_NETBOOT_IP)"
+    )
+    parser.add_argument(
+        "--netload-bootstrap",
+        action="store_true",
+        default=False,
+        help="Reload the supervisor over JTAG even if one answers (supervisor upgrade)"
+    )
+    parser.add_argument(
+        "--netload-max-run-ms",
+        "--netload-timeout-ms",
+        dest="netload_max_run_ms",
+        type=int,
+        default=0,
+        help="Max run time of this app on the board (--netload only); 0 = supervisor default (60 s)"
+    )
+    parser.add_argument(
+        "--netload-wait",
+        type=float,
+        default=120.0,
+        help="Seconds to wait for a busy board before giving up (--netload only, default 120)"
+    )
+    parser.add_argument(
+        "--netload-force-now",
+        action="store_true",
+        default=False,
+        help="Take over the app core immediately without waiting (--netload only)"
+    )
+    parser.add_argument(
+        "--netload-no-force",
+        action="store_true",
+        default=False,
+        help="Do not terminate a previous app past its max run time (--netload only)"
+    )
     args = parser.parse_args()
     if args.board_rev not in ("a", "b"):
         print(f"Error: VEK385_REV must be 'a' or 'b', got '{args.board_rev}'")
+        sys.exit(1)
+    if args.netload and not args.netload_ip:
+        print("Error: --netload requires --netload-ip <ip> or $VEK280_NETBOOT_IP")
         sys.exit(1)
 
     # Step 0: Find ELF file using smart selection
@@ -696,95 +1013,107 @@ Examples:
     if args.stage_pdi and not stage_pdis(args.stage_pdi, args.board_rev):
         sys.exit(1)
 
-    # Step 1: Copy ELF file to remote server
-    success, remote_elf_path = copy_elf_to_remote(local_elf)
-    if not success:
-        print("Failed to copy ELF file, exiting...")
-        sys.exit(1)
-    
+    # --netload streams the ELF through the proxy; skip the SCP step.
+    remote_elf_path = None
+    if not args.netload:
+        success, remote_elf_path = copy_elf_to_remote(local_elf)
+        if not success:
+            print("Failed to copy ELF file, exiting...")
+            sys.exit(1)
+
     conn1 = None
     conn2 = None
     console_thread = None
-    
+    collected_output = []
+    uart_st = {}
+
     try:
-        # Step 2-3: Setup first connection and program device
-        print("\n>>> Setting up first connection...")
-        conn1 = setup_first_connection(board_rev=args.board_rev)
-        
-        # Step 4: Setup second connection for console output
-        print("\n>>> Setting up second connection...")
-        conn2 = setup_second_connection()
+        if args.netload:
+            conn1, conn2, console_thread, elf_ok = netload_start(args, local_elf, collected_output)
+            if not elf_ok:
+                print("\n" + "=" * 60)
+                print("Test FAILED (netload)")
+                print("=" * 60)
+                sys.exit(1)
+        else:
+            # JTAG path: program PDI, open console, dow ELF, continue.
+            print("\n>>> Setting up first connection...")
+            conn1 = setup_first_connection(board_rev=args.board_rev)
 
-        # Read the UART before the ELF runs. com3's telnet session sometimes
-        # drops as soon as it attaches; reconnect and only then download.
-        console_thread = threading.Thread(
-            target=console_reader,
-            args=(conn2, console_output_queue, stop_console_thread)
-        )
-        console_thread.start()
-        uart_ready = False
-        uart_seen = 0.0
-        uart_st = {}
-        settle_deadline = time.time() + 45
-        while time.time() < settle_deadline:
-            while not console_output_queue.empty():
-                chunk = console_output_queue.get()
-                print(chunk, end='', flush=True)
-                if uart_reconnect_step(conn2, chunk, uart_st):
-                    uart_seen = 0.0
-                elif not uart_seen and not uart_st.get("pending") and chunk.strip():
-                    uart_seen = time.time()
-            if uart_seen and time.time() - uart_seen >= 3 and not uart_st.get("pending"):
-                uart_ready = True
-                break
-            time.sleep(0.5)
-        if not uart_ready:
-            print("\n[Connection 2] UART did not stay up; continuing anyway")
+            print("\n>>> Setting up second connection...")
+            conn2 = setup_second_connection()
 
-        # Step 5: Download ELF file
-        print("\n>>> Downloading ELF file...")
-        elf_ok = download_elf_and_continue(conn1, remote_elf_path)
+            console_thread = threading.Thread(
+                target=console_reader,
+                args=(conn2, console_output_queue, stop_console_thread)
+            )
+            console_thread.start()
+            uart_ready = False
+            uart_seen = 0.0
+            settle_deadline = time.time() + 45
+            while time.time() < settle_deadline:
+                while not console_output_queue.empty():
+                    chunk = console_output_queue.get()
+                    print(chunk, end='', flush=True)
+                    if uart_reconnect_step(conn2, chunk, uart_st):
+                        uart_seen = 0.0
+                    elif not uart_seen and not uart_st.get("pending") and chunk.strip():
+                        uart_seen = time.time()
+                if uart_seen and time.time() - uart_seen >= 3 and not uart_st.get("pending"):
+                    uart_ready = True
+                    break
+                time.sleep(0.5)
+            if not uart_ready:
+                print("\n[Connection 2] UART did not stay up; continuing anyway")
 
-        if not elf_ok:
-            # PLM stalled — skip console wait, go straight to cleanup
-            print("\n[Skipping console wait due to PLM failure]")
-            if not args.nonreboot:
-                print("\n>>> Cleaning up Connection 1...")
-                exit_xsdb_and_poweroff(conn1)
-            else:
-                print("\n>>> --nonreboot: board stays powered on for debug.")
-                print(f"    Kill this process when done: Ctrl+C or 'kill {os.getpid()}'")
-                try:
-                    while True:
-                        time.sleep(60)
-                except KeyboardInterrupt:
-                    print("\nReleasing board...")
-            print("\n" + "=" * 60)
-            print("Test FAILED (PLM stall)")
-            print("=" * 60)
-            sys.exit(1)
+            print("\n>>> Downloading ELF file...")
+            elf_ok = download_elf_and_continue(conn1, remote_elf_path)
 
-        # Poll console output instead of fixed sleep:
-        #   - Finish early when "device_teardown done" is seen (program completed)
-        #   - Abort early if no output arrives within NO_OUTPUT_TIMEOUT seconds
-        #   - Hard cap at MAX_WAIT seconds as safety bound
-        MAX_WAIT = 600        # absolute maximum wait (seconds)
-        NO_OUTPUT_TIMEOUT = 300  # abort if no output for this long (debug snapshot reads many regs)
-        POLL_INTERVAL = 1     # check queue every N seconds
+            if not elf_ok:
+                print("\n[Skipping console wait due to PLM failure]")
+                if not args.nonreboot:
+                    print("\n>>> Cleaning up Connection 1...")
+                    exit_xsdb_and_poweroff(conn1)
+                else:
+                    print("\n>>> --nonreboot: board stays powered on for debug.")
+                    print(f"    Kill this process when done: Ctrl+C or 'kill {os.getpid()}'")
+                    try:
+                        while True:
+                            time.sleep(60)
+                    except KeyboardInterrupt:
+                        print("\nReleasing board...")
+                print("\n" + "=" * 60)
+                print("Test FAILED (PLM stall)")
+                print("=" * 60)
+                sys.exit(1)
+
+        # ------ console wait (shared by JTAG and netload paths) ------
+        MAX_WAIT = 600
+        NO_OUTPUT_TIMEOUT = 300
+        POLL_INTERVAL = 1
+
+        finished = None
+        if args.netload:
+            def finished():
+                rc, out = netload_remote(["status", "--host", args.netload_ip,
+                                         "--connect-timeout", "3"], timeout=30)
+                if rc == 0 and ("state=watchdog-timeout" in out or "state=killed" in out):
+                    print(f"\n[netload] the supervisor ended the wait: {out.splitlines()[0]}")
+                return rc == 0 and any(f"state={st}" in out
+                                       for st in ("exited", "watchdog-timeout", "killed"))
 
         print(f"\n>>> Waiting for console output (max {MAX_WAIT}s, no-output timeout {NO_OUTPUT_TIMEOUT}s)...")
 
-        collected_output = []
-        output_detected = False
+        output_detected = bool(collected_output)
         program_done = False
         start_time = time.time()
         last_output_time = start_time
+        last_probe = start_time
 
         while True:
             elapsed = time.time() - start_time
             since_last_output = time.time() - last_output_time
 
-            # Check for new output in the queue
             got_new = False
             while not console_output_queue.empty():
                 chunk = console_output_queue.get()
@@ -793,16 +1122,19 @@ Examples:
                 output_detected = True
                 got_new = True
                 uart_reconnect_step(conn2, chunk, uart_st)
-                # Check for completion marker
-                if "device_teardown done" in chunk or "test end" in chunk or "PASS:" in chunk or "FAIL:" in chunk:
+                if ("device_teardown done" in chunk or "test end" in chunk
+                        or "PASS:" in chunk or "FAIL:" in chunk):
                     program_done = True
 
             if got_new:
                 last_output_time = time.time()
 
-            # Exit conditions (in priority order)
+            if not program_done and finished and time.time() - last_probe >= 0.5:
+                last_probe = time.time()
+                if finished():
+                    program_done = True
+
             if program_done:
-                # Give a short grace period for any trailing output
                 time.sleep(2)
                 while not console_output_queue.empty():
                     chunk = console_output_queue.get()
@@ -820,27 +1152,24 @@ Examples:
                 break
 
             if not output_detected and since_last_output >= NO_OUTPUT_TIMEOUT:
-                print(f"\n[ERROR: No output received for {NO_OUTPUT_TIMEOUT}s — "
-                      "UART/PS may not be initialized (PLM issue or board problem)]")
+                print(f"\n[ERROR: No output received for {NO_OUTPUT_TIMEOUT}s]")
                 break
 
             time.sleep(POLL_INTERVAL)
 
-        # Stop console reader
         stop_console_thread.set()
         if console_thread:
             console_thread.join(timeout=5)
 
-        # Print summary
         print("\n" + "=" * 60)
         print("CONSOLE OUTPUT SUMMARY:")
         print("=" * 60)
-
         if not output_detected:
-            print("[No output received from com0 serial console]")
-        
-        # Step 6: Go back to conn1, exit xsdb and power off
-        if not args.nonreboot:
+            print(f"[No output received from {console_port} serial console]")
+
+        if args.netload:
+            print("\n>>> --netload: board left powered on, netboot supervisor stays resident")
+        elif not args.nonreboot:
             print("\n>>> Cleaning up Connection 1...")
             exit_xsdb_and_poweroff(conn1)
         else:
@@ -856,61 +1185,46 @@ Examples:
         print("\n" + "=" * 60)
         print("Test complete!")
         print("=" * 60)
-        
+        if args.netload and not program_done:
+            sys.exit(1)
+
     except pexpect.TIMEOUT as e:
         print(f"\nError: Command timed out - {e}")
-        if conn1 and not args.nonreboot:
+        if conn1 and not args.nonreboot and not args.netload:
             try:
                 exit_xsdb_and_poweroff(conn1)
             except Exception:
                 pass
-        elif conn1 and args.nonreboot:
-            print(">>> --nonreboot: board stays powered on for debug.")
-            print(f"    Kill this process when done: Ctrl+C or 'kill {os.getpid()}'")
-            try:
-                while True:
-                    time.sleep(60)
-            except KeyboardInterrupt:
-                print("\nReleasing board...")
+        elif conn1:
+            print("[--nonreboot/--netload] board left as-is")
         sys.exit(1)
     except pexpect.EOF as e:
         print(f"\nError: Connection closed unexpectedly - {e}")
         sys.exit(1)
     except Exception as e:
         print(f"\nError: {e}")
-        if conn1 and not args.nonreboot:
+        if conn1 and not args.nonreboot and not args.netload:
             try:
                 exit_xsdb_and_poweroff(conn1)
             except Exception:
                 pass
-        elif conn1 and args.nonreboot:
-            print(">>> --nonreboot: board stays powered on for debug.")
-            print(f"    Kill this process when done: Ctrl+C or 'kill {os.getpid()}'")
-            try:
-                while True:
-                    time.sleep(60)
-            except KeyboardInterrupt:
-                print("\nReleasing board...")
+        elif conn1:
+            print("[--nonreboot/--netload] board left as-is")
         sys.exit(1)
     finally:
-        # Cleanup - ensure thread is stopped and connections closed
         stop_console_thread.set()
-        
         if console_thread and console_thread.is_alive():
             console_thread.join(timeout=5)
-        
         if conn1:
             try:
                 conn1.close()
-            except:
+            except Exception:
                 pass
-        
         if conn2:
             try:
                 conn2.close()
-            except:
+            except Exception:
                 pass
-        
         print("\nConnections closed.")
 
 

@@ -57,6 +57,7 @@ using namespace aiegraph;
 
 #define GET_OP_CLASSES
 #define GET_OP_DECLS
+#include "aiehlcsymbol.h"
 #include "aiegraphop.h.inc"
 #undef GET_OP_DECLS
 #undef GET_OP_CLASSES

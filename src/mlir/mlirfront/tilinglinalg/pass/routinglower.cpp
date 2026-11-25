@@ -1033,8 +1033,8 @@ struct RoutingmovedatabyioConvert : public ConversionPattern {
         int row = createhwmesh.getRow();
         auto shape = createscheduletensor.getShape();
 
-        int tensor_x = shape[0].cast<mlir::IntegerAttr>().getInt();
-        int tensor_y = shape[1].cast<mlir::IntegerAttr>().getInt();
+        int tensor_x = llvm::cast<mlir::IntegerAttr>(shape[0]).getInt();
+        int tensor_y = llvm::cast<mlir::IntegerAttr>(shape[1]).getInt();
 
         llvm::StringRef split_axis = partitionmesh.getSplitaxis();
         llvm::StringRef hw_axis_owner = partitiontensor.getPartition().getHwAxisOwner();
@@ -1046,7 +1046,9 @@ struct RoutingmovedatabyioConvert : public ConversionPattern {
         llvm::outs() << "replicate_on=" << replicate_on << " single_tile_owner=" << single_tile_owner << "\n";
 
         std::vector<Point> tileList;
-        int tileNum = (split_axis == "row") ? row : col;
+        // A row split's group is one mesh row (tiles {round_idx, 0..col-1}) and a col split's
+        // one mesh column ({0..row-1, round_idx}); the swapped form only worked on square meshes.
+        int tileNum = (split_axis == "row") ? col : row;
         int core_start_row = (int) router_.getRM()->getrsc()->absTileRow(TileType::Core, 0);
         for(int i = 0; i < tileNum; i++) {
             if (split_axis == "row") {

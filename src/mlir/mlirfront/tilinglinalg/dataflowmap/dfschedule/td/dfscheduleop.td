@@ -23,6 +23,12 @@ include "mlir/Interfaces/FunctionInterfaces.td"
 include "mlir/IR/BuiltinTypes.td"
 include "dfscheduletype.td"
 
+
+#ifndef AIEHLC_PUBLIC_SYMBOL_TD
+#define AIEHLC_PUBLIC_SYMBOL_TD
+// every aiehlc symbol is public (tilinglinalg/aiehlcsymbol.h)
+def AiehlcPublicSymbol : NativeOpTrait<"PublicSymbol"> { let cppNamespace = "::aiehlc"; }
+#endif
 // ============================================================================
 // TOP-LEVEL HOST BLOCK OPERATION
 // ============================================================================
@@ -30,7 +36,7 @@ include "dfscheduletype.td"
 def dfschedule_HostBlockOp : dfscheduleop<"host", [
     IsolatedFromAbove,
     SymbolTable,
-    Symbol,
+    Symbol, SymbolName, AiehlcPublicSymbol,
     SingleBlock,
     NoTerminator
   ]> {
@@ -132,7 +138,7 @@ def dfschedule_DeclareTileSelfOp : dfscheduleop<"declaretile.self"> {
 }
 
 // Create a packet handle
-def dfschedule_PacketOp : dfscheduleop<"packet", [Symbol]> {
+def dfschedule_PacketOp : dfscheduleop<"packet", []> {
   let summary = "Create a named packet associated with data and DMA channel";
   let arguments = (ins
     SymbolNameAttr:$sym_name,
@@ -144,7 +150,7 @@ def dfschedule_PacketOp : dfscheduleop<"packet", [Symbol]> {
 }
 
 // Declare kernel configuration (replaces multiple packet symbols)
-def dfschedule_DeclareKernelConfigOp : dfscheduleop<"declare_kernel_config", [Symbol]> {
+def dfschedule_DeclareKernelConfigOp : dfscheduleop<"declare_kernel_config", []> {
   let summary = "Declare kernel configuration for multiple tiles";
   let description = [{
     This operation declares a unified kernel configuration that contains
@@ -373,11 +379,9 @@ def dfschedule_ScheduleWaitOp : dfscheduleop<"schedule.wait"> {
 
 // DSKernel Compute - defines a compute logic block
 def dfschedule_DSKernelComputeOp : dfscheduleop<"dskernel.compute", [
-    IsolatedFromAbove,
-    Symbol,
+    IsolatedFromAbove, 
     SingleBlock,
-    NoTerminator
-  ]> {
+    NoTerminator]> {
   let summary = "Define a compute kernel logic that can be invoked from a receiver";
   let description = [{
     Defines reusable compute logic that operates on a buffer.
@@ -399,7 +403,7 @@ def dfschedule_DSKernelComputeOp : dfscheduleop<"dskernel.compute", [
 // DSKernel Receiver - kernel function with ping-pong buffering
 def dfschedule_DSKernelReceiverOp : dfscheduleop<"dskernel_receiver", [
     IsolatedFromAbove,
-    Symbol,
+    Symbol, SymbolName, AiehlcPublicSymbol,
     SingleBlock,
     NoTerminator
   ]> {
@@ -623,7 +627,7 @@ def dfschedule_DSKernelReleaseLockOp : dfscheduleop<"dskernel.release_lock"> {
 // LEGACY OPERATIONS (kept for backward compatibility)
 // ============================================================================
 
-def dfschedule_FuncOp : dfscheduleop<"func",[IsolatedFromAbove, SymbolTable, Symbol]>
+def dfschedule_FuncOp : dfscheduleop<"func",[IsolatedFromAbove, SymbolTable, Symbol, SymbolName, AiehlcPublicSymbol]>
 {
     let summary = "Defines a function in the dfschedule Dialect";
     let description = [{This operation represents a function definition in the dfschedule dialect.
@@ -874,7 +878,7 @@ def dfschedule_L2YieldOp : dfscheduleop<"yield", [
 def dfschedule_HostConfigOp : dfscheduleop<"host_config", [
 //
     SymbolTable,
-    Symbol,
+    Symbol, SymbolName, AiehlcPublicSymbol,
     SingleBlock,
     NoTerminator
   ]> {
@@ -942,7 +946,7 @@ def dfschedule_HostScheduleOp : dfscheduleop<"host_schedule", [
     SingleBlock,
     NoTerminator,
     SymbolTable,
-    Symbol
+    Symbol, SymbolName, AiehlcPublicSymbol
   ]> {
   let summary = "Host-side execution schedule block (no terminator required)";
   let description = [{
@@ -973,7 +977,7 @@ def dfschedule_KernelScheduleOp : dfscheduleop<"kernel_schedule", [
     SingleBlock,
     NoTerminator,
     SymbolTable,
-    Symbol
+    Symbol, SymbolName, AiehlcPublicSymbol
   ]> {
   let summary = "Kernel-side execution schedule block (no terminator required)";
   let description = [{
@@ -1017,7 +1021,7 @@ def dfschedule_KernelScheduleOp : dfscheduleop<"kernel_schedule", [
 def dfschedule_KernelModuleOp : dfscheduleop<"module", [
     IsolatedFromAbove,
     SymbolTable,
-    Symbol,
+    Symbol, SymbolName, AiehlcPublicSymbol,
     SingleBlock,
     NoTerminator
   ]> {
@@ -1044,7 +1048,7 @@ def dfschedule_KernelModuleOp : dfscheduleop<"module", [
 }
 
 // Kernel configuration metadata
-def dfschedule_KernelConfigDefOp : dfscheduleop<"kernel_config_def", [Symbol]> {
+def dfschedule_KernelConfigDefOp : dfscheduleop<"kernel_config_def", [Symbol, SymbolName, AiehlcPublicSymbol]> {
   let summary = "Define kernel configuration metadata";
   let description = [{
     Defines kernel metadata like name, file, buffer size, element type, etc.
@@ -1069,7 +1073,7 @@ def dfschedule_KernelConfigDefOp : dfscheduleop<"kernel_config_def", [Symbol]> {
 }
 
 // Lock definition
-def dfschedule_LockDefOp : dfscheduleop<"lock_def", [Symbol]> {
+def dfschedule_LockDefOp : dfscheduleop<"lock_def", [Symbol, SymbolName, AiehlcPublicSymbol]> {
   let summary = "Define a named lock with ID";
   let description = [{
     Defines a named lock that can be referenced by windows and kernel operations.
@@ -1088,7 +1092,7 @@ def dfschedule_LockDefOp : dfscheduleop<"lock_def", [Symbol]> {
 }
 
 // Buffer definition
-def dfschedule_BufferDefOp : dfscheduleop<"buffer_def", [Symbol]> {
+def dfschedule_BufferDefOp : dfscheduleop<"buffer_def", [Symbol, SymbolName, AiehlcPublicSymbol]> {
   let summary = "Define a named buffer with type";
   let description = [{
     Defines a named buffer (typically in local memory) that can be referenced
@@ -1107,7 +1111,7 @@ def dfschedule_BufferDefOp : dfscheduleop<"buffer_def", [Symbol]> {
 }
 
 // Window definition (abstract ping-pong window)
-def dfschedule_WindowDefOp : dfscheduleop<"window_def", [Symbol]> {
+def dfschedule_WindowDefOp : dfscheduleop<"window_def", [Symbol, SymbolName, AiehlcPublicSymbol]> {
   let summary = "Define an abstract window combining ping-pong buffers with locks";
   let description = [{
     Defines a window abstraction that combines:
@@ -1139,7 +1143,7 @@ def dfschedule_WindowDefOp : dfscheduleop<"window_def", [Symbol]> {
 }
 
 // Kernel declaration with iteration style
-def dfschedule_KernelDeclOp : dfscheduleop<"kernel_decl", [Symbol]> {
+def dfschedule_KernelDeclOp : dfscheduleop<"kernel_decl", [Symbol, SymbolName, AiehlcPublicSymbol]> {
   let summary = "Declare a kernel with inputs, outputs, and iteration style";
   let description = [{
     Declares the kernel interface with:
@@ -1167,7 +1171,7 @@ def dfschedule_KernelDeclOp : dfscheduleop<"kernel_decl", [Symbol]> {
 
 // Main entry point
 def dfschedule_KernelMainOp : dfscheduleop<"main", [
-    Symbol,
+    Symbol, SymbolName, AiehlcPublicSymbol,
     SingleBlock
   ]> {
   let summary = "Kernel main entry point";

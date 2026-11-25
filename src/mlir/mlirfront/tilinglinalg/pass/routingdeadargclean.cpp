@@ -73,7 +73,10 @@ void RoutingDeadArgPass::runOnOperation()  {
             mlir::OpBuilder builder(module.getBodyRegion());
             auto newFunc = builder.create<mlir::func::FuncOp>(
                 oldFunc.getLoc(), oldFunc.getName(), newFuncType);
-        newFunc.dump();
+            {
+                newFunc->print(llvm::errs());
+                llvm::errs() << "\n";
+            }
         // Copy all attributes (like linkage visibility) from the old function.
         // Copy attributes individually, skipping the ones handled by the builder ---
             //newFunc->setAttrs(oldFunc->getAttrs());
@@ -123,7 +126,10 @@ void RoutingDeadArgPass::runOnOperation()  {
             builder.setInsertionPointToEnd(newEntryBlock);
             builder.clone(*oldEntryBlock->getTerminator(), mapping);
             //dFunc.getBody().cloneInto(&newFunc.getBody(), mapping);
-            newFunc.dump();
+            {
+                newFunc->print(llvm::errs());
+                llvm::errs() << "\n";
+            }
         // Step 2d: Update all call sites.
             auto uses = symbolTable.getSymbolUses(oldFunc, module);
             if (uses) {
@@ -164,10 +170,9 @@ void RoutingDeadArgPass::runOnOperation()  {
             op.getCanonicalizationPatterns(patternscde, &ctx);
         }
         // Apply the patterns greedily. This will simplify and clean up the IR.
-        if (mlir::failed(mlir::applyPatternsAndFoldGreedily(module, std::move(patternscde)))) {
-                    // Handle error
+        if (mlir::failed(mlir::applyPatternsGreedily(module, std::move(patternscde)))) {
+            // Handle error
             signalPassFailure();
         }
-  
     }
 }

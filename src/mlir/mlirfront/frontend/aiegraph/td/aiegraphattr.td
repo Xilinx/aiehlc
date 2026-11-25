@@ -13,11 +13,12 @@ include "mlir/Interfaces/FunctionInterfaces.td"
 include "mlir/IR/EnumAttr.td"
 
 def aiegraphdialect : Dialect {
+    // keep the pre-LLVM-24 textual form (inherent attrs in attr-dict)
+    let useStrictPropertiesInAssemblyFormat = 0;
     let name = "aiegraph";
     let cppNamespace = "aiegraph";
     let hasOperationAttrVerify = 0;
     let useDefaultAttributePrinterParser = 1;
-    let usePropertiesForAttributes = 0;
     let useDefaultTypePrinterParser = 1;
     dag discardableAttrs = (ins);
 }

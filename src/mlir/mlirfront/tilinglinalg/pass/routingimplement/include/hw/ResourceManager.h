@@ -489,6 +489,9 @@ class CoreMemAllocator {
     // Get base address of the data memory region
     uint32_t getBaseAddr() const { return baseAddr_; }
 
+    // Lowest allocated address (the stack ends here; below baseAddr_ under AIEHLC_CORE_BANKS)
+    uint32_t getLowestAddr() const;
+
     // Get remaining free space
     uint32_t getFreeSpace() const { return (baseAddr_ + totalSize_) - nextFree_; }
 
@@ -496,7 +499,12 @@ class CoreMemAllocator {
     uint32_t baseAddr_;  // 0x78000
     uint32_t totalSize_; // 0x8000
     uint32_t nextFree_;  // next available address
+    uint32_t bankNext_[2] = {0, 0}; // AIEHLC_CORE_BANKS: next free address in input banks 2, 3
+    uint32_t outNext_ = 0;          // AIEHLC_CORE_BANKS: outputs grow down from baseAddr_
+    uint32_t lowNext_ = 0;          // buffers that do not fit above grow down from baseAddr_ (stack shrinks)
     std::vector<CoreMemSlot> allocations_;
+
+    std::optional<uint32_t> allocateBanked(const std::string &name, uint32_t size, uint32_t alignment);
 };
 
 // One core tile's self-programmed DMA config under #pragma KERNELCONFIGOFFLOAD.
@@ -639,6 +647,11 @@ public:
   std::optional<int> allocatePktId(int ownerId = -1);
   bool releasePktId(int pktId, int ownerId = -1);
   bool isPktIdFree(int pktId) const;
+  // pkt_id of the index-th core of one packet-merged output flow: the index-th id not
+  // reserved by the control plane. Data-plane ids need not be unique across flows: every
+  // neighbour-facing data-plane slave slot matches any id (mask 0), and the only exact
+  // match is a core's own DMA slot, which carries that core's packets alone.
+  std::optional<int> flowPktId(int indexInFlow) const;
 
   // Owner sentinel marking a pkt-id reserved by the control plane (never handed
   // out to data-plane allocations).

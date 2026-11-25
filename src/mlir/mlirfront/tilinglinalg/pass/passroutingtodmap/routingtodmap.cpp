@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  ******************************************************************************/
 
+#include <cstdlib>
 #include "routingtodmap.h"
 #include "routinghw_pkt_slot.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -1016,8 +1017,8 @@ struct RoutingmovedatabyioConvertdmap : public ConversionPattern {
         // These are only used for the debug print below; read them rank-aware so
         // a 1-D schedule tensor (shape=[N], as the TVM frontend emits) does not
         // read shape[1] out of bounds (garbage attr -> getInt/type-storage crash).
-        int tensor_x = shape.size() > 0 ? shape[0].cast<mlir::IntegerAttr>().getInt() : 0;
-        int tensor_y = shape.size() > 1 ? shape[1].cast<mlir::IntegerAttr>().getInt() : 1;
+        int tensor_x = shape.size() > 0 ? llvm::cast<mlir::IntegerAttr>(shape[0]).getInt() : 0;
+        int tensor_y = shape.size() > 1 ? llvm::cast<mlir::IntegerAttr>(shape[1]).getInt() : 1;
 
         llvm::StringRef split_axis = partitionmesh.getSplitaxis();
         llvm::StringRef hw_axis_owner = partitiontensor.getPartition().getHwAxisOwner();
@@ -1029,7 +1030,9 @@ struct RoutingmovedatabyioConvertdmap : public ConversionPattern {
         llvm::outs() << "replicate_on=" << replicate_on << " single_tile_owner=" << single_tile_owner << "\n";
 
         std::vector<Point> tileList;
-        int tileNum = (split_axis == "row") ? row : col;
+        // A row split's group is one mesh row (tiles {round_idx, 0..col-1}) and a col split's
+        // one mesh column ({0..row-1, round_idx}); the swapped form only worked on square meshes.
+        int tileNum = (split_axis == "row") ? col : row;
         int core_start_row = (int) router_.getRM()->getrsc()->absTileRow(TileType::Core, 0);
         for(int i = 0; i < tileNum; i++) {
             if (split_axis == "row") {
@@ -1100,8 +1103,11 @@ struct RoutingmovedatabyioConvertdmap : public ConversionPattern {
         auto gcret = dmap::dmacoregroupconfigType::get(ctx);
         auto gcmap = rewriter.create<create_core_group_with_config>(rewriter.getUnknownLoc(),  gcret, peg.getResult(), "row", configMapAttr);
         auto streamret = dmap::dmapportstreamType::get(ctx);
-        //op level is a outside parameter, opby mem tile will pass mem tile
-        if (moplevel == 1) {
+        // op level is a outside parameter, opby mem tile will pass mem tile
+        //  AIEHLC_MEMTILE_GATHER=1 (memtile staging bring-up, doc/design/memtile_staging.md):
+        //  route gathers (outputs) core -> memtile -> shim.
+        bool viaMem = moplevel == 1 || (processing_type == 2 && std::getenv("AIEHLC_MEMTILE_GATHER"));
+        if (viaMem) {
             auto memio = rewriter.create<define_io_engine>(rewriter.getUnknownLoc(),  ioout, 0, "MEM"); 
             ///*
             auto memiorecvconfig = rewriter.create<create_io_engin_with_config>(rewriter.getUnknownLoc(),  ioconfigret,  memio.getResult(),receivepattern);

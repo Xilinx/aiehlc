@@ -67,9 +67,9 @@ static mlir::Attribute findConstantValue(mlir::MLIRContext *context, mlir::Patte
       
     }
     if (auto emitcConst = dyn_cast<mlir::emitc::ConstantOp>(definingOp)) {
-      if (auto strAttr = emitcConst.getValue().dyn_cast<mlir::StringAttr>()) {
-        return mlir::emitc::OpaqueAttr::get(rewriter.getContext(), strAttr);
-      }
+        if (auto strAttr = llvm::dyn_cast<mlir::StringAttr>(emitcConst.getValue())) {
+            return mlir::emitc::OpaqueAttr::get(rewriter.getContext(), strAttr);
+        }
       return emitcConst.getValue();
     }
   }
@@ -101,24 +101,26 @@ struct FoldConstantOperandsIntoCall : public mlir::OpRewritePattern<mlir::emitc:
 
     int operandIdx = 0;
     for (size_t i = 0; i < newArgs.size(); ++i) {
-      if (auto intAttr = newArgs[i].dyn_cast<mlir::IntegerAttr>()) {
-          if (intAttr.getType().isa<mlir::IndexType>()) {
-            if (operandIndex >= callOp.getNumOperands()) return mlir::failure();
-            mlir::Value currentOperand = callOp.getOperands()[operandIndex];
-            if (mlir::Attribute constValue = findConstantValue(getContext(), rewriter,calleeName,currentOperand)) {
-              newArgs[i] = constValue;
-              changed = true;
-            } else {
-              //all the func parameter should present in the newArgs, for the operand ,it should have a slot in newArgs but
-              //declare it is operand by using n:Index, n is the index of operand paramerter, for example func(%a,%b) , 
-              //1:Index means the second operand , it is %b, the newArgs can be [1:i32, 1:Index, 0:Index] then after convert
-              //into c like func(1, %b, %a)
-              newArgs[i] = rewriter.getIndexAttr(operandIdx++);
-              newOperands.push_back(currentOperand);
+        if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(newArgs[i])) {
+            if (llvm::isa<mlir::IndexType>(intAttr.getType())) {
+                if (operandIndex >= callOp.getNumOperands())
+                    return mlir::failure();
+                mlir::Value currentOperand = callOp.getOperands()[operandIndex];
+                if (mlir::Attribute constValue =
+                        findConstantValue(getContext(), rewriter, calleeName, currentOperand)) {
+                    newArgs[i] = constValue;
+                    changed = true;
+                } else {
+                    // all the func parameter should present in the newArgs, for the operand ,it should have a slot in
+                    // newArgs but declare it is operand by using n:Index, n is the index of operand paramerter, for
+                    // example func(%a,%b) , 1:Index means the second operand , it is %b, the newArgs can be [1:i32,
+                    // 1:Index, 0:Index] then after convert into c like func(1, %b, %a)
+                    newArgs[i] = rewriter.getIndexAttr(operandIdx++);
+                    newOperands.push_back(currentOperand);
+                }
+                operandIndex++;
             }
-            operandIndex++;
         }
-      }
     }
 
     if (!changed) {
@@ -201,25 +203,27 @@ struct FoldConstantOperandsIntoCallOpaqueOp : public mlir::OpRewritePattern<mlir
 
     int operandIdx = 0;
     for (size_t i = 0; i < newArgs.size(); ++i) {
-      if (auto intAttr = newArgs[i].dyn_cast<mlir::IntegerAttr>()) {
-          if (intAttr.getType().isa<mlir::IndexType>()) {
-            if (operandIndex >= callOp.getNumOperands()) return mlir::failure();
-            mlir::Value currentOperand = callOp.getOperands()[operandIndex];     
-            // Check if this is a PartitionTensor* from emitc.expression containing emitc.apply "&"
-            if (mlir::Attribute constValue = findConstantValue(getContext(), rewriter,calleeName,currentOperand)) {
-              newArgs[i] = constValue;
-              changed = true;
-            } else {
-              //all the func parameter should present in the newArgs, for the operand ,it should have a slot in newArgs but
-              //declare it is operand by using n:Index, n is the index of operand paramerter, for example func(%a,%b) , 
-              //1:Index means the second operand , it is %b, the newArgs can be [1:i32, 1:Index, 0:Index] then after convert
-              //into c like func(1, %b, %a)
-              newArgs[i] = rewriter.getIndexAttr(operandIdx++);
-              newOperands.push_back(currentOperand);
+        if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(newArgs[i])) {
+            if (llvm::isa<mlir::IndexType>(intAttr.getType())) {
+                if (operandIndex >= callOp.getNumOperands())
+                    return mlir::failure();
+                mlir::Value currentOperand = callOp.getOperands()[operandIndex];
+                // Check if this is a PartitionTensor* from emitc.expression containing emitc.apply "&"
+                if (mlir::Attribute constValue =
+                        findConstantValue(getContext(), rewriter, calleeName, currentOperand)) {
+                    newArgs[i] = constValue;
+                    changed = true;
+                } else {
+                    // all the func parameter should present in the newArgs, for the operand ,it should have a slot in
+                    // newArgs but declare it is operand by using n:Index, n is the index of operand paramerter, for
+                    // example func(%a,%b) , 1:Index means the second operand , it is %b, the newArgs can be [1:i32,
+                    // 1:Index, 0:Index] then after convert into c like func(1, %b, %a)
+                    newArgs[i] = rewriter.getIndexAttr(operandIdx++);
+                    newOperands.push_back(currentOperand);
+                }
+                operandIndex++;
             }
-            operandIndex++;
         }
-      }
     }
 
     if (!changed) {
@@ -381,7 +385,7 @@ void RoutingConstantFoldPass::runOnOperation() {
     }
 
     // Apply the patterns greedily.
-    if (failed(mlir::applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
-      signalPassFailure();
+    if (failed(mlir::applyPatternsGreedily(getOperation(), std::move(patterns)))) {
+        signalPassFailure();
     }
 }

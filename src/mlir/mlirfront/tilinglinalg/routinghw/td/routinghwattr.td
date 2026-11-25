@@ -6,6 +6,8 @@
 include "mlir/IR/OpBase.td"
 
 def RoutingHWDialect : Dialect {
+    // keep the pre-LLVM-24 textual form (inherent attrs in attr-dict)
+    let useStrictPropertiesInAssemblyFormat = 0;
     let name = "routinghw";
     let cppNamespace = "routinghw";
     let description = "hw level routing";
@@ -13,7 +15,6 @@ def RoutingHWDialect : Dialect {
     dag discardableAttrs = (ins);
     let useDefaultAttributePrinterParser = 1;
     let useDefaultTypePrinterParser = 1;
-    let usePropertiesForAttributes = 0;
 }
 
 class RoutingHWType<string name, list<Trait> traits=[]> : TypeDef<RoutingHWDialect, name, traits>;

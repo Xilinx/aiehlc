@@ -20,7 +20,7 @@ run_cmd() {
 }
 
 usage() {
-    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss] [-serialize]"
+    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss] [-serialize] [--warm-launch] [--persistent]"
     echo "  --platform    baremetal (default) | sim | linux | baremetal_debug"
     echo "                'baremetal_debug' builds a baremetal ELF and writes sim_config.sh so the debug"
     echo "                UI can run either a hardware test or a simulator run from one build."
@@ -30,6 +30,10 @@ usage() {
     echo "  -serialize    take an exclusive lock on thirdparty/alib for the whole run, so parallel aiehlc.sh runs"
     echo "                on this tree wait for each other (also AIEHLC_SERIALIZE=1). Default: no lock -- two runs"
     echo "                at once on one tree can wipe each other's alib; use separate worktrees or -serialize."
+    echo "  --persistent  load + launch the kernel once; later launches only re-arm shim BDs"
+    echo "                (script/persist_transform.py; needs #pragma KERNELCONFIGOFFLOAD)"
+    echo "  --warm-launch cheap relaunch of the same kernel ELF: --skip-bss + hardware DM zeroisation,"
+    echo "                program memory kept warm, whole-register core/DMA reset (baremetal HW only)"
     return 1
 }
 
@@ -320,15 +324,22 @@ USE_LOCAL_AIERT_BSP=0
 PRETTY_DEBUG=0
 SIM_TILES=""
 GDB_MODE=0
+GEN_ONLY=0   # --gen-only: stop after code generation (host.cc / kernel*.cc / routing*.cc under aout/)
 # Reset every run: this script is sourced, so a flag from a previous invocation
 # in the same shell would otherwise persist.
 PROFILING=0
 SKIP_BSS=0
+WARM_LAUNCH=0
+PERSISTENT=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -help)
             usage
             return 0
+            ;;
+        --gen-only)
+            GEN_ONLY=1
+            shift
             ;;
         --runtime-source-file)
             runtime_source_file="$2"
@@ -388,6 +399,15 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-bss)
             SKIP_BSS=1
+            shift
+            ;;
+        --persistent)
+            PERSISTENT=1
+            shift
+            ;;
+        --warm-launch)
+            SKIP_BSS=1
+            WARM_LAUNCH=1
             shift
             ;;
         *)
@@ -627,6 +647,13 @@ AIEHLC_ARGS+=(
     # header (Gen5 / cortexa78) the earlier -I dirs still win.
     --extra-arg="-I${AIEHLC_DIR}/include/bspcompat"
 )
+# Split-layout BSP: per-CPU timestamp name xtime_l.h expects (bspcompat_defs.sh).
+source "${AIEHLC_DIR}/script/bspcompat_defs.sh"
+if [[ "$aie_version" == "1" || "$aie_version" == "2" ]]; then
+    for _def in $(bspcompat_defs "${ARCH_APU_AINC}"); do
+        AIEHLC_ARGS+=(--extra-arg="${_def}")
+    done
+fi
 if [ -n "$AIEHLC_SIM_DEFINE" ]; then
     AIEHLC_ARGS+=("$AIEHLC_SIM_DEFINE")
 fi
@@ -684,6 +711,10 @@ if [ "$GDB_MODE" -eq 1 ]; then
     echo "gdb session finished (-gdb): skipping kernel/host build. Generated IR is under aout/."
     return 0
 fi
+if [ "$GEN_ONLY" -eq 1 ]; then
+    echo "[aiehlc] --gen-only: code generated under $(pwd)/aout/ (kernel / host builds skipped)."
+    return 0
+fi
 
 HOST_BUILD_DIR=$(pwd)/aout/
 mkdir -p $HOST_BUILD_DIR
@@ -721,7 +752,7 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
     # Non-fatal: header generation must never break the build (set -e is active).
     if [ -f "${WORKLOCAL_DIR}/routingresourcemap.json" ]; then
         echo "Generating routing resource map header..."
-        if python3 "${AIEHLC_DIR}/src/tool/debug/resource_json_to_header.py" \
+        if python3 "${AIEHLC_DIR}/script/resource_json_to_header.py" \
                 "${WORKLOCAL_DIR}/routingresourcemap.json" \
                 --out "${WORKLOCAL_DIR}/aie_resource_map.h"; then
             echo "    ${WORKLOCAL_DIR}/aie_resource_map.h"
@@ -730,10 +761,16 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
         fi
     fi
 
+    if [ "${PERSISTENT}" -eq 1 ]; then
+        python3 "${AIEHLC_DIR}/script/persist_transform.py" "${WORKLOCAL_DIR}" || return 1
+    fi
     # Run hostcompile.sh with WORKLOCAL_DIR pointing at aout/worklocal.
     hc_extra_defs="${EXTRA_DEFS:-}"
     if [ "${SKIP_BSS}" -ne 0 ]; then
         hc_extra_defs="${hc_extra_defs} -DAIEHLC_SKIP_BSS_DEFAULT=${SKIP_BSS}"
+    fi
+    if [ "${WARM_LAUNCH}" -eq 1 ]; then
+        hc_extra_defs="${hc_extra_defs} -DAIEHLC_WARM_TEXT -DAIEHLC_HW_ZERO_BSS -DAIEHLC_PLAIN_WRITE_RESET"
     fi
     aiehlc_ts host_link_begin
     # KERNEL_DIR: hostcompile.sh cd's into WORKLOCAL_DIR before it sources kc.sh,

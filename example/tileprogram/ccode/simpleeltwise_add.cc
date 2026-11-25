@@ -3,9 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  ******************************************************************************/
 #include "simpleops_load.h"
-// STATUS (2026-11-15): passes the kernel analysis (`build/aiehlc-convtile trace` this file);
-// the lowering does not support this op shape yet, so aiehlc.sh stops with
-// "the core window is ... but the kernel's blocks (#routing.kernel_block) are ...".
+// STATUS (2026-11-17): PASS on VEK280 (2.06 ms). On VEK385 the build stops with a
+// packet "same-side U-turn" error: no output route avoids it there (skill kernelblockgather).
 #define OPS_R 256  // rows
 #define OPS_C 1024 // columns (bytes)
 // Elementwise: z = saturate_int8(x + y), x / y / z int8[256, 1024], on the 4x4 mesh
@@ -40,17 +39,16 @@ __global__ void eltwise_add(aie::port<input_window_int8 *, aie::shape<OPS_R, OPS
 int main() {
     aieSetDevice(0);
     aieArray device;
-    aieMesh mesh = device.partition({3, 6, 0, 6}, 4, 4);
+    aieMesh mesh = device.partition(OPS_PARTITION, 4, 4);
     const long n = (long)OPS_R * OPS_C;
     int8_t *x = (int8_t *)__Runtime_Alloc(n), *y = (int8_t *)__Runtime_Alloc(n);
     int8_t *z = (int8_t *)__Runtime_Alloc(n), *ref = (int8_t *)malloc(n);
     ops_fill(x, n, 11);
     ops_fill(y, n, 22);
     memset(z, 0, n);
-    XTime t0, t1;
-    XTime_GetTime(&t0);
+    uint64_t t0 = ops_now(), t1;
     eltwise_add<<<mesh>>>(x, y, z);
-    XTime_GetTime(&t1);
+    t1 = ops_now();
     printf("[BENCH] aie_wall_ms=%.3f\n", ops_ms(t0, t1));
     for (long e = 0; e < n; e++)
         ref[e] = ops_sat8(x[e] + y[e]);

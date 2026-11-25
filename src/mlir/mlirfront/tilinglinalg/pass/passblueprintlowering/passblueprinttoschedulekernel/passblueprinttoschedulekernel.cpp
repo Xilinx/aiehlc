@@ -1004,7 +1004,14 @@ analyzeKernelParams(Operation *rootOp, KernelResourceManager &resourceMgr, Type 
                             // B's view is its tile_cols x K block, sent whole in every m-round: dividing
                             // it gave a window of tile_cols*effK/mRounds (24 elements instead of 512 for
                             // the P4bk c013 kernel) and a core/shim mismatch.
-                            if (viewRows <= 0 || viewRows == tileRows)
+                            // Tell them apart by size, as the host does (flowtransfer_kernel.cpp): A's
+                            // per-k-round data is tile_rows x effK. The view's first dim is no proof:
+                            // B's view is [full_k / mesh cols, N], which equals tile_rows whenever
+                            // full_k == M (gemm_q<256,64,192,64,16>: B's window came out 256, not 1024).
+                            const int64_t effK = tiling.effectiveK;
+                            const bool mSide = effK > 0 ? perCoreSizeForBuf == tileRows * effK
+                                                        : (viewRows <= 0 || viewRows == tileRows);
+                            if (mSide)
                                 perCoreSizeForBuf = perCoreSizeForBuf / mRounds;
                         }
                     }
