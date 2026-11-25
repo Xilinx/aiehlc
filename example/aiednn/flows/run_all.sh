@@ -12,7 +12,8 @@ cd "$REPO"
 out=$(PYTHONPATH=src "$PY" -m aiegraph dnn-build example/aiednn/flows/1_c_api/matmul_relu_app.cc --target x86 --run \
     2>&1 | grep -E "^ *(PASS|FAIL)" | sed 's/^ *//')
 for f in 2_torch_compile 3_onnx 4_model_compiler 5_export_session; do
-    out+=$'\n'$("$PY" "example/aiednn/flows/$f/run.py" 2>&1 | grep -E "^(PASS|FAIL)")
+    # a flow's verdict is its last PASS / FAIL line (flow 5 also echoes its host program's PASS)
+    out+=$'\n'$("$PY" "example/aiednn/flows/$f/run.py" 2>&1 | grep -E "^(PASS|FAIL)" | tail -1)
 done
 echo "$out"
 [ "$(grep -c '^PASS: flow' <<< "$out")" = 5 ] && ! grep -q FAIL <<< "$out"

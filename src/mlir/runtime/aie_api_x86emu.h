@@ -160,7 +160,6 @@ inline saturation_mode get_saturation() { return emu::sat(); }
 inline rounding_mode get_rounding() { return emu::rnd(); }
 
 using ::bfloat16; // one type: the global chess-native bfloat16 above (aie::bfloat16 names it too)
-struct accfloat {};
 
 template <class T, unsigned N> struct vector {
     T v[N];
@@ -496,14 +495,16 @@ template <class T, unsigned N> vector<typename emu::wider<T>::type, N> unpack(co
     return r;
 }
 
-// Lane-wise vector x scalar into a 32-bit accumulator (as aie::mul / aie::mac with a scalar operand).
-template <class Tag = acc32, class T, unsigned N, class S> accum<Tag, N> mul(const vector<T, N> &v, S x) {
+// Lane-wise vector x integer scalar into a 32-bit accumulator (as aie::mul / aie::mac with a scalar
+// operand); a floating-point scalar takes the accfloat overload above.
+template <class Tag = acc32, class T, unsigned N, class S, class = std::enable_if_t<std::is_integral<S>::value>>
+accum<Tag, N> mul(const vector<T, N> &v, S x) {
     accum<Tag, N> r;
     for (unsigned i = 0; i < N; i++)
         r.v[i] = accum<Tag, N>::wrap((int64_t)v.v[i] * (int64_t)x);
     return r;
 }
-template <class Tag, unsigned N, class T, class S>
+template <class Tag, unsigned N, class T, class S, class = std::enable_if_t<std::is_integral<S>::value>>
 accum<Tag, N> mac(const accum<Tag, N> &a, const vector<T, N> &v, S x) {
     accum<Tag, N> r;
     for (unsigned i = 0; i < N; i++)
@@ -534,49 +535,6 @@ template <unsigned M, unsigned K, unsigned N, class TA, class TB, class Tag = ac
     }
     const accum_type &to_accum() const { return c; }
     template <class T> vector<T, M * N> to_vector(int shift = 0) const { return c.template to_vector<T>(shift); }
-};
-
-// fp32 accumulator: from_vector / to_vector convert (float or bfloat16 lanes).
-template <unsigned N> struct accum<accfloat, N> {
-    float v[N];
-    template <class T> accum &from_vector(const vector<T, N> &x, int = 0) {
-        for (unsigned i = 0; i < N; i++)
-            v[i] = (float)x.v[i];
-        return *this;
-    }
-    template <class T> vector<T, N> to_vector(int = 0) const {
-        vector<T, N> r;
-        for (unsigned i = 0; i < N; i++)
-            r.v[i] = T(v[i]);
-        return r;
-    }
-};
-
-// bf16 x bf16 -> fp32: products exact; the hardware's summation order is not modelled (not bit-exact).
-template <unsigned M, unsigned K, unsigned N> struct mmul<M, K, N, bfloat16, bfloat16, accfloat> {
-    using accum_type = accum<accfloat, M * N>;
-    accum_type c;
-    mmul() {
-        for (unsigned i = 0; i < M * N; i++)
-            c.v[i] = 0.f;
-    }
-    explicit mmul(const accum_type &a) : c(a) {}
-    void mac(const vector<bfloat16, M * K> &a, const vector<bfloat16, K * N> &b) {
-        for (unsigned m = 0; m < M; m++)
-            for (unsigned n = 0; n < N; n++) {
-                float s = c.v[m * N + n];
-                for (unsigned k = 0; k < K; k++)
-                    s += (float)a.v[m * K + k] * (float)b.v[k * N + n];
-                c.v[m * N + n] = s;
-            }
-    }
-    void mul(const vector<bfloat16, M * K> &a, const vector<bfloat16, K * N> &b) {
-        for (unsigned i = 0; i < M * N; i++)
-            c.v[i] = 0.f;
-        mac(a, b);
-    }
-    const accum_type &to_accum() const { return c; }
-    template <class T> vector<T, M * N> to_vector(int = 0) const { return c.template to_vector<T>(); }
 };
 
 // ── f32 vector arithmetic (the FVEC mode, aie_modes_fvec.h) ──────────────────

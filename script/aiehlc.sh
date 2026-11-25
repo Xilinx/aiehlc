@@ -40,15 +40,6 @@ usage() {
 # shellcheck disable=SC1090
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sim/write_sim_config.sh"
 
-# Debug UI (aiedbg) lives in-repo at tool/aiegdb. Its bin/ wrappers run the
-# console scripts (aiedbg, aiedbg-ui, aiegdb, ...) from this tree uninstalled,
-# so the UI's `aiedbg` subprocesses never pick up a different pip-installed clone.
-aiegdb_run() {
-    local root
-    root="$(cd "${AIEHLC_DIR}" && pwd)"
-    PATH="${root}/tool/aiegdb/bin:${PATH}" AIEDBG_PRODUCER_ROOT="${root}" "$@"
-}
-
 prepare_raw_xaie_debug_view() {
     local host_src="$1"
     local worklocal="$2"
@@ -64,7 +55,7 @@ prepare_raw_xaie_debug_view() {
     echo "$app_src" > "$worklocal/app_source.txt" 2>/dev/null || true
 
     echo "Generating static provenance (raw-XAie flow)..."
-    if ! aiegdb_run python3 "${AIEHLC_DIR}/tool/aiegdb/src/aiedbg/debugui/xaiehost2provenance.py" \
+    if ! python3 "${AIEHLC_DIR}/src/tool/debug/xaiehost2provenance.py" \
             "$worklocal/host.cc" --out-dir "$worklocal" \
             --aie-version "$aie_version" --platform "$platform" \
             --artifacts-dir "$artifacts_dir"; then
@@ -76,7 +67,7 @@ prepare_raw_xaie_debug_view() {
     fi
 
     echo "Generating readable schedule view..."
-    if ! aiegdb_run aiedbg-view "$worklocal"; then
+    if ! python3 "${AIEHLC_DIR}/src/tool/debug/schedule_view.py" "$worklocal"; then
         echo "    warning: schedule_view.py failed (non-fatal); skipping view."
         return 0
     fi
@@ -93,7 +84,8 @@ prepare_raw_xaie_debug_view() {
     elif [ -n "$host_elf" ] && [ -f "$host_elf" ]; then
         server_args+=(--elf "$host_elf")
     fi
-    aiegdb_run aiedbg-ui "${server_args[@]}"
+    python3 "${AIEHLC_DIR}/src/tool/debug/schedule_debug_server.py" \
+        "${server_args[@]}"
 }
 
 check_bsp_environment() {
@@ -315,6 +307,11 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export AIEHLC_DIR="${SCRIPT_DIR}/../"
 
+# aiedbg pip install PATH (written by ensure_aiedbg.py on first bootstrap)
+if [[ -f "${AIEHLC_DIR}.aiehlc/aiedbg_env.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${AIEHLC_DIR}.aiehlc/aiedbg_env.sh"
+fi
 runtime_source_file=""
 aie_version="2"
 use_llvm_aie="false"
@@ -817,7 +814,7 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
     # Non-fatal: view generation must never break the build (set -e is active).
     if [ -f "${WORKLOCAL_DIR}/dfscheduleprovenancemap.json" ] && [ -f "${WORKLOCAL_DIR}/host.cc" ]; then
         echo "Generating readable schedule view..."
-        if aiegdb_run aiedbg-view "${WORKLOCAL_DIR}"; then
+        if python3 "${AIEHLC_DIR}/src/tool/debug/schedule_view.py" "${WORKLOCAL_DIR}"; then
             echo "    ${WORKLOCAL_DIR}/host_schedule.html"
         else
             echo "    warning: schedule_view.py failed (non-fatal); skipping view."
@@ -841,12 +838,22 @@ if [ -f "${HOST_BUILD_DIR}/worklocal/host.cc" ]; then
     # live. Runs in the foreground for the interactive debug session; Ctrl-C to stop.
     if [ "$PRETTY_DEBUG" -eq 1 ]; then
         if [ -f "${WORKLOCAL_DIR}/host_schedule.html" ]; then
+            if ! command -v aiedbg &>/dev/null; then
+                echo "aiedbg not found — bootstrapping (clone + pip install)..."
+                python3 "${AIEHLC_DIR}src/tool/debug/ensure_aiedbg.py" \
+                    --repo-root "${AIEHLC_DIR}" || \
+                    echo "    warning: aiedbg bootstrap failed; live HW reads disabled."
+                if [[ -f "${AIEHLC_DIR}.aiehlc/aiedbg_env.sh" ]]; then
+                    # shellcheck disable=SC1091
+                    source "${AIEHLC_DIR}.aiehlc/aiedbg_env.sh"
+                fi
+            fi
             echo "Launching live schedule-debug server (--prettydebug)..."
             PD_ELF_ARGS=()
             if [ -f "${HOST_BUILD_DIR}/main.elf" ]; then
                 PD_ELF_ARGS=(--elf "${HOST_BUILD_DIR}/main.elf")
             fi
-            aiegdb_run aiedbg-ui \
+            python3 "${AIEHLC_DIR}/src/tool/debug/schedule_debug_server.py" \
                 "${WORKLOCAL_DIR}" \
                 "${PD_ELF_ARGS[@]}" \
                 --aie-version "${aie_version}" \
