@@ -604,12 +604,15 @@ struct KernelModuleToEmitCPattern : public OpConversionPattern<KernelModuleOp> {
     // The MM2S arm(s) of the per-tile dispatch. Only (col,row) -> packet enable, packet
     // id, ooo bd id and BD length vary between tiles; one straight-line arm per tile
     // grew .text by ~310 B per core and overflowed the 16 KB program memory at 8x8, so
-    // more than one tile becomes a const table in data memory + ONE arm in a lookup loop.
+    // more than one tile becomes a const table in data memory + ONE arm in a lookup loop
+    // (AIEHLC_KCO_TABLE=1, aiehlc.sh --kco-table).
     static std::string emitOutTileDispatch(const WindowInfo &w, ArrayRef<const CoreOffloadEntry *> outTiles) {
         bool fitsTable = true;
         for (const CoreOffloadEntry *e : outTiles)
             fitsTable &= e->col < 128 && e->row < 128 && e->packetId < 128 && e->oooBdId < 128 && e->bdLenBytes < 32768;
-        if (outTiles.size() == 1 || !fitsTable) {
+        const char *tableEnv = std::getenv("AIEHLC_KCO_TABLE");
+        const bool tableOn = tableEnv && *tableEnv && std::string(tableEnv) != "0";
+        if (!tableOn || outTiles.size() == 1 || !fitsTable) {
             std::string s;
             for (size_t i = 0; i < outTiles.size(); ++i) {
                 const CoreOffloadEntry &e = *outTiles[i];

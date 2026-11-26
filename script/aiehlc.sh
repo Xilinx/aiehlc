@@ -20,7 +20,7 @@ run_cmd() {
 }
 
 usage() {
-    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss] [-serialize] [--warm-launch] [--persistent] [--fast-shim-bd]"
+    echo "Usage: $0 --runtime-source-file <path> --aie-version <version> [--kernel-count <count>] [--kernel <source> [<directory>]] [--aielib-only] [--prettydebug] [-gdb] [--profiling] [--skip-bss|--skip-port-bss] [-serialize] [--warm-launch] [--persistent] [--fast-shim-bd] [--kco-table]"
     echo "  --platform    baremetal (default) | sim | linux | baremetal_debug"
     echo "                'baremetal_debug' builds a baremetal ELF and writes sim_config.sh so the debug"
     echo "                UI can run either a hardware test or a simulator run from one build."
@@ -36,6 +36,7 @@ usage() {
     echo "                program memory kept warm, whole-register core/DMA reset (baremetal HW only)"
     echo "  --fast-shim-bd faster host shim-BD programming: outputs programmed after the inputs, shim BD"
     echo "                templates built before the launch, VEK280 shim BDs written from a cached template"
+    echo "  --kco-table   KERNELCONFIGOFFLOAD output dispatch as a table + loop (smaller .text on big meshes)"
     return 1
 }
 
@@ -333,6 +334,7 @@ PROFILING=0
 SKIP_BSS=0
 WARM_LAUNCH=0
 FAST_SHIM_BD=0
+KCO_TABLE=0
 PERSISTENT=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -415,6 +417,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --fast-shim-bd)
             FAST_SHIM_BD=1
+            shift
+            ;;
+        --kco-table)
+            KCO_TABLE=1
             shift
             ;;
         *)
@@ -678,6 +684,9 @@ rm -f "$(pwd)/aout/worklocal"/routing_*.cc
 PIPE_ENV=()
 if [ "${FAST_SHIM_BD}" -eq 1 ]; then
     PIPE_ENV=(AIEHLC_OUTPUTS_LAST=1 AIEHLC_BDT_PREPARE=1)
+fi
+if [ "${KCO_TABLE}" -eq 1 ]; then
+    PIPE_ENV+=(AIEHLC_KCO_TABLE=1)
 fi
 
 if [ "$GDB_MODE" -eq 1 ]; then

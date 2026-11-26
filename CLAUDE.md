@@ -1167,11 +1167,16 @@ cannot be used. portobello13: 0.204 (per-call AOT) → 0.194–0.197 ms; JIT 0.2
 `createio` so a channel starts as soon as its BD chain is written (mlir-aie's runtime-sequence order);
 skipped under AOT / `control_plan_shim_bd_ctrl`, off with `AIEHLC_NO_STARTIO_INTERLEAVE=1`.
 **`aiehlc.sh --fast-shim-bd`** (opt-in; default flows keep main's host.cc order and shim BD writes;
-`dnn_build` passes it for vek280 / vek385) adds three speedups: outputs programmed after the inputs
+`dnn_build` passes it and `--kco-table` for vek280 / vek385) adds three speedups: outputs programmed after the inputs
 (`AIEHLC_OUTPUTS_LAST=1`), the first shim BD config of each shape cloned before the kernel launch
 between `__Runtime_bd_template_prepare_begin/_end` (`AIEHLC_BDT_PREPARE=1`; encodes the AIE-ML
 shim BD template, no register write), and the runtime's cached shim BD template on AIE-ML
-baremetal (`-DAIEHLC_BD_TEMPLATE`), so every run's BDs are template hits. The
+baremetal (`-DAIEHLC_BD_TEMPLATE`), so every run's BDs are template hits. Likewise opt-in:
+`aiehlc.sh --kco-table` (`AIEHLC_KCO_TABLE=1`) emits the KERNELCONFIGOFFLOAD output dispatch as a
+const table + loop instead of one arm per core (fits 8x8 in 16 KB PM). Output-gather packet ids
+come from the global pool as on main; only a flow the pool cannot cover (8x4 and larger) is
+numbered within itself (`ResourceMgr::flowPktId`). With none of these flags the 11 original
+examples + conv2dstem generate the same host.cc / kernel.cc / routing.cc as origin/main. The
 template path needs the absolute column for NoC vs PL: aie-rt's public
 `XAie_GetTileTypefromLoc` ignores `StartCol`, so a partition starting at column 2 reported
 every NoC shim as PL (skill **aiehlc-vek280-gen2**). `AIEHLC_CORE_BANKS=1` makes

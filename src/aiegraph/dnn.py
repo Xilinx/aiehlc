@@ -111,7 +111,7 @@ TARGETS = {"vek280": {"aie_version": "2", "runner": "vek280_mlir_aie/run_vek280.
                       # one resident kernel: loaded + launched once, later launches only re-arm the
                       # shim BDs (--persistent; the GEMM ELF is a megakernel whose mode rides in a
                       # descriptor); --warm-launch covers any non-persistent relaunch
-                      "aiehlc_args": ("--warm-launch", "--fast-shim-bd", "--persistent"),
+                      "aiehlc_args": ("--warm-launch", "--fast-shim-bd", "--kco-table", "--persistent"),
                       # the runtime's im2col / epilogue / packing loops run on the A72 in host.cc
                       "host_opt": "-O3",
                       "stage": "/proj/xsjsswstaff/{user}/vek280_mlir_aie"},
@@ -120,7 +120,7 @@ TARGETS = {"vek280": {"aie_version": "2", "runner": "vek280_mlir_aie/run_vek280.
            # --warm-launch matters more here: an ELF load is MMIO at ~372 ns / write (a megakernel switch
            # 65 -> 21 ms with it; skill aiednnvek385)
            "vek385": {"aie_version": "5", "runner": "script/test/appvek385.py",
-                      "aiehlc_args": ("--warm-launch", "--fast-shim-bd", "--persistent"),
+                      "aiehlc_args": ("--warm-launch", "--fast-shim-bd", "--kco-table", "--persistent"),
                       "host_opt": "-O3"},
            "x86": {}}
 
@@ -425,7 +425,7 @@ def _build_board(rep: DnnBuild, entry: Path, aiehlc_args, vitis_settings, verbos
     srcs = "".join(s.read_text(errors="replace") for s in dict.fromkeys(e.contract.source for e in rep.kernels))
     # target_args=False (eager mode): only --warm-launch, no --persistent -- every launch loads its kernel
     args = [a for a in cfg.get("aiehlc_args", ())
-            if (target_args or a in ("--warm-launch", "--fast-shim-bd")) and _ARG_NEEDS.get(a, "") in srcs]
+            if (target_args or a in ("--warm-launch", "--fast-shim-bd", "--kco-table")) and _ARG_NEEDS.get(a, "") in srcs]
     cmd = (f"{_vitis_prefix(vitis_settings)}cd {rep.out} && {host_opt}source {root}/script/aiehlc.sh "
            f"--aie-version {cfg['aie_version']} {' '.join((*args, *aiehlc_args))} "
            f"--runtime-source-file {entry}")

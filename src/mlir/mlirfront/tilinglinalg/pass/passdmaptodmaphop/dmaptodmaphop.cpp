@@ -230,7 +230,13 @@ static LogicalResult lowerDataMovementOp(Operation *op, ConversionPatternRewrite
     SmallVector<dmaphop::tile, 4> coreTiles;
     SmallVector<Value, 4> corePortsInValues;
     SmallVector<dmaphop::port, 4> corePortsOutOps;
-    
+
+    int freePktIds = 0;
+    for (int id = 1; id < 32; ++id)
+        freePktIds += router.getRM()->isPktIdFree(id);
+    // main's global pool while it lasts; a flow it cannot serve is numbered within itself
+    const bool perFlowPktIds = freePktIds < coreGroup.getCoreCount();
+
     for (int i = 0; i < coreGroup.getCoreCount(); ++i) {
         // Use core_start_row as the base for core tile row calculation,
         // and partColOffset to convert mesh-relative col to absolute col
@@ -259,8 +265,7 @@ static LogicalResult lowerDataMovementOp(Operation *op, ConversionPatternRewrite
         // hop chaining and don't need pkt_ids (saves scarce 5-bit pkt_id pool).
         mlir::IntegerAttr pktIdAttr = nullptr;
         if (direction == DataflowDirection::Pull) {
-            // Numbered within this flow, not from a global pool: see ResourceMgr::flowPktId.
-            auto pktId = router.getRM()->flowPktId(i);
+            auto pktId = perFlowPktIds ? router.getRM()->flowPktId(i) : router.getRM()->allocatePktId(-1);
             if (!pktId) {
                 llvm::errs() << "[TilingLinalg] ERROR: output flow " << flowPrefix << " has more cores ("
                              << coreGroup.getCoreCount() << ") than free packet ids\n";
